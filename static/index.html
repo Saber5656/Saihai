@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ITB Org Viewer</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-panel: #161b22;
+    --bg-card: #1c2128;
+    --border: #30363d;
+    --fg: #c9d1d9;
+    --fg-dim: #8b949e;
+    --fg-faint: #545d68;
+    --yellow: #f2cc60;
+    --yellow-glow: rgba(242, 204, 96, 0.35);
+    --green: #56d364;
+    --red: #f85149;
+    --mono: "SF Mono", "Menlo", "Consolas", monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Hiragino Sans", "Segoe UI", sans-serif;
+    font-size: 14px;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 12px 20px; background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header h1 .dot { color: var(--yellow); }
+  #session-select {
+    background: var(--bg-card); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; font-size: 13px; max-width: 480px;
+  }
+  #org-meta { color: var(--fg-dim); font-size: 12px; margin-left: auto; text-align: right; }
+  #org-meta .live { color: var(--green); }
+  #org-meta .offline { color: var(--red); }
+  #org-meta .busy { color: var(--yellow); font-weight: 600; }
+
+  main { display: flex; }
+  #board { flex: 1; padding: 16px 20px; min-width: 0; }
+  .team { margin-bottom: 20px; }
+  .team-title {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px;
+    color: var(--fg-dim); margin-bottom: 8px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .team-title .count { color: var(--fg-faint); }
+  .team-title .busy-badge {
+    color: var(--bg); background: var(--yellow); border-radius: 8px;
+    padding: 0 7px; font-size: 11px; font-weight: 700;
+  }
+  .grid {
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  }
+  .card {
+    background: var(--bg-card); border: 2px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; cursor: pointer;
+    transition: border-color .15s, box-shadow .15s; position: relative;
+  }
+  .card:hover { border-color: var(--fg-faint); }
+  .card.selected { outline: 1px solid var(--fg-dim); }
+  .card .role { font-weight: 600; font-size: 13px; word-break: break-all; }
+  .card .meta { color: var(--fg-dim); font-size: 11px; margin-top: 4px; line-height: 1.5; }
+  .card .meta .task { color: var(--yellow); }
+  .card .state-line { margin-top: 6px; font-size: 11px; display: flex; gap: 6px; align-items: center; }
+
+  /* status styles */
+  .card.working {
+    border-color: var(--yellow);
+    box-shadow: 0 0 10px var(--yellow-glow);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 6px var(--yellow-glow); }
+    50% { box-shadow: 0 0 16px var(--yellow-glow); }
+  }
+  .card.processing { border-color: var(--yellow); border-style: dashed; }
+  .card.pending { border-color: var(--border); }
+  .card.lazy { opacity: .45; }
+  .card.offline { border-color: rgba(248, 81, 73, .4); opacity: .55; }
+  .badge {
+    display: inline-block; border-radius: 8px; padding: 0 7px;
+    font-size: 10px; font-weight: 700; letter-spacing: .5px;
+  }
+  .badge.working { background: var(--yellow); color: #1c2128; }
+  .badge.processing { background: rgba(242,204,96,.2); color: var(--yellow); }
+  .badge.pending { background: rgba(242,204,96,.12); color: var(--yellow); }
+  .badge.ready { background: rgba(139,148,158,.15); color: var(--fg-dim); }
+  .badge.lazy { background: rgba(84,93,104,.2); color: var(--fg-faint); }
+  .badge.offline { background: rgba(248,81,73,.15); color: var(--red); }
+  .pending-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--yellow); display: inline-block; }
+
+  /* drawer */
+  #drawer {
+    width: 0; overflow: hidden; transition: width .2s ease;
+    background: var(--bg-panel); border-left: 1px solid var(--border);
+    height: calc(100vh - 49px); position: sticky; top: 49px;
+    display: flex; flex-direction: column;
+  }
+  #drawer.open { width: 46vw; min-width: 420px; }
+  #drawer-head {
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  #drawer-head .role { font-weight: 700; }
+  #drawer-head .target { color: var(--fg-faint); font-size: 11px; font-family: var(--mono); }
+  #drawer-head button {
+    background: var(--bg-card); border: 1px solid var(--border); color: var(--fg-dim);
+    border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: 12px;
+  }
+  #drawer-head button.on { color: var(--yellow); border-color: var(--yellow); }
+  #drawer-head .close { margin-left: auto; }
+  #agent-info { padding: 8px 14px; color: var(--fg-dim); font-size: 12px; border-bottom: 1px solid var(--border); line-height: 1.6; }
+  #inbox-info { padding: 6px 14px; font-size: 11px; color: var(--fg-dim); border-bottom: 1px solid var(--border); }
+  #pane {
+    flex: 1; overflow: auto; margin: 0; padding: 12px 14px;
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.45;
+    white-space: pre-wrap; word-break: break-all; color: #b6c2cf;
+    background: #0a0d12;
+  }
+  #pane .err { color: var(--red); }
+
+  footer {
+    padding: 8px 20px; color: var(--fg-faint); font-size: 11px;
+    border-top: 1px solid var(--border); display: flex; gap: 14px; flex-wrap: wrap;
+  }
+  .legend { display: inline-flex; align-items: center; gap: 5px; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; border: 2px solid var(--border); display: inline-block; }
+  .swatch.working { border-color: var(--yellow); box-shadow: 0 0 5px var(--yellow-glow); }
+  .swatch.processing { border-color: var(--yellow); border-style: dashed; }
+  .swatch.lazy { opacity: .45; }
+  .swatch.offline { border-color: rgba(248,81,73,.4); }
+  #empty { color: var(--fg-dim); padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ITB Org Viewer <span class="dot">●</span></h1>
+  <select id="session-select" title="監視対象のチャットセッション"></select>
+  <div id="org-meta"></div>
+</header>
+<main>
+  <div id="board"><div id="empty">セッションを読み込み中…</div></div>
+  <aside id="drawer">
+    <div id="drawer-head">
+      <span class="role" id="d-role"></span>
+      <span class="target" id="d-target"></span>
+      <button id="d-follow" class="on" title="末尾自動追尾">follow</button>
+      <button id="d-refresh">refresh</button>
+      <button class="close" id="d-close">✕</button>
+    </div>
+    <div id="agent-info"></div>
+    <div id="inbox-info"></div>
+    <pre id="pane"></pre>
+  </aside>
+</main>
+<footer>
+  <span class="legend"><span class="swatch working"></span> working（黄色枠 = 稼働中）</span>
+  <span class="legend"><span class="swatch processing"></span> processing（queue 処理中）</span>
+  <span class="legend"><span class="pending-dot"></span> pending（queue 待ち）</span>
+  <span class="legend"><span class="swatch"></span> ready（常駐・待機）</span>
+  <span class="legend"><span class="swatch lazy"></span> lazy（未起動 resident）</span>
+  <span class="legend"><span class="swatch offline"></span> offline</span>
+  <span id="poll-info" style="margin-left:auto"></span>
+</footer>
+
+<script>
+const POLL_MS = 2000;
+const PANE_POLL_MS = 2500;
+let currentSession = null;
+let selectedRole = null;
+let follow = true;
+let orgTimer = null, paneTimer = null;
+
+const $ = (id) => document.getElementById(id);
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${res.status}`);
+  return res.json();
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+function relTime(sec) {
+  if (sec == null) return "-";
+  if (sec < 60) return `${sec}s前`;
+  if (sec < 3600) return `${Math.floor(sec/60)}m前`;
+  if (sec < 86400) return `${Math.floor(sec/3600)}h前`;
+  return `${Math.floor(sec/86400)}d前`;
+}
+
+// ---------------- sessions
+async function loadSessions() {
+  const data = await fetchJSON("/api/sessions");
+  const sel = $("session-select");
+  const prev = currentSession;
+  sel.innerHTML = "";
+  for (const s of data.sessions) {
+    const opt = document.createElement("option");
+    opt.value = s.session_id;
+    const mark = s.live ? "🟢" : "⚫";
+    const task = s.active_task_id ? ` [${s.active_task_id}]` : "";
+    opt.textContent = `${mark} ${s.chat_name || s.session_id.slice(0,8)}${task} — ${s.organization_instance_id}`;
+    sel.appendChild(opt);
+  }
+  if (data.sessions.length === 0) {
+    $("board").innerHTML = '<div id="empty">ITB セッションが見つかりません</div>';
+    return;
+  }
+  if (prev && data.sessions.some(s => s.session_id === prev)) {
+    sel.value = prev;
+  } else {
+    currentSession = data.sessions[0].session_id;
+    sel.value = currentSession;
+  }
+  startOrgPolling();
+}
+
+$("session-select").addEventListener("change", (e) => {
+  currentSession = e.target.value;
+  closeDrawer();
+  startOrgPolling();
+});
+
+// ---------------- org board
+function startOrgPolling() {
+  if (orgTimer) clearInterval(orgTimer);
+  loadOrg();
+  orgTimer = setInterval(loadOrg, POLL_MS);
+  $("poll-info").textContent = `更新間隔 ${POLL_MS/1000}s`;
+}
+
+async function loadOrg() {
+  if (!currentSession) return;
+  let data;
+  try { data = await fetchJSON(`/api/org?session=${encodeURIComponent(currentSession)}`); }
+  catch (e) { return; }
+  if (data.error) {
+    $("board").innerHTML = `<div id="empty">${esc(data.error)}</div>`;
+    return;
+  }
+  renderMeta(data);
+  renderBoard(data);
+}
+
+function renderMeta(d) {
+  const live = d.live ? '<span class="live">● live</span>' : '<span class="offline">● offline</span>';
+  const task = d.active_task.task_id
+    ? ` / ${esc(d.active_task.task_id)} (${esc(d.active_task.flow_phase)})` : "";
+  $("org-meta").innerHTML =
+    `${live} &nbsp;tmux: <code>${esc(d.tmux_session)}</code>${task}<br>` +
+    `稼働中 <span class="busy">${d.busy_count}</span> / 常駐 ${d.agent_count} agents`;
+}
+
+function renderBoard(d) {
+  const board = $("board");
+  const frag = document.createDocumentFragment();
+  for (const team of (d.teams || [])) {
+    const sec = document.createElement("section");
+    sec.className = "team";
+    const busy = team.agents.filter(a => a.busy).length;
+    sec.innerHTML = `<div class="team-title">${esc(team.label)}` +
+      ` <span class="count">${team.agents.length}</span>` +
+      (busy ? ` <span class="busy-badge">${busy} working</span>` : "") + `</div>`;
+    const grid = document.createElement("div");
+    grid.className = "grid";
+    for (const a of team.agents) {
+      grid.appendChild(card(a));
+    }
+    sec.appendChild(grid);
+    frag.appendChild(sec);
+  }
+  board.innerHTML = "";
+  board.appendChild(frag);
+}
+
+function card(a) {
+  const el = document.createElement("div");
+  el.className = `card ${a.status}` + (a.role_id === selectedRole ? " selected" : "");
+  const pend = a.inbox_pending ? ` <span class="pending-dot" title="pending ${a.inbox_pending}"></span>` : "";
+  const task = a.active_for_task ? `<span class="task">${esc(a.active_for_task)}</span> · ` : "";
+  el.innerHTML =
+    `<div class="role">${esc(a.role_id)}${pend}</div>` +
+    `<div class="meta">${task}${esc(a.intended_model || a.provider || "")}</div>` +
+    `<div class="state-line"><span class="badge ${a.status}">${a.status.toUpperCase()}</span>` +
+    `<span style="color:var(--fg-faint)">${relTime(a.last_activity_age_sec)}</span></div>`;
+  el.addEventListener("click", () => openDrawer(a.role_id));
+  return el;
+}
+
+// ---------------- drawer (pane viewer)
+function openDrawer(role) {
+  selectedRole = role;
+  $("drawer").classList.add("open");
+  $("d-role").textContent = role;
+  $("pane").textContent = "loading…";
+  loadPane();
+  if (paneTimer) clearInterval(paneTimer);
+  paneTimer = setInterval(loadPane, PANE_POLL_MS);
+}
+
+function closeDrawer() {
+  selectedRole = null;
+  $("drawer").classList.remove("open");
+  if (paneTimer) { clearInterval(paneTimer); paneTimer = null; }
+}
+
+async function loadPane() {
+  if (!selectedRole || !currentSession) return;
+  let d;
+  try {
+    d = await fetchJSON(`/api/pane?session=${encodeURIComponent(currentSession)}&role=${encodeURIComponent(selectedRole)}`);
+  } catch (e) { return; }
+  $("d-target").textContent = d.tmux_target || "";
+  const ag = d.agent || {};
+  $("agent-info").innerHTML =
+    `team: <b>${esc(ag.team)}</b> · model: ${esc(ag.intended_model)} (${esc(ag.provider)})` +
+    ` · profile: ${esc(ag.startup_profile)} · process: ${esc(ag.process_status)}` +
+    ` · activation: ${esc(ag.activation_status)}` +
+    (ag.active_for_task ? ` · task: <b style="color:var(--yellow)">${esc(ag.active_for_task)}</b>` : "");
+  const inbox = d.inbox || [];
+  $("inbox-info").innerHTML = inbox.length
+    ? "inbox: " + inbox.map(m =>
+        `<span title="${esc(m.message_id)}">[${esc(m.status)}] ${esc(m.task_id || m.from_role)}</span>`
+      ).join(" · ")
+    : "inbox: empty";
+  const pane = $("pane");
+  if (d.error && !d.content) {
+    pane.innerHTML = `<span class="err">${esc(d.error)}</span>`;
+  } else {
+    pane.textContent = (d.content || "").replace(/\n+$/, "\n");
+    if (follow) pane.scrollTop = pane.scrollHeight;
+  }
+}
+
+$("d-close").addEventListener("click", closeDrawer);
+$("d-refresh").addEventListener("click", loadPane);
+$("d-follow").addEventListener("click", (e) => {
+  follow = !follow;
+  e.target.classList.toggle("on", follow);
+});
+
+// ---------------- boot
+loadSessions();
+setInterval(loadSessions, 30000);
+</script>
+</body>
+</html>
