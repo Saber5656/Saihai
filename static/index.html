@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ITB Org Viewer</title>
+<title>Agent-Teams-Viewer</title>
 <style>
   :root {
     --bg: #0d1117;
@@ -143,7 +143,7 @@
 </head>
 <body>
 <header>
-  <h1>ITB Org Viewer <span class="dot">●</span></h1>
+  <h1>Agent-Teams-Viewer <span class="dot">●</span></h1>
   <select id="session-select" title="監視対象のチャットセッション"></select>
   <div id="org-meta"></div>
 </header>
@@ -189,7 +189,7 @@ async function fetchJSON(url) {
 }
 
 function esc(s) {
-  return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
 function relTime(sec) {

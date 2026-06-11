@@ -410,7 +410,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_static(self, rel: str) -> None:
         path = (STATIC_DIR / rel).resolve()
-        if not str(path).startswith(str(STATIC_DIR)) or not path.is_file():
+        if not path.is_relative_to(STATIC_DIR) or not path.is_file():
             self.send_error(404)
             return
         ctype = {
@@ -449,9 +449,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
         except BrokenPipeError:
             pass
-        except Exception as exc:  # keep server alive, report error
+        except Exception:  # keep server alive; avoid leaking internals
             try:
-                self._send_json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+                self._send_json({"error": "internal server error"}, 500)
             except Exception:
                 pass
 
@@ -461,7 +461,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"ITB Org Viewer: http://127.0.0.1:{args.port}/  (Ctrl-C to stop)")
+    print(f"Agent-Teams-Viewer: http://127.0.0.1:{args.port}/  (Ctrl-C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

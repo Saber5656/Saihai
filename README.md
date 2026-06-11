@@ -1,4 +1,4 @@
-# ITB Org Viewer
+# Agent-Teams-Viewer
 
 ITB Organization Instance（チャットセッションごとに起動する AI エージェント組織）の
 稼働状況を可視化する、読み取り専用のローカルダッシュボード。
@@ -64,8 +64,6 @@ python3 server.py --port 8799
 | `GET /api/org?session=<id>` | チーム別エージェント稼働状況 |
 | `GET /api/pane?session=<id>&role=<role_id>` | 対象エージェントの tmux pane 内容 + inbox |
 
-## 関連
+## ライセンス
 
-- Task: Agents-Vault `01-Projects/AI-Agent-Organization/TSK-1252-itb-org-status-viewer/`
-- 組織ポリシー: Agents-Vault `03-Contexts/Policies/AI-Organization.md`
-- Registry: `~/skills-repo/skills/infra-team-bootstrap/config/role-agent-registry.yaml`
+MIT License（[LICENSE](LICENSE) を参照）。
