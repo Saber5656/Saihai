@@ -1,0 +1,78 @@
+{
+  "fixture_version": "1",
+  "description": "FIX-14 deterministic pre-GPF classifier benchmark cases. Fan-out budget is intentionally excluded until FIX-18 approval.",
+  "cases": [
+    {
+      "case_id": "TC-1A-read-only-question-micro",
+      "prompt": "今の状態を教えて？",
+      "expected": {
+        "workflow_mode": "controlled_micro_flow",
+        "risk_tier": "low",
+        "read_only": true,
+        "inspection_required": false,
+        "fast_path_candidate": "read_only_no_diff_single_team"
+      }
+    },
+    {
+      "case_id": "TC-1B-small-edit-strict",
+      "prompt": "READMEを1行修正して",
+      "expected": {
+        "workflow_mode": "strict_flow",
+        "risk_tier": "normal",
+        "read_only": false,
+        "inspection_required": false,
+        "fast_path_candidate": "not_eligible",
+        "escalation_triggers_include": ["修正"]
+      }
+    },
+    {
+      "case_id": "TC-2A-read-only-research-standard",
+      "prompt": "このコードの責務を調査して要約して",
+      "expected": {
+        "workflow_mode": "standard_flow",
+        "risk_tier": "normal",
+        "read_only": true,
+        "inspection_required": true,
+        "fast_path_candidate": "not_eligible",
+        "inspection_signals_include": ["コード", "調査"]
+      }
+    },
+    {
+      "case_id": "TC-2B-research-then-edit-strict",
+      "prompt": "このコードを調査して、必要な修正を反映して",
+      "expected": {
+        "workflow_mode": "strict_flow",
+        "risk_tier": "normal",
+        "read_only": false,
+        "inspection_required": false,
+        "fast_path_candidate": "not_eligible",
+        "escalation_triggers_include": ["修正", "反映"]
+      }
+    },
+    {
+      "case_id": "TC-3A-diff-check-no-commit-standard",
+      "prompt": "未コミットの差分を確認して。コミットはしないで",
+      "expected": {
+        "workflow_mode": "standard_flow",
+        "risk_tier": "normal",
+        "read_only": true,
+        "inspection_required": true,
+        "fast_path_candidate": "not_eligible",
+        "suppressed_escalation_triggers_include": ["コミット"],
+        "inspection_signals_include": ["未コミット", "差分"]
+      }
+    },
+    {
+      "case_id": "TC-3B-diff-check-then-commit-strict",
+      "prompt": "未コミットの差分を確認してコミットして",
+      "expected": {
+        "workflow_mode": "strict_flow",
+        "risk_tier": "high",
+        "read_only": false,
+        "inspection_required": false,
+        "fast_path_candidate": "not_eligible",
+        "escalation_triggers_include": ["コミット"]
+      }
+    }
+  ]
+}

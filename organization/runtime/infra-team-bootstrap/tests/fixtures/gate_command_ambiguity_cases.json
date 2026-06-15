@@ -1,0 +1,66 @@
+{
+  "fixture_version": "1",
+  "description": "FIX-06/FIX-13 command ambiguity benchmark cases. These cases assert that deterministic gate commands return pass/block, not ambiguous, for known completion and repair scenarios.",
+  "cases": [
+    {
+      "case_id": "TC-CMD-1-team-completion-pass",
+      "command": "team-completion-check",
+      "task_detail": {
+        "routing": true,
+        "completion_envelope": true,
+        "guardian_complete": false
+      },
+      "provider_evidence": false,
+      "expected": {
+        "status": "pass",
+        "next_action": "queue_gate_task_evaluator",
+        "llm_dispatch_policy": "skip_assessor_runtime_queue_evaluator"
+      }
+    },
+    {
+      "case_id": "TC-CMD-2-team-completion-block-missing-routing",
+      "command": "team-completion-check",
+      "task_detail": {
+        "routing": false,
+        "completion_envelope": false,
+        "guardian_complete": false
+      },
+      "provider_evidence": false,
+      "expected": {
+        "status": "block",
+        "next_action": "return_to_teams_project_manager_with_missing_evidence",
+        "llm_dispatch_policy": "skip_assessor_and_evaluator_dispatch"
+      }
+    },
+    {
+      "case_id": "TC-CMD-3-finalization-pass",
+      "command": "finalization-check",
+      "task_detail": {
+        "routing": true,
+        "completion_envelope": true,
+        "guardian_complete": true
+      },
+      "provider_evidence": true,
+      "expected": {
+        "status": "pass",
+        "next_action": "handoff_to_main_transport_renderer",
+        "llm_dispatch_policy": "skip_guardian_runtime_render_final"
+      }
+    },
+    {
+      "case_id": "TC-CMD-4-finalization-block-missing-evidence",
+      "command": "finalization-check",
+      "task_detail": {
+        "routing": true,
+        "completion_envelope": false,
+        "guardian_complete": false
+      },
+      "provider_evidence": false,
+      "expected": {
+        "status": "block",
+        "next_action": "return_to_gate_task_evaluator_or_vault_final_update_with_missing_evidence",
+        "llm_dispatch_policy": "skip_guardian_and_final_renderer"
+      }
+    }
+  ]
+}
