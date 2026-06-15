@@ -1,0 +1,66 @@
+{
+  "registry_version": "1",
+  "format": "yaml",
+  "model_registry_source": "skills/infra-team-bootstrap/references/model-registry.md",
+  "queue_root": "${ITB_STATE_ROOT}/<session>/queue",
+  "defaults": {
+    "tmux_session": "itb-{org_instance_id}",
+    "tmux_window": "{role_id}",
+    "tmux_pane": 0,
+    "queue_consumer": false,
+    "inbox_path": "inbox/{role_id}.yaml",
+    "report_dir": "reports/{role_id}",
+    "queue_finalizer": "role-report",
+    "report_write_mode": "builder_atomic",
+    "allowed_tools": ["Read", "Grep", "Glob"],
+    "git_operations_allowed": false
+  },
+  "agents": {
+    "gate-prompt-formatter": {
+      "model_registry_ref": "gate-prompt-formatter",
+      "queue_consumer": true
+    },
+    "gate-task-creator": {
+      "model_registry_ref": "gate-task-creator",
+      "queue_consumer": true,
+      "allowed_tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "Agent"]
+    },
+    "teams-project-manager": {
+      "model_registry_ref": "teams-project-manager",
+      "queue_consumer": true,
+      "allowed_tools": ["Read", "Grep", "Glob", "Write", "Edit", "Agent"]
+    },
+    "gate-task-assessor": {
+      "model_registry_ref": "gate-task-assessor",
+      "queue_consumer": true,
+      "allowed_tools": ["Read", "Grep", "Glob"]
+    },
+    "gate-task-evaluator": {
+      "model_registry_ref": "gate-task-evaluator",
+      "queue_consumer": true,
+      "allowed_tools": ["Read", "Grep", "Glob", "Bash"]
+    },
+    "gate-task-guardian": {
+      "model_registry_ref": "gate-task-guardian",
+      "queue_consumer": true,
+      "allowed_tools": ["Read", "Grep", "Glob", "Bash"]
+    },
+    "infra-director": {
+      "model_registry_ref": "infra-director",
+      "queue_consumer": true,
+      "allowed_tools": ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "Agent"]
+    },
+    "tech-lead": {
+      "model_registry_ref": "tech-lead"
+    },
+    "tech-backend": {
+      "model_registry_ref": "tech-backend"
+    },
+    "tech-qa": {
+      "model_registry_ref": "tech-qa"
+    },
+    "tech-tester": {
+      "model_registry_ref": "tech-tester"
+    }
+  }
+}

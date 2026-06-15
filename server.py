@@ -32,6 +32,7 @@ STATE_ROOTS = [
 ]
 TRANSCRIPT_ROOT = HOME / ".claude" / "projects"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+ORG_DIR = Path(__file__).resolve().parent / "organization"
 
 SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 ACTIVE_WINDOW_SECONDS = 20  # tmux window activity within this -> working
@@ -45,6 +46,21 @@ TEAM_LABELS = {
     "business": "Business",
     "infra": "Infrastructure",
 }
+
+FAST_HINT_RE = re.compile(r"(教えて|確認して|調べる|比較|どちら|人気|売上|シェア|どこ|何|短く|軽く|一言)", re.I)
+STRICT_HINT_RE = re.compile(
+    r"(修正|実装|変更|追加|削除|commit|push|PR|レビュー|security|権限|policy|モデル|hook|本番|検証|テスト|複数|認証|設計|採用|選定|判断|worktree|Vault)",
+    re.I,
+)
+MAINTENANCE_HINT_RE = re.compile(
+    r"(組織|organization|Agent-Teams-Viewer|Agent-Org-Viewer|configure-organization|COMMON-AGENTS|\bHook\b|\bITB\b|gate-prompt-formatter|infra-team-bootstrap)",
+    re.I,
+)
+WEATHER_RE = re.compile(r"(天気|天気予報|weather|forecast)", re.I)
+LOCATION_HINT_RE = re.compile(
+    r"(東京|大阪|京都|名古屋|福岡|札幌|沖縄|横浜|神戸|Seattle|San Francisco|New York|Los Angeles|Tokyo|Osaka|市|区|県|府|都|州)",
+    re.I,
+)
 
 
 # ---------------------------------------------------------------- helpers
@@ -64,6 +80,10 @@ def read_json(path: Path):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+def org_json(name: str, default):
+    return read_json(ORG_DIR / name) or default
 
 
 def read_inbox(path: Path) -> list[dict]:
@@ -391,6 +411,100 @@ def api_pane(session_id: str, role: str) -> dict:
     }
 
 
+def api_config() -> dict:
+    settings = org_json("settings.json", {})
+    roles = org_json("role-index.json", {"roles": []}).get("roles") or []
+    policies = org_json("policy-index.json", {"policies": []}).get("policies") or []
+    teams: dict[str, int] = {}
+    for role in roles:
+        team = role.get("team") or "unknown"
+        teams[team] = teams.get(team, 0) + 1
+    return {
+        "settings": settings,
+        "role_count": len(roles),
+        "policy_count": len(policies),
+        "teams": teams,
+        "policies": [
+            {
+                "name": Path(str(item.get("path", ""))).name,
+                "sha1": item.get("sha1", ""),
+                "bytes": item.get("bytes", 0),
+                "source": item.get("source", ""),
+            }
+            for item in policies
+        ],
+        "generated_at": time.time(),
+    }
+
+
+def api_decide(prompt: str, requested_mode: str = "", organization_state: str = "") -> dict:
+    settings = org_json("settings.json", {})
+    control = settings.get("control") or {}
+    hook_policy = settings.get("hook_policy") or {}
+    modes = settings.get("modes") or {}
+    maintenance = settings.get("maintenance") or {}
+
+    state = organization_state or control.get("state") or "enabled"
+    prompt = prompt.strip()
+    prompt_is_maintenance = bool(MAINTENANCE_HINT_RE.search(prompt))
+    missing_information = []
+    clarification_required = False
+    if WEATHER_RE.search(prompt) and not LOCATION_HINT_RE.search(prompt):
+        missing_information.append("location")
+        clarification_required = True
+
+    if state == "disabled":
+        mode = "fast"
+        reason = "organization disabled by configuration"
+        flow_enabled = False
+        main_agent_can_execute = True
+    elif state == "maintenance" or prompt_is_maintenance:
+        state = "maintenance"
+        mode = "fast"
+        reason = "organization maintenance or organization-system prompt"
+        flow_enabled = bool(maintenance.get("organization_flow_enabled", False))
+        main_agent_can_execute = bool(maintenance.get("main_agent_can_execute", True))
+    elif requested_mode in {"fast", "strict"}:
+        mode = requested_mode
+        reason = f"mode explicitly requested: {requested_mode}"
+        flow_enabled = True
+        main_agent_can_execute = bool((modes.get(mode) or {}).get("main_agent_can_execute"))
+    elif len(prompt) <= 120 and FAST_HINT_RE.search(prompt) and not STRICT_HINT_RE.search(prompt):
+        mode = "fast"
+        reason = "small low-risk prompt matched fast heuristics"
+        flow_enabled = True
+        main_agent_can_execute = True
+    else:
+        mode = "strict"
+        reason = "default strict mode for non-trivial work"
+        flow_enabled = True
+        main_agent_can_execute = False
+
+    mode_config = modes.get(mode) or {}
+    return {
+        "schema_version": 1,
+        "decision": "ok",
+        "organization_state": state,
+        "organization_flow_enabled": flow_enabled,
+        "mode": mode,
+        "reason": reason,
+        "task_required": True,
+        "task_policy": control.get("task_policy", "all_work_must_have_task_record"),
+        "main_agent_can_execute": main_agent_can_execute,
+        "role_dispatch_required": bool(mode_config.get("role_dispatch_required", False)) and flow_enabled,
+        "review_required": mode_config.get("review_required", "optional" if mode == "fast" else "required"),
+        "vault_update_required": True,
+        "missing_information": missing_information,
+        "clarification_required": clarification_required,
+        "hook_policy": {
+            "mode": hook_policy.get("mode", "observer"),
+            "hard_block": bool(hook_policy.get("hard_block", False)),
+        },
+        "performance_target_seconds": mode_config.get("performance_target_seconds"),
+        "generated_at": time.time(),
+    }
+
+
 # ---------------------------------------------------------------- http
 
 class Handler(BaseHTTPRequestHandler):
@@ -437,12 +551,19 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/" or url.path == "/index.html":
                 self._send_static("index.html")
+            elif url.path == "/favicon.ico":
+                self.send_response(204)
+                self.end_headers()
             elif url.path == "/api/sessions":
                 self._send_json(api_sessions())
             elif url.path == "/api/org":
                 self._send_json(api_org(q.get("session", "")))
             elif url.path == "/api/pane":
                 self._send_json(api_pane(q.get("session", ""), q.get("role", "")))
+            elif url.path == "/api/config":
+                self._send_json(api_config())
+            elif url.path == "/api/decide":
+                self._send_json(api_decide(q.get("prompt", ""), q.get("mode", ""), q.get("state", "")))
             elif url.path.startswith("/static/"):
                 self._send_static(url.path[len("/static/"):])
             else:
