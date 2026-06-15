@@ -7,6 +7,8 @@ import argparse
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,10 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ORG_ROOT = REPO_ROOT / "organization"
 SETTINGS_PATH = ORG_ROOT / "settings.json"
+ITB_RUNTIME_ROOT = ORG_ROOT / "runtime" / "infra-team-bootstrap"
+ITB_BUILDER = ITB_RUNTIME_ROOT / "scripts" / "itb_bootstrap_builder.py"
+ITB_HOOKS = ITB_RUNTIME_ROOT / "hooks"
+ITD_MONITOR = ORG_ROOT / "runtime" / "infra-task-dispatcher" / "scripts" / "itd_monitor.py"
 
 TRUTHY = {"1", "true", "yes", "on", "enabled"}
 FALSY = {"0", "false", "no", "off", "disabled"}
@@ -114,6 +120,44 @@ def load_state() -> dict[str, Any]:
     }
 
 
+def runtime_paths() -> dict[str, Any]:
+    paths = {
+        "itb_runtime_root": ITB_RUNTIME_ROOT,
+        "itb_builder": ITB_BUILDER,
+        "itb_hooks": ITB_HOOKS,
+        "itd_monitor": ITD_MONITOR,
+        "role_root": ORG_ROOT / "roles",
+        "runtime_registry": ORG_ROOT / "runtime" / "role-agent-registry.yaml",
+    }
+    return {
+        "schema_version": 1,
+        "decision": "ok",
+        "agent_teams_viewer_root": str(REPO_ROOT),
+        "runtime_paths": {
+            key: {"path": str(path), "exists": path.exists()}
+            for key, path in paths.items()
+        },
+    }
+
+
+def run_runtime_script(script: Path, args: list[str]) -> int:
+    if not script.exists():
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "decision": "block",
+                    "reason": f"runtime script missing: {script}",
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 2
+    command = [sys.executable, str(script), *args]
+    completed = subprocess.run(command, check=False)
+    return completed.returncode
+
+
 def has_any(patterns: list[str], text: str) -> bool:
     return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns)
 
@@ -195,17 +239,33 @@ def classify(prompt: str, *, requested_mode: str = "", organization_state: str =
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "itb":
+        raise SystemExit(run_runtime_script(ITB_BUILDER, sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "itd-monitor":
+        raise SystemExit(run_runtime_script(ITD_MONITOR, sys.argv[2:]))
+
     parser = argparse.ArgumentParser(description="Configure organization execution mode")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
+    sub.add_parser("runtime-paths")
     classify_parser = sub.add_parser("classify")
     classify_parser.add_argument("--prompt", default="")
     classify_parser.add_argument("--mode", choices=["fast", "strict"], default="")
     classify_parser.add_argument("--organization-state", choices=["enabled", "disabled", "maintenance"], default="")
+    itb_parser = sub.add_parser("itb", help="Run the Agent-Teams-Viewer ITB runtime builder")
+    itb_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
+    itd_parser = sub.add_parser("itd-monitor", help="Run the Agent-Teams-Viewer ITD monitor runtime")
+    itd_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
     if args.command == "status":
         payload = load_state()
+    elif args.command == "runtime-paths":
+        payload = runtime_paths()
+    elif args.command == "itb":
+        raise SystemExit(run_runtime_script(ITB_BUILDER, args.runtime_args))
+    elif args.command == "itd-monitor":
+        raise SystemExit(run_runtime_script(ITD_MONITOR, args.runtime_args))
     else:
         payload = classify(
             args.prompt,

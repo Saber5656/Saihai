@@ -326,7 +326,7 @@ Task Detail へ section を追記・更新する場合は、ITB builder の `tas
 手書きで長文 table や本文を貼り付けない。
 
 ```bash
-python3 skills/infra-team-bootstrap/scripts/itb_bootstrap_builder.py task-detail-append --runtime <runtime> --state-root <state_root>
+python3 Agent-Teams-Viewer/organization/runtime/infra-team-bootstrap/scripts/itb_bootstrap_builder.py task-detail-append --runtime <runtime> --state-root <state_root>
 ```
 
 標準入力 JSON には `task_detail_path`、`section`、`status`、`summary`、`report_path`、`report_sha256`（report が存在する場合は省略可）を含める。

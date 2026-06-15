@@ -12,7 +12,7 @@ last_updated: 2026-06-14
 
 `infra-task-dispatcher` の Vault 状態同期、採番、Kanban 連携は [[03-Contexts/Policies/Dispatcher-IO-Contract]] を正とする。  
 この契約は、その前段と後段で Gate がどの情報を渡すかを定義する。
-Completion Gate の機械検証用チェーン、pre-final 必須 section、main-agent 禁止 role 集合は `/Users/takagiyasushi/skills-repo/skills/infra-team-bootstrap/config/completion-chain.yaml` を正本とする。このノート内の flow 表は人間向け説明であり、ITB builder / Gate role は config を参照する。
+Completion Gate の機械検証用チェーン、pre-final 必須 section、main-agent 禁止 role 集合は `/Users/takagiyasushi/dev/Agent-Teams-Viewer/organization/runtime/infra-team-bootstrap/config/completion-chain.yaml` を正本とする。このノート内の flow 表は人間向け説明であり、ITB builder / Gate role は config を参照する。
 
 ## Scope
 
