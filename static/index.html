@@ -44,7 +44,33 @@
   #org-meta .busy { color: var(--yellow); font-weight: 600; }
 
   main { display: flex; }
-  #board { flex: 1; padding: 16px 20px; min-width: 0; }
+  #workspace { flex: 1; padding: 16px 20px; min-width: 0; }
+  #board { min-width: 0; }
+  #control-panel {
+    border: 1px solid var(--border); background: var(--bg-panel);
+    border-radius: 8px; padding: 12px; margin-bottom: 16px;
+    display: grid; gap: 10px;
+  }
+  .control-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .control-title { font-weight: 700; font-size: 13px; }
+  .pill {
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 2px 8px; font-size: 11px; color: var(--fg-dim);
+    background: rgba(139,148,158,.08);
+  }
+  .pill.good { color: var(--green); border-color: rgba(86,211,100,.45); }
+  .pill.warn { color: var(--yellow); border-color: rgba(242,204,96,.45); }
+  .pill.bad { color: var(--red); border-color: rgba(248,81,73,.45); }
+  #decision-form { display: flex; gap: 8px; flex: 1; min-width: 260px; }
+  #decision-input {
+    flex: 1; min-width: 220px; background: var(--bg-card); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+  }
+  #decision-form button {
+    background: var(--bg-card); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 6px; padding: 6px 10px; cursor: pointer;
+  }
+  #decision-result { color: var(--fg-dim); font-size: 12px; }
   .team { margin-bottom: 20px; }
   .team-title {
     font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px;
@@ -148,7 +174,10 @@
   <div id="org-meta"></div>
 </header>
 <main>
-  <div id="board"><div id="empty">セッションを読み込み中…</div></div>
+  <div id="workspace">
+    <section id="control-panel"></section>
+    <div id="board"><div id="empty">セッションを読み込み中…</div></div>
+  </div>
   <aside id="drawer">
     <div id="drawer-head">
       <span class="role" id="d-role"></span>
@@ -179,6 +208,7 @@ let currentSession = null;
 let selectedRole = null;
 let follow = true;
 let orgTimer = null, paneTimer = null;
+let orgConfig = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -201,6 +231,54 @@ function relTime(sec) {
 }
 
 // ---------------- sessions
+async function loadConfig() {
+  try {
+    orgConfig = await fetchJSON("/api/config");
+    renderConfig();
+  } catch (e) {
+    $("control-panel").innerHTML = '<div class="control-row"><span class="pill bad">CONFIG ERROR</span></div>';
+  }
+}
+
+function renderConfig(decision = null) {
+  const settings = (orgConfig || {}).settings || {};
+  const control = settings.control || {};
+  const hook = settings.hook_policy || {};
+  const state = control.state || "-";
+  const mode = control.default_mode || "-";
+  const hardBlock = hook.hard_block ? "hard block" : "observer";
+  const hardClass = hook.hard_block ? "bad" : "good";
+  const stateClass = state === "enabled" ? "good" : (state === "maintenance" ? "warn" : "bad");
+  const decisionText = decision
+    ? `判定: ${esc(decision.mode)} / ${esc(decision.organization_state)} / ${esc(decision.reason)}`
+    : "";
+  $("control-panel").innerHTML =
+    `<div class="control-row">` +
+      `<span class="control-title">Organization Control</span>` +
+      `<span class="pill ${stateClass}">${esc(state)}</span>` +
+      `<span class="pill warn">default ${esc(mode)}</span>` +
+      `<span class="pill ${hardClass}">hook ${esc(hardBlock)}</span>` +
+      `<span class="pill">${esc((orgConfig || {}).role_count || 0)} roles</span>` +
+      `<span class="pill">${esc((orgConfig || {}).policy_count || 0)} policies</span>` +
+    `</div>` +
+    `<div class="control-row">` +
+      `<form id="decision-form">` +
+        `<input id="decision-input" value="" placeholder="最近の天気予報を調べる">` +
+        `<button type="submit">decide</button>` +
+      `</form>` +
+      `<span id="decision-result">${decisionText}</span>` +
+    `</div>`;
+  $("decision-form").addEventListener("submit", decidePrompt);
+}
+
+async function decidePrompt(e) {
+  e.preventDefault();
+  const prompt = $("decision-input").value || "";
+  const decision = await fetchJSON(`/api/decide?prompt=${encodeURIComponent(prompt)}`);
+  renderConfig(decision);
+  $("decision-input").value = prompt;
+}
+
 async function loadSessions() {
   const data = await fetchJSON("/api/sessions");
   const sel = $("session-select");
@@ -352,8 +430,10 @@ $("d-follow").addEventListener("click", (e) => {
 });
 
 // ---------------- boot
+loadConfig();
 loadSessions();
 setInterval(loadSessions, 30000);
+setInterval(loadConfig, 30000);
 </script>
 </body>
 </html>
