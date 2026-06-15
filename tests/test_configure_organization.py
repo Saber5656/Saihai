@@ -23,6 +23,17 @@ def classify(prompt: str) -> dict:
     return json.loads(completed.stdout)
 
 
+def runtime_paths() -> dict:
+    completed = subprocess.run(
+        [sys.executable, str(CLI), "runtime-paths"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(completed.stdout)
+
+
 def assert_decision(prompt: str, **expected) -> None:
     result = classify(prompt)
     for key, value in expected.items():
@@ -72,7 +83,12 @@ def main() -> None:
         review_required="required",
         main_agent_can_execute=False,
     )
-    print(json.dumps({"result": "pass", "cases": 5}, ensure_ascii=False))
+    paths = runtime_paths()["runtime_paths"]
+    assert paths["itb_builder"]["exists"] is True
+    assert paths["itb_hooks"]["exists"] is True
+    assert paths["itd_monitor"]["exists"] is True
+    assert "organization/runtime/infra-team-bootstrap/scripts/itb_bootstrap_builder.py" in paths["itb_builder"]["path"]
+    print(json.dumps({"result": "pass", "cases": 6}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

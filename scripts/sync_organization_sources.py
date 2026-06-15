@@ -28,9 +28,9 @@ POLICY_REFS = [
 ]
 
 RUNTIME_REFS = {
-    "role-agent-registry.yaml": "infra-team-bootstrap/config/role-agent-registry.yaml",
-    "model-registry.md": "infra-team-bootstrap/references/model-registry.md",
-    "team-config.md": "infra-team-bootstrap/references/team-config.md",
+    "role-agent-registry.yaml": "runtime/infra-team-bootstrap/config/role-agent-registry.yaml",
+    "model-registry.md": "runtime/infra-team-bootstrap/references/model-registry.md",
+    "team-config.md": "runtime/infra-team-bootstrap/references/team-config.md",
 }
 
 TEAM_PREFIXES = ("gate-", "teams-", "tech-", "contents-", "business-", "infra-")
@@ -91,10 +91,10 @@ def sync_policies(agent_vault: Path, org_root: Path) -> list[dict[str, str | int
     return records
 
 
-def sync_runtime(skills_root: Path, org_root: Path) -> list[dict[str, str | int]]:
+def sync_runtime(org_root: Path) -> list[dict[str, str | int]]:
     records = []
     for dst_name, rel in RUNTIME_REFS.items():
-        src = skills_root / rel
+        src = org_root / rel
         if src.is_file():
             records.append(copy_with_record(src, org_root / "runtime" / dst_name))
     return records
@@ -138,7 +138,7 @@ def main() -> None:
     org_root.mkdir(parents=True, exist_ok=True)
 
     policies = sync_policies(args.agent_vault, org_root)
-    runtime = sync_runtime(args.skills_root, org_root)
+    runtime = sync_runtime(org_root)
     roles = sync_roles(args.skills_root, org_root)
 
     (org_root / "policy-index.json").write_text(

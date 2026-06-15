@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "sections": {
+    "Team Completion Check": {
+      "fields": {
+        "completion_status": {
+          "labels": ["Completion Status", "completion_status", "Assessment Status", "assessment_status"],
+          "required": true,
+          "normalized_equals": "ready_for_evaluation"
+        },
+        "all_director_reports_complete": {
+          "labels": ["All Director Reports Complete", "all_director_reports_complete", "All Team Tasks Done", "all_team_tasks_done"],
+          "required": true,
+          "truthy": true
+        },
+        "handoff_to": {
+          "labels": ["Handoff To", "handoff_to"],
+          "required": true,
+          "normalized_equals": "gate-task-evaluator"
+        }
+      }
+    },
+    "Completion Assessment": {
+      "fields": {
+        "assessment_status": {
+          "labels": ["Assessment Status", "assessment_status"],
+          "required": false,
+          "normalized_equals": "ready_for_evaluation"
+        }
+      }
+    },
+    "Quality Evaluation": {
+      "fields": {
+        "evaluation_status": {
+          "labels": ["Evaluation Status", "evaluation_status"],
+          "required": true,
+          "normalized_equals": "quality_ok"
+        }
+      }
+    },
+    "Task Change Manifest": {
+      "fields": {
+        "task_id": {
+          "labels": ["task_id", "Task ID", "taskId"],
+          "required": true
+        }
+      }
+    },
+    "Finalization Check": {
+      "fields": {
+        "finalization_status": {
+          "labels": ["Finalization Status", "finalization_status", "Guardian Status", "guardian_status"],
+          "required": true,
+          "normalized_equals": "complete"
+        },
+        "gte_final_review_complete": {
+          "labels": ["GTE Final Review Complete", "gte_final_review_complete", "Evaluation OK", "evaluation_ok"],
+          "required": true,
+          "truthy": true
+        },
+        "vault_final_update": {
+          "labels": ["Vault Final Update", "vault_final_update"],
+          "required": true,
+          "truthy": true
+        },
+        "handoff_to": {
+          "labels": ["Handoff To", "handoff_to"],
+          "required": true,
+          "normalized_equals": "main_transport_renderer"
+        },
+        "notification_class": {
+          "labels": ["Notification Class", "notification_class"],
+          "required": false
+        }
+      }
+    },
+    "Guardian Verdict": {
+      "fields": {
+        "guardian_status": {
+          "labels": ["Guardian Status", "guardian_status"],
+          "required": false,
+          "normalized_equals": "complete"
+        },
+        "handoff_to": {
+          "labels": ["Handoff To", "handoff_to"],
+          "required": false,
+          "normalized_equals": "main_transport_renderer"
+        }
+      }
+    },
+    "Completion Envelope": {
+      "fields": {
+        "finalization_status_checked": {
+          "labels": ["finalization_status_checked", "Finalization Status Checked", "guardian_status_checked", "Guardian Status Checked"],
+          "required": true,
+          "truthy": true
+        }
+      }
+    },
+    "Final Transport Render Check": {
+      "fields": {
+        "renderer": {
+          "labels": ["Renderer", "renderer"],
+          "required": true,
+          "normalized_equals": "main_transport_renderer"
+        },
+        "source_envelope": {
+          "labels": ["Source Envelope", "source_envelope"],
+          "required": true,
+          "normalized_equals": "completion_envelope"
+        },
+        "source_finalization_check": {
+          "labels": ["Source Finalization Check", "source_finalization_check", "Source Guardian Verdict", "source_guardian_verdict"],
+          "required": true,
+          "normalized_equals": "finalization_check"
+        },
+        "facts_preserved": {
+          "labels": ["Facts Preserved", "facts_preserved"],
+          "required": true,
+          "truthy": true
+        },
+        "no_new_task_judgment": {
+          "labels": ["No New Task Judgment", "no_new_task_judgment"],
+          "required": true,
+          "truthy": true
+        },
+        "worker_persona_leakage": {
+          "labels": ["Worker Persona Leakage", "worker_persona_leakage"],
+          "required": true,
+          "falsy": true
+        },
+        "style_profile": {
+          "labels": ["Style Profile", "style_profile"],
+          "required": true
+        },
+        "self_certified": {
+          "labels": ["Self Certified", "self_certified"],
+          "forbidden_truthy": true
+        }
+      },
+      "forbidden_main_role_source_fields": [
+        "Author",
+        "Created By",
+        "Evidence Source",
+        "Certification Source",
+        "Validation Source",
+        "Renderer Role",
+        "Executor Role"
+      ]
+    }
+  }
+}

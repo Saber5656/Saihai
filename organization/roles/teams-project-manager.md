@@ -7,7 +7,7 @@ user-invocable: false
 allowed-tools: Read, Grep, Glob, Write, Edit, Agent
 category: Team Role
 created: 2026-02-25
-updated: 2026-05-20
+updated: 2026-06-13
 status: active
 purpose: GTC 後のタスクをチーム単位で配送し、各チーム director へ引き渡す
 ---
@@ -25,7 +25,7 @@ TPM は `tech-backend`、`infra-local-qa`、`contents-formatter` などの個別
 | 区分 | 内容 |
 |---|---|
 | In | Task Detail、routing hint、review requirements、approval status、open questions |
-| Out | 主担当チーム、支援チーム、レビュー担当チーム、実行順序、Branch Plan、Resident Roster の active set、director handoff、completion gate handoff |
+| Out | 主担当チーム、支援チーム、レビュー担当チーム、実行順序、Branch Plan、Resident Roster の active set、director handoff、Team Completion Check、completion gate handoff |
 | 前ロール | `gate-task-creator` |
 | 次ロール | 各チーム director または Gate 固定フロー |
 | 対象外 | 個別エージェント選定、実作業、レビュー実施、Kanban 同期実装、Task ID 採番 |
@@ -36,7 +36,7 @@ TPM は `tech-backend`、`infra-local-qa`、`contents-formatter` などの個別
 |---|---|
 | Input Agents | `gate-task-creator` |
 | Output Agents | `tech-director`, `contents-director`, `business-director`, `infra-director`, or Gate fixed roles |
-| Required Handoff Artifact | Team Routing Decision、Active Set、Director Handoff、Completion Gate handoff |
+| Required Handoff Artifact | Team Routing Decision、Active Set、Director Handoff、Team Completion Check、Completion Gate handoff |
 | Return Policy | メインエージェントへの返却は transport としてのみ許可し、workflow output として扱わない |
 | Forbidden Outputs | user final response, main transport renderer, individual worker assignment, skipped director handoff |
 
@@ -90,7 +90,7 @@ TPM は role 定義ではなく、現チャットセッションの agent instan
    - `/Users/takagiyasushi/dev/*` 配下の source repository では、`workspace_mode: task_worktree`、`worktree_required: true`、`branch_action: create_task_worktree` または `checkout_task_worktree`、`publication_flow: create_pr_from_task_branch`、`pr_required: true` を記録する。
    - `/Users/takagiyasushi/dev/*` では、現在 branch が main 以外でも、その branch を task branch として使い回さない。Branch Plan の `working_branch` と `worktree_path` に一致する場合だけ利用を許可する。
    - standard worktree path は `/Users/takagiyasushi/dev/_worktrees/<repo-name>/<TSK-####-slug>` とし、既存 project convention がある場合だけ理由付きで変更する。
-   - `/Users/takagiyasushi/dev/*` では GitHub PR 作成を必須の publication step として扱う。PR URL が作成されるまで Guardian は complete にしない。
+   - `/Users/takagiyasushi/dev/*` では GitHub PR 作成を必須の publication step として扱う。PR URL が作成されるまで `finalization-check` は complete にしない。
    - 1つの親 task に複数 Director が関わる場合も、原則として `branch_owner: task` の単一 `working_branch` を共有させる。
    - `branch_action: none` は read-only task、emergency task、または人間が明示した例外だけに使い、理由を記録する。
    - branch 名は `codex/TSK-####-slug` を標準にし、環境制約で slash 付き ref を作れない場合は `codex-TSK-####-slug` を許容して理由を記録する。
@@ -105,8 +105,9 @@ TPM は role 定義ではなく、現チャットセッションの agent instan
    - strict escalation trigger が見つかった場合、`workflow_mode: strict_flow` に戻し、通常の team task board / worktree / review flow にする。
 
 7. Team Routing Decision を Task Detail に残す。
-   - 判断、理由、handoff 先、レビュー線、未解決事項を Vault に記録する。
-   - Vault に記録していない判断を共有済み事実として扱わない。
+   - 判断、理由、handoff 先、レビュー線、未解決事項は role-report を正本にする。
+   - Task Detail には `task-detail-append` command で status、1行 summary、report path、report sha256 だけを残す。
+   - Vault に記録していない判断を共有済み事実として扱わないが、長文本文を Task Detail へ直接貼らない。
 
 7.5. Resident Roster の active set を残す。
    - Gate / Infra は常時 active として `Always Active` に記録する。
@@ -116,11 +117,34 @@ TPM は role 定義ではなく、現チャットセッションの agent instan
    - bridge、commit、git-publisher、push、git-workspace-prep、save、Obsidian CLI などの道具スキルを resident active set に混ぜない。
    - モデル、session、request、usage の証跡は `Invocation Evidence` に記録する前提を維持する。
 
-8. Completion Gate handoff を維持する。
-   - Director 完了報告後の次ロールは `skills/infra-team-bootstrap/config/completion-chain.yaml` の `completion_chain` と `assessor_integration_policy` に従う。現行 mode は `preserve_by_default` のため通常は `gate-task-assessor` へ渡す。
-   - TPM は完了判定、品質評価、commit 実行、guardian 判定を行わない。
+8. Team Completion Check と Completion Gate handoff を維持する。
+   - 各 Director は担当チームの作業・レビュー完了後、TPM へ completion report を返す。
+   - TPM は `team-completion-check` command evidence として、対象チームの完了報告、未解決 blocker、human approval、レビュー証跡を集約し、全チーム完了時だけ `Completion Status: ready_for_evaluation` を記録する。
+   - Director 完了報告後の次工程は `skills/infra-team-bootstrap/config/completion-chain.yaml` の `completion_chain`、`auto_queue_handoffs`、`assessor_integration_policy` に従う。現行 mode は `tpm_team_completion_check` のため、TPM の terminal report 後に builder / queue-watch が `team-completion-check` command を実行し、`pass` の場合だけ `gate-task-evaluator` を queue する。
+   - TPM は evaluator inbox を手書き生成しない。command が `block` / `ambiguous` の場合は `missing_evidence`、`blockers`、`reason` を直してから再 report する。
+   - TPM は品質評価、commit 実行、finalization 判定を行わない。
    - TPM は Director 完了報告を main transport renderer へ直接渡さない。
    - Task Detail または Team Routing Decision に、`skills/infra-team-bootstrap/config/completion-chain.yaml` の `completion_chain` 由来の後段フローを残す。
+
+## Team Completion Check
+
+TPM は Director 完了報告が揃った後、role-report に completion detail を残し、Task Detail には `task-detail-append` で thin section だけを残す。
+
+```markdown
+## Team Completion Check
+
+| Field | Value |
+|---|---|
+| Status | pass / block / ambiguous |
+| Summary | 1行要約 |
+| Report | report path または wikilink |
+| Report Path | queue/reports/teams-project-manager/<task>/<report>.yaml |
+| Report SHA256 | <sha256> |
+| Updated At | <ISO timestamp> |
+| Owner Role | teams-project-manager |
+```
+
+Director reports、Required Teams、Reviews Complete、Blockers、Human Approval、Reasons の詳細は TPM role-report と `team-completion-check` artifact を正本にする。
 
 ## Team Routing Decision
 
@@ -142,7 +166,7 @@ TPM の出力は次の形式を基本にする。
 | Open Questions |  |
 | Branch Plan | Git 管理対象作業では repo_root / repo_kind / base_branch / working_branch / branch_owner / shared_by_teams / default_branch_push_allowed / branch_action / workspace_mode / worktree_required / worktree_path / publication_flow / pr_required。Git 無関係タスクでは `not_applicable` と理由だけを記録 |
 | Workspace Prep Handoff | `git-workspace-prep` when branch action is `checkout_existing`, `create_working_branch`, `checkout_task_worktree`, or `create_task_worktree`; `not_required` when `branch_action: none` |
-| Completion Gate | `config/completion-chain.yaml` の `completion_chain` |
+| Completion Gate | `config/completion-chain.yaml` の `completion_chain`。現行は `team-completion-check -> gate-task-evaluator -> git-publisher -> vault_final_update -> finalization-check -> main_transport_renderer` |
 | Workflow Mode | `controlled_micro_flow` / `strict_flow` |
 | Micro Team Record | `in_task_certificate` / `team_task_board_required` |
 ```
@@ -177,7 +201,7 @@ Task Detail には次を残す。
 - git branch 作成や checkout を TPM 自身が実行しない。
 - Director に独自 branch / worktree 作成を許可しない。TPM が記録した Branch Plan の `working_branch` / `worktree_path` を使わせる。`branch_action: none` は明示例外時だけ許可する。
 - 実作業、レビュー実施、修正反映を TPM の完了条件に含めない。
-- Team Director 完了後に `completion-chain.yaml` の `assessor_integration_policy` を変更せず `gate-task-assessor` を飛ばして main transport renderer へ渡さない。
+- Team Director 完了後に `Team Completion Check` と `gate-task-evaluator` を飛ばして main transport renderer へ渡さない。
 - GTC、Dispatcher、各 director の責務を再定義しない。
 - 人間承認が必要な変更を承認済みとして扱わない。
 
@@ -200,7 +224,8 @@ Task Detail には次を残す。
 | 個別エージェントへ直接アサインしていない | Yes |
 | 人間承認要否を維持または明確化した | Yes |
 | 判断を Vault に記録した | Yes |
-| Director 完了後の handoff 先を `completion-chain.yaml` の assessor policy に合わせた | Yes |
+| Director 完了後の handoff 先を `completion-chain.yaml` の `tpm_team_completion_check` policy に合わせた | Yes |
+| Team Completion Check を Task Detail に記録した | Yes |
 | Completion Gate の後段フローを保持した | Yes |
 | Gate / Infra を常時 active として扱い、タスク別 active set を記録した | Yes |
 | 道具スキルを resident active set に混ぜていない | Yes |
@@ -217,16 +242,17 @@ Task Detail には次を残す。
 
 This block is generated by `infra-team-bootstrap sync-policy-digest-skills`.
 Use the digest for routine freshness checks; read full policy bodies only when this digest changes, required judgment evidence is missing, or human approval is needed.
+Narration policy: act on routine flow checks silently; surface only anomaly or approval blockers as `[FLOW-ALERT]`.
 
 | Field | Value |
 |---|---|
 | policy_digest_status | `ready` |
-| policy_digest_sha1 | `9fda168882cde9ad003f9f107455b22479793a95` |
+| policy_digest_sha1 | `3208f43814e1e595e6baf885b6bc3e5641653fc4` |
 
 | Policy | Status | SHA1 | Bytes | Source |
 |---|---|---:|---:|---|
 | AI-Organization | `ready` | `380b4a2cab2325b88f68993485ae997428265913` | 31825 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/AI-Organization.md` |
 | Gate-IO-Contract | `ready` | `7af1c38f0b140feb45a11009ca94f70da542344d` | 34482 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Gate-IO-Contract.md` |
 | Dispatcher-IO-Contract | `ready` | `75cd888d160d7ae0a87640cefd1268ea84b4209e` | 6188 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Dispatcher-IO-Contract.md` |
-| Task-File-Conventions | `ready` | `cb08eca7c65ceac09211da94294c96bba0132dd2` | 16849 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Task-File-Conventions.md` |
+| Task-File-Conventions | `ready` | `ac5b009a443216dd7b00ebaa5541eaecfe341176` | 18748 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Task-File-Conventions.md` |
 <!-- ITB_POLICY_DIGEST_SNAPSHOT_END -->

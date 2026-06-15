@@ -1,13 +1,13 @@
 ---
 name: gate-task-guardian
-description: git-publisher と Agents-Vault final update の後、親 task、team task、レビュー、human approval、commit hash、push status、PR URLまたはPR不要理由、Vault final update、Task Index / Kanban 同期がすべて揃ったか最終確認するときに必ず使う Gate ロール。guardian OK 前に done や main transport renderer へ進めてはならない。
+description: 互換参照用。現行フローでは git-publisher、GTE final review、Agents-Vault final update 後の最終確認は finalization-check command evidence に統合する。旧 Guardian Verdict を読むときだけ参照する。
 user-invocable: false
-allowed-tools: Read, Grep, Glob, Bash
+allowed-tools: Read, Grep, Glob
 category: Team Role
 created: 2026-05-18
-updated: 2026-05-21
-status: active
-purpose: Completion Gate の最終番人として、done / main transport renderer 進行前に全証跡を検査する
+updated: 2026-06-14
+status: reference
+purpose: 旧 Guardian Verdict 契約の互換参照。runtime resident agent としては使わず、Finalization Check を正本にする
 team: gate
 agent_id: gate-task-guardian
 ---
@@ -16,193 +16,79 @@ agent_id: gate-task-guardian
 
 ## 役割
 
-`gate-task-guardian` は、`gate-task-evaluator`、`git-publisher`、Agents-Vault final update の後に、タスクを `done` として扱ってよいかを最終確認する。
+`gate-task-guardian` は旧フローの互換参照である。
+現行フローでは、`gate-task-evaluator`、`git-publisher` の後に、ITB builder の `vault-final-update` command が compact gate artifacts を Agents-Vault final update として一度だけ rollup し、その後 `finalization-check` command evidence としてタスクを `done` として扱ってよいかを最終確認する。
+`finalization-check` が pass した後、`final-transport-render-check` command が `Final Transport Render Check` section / artifact を生成してから main transport renderer へ渡す。`auto_final_transport_render_check: true` の場合だけ、この生成を `finalization-check` から続けて実行できる。
+`Git Publication Result` が thin section の場合、`finalization-check` は Task Detail 本文ではなく linked report artifact の `git_publication_result` fields を正本として検査する。
 repo 全体の clean state ではなく、この task の Task Change Manifest と Git Publication Result が commit / push / PR の必要証跡で閉じているかを確認する。
 
-Guardian OK が出るまで、Task Detail を `done` にせず、main transport renderer へ渡さない。
+`Finalization Check` が complete になるまで、Task Detail を `done` にせず、main transport renderer へ渡さない。旧 `Guardian Verdict` は既存タスクの読み取り互換としてだけ扱う。
 
 ## Flow Contract
 
 | Field | Value |
 |---|---|
-| Input Agents | Vault final update and Git Publication Result |
-| Output Agents | `main_transport_renderer` only when `guardian_status: complete` |
-| Required Handoff Artifact | Guardian Verdict、Completion Envelope |
+| Input Agents | Legacy Vault final update, GTE final review, and Git Publication Result references |
+| Output Agents | none for runtime; use `finalization-check` / `final-transport-render-check` |
+| Required Handoff Artifact | Legacy Guardian Verdict reference only |
 | Return Policy | メインエージェントへの返却は transport としてのみ許可し、workflow output として扱わない |
-| Forbidden Outputs | user final response, quality evaluation, commit execution, main transport render handoff without complete verdict |
+| Forbidden Outputs | user final response, quality evaluation, commit execution, main transport render handoff |
 
 ## Report / Queue Boundary
 
-この Gate role は判定内容を返す role であり、queue inbox status や role report file を provider turn 内で直接確定する責務を持たない。
-Queue message の `done` / `failed` 更新と report YAML の atomic write は、ITB builder の `role-report` / atomic queue writer を正本とする。
-allowed-tools は判定に必要な参照 tool だけを表し、queue transport の最終確定権限ではない。
+この Gate role は現行 workflow の queue consumer ではない。
+新規 task で `gate-task-guardian` inbox、role-report、provider turn、tmux resident process を作ってはならない。
+旧 Task Detail を読むときも、互換 section の意味を `finalization-check` / `final-transport-render-check` の現行 artifact へ写像するだけにする。
 
-## Builder Precheck
+## Builder Precheck Compatibility
 
-Guardian 起動前に ITB builder の `guardian-precheck` を実行し、`gatePrecheck.precheck_status` を確認する。
+旧 `guardian-precheck` は互換 alias として残すが、正本 command は `finalization-check` と `final-transport-render-check` である。
 
 | Precheck | Required |
 |---|---|
-| Command | `itb_bootstrap_builder.py guardian-precheck` |
+| Command | `itb_bootstrap_builder.py finalization-check` |
 | Default phase | `pre_final_response` |
 | Pass condition | `precheck_status: pass` |
-| Block behavior | `validation_errors` を差し戻し理由にし、独立 LLM 再監査へ進まない |
-| Pass behavior | LLM は最終 verdict 理由と残リスク整理に集中し、Completion Gate / Invocation Evidence / Git Publication gate の機械確認を繰り返さない |
+| Block behavior | `validation_errors` を GTE / publication / final update へ戻す理由にし、独立 guardian LLM 再監査へ進まない |
+| Pass behavior | guardian runtime を起動せず、`final-transport-render-check` 後に main transport renderer へ進む |
+| Notification class | command artifact の `notification_class` を正本にする。`done` は最終表示へ進行可、`flow_alert` は完了応答前に block / operator alert、`approval_wait` は人間承認待ちとして扱う |
 
-## 責務境界
+`finalization-check` は実行時に `active-task.json` を `flow_phase: pre_final_response` / `last_gate: finalization-check` に更新する。これに失敗した場合、最終応答へ進めず Task Detail / active-task の整合性を直す。
 
-| 区分 | 内容 |
+## Current Flow Mapping
+
+| Legacy Concept | Current Source Of Truth |
 |---|---|
-| In | Task Detail、Completion Assessment、Quality Evaluation、Task Change Manifest、Git Publication Manifest、Git Publication Result、Vault final update、Task Index / Kanban 状態 |
-| Out | Guardian Verdict、done 可否、main transport renderer へ渡す Completion Envelope |
-| 前ロール | `git-publisher`、Vault final update 担当、`gate-task-evaluator` |
-| 次ロール | `main_transport_renderer` または差し戻し先 |
-| 対象外 | 成果物の再設計、commit / push / PR 実行、文体整形 |
+| old Guardian Verdict | `Finalization Check` JSON artifact plus Task Detail thin section |
+| old guardian complete status | `finalization-check.status: pass` and `next_phase_allowed: true` |
+| old renderer readiness check | `final-transport-render-check` artifact |
+| old handoff to final renderer | builder / hook guard output from `final-response-guard` |
 
-## 実行手順
+## New Task Rules
 
-1. Task Detail を確認する。
-   - status、deliverables、reviews、Vault Updates、Task Change Manifest、Git Publication Manifest、Git Publication Result、commit hashes、push status、PR URL、related tasks を確認する。
+新規 task では次を禁止する。
 
-2. Completion Assessment と Quality Evaluation を確認する。
-   - `ready_for_evaluation` と `quality_ok` が揃っていない場合は完了不可。
-   - Controlled Micro-Flow の場合は、`Controlled Micro-Flow` section、Micro Team Certificate、Quality Evaluation の `Controlled Micro-Flow Evidence: accepted`、strict escalation trigger none を確認する。
-   - local gate evidence があるのに Controlled Micro-Flow section が完全でない場合、または failed provider evidence が未解決の場合は完了不可。
-
-3. Task Change Manifest と Git Publication Result を確認する。
-   - Task Change Manifest がない場合は完了不可。
-   - `commit_required: true` なら `commit_hashes` と `committed_diff_matches_snapshot: true` が必須。
-   - `commit_required: false` なら、コミット不要判断の理由と確認者が必須。
-   - `commit_required: false` の理由が `deferred_not_requested`、`not_requested`、`user_did_not_request_commit`、または同等の「人間が明示しなかった」理由なら完了不可。
-   - Task Change Manifest / Quality Evaluation / Git Publication Manifest のいずれかで task-owned Git diff が示されている場合、`commit_required: false` を受け入れない。
-   - `approved_diff_snapshot` が commit 済み、または明示的な commit 不要理由で閉じていない場合は完了不可。
-   - `push_required: true` なら `push_status: complete` と `remote_branch` が必須。
-   - `push_required: false` なら push 不要判断の理由が必須。
-   - `pr_required: true` なら `pr_status: created` と `pr_url` が必須。`pr_status: deferred` / `blocked` は完了不可。
-   - `pr_required: false` なら PR 不要判断の理由が必須。
-   - `git_publication_status` が `complete` または `not_required` でない場合は完了不可。
-   - `deferred_not_requested`、`not_requested`、`publication_deferred_not_requested`、`commit_deferred_not_requested` は `complete` / `not_required` の代替にしてはならない。
-   - Git publication 後に guardian verdict、Completion Envelope、Final Transport Render Check、Task Index / Kanban 同期などの completion artifacts が追記される場合、`finalization_status` が `complete` / `separated` / `not_required` のいずれかで閉じていることを確認する。
-   - `finalization_status: complete` の場合は `finalization_commit_hashes` が必須。`push_required: true` の task では `finalization_push_status: complete` と `finalization_remote_branch` も必須。
-   - `finalization_status: separated` / `not_required` の場合は、completion artifacts が git dirty として孤立しない理由が `finalization_separation_reason` または `finalization_not_required_reason` に記録されていることを確認する。
-   - repo に `unrelated_dirty_paths` が残っていても、それが Task Change Manifest の `excluded_paths` / `unrelated_dirty_paths` として記録され、approved diff に含まれないなら blocking にしない。
-   - `scope_mismatch`、`unscoped_commit_forbidden`、`security_review_invalid` が残る場合は完了不可。
-
-4. Vault final update を確認する。
-   - Task Detail に最終判断、レビュー、検証、Task Change Manifest、Git Publication Result、commit hashes または commit 不要理由、push status、remote branch、PR URL または PR 不要理由、残リスクが記録されているか確認する。
-   - Task Index と Kanban が Task Detail の status と矛盾していないか確認する。
-   - Resident Team Roster、Active Set、Invocation Evidence が最終状態に更新されているか確認する。
-   - Gate / Infra が常時 active として記録され、Tech / Contents / Business は必要時のみ active 化されているか確認する。
-   - bridge、commit、git-publisher、push、git-workspace-prep、save、Obsidian CLI などの道具スキルが resident agent として混入していないか確認する。
-
-5. 関連タスクを確認する。
-   - child task、team task、review task、commit task が残っていないか確認する。
-
-6. Guardian Verdict を作る。
-   - 全条件が揃う場合は `guardian_status: complete` とし、main transport renderer 用 Completion Envelope を作る。
-   - 不足がある場合は `guardian_status: incomplete` とし、差し戻し先と不足証跡を明示する。
-   - verdict 作成時に Task Detail の Completion Gate へ `Guardian Status Checked: true` を必ず記録する。
-   - `Guardian Status Checked: true` かつ `guardian_status: complete` が揃うまで、main transport renderer へ渡さない。
-   - Final Transport Render Check は `Completion Envelope` と `Guardian Verdict` の report 由来として記録し、main agent / main transport renderer の自己認証を証跡にしてはならない。
-
-## Guardian Verdict
-
-```markdown
-## Guardian Verdict
-
-| Field | Value |
+| Forbidden | Replacement |
 |---|---|
-| Guardian | gate-task-guardian |
-| Parent Task |  |
-| Assessment Ready | true / false |
-| Evaluation OK | true / false |
-| Task Change Manifest Present | true / false |
-| Approved Diff Closed | true / false |
-| Commit Requirement Satisfied | true / false |
-| Commit Hashes |  |
-| Committed Diff Matches Snapshot | true / false / not_applicable |
-| Git Publication Status | complete / not_required / blocked / missing |
-| Push Status | complete / not_required / blocked / missing |
-| Remote Branch |  |
-| PR Status | created / not_required / blocked / deferred / missing |
-| PR URL |  |
-| Finalization Status | complete / separated / not_required / blocked / missing |
-| Finalization Commit Hashes |  |
-| Finalization Push Status | complete / not_required / blocked / missing |
-| Finalization Remote Branch |  |
-| Unrelated Dirty Paths |  |
-| Vault Final Update Complete | true / false |
-| Task Index Synced | true / false |
-| Kanban Synced | true / false |
-| Related Tasks Complete | true / false |
-| Resident Roster Complete | true / false |
-| Controlled Micro-Flow Closed | true / false / not_applicable |
-| Guardian Status Checked | true / false |
-| Guardian Status | complete / incomplete |
-| Handoff To | main_transport_renderer / <owner> |
-| Reasons |  |
-```
+| `gate-task-guardian` を resident / queue consumer として起動する | `finalization-check` command |
+| Git / Vault / Index / Kanban / Completion Envelope を guardian LLM に再検査させる | compact command artifacts and linked report files |
+| guardian 名義の Markdown 判定表を Task Detail に追加する | `task-detail-append` による `Finalization Check` thin section |
+| main transport renderer への handoff を guardian が手書きする | `final-transport-render-check` + final response guard |
+| commit / push / PR を guardian から実行する | `git-publisher` / publication command flow |
 
-## Completion Envelope For Main Transport Renderer
+## Legacy Read Compatibility
 
-Guardian OK 後だけ、main transport renderer へ次を渡す。
+過去 task に旧 verdict section が残る場合は、次の互換情報として読む。
 
-| Field | Required |
+| Old Field | Interpret As |
 |---|---|
-| result | Yes |
-| changed_artifacts | Yes |
-| review_status | Yes |
-| validation_status | Yes |
-| commit_hash_or_commit_not_required | Yes |
-| push_status_or_push_not_required | Yes |
-| pr_url_or_pr_not_required | Yes |
-| guardian_status_checked | Yes |
-| vault_update_status | Yes |
-| risks_or_limits | Yes |
-| next_actions | When useful |
+| `complete` | 現行 `finalization-check.status: pass` 相当。ただし新規証跡ではない |
+| `incomplete` / `blocked` / `missing` | 現行 `validation_errors` / `blockers` 相当 |
+| old commit / push / PR rows | `Git Publication Result` linked report の手掛かり |
+| old reasons | GTE、git-publisher、Vault final update へ戻す修復 hint |
 
-## Final Transport Render Check Requirements
-
-main transport renderer へ渡す前に、Task Detail の `Final Transport Render Check` は次を満たす。
-
-| Field | Required Value |
-|---|---|
-| Renderer | `main_transport_renderer` |
-| Source Envelope | `Completion Envelope` |
-| Source Guardian Verdict | `Guardian Verdict` |
-| Facts Preserved | `true` |
-| No New Task Judgment | `true` |
-| Worker Persona Leakage | `false` |
-| Style Profile | non-empty |
-
-`Self Certified: true`、または `Author` / `Created By` / `Evidence Source` / `Certification Source` / `Validation Source` が `main-agent`、`codex-main`、`claude-main`、`entrypoint`、`main_transport_renderer` など main 系 role を指す場合は完了不可とする。
-
-## Validation Checklist
-
-| Check | Required |
-|---|---|
-| evaluator OK 前に完了判定していない | Yes |
-| Task Change Manifest がある | Yes |
-| approved_diff_snapshot が commit 済みまたは commit 不要理由で閉じている | Yes |
-| commit_required true なら commit_hashes がある | Yes |
-| commit_required true なら `committed_diff_matches_snapshot: true` がある | Yes |
-| commit_required false なら理由が記録されている | Yes |
-| commit_required false の理由がユーザー未依頼や deferred_not_requested ではない | Yes |
-| push_required true なら `push_status: complete` と `remote_branch` がある | Yes |
-| push_required false なら理由が記録されている | Yes |
-| pr_required true なら `pr_status: created` と `pr_url` がある | Yes |
-| pr_required false なら理由が記録されている | Yes |
-| Git Publication Result が complete または not_required で閉じている | Yes |
-| publication 後の completion artifacts が git dirty として孤立しない finalization 証跡がある | Yes |
-| `deferred_not_requested` / `not_requested` を完了扱いしていない | Yes |
-| unrelated dirty paths を blocking 扱いしていない | Yes |
-| Vault final update が完了している | Yes |
-| Task Index / Kanban が同期している | Yes |
-| 関連 task と team task が完了している | Yes |
-| Resident Roster / Active Set / Invocation Evidence が最終更新されている | Yes |
-| controlled_micro_flow の場合、Control section / Micro Team Certificate / local evidence / escalation none を確認した | When applicable |
-| Guardian Status Checked を Task Detail に記録した | Yes |
-| guardian OK 前に main transport renderer へ渡していない | Yes |
+この互換読み取りは完了証跡を新規生成しない。
+現行フローの complete 判定には、必ず `finalization-check` command artifact、`final-transport-render-check` artifact、Completion Envelope、linked Git publication report を使う。
 
 ## Related Notes
 
@@ -215,16 +101,17 @@ main transport renderer へ渡す前に、Task Detail の `Final Transport Rende
 
 This block is generated by `infra-team-bootstrap sync-policy-digest-skills`.
 Use the digest for routine freshness checks; read full policy bodies only when this digest changes, required judgment evidence is missing, or human approval is needed.
+Narration policy: act on routine flow checks silently; surface only anomaly or approval blockers as `[FLOW-ALERT]`.
 
 | Field | Value |
 |---|---|
 | policy_digest_status | `ready` |
-| policy_digest_sha1 | `9fda168882cde9ad003f9f107455b22479793a95` |
+| policy_digest_sha1 | `3208f43814e1e595e6baf885b6bc3e5641653fc4` |
 
 | Policy | Status | SHA1 | Bytes | Source |
 |---|---|---:|---:|---|
 | AI-Organization | `ready` | `380b4a2cab2325b88f68993485ae997428265913` | 31825 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/AI-Organization.md` |
 | Gate-IO-Contract | `ready` | `7af1c38f0b140feb45a11009ca94f70da542344d` | 34482 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Gate-IO-Contract.md` |
 | Dispatcher-IO-Contract | `ready` | `75cd888d160d7ae0a87640cefd1268ea84b4209e` | 6188 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Dispatcher-IO-Contract.md` |
-| Task-File-Conventions | `ready` | `cb08eca7c65ceac09211da94294c96bba0132dd2` | 16849 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Task-File-Conventions.md` |
+| Task-File-Conventions | `ready` | `ac5b009a443216dd7b00ebaa5541eaecfe341176` | 18748 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Task-File-Conventions.md` |
 <!-- ITB_POLICY_DIGEST_SNAPSHOT_END -->
