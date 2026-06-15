@@ -1,7 +1,7 @@
 # Agent-Teams-Viewer
 
 ITB Organization Instance（チャットセッションごとに起動する AI エージェント組織）の
-稼働状況を可視化する、読み取り専用のローカルダッシュボード。
+稼働状況と、AI 組織運用の設定・Policy・Role 定義を管理するローカルダッシュボード。
 
 ![dark theme dashboard]
 
@@ -13,6 +13,8 @@ ITB Organization Instance（チャットセッションごとに起動する AI 
 | 稼働中ハイライト | 作業中（tmux pane に直近出力あり）のエージェントカードに **黄色の枠** + 発光パルスを付与。黒ベース UI |
 | ペインビューア | エージェントカードをクリックすると右ドロワーに tmux pane の内容（作業中の画面そのもの）、inbox メッセージ、roster メタデータを表示 |
 | 組織構造表示 | Gate / Engineering / Contents / Business / Infrastructure のチーム別グルーピング（roster.json の `team` を正本とする） |
+| 組織設定表示 | `organization/settings.json` を読み、組織運用 state、fast/strict mode、Hook observer 方針を表示 |
+| Task mode 判定 | `/api/decide` と `scripts/configure_organization.py` で prompt を fast / strict / maintenance に判定 |
 
 ## 起動
 
@@ -34,6 +36,10 @@ python3 server.py --port 8799
 | `tmux list-panes` / `tmux capture-pane` | window 活動時刻・pane 内容（読み取りのみ） |
 | `~/.claude/projects/*/<session_id>.jsonl` | チャット名称の best-effort 抽出（summary / 最初のユーザープロンプト） |
 | `~/.codex/state/itb/` | Codex 側 state（存在すれば同様に読む） |
+| `organization/settings.json` | 組織運用 enabled / disabled / maintenance、fast / strict、Hook observer 方針 |
+| `organization/policies/*.md` | 組織運用 Policy のミラー正本 |
+| `organization/roles/*.md` | Team Role 定義のミラー正本（既存 skill は削除せず互換保持） |
+| `organization/runtime/*` | role registry / model registry / team config の runtime 参照 |
 
 ## 稼働判定（status）
 
@@ -63,6 +69,20 @@ python3 server.py --port 8799
 | `GET /api/sessions` | 監視可能なセッション一覧（live 優先・作成日時降順） |
 | `GET /api/org?session=<id>` | チーム別エージェント稼働状況 |
 | `GET /api/pane?session=<id>&role=<role_id>` | 対象エージェントの tmux pane 内容 + inbox |
+| `GET /api/config` | 組織運用設定、role count、policy count、policy index |
+| `GET /api/decide?prompt=<text>` | prompt を fast / strict / maintenance に判定 |
+
+## 組織設定 CLI
+
+```sh
+python3 scripts/configure_organization.py status
+python3 scripts/configure_organization.py classify --prompt "最近の天気予報を調べる"
+AGENT_ORG_MAINTENANCE=1 python3 scripts/configure_organization.py classify --prompt "Hookを直す"
+```
+
+全ての作業は task record を持つ。`fast` は task 化を省略する mode ではなく、
+ごく簡単な作業を main agent が軽量 task record と Vault 記録で処理する mode。
+`strict` は role dispatch / review / final evidence を要求する通常 mode。
 
 ## ライセンス
 
