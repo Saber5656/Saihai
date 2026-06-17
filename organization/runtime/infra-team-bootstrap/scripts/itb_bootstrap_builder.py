@@ -105,6 +105,49 @@ DEFAULT_CODEX_SERVICE_TIER = "fast"
 LAZY_STARTUP_PROFILES = {"lazy_activation", "on_demand"}
 ALLOWED_QUEUE_FINALIZERS = {"role-report"}
 ALLOWED_REPORT_WRITE_MODES = {"builder_atomic"}
+STATIC_ROLE_LAYERS = frozenset({"gate", "tpm", "director", "worker"})
+ASSIGNMENT_ROLE_VALUES = frozenset({"none", "implementer", "reviewer", "qa", "approver", "observer"})
+AGENT_CALL_MANIFEST_VERSION = "1"
+AGENT_SWITCH_MANIFEST_VERSION = "1"
+ROLE_LAYER_CONTEXT_PRESET_REFS: dict[str, list[dict[str, str]]] = {
+    "gate": [
+        {"type": "policy", "path": "organization/policies/AI-Organization.md"},
+        {"type": "contract", "path": "organization/policies/Gate-IO-Contract.md"},
+    ],
+    "tpm": [
+        {"type": "contract", "path": "organization/runtime/infra-team-bootstrap/config/completion-chain.yaml"},
+        {"type": "catalog", "path": "organization/runtime/infra-team-bootstrap/config/role-agent-registry.yaml"},
+        {"type": "catalog", "path": "organization/runtime/infra-team-bootstrap/references/team-config.md"},
+    ],
+    "director": [
+        {"type": "catalog", "path": "organization/runtime/infra-team-bootstrap/config/role-agent-registry.yaml"},
+        {"type": "catalog", "path": "organization/runtime/infra-team-bootstrap/references/team-config.md"},
+        {"type": "contract", "path": "organization/runtime/agent-call-contract.md"},
+    ],
+    "worker": [
+        {"type": "contract", "path": "organization/runtime/agent-call-contract.md"},
+        {"type": "contract", "path": "organization/runtime/infra-team-bootstrap/SKILL.md"},
+    ],
+}
+ASSIGNMENT_ROLE_CONTEXT_PRESET_REFS: dict[str, list[dict[str, str]]] = {
+    "none": [],
+    "implementer": [
+        {"type": "checklist", "path": "organization/runtime/agent-call-contract.md#assignment-overlays"}
+    ],
+    "reviewer": [
+        {"type": "checklist", "path": "organization/runtime/agent-call-contract.md#assignment-overlays"}
+    ],
+    "qa": [
+        {"type": "checklist", "path": "organization/runtime/agent-call-contract.md#assignment-overlays"}
+    ],
+    "approver": [
+        {"type": "checklist", "path": "organization/runtime/agent-call-contract.md#assignment-overlays"}
+    ],
+    "observer": [
+        {"type": "checklist", "path": "organization/runtime/agent-call-contract.md#assignment-overlays"}
+    ],
+}
+PROVIDER_SWITCH_DEFAULT_EXECUTION_MODES = {"anthropic": "agent", "openai": "codex"}
 QUEUE_FINALIZER_TRANSPORT_TOOLS = {"Bash"}
 AUTO_HANDOFF_CONTEXT_KEYS = (
     "vault_root",
@@ -195,6 +238,14 @@ def load_hook_input() -> dict[str, Any]:
     if not raw.strip():
         return {}
     return json.loads(raw)
+
+
+def load_json_file_input(path_value: str) -> dict[str, Any]:
+    path = Path(path_value).expanduser()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("--input-json-file must contain a JSON object")
+    return data
 
 
 def safe_id(value: str) -> str:
@@ -1058,6 +1109,7 @@ def role_agent_rows(*, organization_instance_id: str = "{org_instance_id}") -> l
     registry = load_role_agent_registry()
     defaults = registry.get("defaults") if isinstance(registry.get("defaults"), dict) else {}
     overrides = registry.get("agents") if isinstance(registry.get("agents"), dict) else {}
+    role_layers = registry.get("role_layers") if isinstance(registry.get("role_layers"), dict) else {}
     rows: list[dict[str, Any]] = []
     for model_row in active_resident_model_rows():
         role_id = model_row["agent_id"]
@@ -1090,6 +1142,13 @@ def role_agent_rows(*, organization_instance_id: str = "{org_instance_id}") -> l
         queue_finalizer = normalize_cell(override.get("queue_finalizer") or defaults.get("queue_finalizer"))
         report_write_mode = normalize_cell(override.get("report_write_mode") or defaults.get("report_write_mode"))
         allowed_tools = normalize_allowed_tools(override.get("allowed_tools", defaults.get("allowed_tools", [])))
+        role_layer = normalize_cell(override.get("role_layer") or role_layers.get(role_id) or defaults.get("role_layer"))
+        if role_layer not in STATIC_ROLE_LAYERS:
+            allowed_layers = ", ".join(sorted(STATIC_ROLE_LAYERS))
+            raise ValueError(
+                f"role-agent registry role_layer missing/invalid for {role_id}: {role_layer or '<missing>'}; "
+                f"allowed={allowed_layers}"
+            )
         context_dirs = [
             expand_config_path_value(item)
             for item in normalize_string_list(override.get("context_dirs", defaults.get("context_dirs", [])))
@@ -1118,6 +1177,7 @@ def role_agent_rows(*, organization_instance_id: str = "{org_instance_id}") -> l
                 "role_id": role_id,
                 "agent_id": role_id,
                 "team": team,
+                "role_layer": role_layer,
                 "model_registry_ref": model_ref,
                 "provider": model_source.get("provider", ""),
                 "intended_model": model_source.get("primary_model", ""),
@@ -4224,6 +4284,14 @@ def validate_queue_message(message: dict[str, Any]) -> list[str]:
 
 def normalize_cell(value: Any) -> str:
     return str(value or "").strip().strip("`")
+
+
+def value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
 
 
 def evidence_result_status(value: Any) -> str:
@@ -9121,6 +9189,9 @@ def role_report(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -
     role_row = role_agent_row_for(role_id, organization_instance_id=organization_instance_id)
     if not role_row:
         return {"decision": "block", "reason": f"role-agent registry has no active resident role: {role_id}"}
+    if truthy_input(hook_input.get("queue_consumer_override") or hook_input.get("queueConsumerOverride")):
+        role_row = dict(role_row)
+        role_row["queue_consumer"] = True
 
     queue_root = queue_root_for(session_dir, hook_input)
     inbox_path = queue_root / str(role_row["inbox_path"])
@@ -17742,6 +17813,9 @@ def write_agent_dispatch_transport_refs(
             "effective_model",
             "usage_source",
             "transcript_path",
+            "started_at",
+            "completed_at",
+            "duration_sec",
         ],
         "allowed_results": [
             "provider_response_ready",
@@ -18118,7 +18192,7 @@ def validate_agent_dispatch_transport_report(report: dict[str, Any], *, agent_id
         if usage_source in INVALID_PUBLICATION_USAGE_SOURCES:
             errors.append("agent-dispatch done report provider evidence usage_source is missing or not provider-backed")
         for key in ("provider_session_id", "duration_sec", "started_at", "completed_at"):
-            if not normalize_cell(evidence.get(key)):
+            if not value_present(evidence.get(key)):
                 errors.append(f"agent-dispatch done report provider evidence missing {key}")
     return errors
 
@@ -18229,6 +18303,9 @@ def agent_dispatch_report_command(*, runtime: str, state_root: Path, hook_input:
         or hook_input.get("tmux_target")
         or hook_input.get("tmuxTarget")
     )
+    if not target:
+        tmux_session = normalize_cell(state.get("tmux_session")) or safe_tmux_name(f"itb-{organization_instance_id}", max_length=60)
+        target = f"{tmux_session}:{safe_tmux_name(agent_id)}.0"
     result = normalize_cell(hook_input.get("result") or "provider_response_ready")
     response = str(hook_input.get("response") or hook_input.get("summary") or "")
     wait_error = normalize_cell(hook_input.get("error") or hook_input.get("wait_error") or hook_input.get("waitError"))
@@ -20423,6 +20500,475 @@ def role_queue(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) ->
             "notification_class": event["notification_class"],
         }
     }
+
+
+def merged_manifest_input(hook_input: dict[str, Any], nested_keys: tuple[str, ...]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for key in nested_keys:
+        value = hook_input.get(key)
+        if isinstance(value, dict):
+            merged.update(value)
+    for key, value in hook_input.items():
+        if key not in nested_keys:
+            merged[key] = value
+    return merged
+
+
+def normalize_context_refs(value: Any) -> list[dict[str, str]]:
+    raw_items: list[Any]
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, str) and value.strip():
+        raw_items = [value]
+    else:
+        raw_items = []
+    refs: list[dict[str, str]] = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            ref_type = normalize_cell(item.get("type") or "context")
+            path = normalize_cell(item.get("path") or item.get("ref") or item.get("value"))
+            label = normalize_cell(item.get("label") or item.get("name"))
+        else:
+            ref_type = "context"
+            path = normalize_cell(item)
+            label = ""
+        if not path:
+            continue
+        ref = {"type": ref_type, "path": path}
+        if label:
+            ref["label"] = label
+        refs.append(ref)
+    return refs
+
+
+def dedupe_context_refs(refs: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for ref in refs:
+        key = (normalize_cell(ref.get("type")), normalize_cell(ref.get("path")))
+        if not key[1] or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ref)
+    return deduped
+
+
+def agent_call_context_refs(manifest: dict[str, Any], *, role_layer: str, assignment_role: str) -> list[dict[str, str]]:
+    refs = normalize_context_refs(manifest.get("context_refs") or manifest.get("contextRefs"))
+    if manifest.get("context_ref") or manifest.get("contextRef"):
+        refs.extend(normalize_context_refs(manifest.get("context_ref") or manifest.get("contextRef")))
+    refs.extend([dict(ref) for ref in ROLE_LAYER_CONTEXT_PRESET_REFS.get(role_layer, [])])
+    if assignment_role:
+        refs.extend([dict(ref) for ref in ASSIGNMENT_ROLE_CONTEXT_PRESET_REFS.get(assignment_role, [])])
+    return dedupe_context_refs(refs)
+
+
+def nested_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def agent_call_target_role(manifest: dict[str, Any]) -> str:
+    to_mapping = nested_mapping(manifest.get("to") or manifest.get("target"))
+    return normalize_cell(
+        manifest.get("to_role")
+        or manifest.get("toRole")
+        or manifest.get("to_agent")
+        or manifest.get("toAgent")
+        or manifest.get("role_id")
+        or manifest.get("roleId")
+        or manifest.get("agent_id")
+        or manifest.get("agentId")
+        or to_mapping.get("role")
+        or to_mapping.get("role_id")
+        or to_mapping.get("roleId")
+        or to_mapping.get("agent")
+        or to_mapping.get("agent_id")
+        or to_mapping.get("agentId")
+    )
+
+
+def agent_call_provider_override_errors(manifest: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    forbidden_top_level = (
+        "provider",
+        "model",
+        "intended_model",
+        "intendedModel",
+        "effective_model",
+        "effectiveModel",
+        "execution_mode",
+        "executionMode",
+        "to_provider",
+        "toProvider",
+        "to_model",
+        "toModel",
+        "provider_override",
+        "providerOverride",
+        "model_override",
+        "modelOverride",
+    )
+    for key in forbidden_top_level:
+        if key in manifest and normalize_cell(manifest.get(key)):
+            errors.append(f"agent-call does not accept provider/model override field: {key}")
+    for nested_key in ("to", "target"):
+        nested = nested_mapping(manifest.get(nested_key))
+        for key in ("provider", "model", "intended_model", "intendedModel", "execution_mode", "executionMode"):
+            if key in nested and normalize_cell(nested.get(key)):
+                errors.append(f"agent-call does not accept provider/model override field: {nested_key}.{key}")
+    return errors
+
+
+def role_is_director(role_id: str, *, organization_instance_id: str) -> bool:
+    row = role_agent_row_for(role_id, organization_instance_id=organization_instance_id)
+    if normalize_cell(row.get("role_layer")) == "director":
+        return True
+    return role_id.endswith("-director")
+
+
+def validate_agent_call_manifest(manifest: dict[str, Any], *, organization_instance_id: str) -> tuple[dict[str, Any], list[str]]:
+    errors: list[str] = []
+    version = normalize_cell(
+        manifest.get("agent_call_manifest_version")
+        or manifest.get("agentCallManifestVersion")
+        or AGENT_CALL_MANIFEST_VERSION
+    )
+    if version != AGENT_CALL_MANIFEST_VERSION:
+        errors.append(f"unsupported agent_call_manifest_version: {version or '<missing>'}")
+    task_id = normalize_cell(manifest.get("task_id") or manifest.get("taskId"))
+    from_role = normalize_cell(manifest.get("from_role") or manifest.get("fromRole") or manifest.get("source_agent") or manifest.get("sourceAgent"))
+    to_role = agent_call_target_role(manifest)
+    instruction = str(manifest.get("instruction") or manifest.get("prompt") or "")
+    expected_output = normalize_cell(manifest.get("expected_output") or manifest.get("expectedOutput"))
+    if not task_id:
+        errors.append("agent-call requires task_id")
+    if not from_role:
+        errors.append("agent-call requires from_role")
+    if not to_role:
+        errors.append("agent-call requires to_role or to_agent")
+    if not instruction.strip():
+        errors.append("agent-call requires instruction")
+    if not expected_output:
+        errors.append("agent-call requires expected_output")
+    errors.extend(agent_call_provider_override_errors(manifest))
+
+    to_row = role_agent_row_for(to_role, organization_instance_id=organization_instance_id) if to_role else {}
+    if to_role and not to_row:
+        errors.append(f"role-agent registry has no active resident role: {to_role}")
+    role_layer = normalize_cell(to_row.get("role_layer")) if to_row else ""
+    if to_row and role_layer not in STATIC_ROLE_LAYERS:
+        errors.append(f"role-agent registry role_layer missing/invalid for {to_role}: {role_layer or '<missing>'}")
+
+    assignment_role = normalize_cell(manifest.get("assignment_role") or manifest.get("assignmentRole"))
+    if assignment_role and assignment_role not in ASSIGNMENT_ROLE_VALUES:
+        allowed = ", ".join(sorted(ASSIGNMENT_ROLE_VALUES))
+        errors.append(f"assignment_role invalid: {assignment_role}; allowed={allowed}")
+    caller_is_director = role_is_director(from_role, organization_instance_id=organization_instance_id) if from_role else False
+    if assignment_role and not caller_is_director:
+        errors.append("assignment_role may be assigned only by a Director")
+    if caller_is_director and role_layer == "worker" and not assignment_role:
+        errors.append("Director -> worker agent-call requires assignment_role, including explicit none")
+
+    normalized = {
+        "agent_call_manifest_version": AGENT_CALL_MANIFEST_VERSION,
+        "task_id": task_id,
+        "from_role": from_role,
+        "to_role": to_role,
+        "instruction": instruction,
+        "expected_output": expected_output,
+        "wait": truthy_input(manifest.get("wait") or manifest.get("completion_wait") or manifest.get("completionWait")),
+        "assignment_role": assignment_role,
+        "role_layer": role_layer,
+        "context_refs": agent_call_context_refs(manifest, role_layer=role_layer, assignment_role=assignment_role),
+    }
+    return normalized, errors
+
+
+def agent_call(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
+    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
+    session_dir = state_root / safe_id(session_id)
+    state_path = session_dir / "bootstrap.json"
+    state = read_json(state_path) if state_path.exists() else {}
+    organization_instance_id = str(
+        state.get("organization_instance_id")
+        or hook_input.get("organization_instance_id")
+        or hook_input.get("organizationInstanceId")
+        or organization_id(session_id)
+    )
+    manifest = merged_manifest_input(
+        hook_input,
+        ("manifest", "agent_call_manifest", "agentCallManifest", "agent_call", "agentCall"),
+    )
+    normalized, errors = validate_agent_call_manifest(manifest, organization_instance_id=organization_instance_id)
+    if errors:
+        return {"decision": "block", "reason": "; ".join(errors), "agentCall": {"result": "blocked", "errors": errors}}
+
+    payload = dict(manifest.get("payload")) if isinstance(manifest.get("payload"), dict) else {}
+    payload.update(
+        {
+            "type": "agent_call",
+            "agent_call_manifest_version": AGENT_CALL_MANIFEST_VERSION,
+            "from_role": normalized["from_role"],
+            "to_role": normalized["to_role"],
+            "role_layer": normalized["role_layer"],
+            "context_refs": normalized["context_refs"],
+        }
+    )
+    if normalized["assignment_role"]:
+        payload["assignment_role"] = normalized["assignment_role"]
+    queue_input = dict(hook_input)
+    queue_input.update(
+        {
+            "session_id": session_id,
+            "role_id": normalized["to_role"],
+            "task_id": normalized["task_id"],
+            "from_role": normalized["from_role"],
+            "instruction": normalized["instruction"],
+            "expected_output": normalized["expected_output"],
+            "payload": payload,
+            "queue_consumer_override": True,
+        }
+    )
+    if normalized["wait"] and not (
+        queue_input.get("completion_wait_seconds")
+        or queue_input.get("completionWaitSeconds")
+        or queue_input.get("completion_wait_profile")
+        or queue_input.get("completionWaitProfile")
+    ):
+        queue_input["completion_wait_profile"] = "live_validation"
+    queue_output = role_queue(runtime=runtime, state_root=state_root, hook_input=queue_input)
+    role_queue_summary = queue_output.get("roleQueue") if isinstance(queue_output.get("roleQueue"), dict) else {}
+    if queue_output.get("decision") == "block":
+        return {
+            "decision": "block",
+            "reason": normalize_cell(queue_output.get("reason")) or "role-queue blocked",
+            "agentCall": {
+                "agent_call_receipt_version": "1",
+                "result": "blocked_role_queue",
+                "task_id": normalized["task_id"],
+                "from_role": normalized["from_role"],
+                "to_role": normalized["to_role"],
+                "role_layer": normalized["role_layer"],
+                "assignment_role": normalized["assignment_role"],
+                "roleQueue": role_queue_summary,
+            },
+        }
+    nudge = role_queue_summary.get("nudge") if isinstance(role_queue_summary.get("nudge"), dict) else {}
+    return {
+        "decision": "ok",
+        "agentCall": {
+            "agent_call_receipt_version": "1",
+            "result": role_queue_summary.get("result", "queued"),
+            "task_id": normalized["task_id"],
+            "from_role": normalized["from_role"],
+            "to_role": normalized["to_role"],
+            "role_layer": normalized["role_layer"],
+            "assignment_role": normalized["assignment_role"],
+            "message_id": normalize_cell(role_queue_summary.get("message_id")),
+            "queue_root": normalize_cell(role_queue_summary.get("queue_root")),
+            "inbox_path": normalize_cell(role_queue_summary.get("inbox_path")),
+            "payload_path": normalize_cell(role_queue_summary.get("task_payload_path")),
+            "report_path": normalize_cell(role_queue_summary.get("report_path")),
+            "queue_status": "pending",
+            "nudge_status": normalize_cell(nudge.get("result")),
+            "context_refs": normalized["context_refs"],
+            "completion_wait": role_queue_summary.get("completion_wait", {}),
+            "roleQueue": role_queue_summary,
+        },
+    }
+
+
+def active_inbox_messages(path: Path, role_id: str) -> list[dict[str, Any]]:
+    inbox = load_inbox(path, role_id)
+    return [
+        dict(item)
+        for item in inbox.get("messages", [])
+        if isinstance(item, dict) and normalize_cell(item.get("status") or "pending") in {"pending", "processing"}
+    ]
+
+
+def agent_surfaces(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
+    session_id = str(current_session_id(state_root, hook_input) or hook_input.get("session_id") or "unknown-session")
+    organization_instance_id = str(hook_input.get("organization_instance_id") or hook_input.get("organizationInstanceId") or organization_id(session_id))
+    rows = role_agent_rows(organization_instance_id=organization_instance_id)
+    roles: list[dict[str, Any]] = []
+    for row in rows:
+        roles.append(
+            {
+                "role_id": row["role_id"],
+                "agent_id": row["agent_id"],
+                "team": row["team"],
+                "role_layer": row["role_layer"],
+                "provider": row["provider"],
+                "intended_model": row["intended_model"],
+                "execution_mode": row["execution_mode"],
+                "startup_profile": row["startup_profile"],
+                "queue_consumer": row["queue_consumer"],
+                "agent_call_supported": True,
+                "tmux_target": row["tmux_target"],
+                "inbox_path": row["inbox_path"],
+                "report_dir": row["report_dir"],
+                "assignment_roles": sorted(ASSIGNMENT_ROLE_VALUES) if row["role_layer"] == "worker" else [],
+            }
+        )
+    return {
+        "decision": "ok",
+        "agentSurfaces": {
+            "schema_version": 1,
+            "runtime": runtime,
+            "state_root": str(state_root),
+            "session_id": session_id,
+            "organization_instance_id": organization_instance_id,
+            "role_count": len(roles),
+            "roles": roles,
+        },
+    }
+
+
+def transport_status(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
+    session_id = str(current_session_id(state_root, hook_input) or hook_input.get("session_id") or "unknown-session")
+    session_dir = state_root / safe_id(session_id)
+    queue_root = queue_root_for(session_dir, hook_input)
+    return {
+        "decision": "ok",
+        "transportStatus": {
+            "schema_version": 1,
+            "runtime": runtime,
+            "state_root": str(state_root),
+            "session_id": session_id,
+            "queue_root": str(queue_root),
+            "tmux": {"available": bool(shutil.which("tmux")), "path": shutil.which("tmux") or ""},
+            "providers": {
+                "anthropic": {"cli": "claude", "available": bool(shutil.which("claude")), "path": shutil.which("claude") or ""},
+                "openai": {"cli": "codex", "available": bool(shutil.which("codex")), "path": shutil.which("codex") or ""},
+            },
+        },
+    }
+
+
+def agent_switch_manifest(hook_input: dict[str, Any]) -> dict[str, Any]:
+    return merged_manifest_input(
+        hook_input,
+        ("manifest", "agent_switch_manifest", "agentSwitchManifest", "agent_switch", "agentSwitch", "provider_failover", "providerFailover"),
+    )
+
+
+def agent_switch(*, runtime: str, state_root: Path, hook_input: dict[str, Any], command_name: str = "agent-switch") -> dict[str, Any]:
+    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
+    session_dir = state_root / safe_id(session_id)
+    state_path = session_dir / "bootstrap.json"
+    roster_path = session_dir / "roster.json"
+    if not state_path.exists() or not roster_path.exists():
+        return {"decision": "block", "reason": "bootstrap.json or roster.json missing"}
+    state = read_json(state_path)
+    roster = read_json(roster_path)
+    if not isinstance(roster, list):
+        return {"decision": "block", "reason": "roster.json is invalid"}
+    organization_instance_id = str(state.get("organization_instance_id") or organization_id(session_id))
+    manifest = agent_switch_manifest(hook_input)
+    target_role = normalize_cell(
+        manifest.get("target_role")
+        or manifest.get("targetRole")
+        or manifest.get("role_id")
+        or manifest.get("roleId")
+        or manifest.get("agent_id")
+        or manifest.get("agentId")
+    )
+    to_mapping = nested_mapping(manifest.get("to"))
+    to_provider = normalize_cell(to_mapping.get("provider") or manifest.get("to_provider") or manifest.get("toProvider"))
+    to_model = normalize_cell(to_mapping.get("model") or manifest.get("to_model") or manifest.get("toModel") or manifest.get("intended_model") or manifest.get("intendedModel"))
+    to_execution_mode = normalize_cell(
+        to_mapping.get("execution_mode")
+        or to_mapping.get("executionMode")
+        or manifest.get("to_execution_mode")
+        or manifest.get("toExecutionMode")
+        or PROVIDER_SWITCH_DEFAULT_EXECUTION_MODES.get(to_provider)
+    )
+    reason = normalize_cell(manifest.get("reason") or hook_input.get("reason"))
+    persist = truthy_input(manifest.get("persist"))
+    dry_run = truthy_input(manifest.get("dry_run") or manifest.get("dryRun"))
+    version = normalize_cell(
+        manifest.get("agent_switch_manifest_version")
+        or manifest.get("agentSwitchManifestVersion")
+        or AGENT_SWITCH_MANIFEST_VERSION
+    )
+    errors: list[str] = []
+    if version != AGENT_SWITCH_MANIFEST_VERSION:
+        errors.append(f"unsupported agent_switch_manifest_version: {version or '<missing>'}")
+    if not target_role:
+        errors.append(f"{command_name} requires target_role or role_id")
+    if not reason:
+        errors.append(f"{command_name} requires reason")
+    if to_provider not in PROVIDER_SWITCH_DEFAULT_EXECUTION_MODES:
+        errors.append("to.provider must be anthropic or openai")
+    if not to_model:
+        errors.append("to.model is required")
+    if not to_execution_mode:
+        errors.append("to.execution_mode could not be resolved")
+    registry_row = role_agent_row_for(target_role, organization_instance_id=organization_instance_id) if target_role else {}
+    if target_role and not registry_row:
+        errors.append(f"role-agent registry has no active resident role: {target_role}")
+    roster_row = next((item for item in roster if isinstance(item, dict) and item.get("agent_id") == target_role), None)
+    if target_role and roster_row is None:
+        errors.append(f"agent not found in roster: {target_role}")
+    if persist:
+        errors.append("persistent provider switch requires a separate human-approved registry change and Vault evidence")
+    if errors:
+        return {"decision": "block", "reason": "; ".join(errors), "agentSwitch": {"result": "blocked", "errors": errors}}
+
+    assert roster_row is not None
+    queue_root = queue_root_for(session_dir, manifest)
+    inbox_path = queue_root / str(registry_row["inbox_path"])
+    try:
+        active_messages = active_inbox_messages(inbox_path, target_role)
+    except ValueError as exc:
+        return {"decision": "block", "reason": str(exc), "agentSwitch": {"result": "blocked"}}
+    if active_messages:
+        return {
+            "decision": "block",
+            "reason": f"{command_name} blocked because target has pending/processing messages",
+            "agentSwitch": {
+                "result": "blocked_pending_or_processing",
+                "target_role": target_role,
+                "active_message_count": len(active_messages),
+                "active_message_ids": [normalize_cell(item.get("message_id")) for item in active_messages],
+            },
+        }
+
+    switched_at = current_timestamp()
+    updated_row = dict(roster_row)
+    previous = {
+        "provider": normalize_cell(roster_row.get("provider")),
+        "model": normalize_cell(roster_row.get("intended_model")),
+        "execution_mode": normalize_cell(roster_row.get("execution_mode")),
+    }
+    updated_row.update(
+        {
+            "provider": to_provider,
+            "intended_model": to_model,
+            "execution_mode": to_execution_mode,
+            "provider_switch_status": "session_local",
+            "provider_switch_reason": reason,
+            "provider_switched_at": switched_at,
+            "provider_switch_previous": previous,
+        }
+    )
+    event = {
+        "ts": switched_at,
+        "runtime": runtime,
+        "event_type": command_name,
+        "session_id": session_id,
+        "organization_instance_id": organization_instance_id,
+        "target_role": target_role,
+        "result": "dry_run" if dry_run else "session_roster_updated",
+        "reason": reason,
+        "previous": previous,
+        "to": {"provider": to_provider, "model": to_model, "execution_mode": to_execution_mode},
+    }
+    if dry_run:
+        return {"decision": "ok", "agentSwitch": event}
+    merge_roster_agent_row_locked(roster_path, roster, target_role, updated_row)
+    append_jsonl_atomic(session_dir / "provider-switch-events.jsonl", event)
+    return {"decision": "ok", "agentSwitch": event}
 
 
 def role_queue_watch_once(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
@@ -23329,6 +23875,7 @@ def merge_cli_hook_input(
     include_message_id: bool = False,
     include_reason: bool = False,
     include_report_json: bool = False,
+    include_wait: bool = False,
 ) -> dict[str, Any]:
     merged = hook_input
     if include_report_json and getattr(args, "report_json", ""):
@@ -23359,6 +23906,8 @@ def merge_cli_hook_input(
         merged = merged | {"message_id": args.message_id}
     if include_reason and getattr(args, "reason", ""):
         merged = merged | {"reason": args.reason}
+    if include_wait and getattr(args, "wait", False):
+        merged = merged | {"wait": True}
     return merged
 
 
@@ -23451,6 +24000,19 @@ def run_main_command(
         return evaluator_precheck_output(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input))
     if args.command == "provider-activate":
         return provider_activate(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input, role_field="agent_id"))
+    if args.command == "agent-call":
+        call_input = merge_cli_hook_input(args, hook_input, role_field="to_role", include_dry_run=True, include_wait=True)
+        return agent_call(runtime=args.runtime, state_root=state_root, hook_input=call_input)
+    if args.command == "agent-switch":
+        switch_input = merge_cli_hook_input(args, hook_input, role_field="target_role", include_dry_run=True, include_reason=True)
+        return agent_switch(runtime=args.runtime, state_root=state_root, hook_input=switch_input, command_name="agent-switch")
+    if args.command == "provider-failover":
+        switch_input = merge_cli_hook_input(args, hook_input, role_field="target_role", include_dry_run=True, include_reason=True)
+        return agent_switch(runtime=args.runtime, state_root=state_root, hook_input=switch_input, command_name="provider-failover")
+    if args.command == "agent-surfaces":
+        return agent_surfaces(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input))
+    if args.command == "transport-status":
+        return transport_status(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input))
     if args.command == "agent-dispatch":
         return agent_dispatch(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input, role_field="agent_id"))
     if args.command == "agent-dispatch-batch":
@@ -23597,6 +24159,11 @@ def main() -> int:
             "guardian-precheck",
             "evaluator-precheck",
             "provider-activate",
+            "agent-call",
+            "agent-switch",
+            "provider-failover",
+            "agent-surfaces",
+            "transport-status",
             "agent-dispatch",
             "agent-dispatch-batch",
             "agent-dispatch-report",
@@ -23625,12 +24192,14 @@ def main() -> int:
     parser.add_argument("--message-id", default="")
     parser.add_argument("--reason", default="")
     parser.add_argument("--report-json", default="")
+    parser.add_argument("--input-json-file", default="")
     parser.add_argument("--max-messages", default="")
     parser.add_argument("--max-cycles", default="")
     parser.add_argument("--poll-interval-seconds", default="")
     parser.add_argument("--idle-timeout-seconds", default="")
     parser.add_argument("--current", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--wait", action="store_true")
     parser.add_argument(
         "--launch-agents",
         action="store_true",
@@ -23644,7 +24213,7 @@ def main() -> int:
     state_root = Path(args.state_root).expanduser()
     hook_input: dict[str, Any] = {}
     try:
-        hook_input = load_hook_input()
+        hook_input = load_json_file_input(args.input_json_file) if args.input_json_file else load_hook_input()
         output = run_main_command(args=args, parser=parser, hook_input=hook_input, state_root=state_root)
         print(json.dumps(output, ensure_ascii=False))
         if args.command == "gate-skill-contract-lint" and output.get("decision") == "block":

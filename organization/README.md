@@ -8,10 +8,11 @@ store.
 
 | Path | Purpose |
 |---|---|
-| `settings.json` | Organization enablement, fast/strict mode policy, Hook observer policy |
+| `settings.json` | Organization enablement, fast/strict mode policy, Hook observer policy, provider transport approval policy |
 | `policies/` | Mirrored organization policies formerly read from Agents-Vault |
 | `roles/` | Mirrored Team Role definitions formerly held only as skills |
 | `runtime/` | Runtime registry and model/startup references |
+| `runtime/agent-call-contract.md` | Active `co agent-call` / provider switch manifest and context contract |
 | `policy-index.json` | Policy file source, checksum, and byte index |
 | `role-index.json` | Role source, checksum, team, and migration-stage index |
 

@@ -813,6 +813,11 @@ handoff_notes:
         self.assertNotIn("gate-task-assessor", by_role)
         self.assertNotIn("gate-task-guardian", by_role)
         self.assertEqual(by_role["gate-prompt-formatter"]["provider"], "anthropic")
+        self.assertEqual(by_role["gate-prompt-formatter"]["role_layer"], "gate")
+        self.assertEqual(by_role["teams-project-manager"]["role_layer"], "tpm")
+        self.assertEqual(by_role["infra-director"]["role_layer"], "director")
+        self.assertEqual(by_role["tech-backend"]["role_layer"], "worker")
+        self.assertEqual(by_role["tech-reviewer"]["role_layer"], "worker")
         self.assertEqual(by_role["gate-prompt-formatter"]["intended_model"], "claude-sonnet-4-6")
         self.assertEqual(by_role["gate-task-creator"]["intended_model"], "claude-haiku-4-5")
         self.assertEqual(by_role["tech-backend"]["provider"], "openai")
@@ -1142,7 +1147,7 @@ main_agent_executor_roles:
             bad_registry.write_text(
                 json.dumps(
                     {
-                        "defaults": {"tmux_session": "itb-{org_instance_id}"},
+                        "defaults": {"tmux_session": "itb-{org_instance_id}", "role_layer": "worker"},
                         "agents": {"tech-lead": {"model_registry_ref": "missing-model-row"}},
                     }
                 ),
@@ -1168,6 +1173,7 @@ defaults:
   tmux_session: itb-{org_instance_id}
   tmux_window: "{role_id}"
   tmux_pane: 0
+  role_layer: worker
   queue_consumer: false
   inbox_path: inbox/{role_id}.yaml
   report_dir: reports/{role_id}
@@ -1178,6 +1184,8 @@ defaults:
     - Grep
     - Glob
   git_operations_allowed: false
+role_layers:
+  gate-prompt-formatter: gate
 agents:
   gate-prompt-formatter:
     model_registry_ref: gate-prompt-formatter
@@ -1194,8 +1202,48 @@ agents:
 
         by_role = {row["role_id"]: row for row in rows}
         self.assertEqual(by_role["gate-prompt-formatter"]["tmux_target"], "itb-org-test:gate-prompt-formatter.0")
+        self.assertEqual(by_role["gate-prompt-formatter"]["role_layer"], "gate")
         self.assertEqual(by_role["gate-prompt-formatter"]["allowed_tools"], ["Read", "Grep", "Glob"])
         self.assertFalse(by_role["gate-prompt-formatter"]["git_operations_allowed"])
+
+    def test_role_agent_registry_requires_role_layer_metadata(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_registry = Path(tmp) / "role-agent-registry.yaml"
+            bad_registry.write_text(
+                json.dumps(
+                    {
+                        "defaults": {
+                            "tmux_session": "itb-{org_instance_id}",
+                            "tmux_window": "{role_id}",
+                            "tmux_pane": 0,
+                            "inbox_path": "inbox/{role_id}.yaml",
+                            "report_dir": "reports/{role_id}",
+                            "queue_finalizer": "role-report",
+                            "report_write_mode": "builder_atomic",
+                            "allowed_tools": ["Read", "Grep", "Glob"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            model_registry = Path(tmp) / "model-registry.md"
+            model_registry.write_text(
+                "| agent_id | team | status | resident_target | always_active | provider | primary_model | fallback_models | execution_mode | cost_tier | quality_tier | startup_profile | long_run_preferred | notes |\n"
+                "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+                "| active-role | test | active | true | true | codex | gpt-5 |  | codex | normal | high | provider_cli | false | test |\n",
+                encoding="utf-8",
+            )
+            original_registry = builder.ROLE_AGENT_REGISTRY
+            original_model_registry = builder.MODEL_REGISTRY
+            builder.ROLE_AGENT_REGISTRY = bad_registry
+            builder.MODEL_REGISTRY = model_registry
+            try:
+                with self.assertRaisesRegex(ValueError, "role_layer missing/invalid"):
+                    builder.role_agent_rows(organization_instance_id="org-test")
+            finally:
+                builder.ROLE_AGENT_REGISTRY = original_registry
+                builder.MODEL_REGISTRY = original_model_registry
 
     def test_role_agent_registry_requires_queue_finalizer_metadata(self) -> None:
         builder = load_builder_module()
@@ -1208,6 +1256,7 @@ agents:
                             "tmux_session": "itb-{org_instance_id}",
                             "tmux_window": "{role_id}",
                             "tmux_pane": 0,
+                            "role_layer": "worker",
                             "inbox_path": "inbox/{role_id}.yaml",
                             "report_dir": "reports/{role_id}",
                         },
@@ -1250,6 +1299,7 @@ agents:
                             "tmux_session": "itb-{org_instance_id}",
                             "tmux_window": "{role_id}",
                             "tmux_pane": 0,
+                            "role_layer": "worker",
                             "inbox_path": "inbox/{role_id}.yaml",
                             "report_dir": "reports/{role_id}",
                             "queue_finalizer": "role-report",
@@ -1286,6 +1336,178 @@ agents:
                 builder.SKILLS_ROOT = original_skills_root
                 builder.ROLE_AGENT_REGISTRY = original_registry
                 builder.MODEL_REGISTRY = original_model_registry
+
+    def test_agent_surfaces_lists_role_layers_and_assignment_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            output = self.run_builder(
+                state_root,
+                "agent-surfaces",
+                {"session_id": "surface-session"},
+            )
+
+            surfaces = output["agentSurfaces"]
+            by_role = {item["role_id"]: item for item in surfaces["roles"]}
+            self.assertEqual(output["decision"], "ok")
+            self.assertEqual(by_role["teams-project-manager"]["role_layer"], "tpm")
+            self.assertEqual(by_role["tech-director"]["role_layer"], "director")
+            self.assertEqual(by_role["tech-backend"]["role_layer"], "worker")
+            self.assertTrue(by_role["tech-backend"]["agent_call_supported"])
+            self.assertIn("reviewer", by_role["tech-backend"]["assignment_roles"])
+            self.assertEqual(by_role["teams-project-manager"]["assignment_roles"], [])
+
+    def test_agent_call_blocks_director_to_worker_without_assignment_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            self.bootstrap(state_root)
+
+            output = self.run_builder(
+                state_root,
+                "agent-call",
+                {
+                    "session_id": "test-session",
+                    "from_role": "tech-director",
+                    "to_role": "tech-backend",
+                    "task_id": "TSK-1290",
+                    "instruction": "Implement the approved runtime facade.",
+                    "expected_output": "implementation_report",
+                },
+                extra_args=["--dry-run"],
+            )
+
+            self.assertEqual(output["decision"], "block")
+            self.assertIn("requires assignment_role", output["reason"])
+
+    def test_agent_call_queues_manifest_with_assignment_role_and_context_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            self.bootstrap(state_root)
+
+            output = self.run_builder(
+                state_root,
+                "agent-call",
+                {
+                    "session_id": "test-session",
+                    "from_role": "tech-director",
+                    "to_role": "tech-backend",
+                    "assignment_role": "implementer",
+                    "task_id": "TSK-1290",
+                    "message_id": "msg-agent-call",
+                    "instruction": "Implement the approved runtime facade.",
+                    "expected_output": "implementation_report",
+                    "context_refs": [{"type": "task", "path": "task.md"}],
+                },
+                extra_args=["--dry-run"],
+            )
+
+            receipt = output["agentCall"]
+            self.assertEqual(output["decision"], "ok")
+            self.assertEqual(receipt["result"], "queued")
+            self.assertEqual(receipt["to_role"], "tech-backend")
+            self.assertEqual(receipt["role_layer"], "worker")
+            self.assertEqual(receipt["assignment_role"], "implementer")
+            self.assertEqual(receipt["message_id"], "msg-agent-call")
+            self.assertEqual(receipt["nudge_status"], "dry_run")
+            self.assertIn({"type": "task", "path": "task.md"}, receipt["context_refs"])
+            self.assertTrue(
+                any(ref["path"] == "organization/runtime/agent-call-contract.md" for ref in receipt["context_refs"])
+            )
+            inbox = json.loads(Path(receipt["inbox_path"]).read_text(encoding="utf-8"))
+            message = inbox["messages"][0]
+            self.assertEqual(message["payload"]["type"], "agent_call")
+            self.assertEqual(message["payload"]["assignment_role"], "implementer")
+            self.assertEqual(message["payload"]["role_layer"], "worker")
+            self.assertEqual(message["payload"]["context_refs"], receipt["context_refs"])
+
+    def test_agent_call_rejects_provider_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            self.bootstrap(state_root)
+
+            output = self.run_builder(
+                state_root,
+                "agent-call",
+                {
+                    "session_id": "test-session",
+                    "from_role": "tech-director",
+                    "to_role": "tech-backend",
+                    "assignment_role": "implementer",
+                    "task_id": "TSK-1290",
+                    "instruction": "Implement the approved runtime facade.",
+                    "expected_output": "implementation_report",
+                    "to": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+                },
+                extra_args=["--dry-run"],
+            )
+
+            self.assertEqual(output["decision"], "block")
+            self.assertIn("does not accept provider/model override", output["reason"])
+
+    def test_agent_switch_updates_session_roster_when_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = self.bootstrap(state_root)
+
+            output = self.run_builder(
+                state_root,
+                "agent-switch",
+                {
+                    "session_id": "test-session",
+                    "target_role": "tech-backend",
+                    "reason": "anthropic_capacity_test",
+                    "to": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+                },
+            )
+
+            switch = output["agentSwitch"]
+            self.assertEqual(output["decision"], "ok")
+            self.assertEqual(switch["result"], "session_roster_updated")
+            roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+            tech_backend = next(item for item in roster if item["agent_id"] == "tech-backend")
+            self.assertEqual(tech_backend["provider"], "anthropic")
+            self.assertEqual(tech_backend["intended_model"], "claude-sonnet-4-6")
+            self.assertEqual(tech_backend["execution_mode"], "agent")
+            events = [
+                json.loads(line)
+                for line in (session_dir / "provider-switch-events.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(events[-1]["target_role"], "tech-backend")
+
+    def test_agent_switch_blocks_when_target_has_pending_queue_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            self.bootstrap(state_root)
+            self.run_builder(
+                state_root,
+                "agent-call",
+                {
+                    "session_id": "test-session",
+                    "from_role": "tech-director",
+                    "to_role": "tech-backend",
+                    "assignment_role": "implementer",
+                    "task_id": "TSK-1290",
+                    "message_id": "msg-pending",
+                    "instruction": "Implement the approved runtime facade.",
+                    "expected_output": "implementation_report",
+                },
+                extra_args=["--dry-run"],
+            )
+
+            output = self.run_builder(
+                state_root,
+                "agent-switch",
+                {
+                    "session_id": "test-session",
+                    "target_role": "tech-backend",
+                    "reason": "weekly_limit",
+                    "to": {"provider": "anthropic", "model": "claude-sonnet-4-6"},
+                },
+                extra_args=["--dry-run"],
+            )
+
+            self.assertEqual(output["decision"], "block")
+            self.assertEqual(output["agentSwitch"]["result"], "blocked_pending_or_processing")
+            self.assertEqual(output["agentSwitch"]["active_message_ids"], ["msg-pending"])
 
     def test_role_queue_enqueue_writes_inbox_task_payload_and_dry_run_nudge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -15939,6 +16161,59 @@ Marker format: [MARKER_NAME id=MARKER_ID]
             self.assertEqual(report["provider_evidence"]["turn_duration_ms"], 4444)
             self.assertEqual(report["provider_evidence"]["num_turns"], 1)
             self.assertEqual(summary["schema_errors"], [])
+
+    def test_agent_dispatch_report_command_accepts_zero_duration_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = self.bootstrap(state_root, session_id="dispatch-report-zero-duration-session")
+            state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+            tmux_session = state.get("tmux_session") or f"itb-{state['organization_instance_id']}"
+            expected_target = f"{tmux_session}:gate-prompt-formatter.0"
+
+            output = self.run_builder(
+                state_root,
+                "agent-dispatch-report",
+                {
+                    "session_id": "dispatch-report-zero-duration-session",
+                    "agent_id": "gate-prompt-formatter",
+                    "request_id": "writerzero123",
+                    "source_agent": "codex-main",
+                    "result": "provider_response_ready",
+                    "response": "writer command response",
+                    "started_at": "2026-01-01T00:00:00+09:00",
+                    "completed_at": "2026-01-01T00:00:00+09:00",
+                    "provider_evidence": {
+                        "usage_source": "claude_tmux_interactive",
+                        "effective_model": "claude-sonnet-4-6",
+                        "duration_sec": 0.0,
+                    },
+                },
+            )
+
+            summary = output["agentDispatchReport"]
+            self.assertEqual(summary["result"], "written")
+            self.assertEqual(summary["schema_errors"], [])
+            report = json.loads(Path(summary["report_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(report["provider_evidence"]["duration_sec"], 0.0)
+            self.assertEqual(report["provider_evidence"]["provider_session_id"], expected_target)
+
+    def test_builder_reads_hook_input_from_input_json_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            input_path = Path(tmp) / "hook-input.json"
+            input_path.write_text(
+                json.dumps({"session_id": "input-file-session", "cwd": "/tmp"}),
+                encoding="utf-8",
+            )
+
+            output = self.run_builder_without_input(
+                state_root,
+                "session-start",
+                extra_args=["--input-json-file", str(input_path)],
+            )
+
+            context = output["hookSpecificOutput"]["additionalContext"]
+            self.assertIn("session_id | `input-file-session`", context)
 
     def test_agent_dispatch_report_cli_args_select_session_and_role_without_session_in_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
