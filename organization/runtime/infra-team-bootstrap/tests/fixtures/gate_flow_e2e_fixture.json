@@ -1,0 +1,65 @@
+{
+  "fixture_version": "2",
+  "scenario": "gpf_report_to_gtc_scaffold_to_tpm_to_gte",
+  "task_id": "ENTRY-test-session-gate-e2e",
+  "vault_project": "AI-Agent-Organization",
+  "gate_entry": {
+    "role_id": "gate-prompt-formatter",
+    "from_role": "codex-user-prompt-submit",
+    "message_id": "msg-gpf",
+    "report_id": "rep-gpf",
+    "instruction": "Create a thin Gate Intake Envelope.",
+    "expected_output": "gate_intake_envelope",
+    "report": {
+      "status": "done",
+      "result": "gate_intake_envelope_created",
+      "summary": "Gate Intake Envelope created.",
+      "workflow_mode": "strict_flow",
+      "provider_evidence": {
+        "provider_session_id": "session-gate-prompt-formatter",
+        "effective_model": "claude-sonnet-4-6",
+        "usage_source": "claude_tmux_interactive",
+        "request_id": "req-gate-prompt-formatter",
+        "transcript_path": "transcripts/gate-prompt-formatter.jsonl"
+      }
+    }
+  },
+  "expected_command_handoff": {
+    "command": "gtc-scaffold",
+    "command_owner_role": "gate-task-creator",
+    "from_role": "gate-prompt-formatter",
+    "to_role": "teams-project-manager",
+    "handoff_type": "command_then_queue",
+    "expected_result": "scaffolded"
+  },
+  "tpm_report": {
+    "role_id": "teams-project-manager",
+    "message_source": "command_completion_chain_handoff",
+    "status": "done",
+    "result": "ready_for_evaluation",
+    "summary": "All director reports are complete; hand off to evaluation.",
+    "report_extra": {
+      "team_completion_check": {
+        "all_director_reports_complete": true,
+        "completed_teams": ["infra"]
+      }
+    },
+    "provider_evidence": {
+      "provider_session_id": "session-teams-project-manager",
+      "effective_model": "claude-sonnet-4-6",
+      "usage_source": "claude_tmux_interactive",
+      "request_id": "req-teams-project-manager",
+      "transcript_path": "transcripts/teams-project-manager.jsonl"
+    }
+  },
+  "expected_next_queue": {
+    "role_id": "gate-task-evaluator",
+    "from_role": "teams-project-manager",
+    "precheck_command": "team-completion-check"
+  },
+  "forbidden_inboxes": [
+    "gate-task-creator",
+    "gate-task-assessor",
+    "gate-task-guardian"
+  ]
+}

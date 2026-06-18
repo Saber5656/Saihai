@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "organization_name": "AI Agent Organization",
+  "control": {
+    "state": "enabled",
+    "allowed_states": ["enabled", "disabled", "maintenance"],
+    "default_mode": "strict",
+    "allowed_modes": ["fast", "strict"],
+    "task_policy": "all_work_must_have_task_record",
+    "main_agent_role": "orchestrator"
+  },
+  "knowledge": {
+    "canonical_repo": "Agent-Teams-Viewer",
+    "canonical_repo_path": "${AGENT_TEAMS_VIEWER_ROOT}",
+    "context_vault_path": "${AGENTS_VAULT_ROOT}",
+    "legacy_skills_repo_path": "${SKILLS_REPO_ROOT}",
+    "policy_location": "organization/policies",
+    "role_location": "organization/roles",
+    "runtime_location": "organization/runtime"
+  },
+  "hook_policy": {
+    "mode": "observer",
+    "hard_block": false,
+    "allowed_actions": [
+      "record_session_metadata",
+      "emit_advisory_context",
+      "surface_active_task_or_stale_state",
+      "record_timing"
+    ],
+    "forbidden_actions": [
+      "block_prompt_on_queue_failure",
+      "auto_dispatch_every_prompt",
+      "require_provider_response_before_main_agent_can_help",
+      "mutate_task_state_without_user_or_main_agent_intent"
+    ]
+  },
+  "provider_transport_policy": {
+    "external_context_transmission": {
+      "default": "human_approval_required",
+      "organization_flow": "preapproved",
+      "approved_scope": [
+        "co/ITB organization-internal role dispatch",
+        "agent-call, agent-dispatch, agent-dispatch-batch, role-queue, provider-activate, agent-switch, and provider-failover transport payloads",
+        "bounded task instructions, context refs, queue manifests, report paths, and provider evidence needed for the active task"
+      ],
+      "human_approval_record": {
+        "task_id": "TSK-1293",
+        "approved_at": "2026-06-17",
+        "approved_by": "human_user"
+      },
+      "disallowed_scope": [
+        "secrets, credentials, auth tokens, or private keys",
+        "unbounded Vault, repository, home directory, or transcript dumps",
+        "personal data unrelated to the active organization task",
+        "persistent provider/model registry changes without separate human approval"
+      ],
+      "host_safety_boundary": "Repository policy cannot bypass Codex host-level sandbox, escalation, or external-provider safety review."
+    }
+  },
+  "modes": {
+    "fast": {
+      "description": "Lightweight task record plus main-agent execution for very simple work.",
+      "task_required": true,
+      "main_agent_can_execute": true,
+      "role_dispatch_required": false,
+      "review_required": "optional",
+      "vault_update_required": true,
+      "performance_target_seconds": 45,
+      "allowed_when": [
+        "single-step answer or small local edit",
+        "low risk and no publication gate",
+        "no sensitive permission, security, legal, or data-loss concern",
+        "user explicitly asks for speed or the task is obviously tiny"
+      ]
+    },
+    "strict": {
+      "description": "Full organization workflow for normal and important work.",
+      "task_required": true,
+      "main_agent_can_execute": false,
+      "role_dispatch_required": true,
+      "review_required": "required",
+      "vault_update_required": true,
+      "performance_target_seconds": 180,
+      "required_when": [
+        "code or shell file changes",
+        "multi-step implementation or investigation",
+        "commit, push, PR, release, policy, permission, model, or hook change",
+        "security, legal, financial, medical, or high-impact decision",
+        "user explicitly asks for strict organization flow"
+      ]
+    }
+  },
+  "maintenance": {
+    "description": "Use when changing the organization system itself.",
+    "organization_flow_enabled": false,
+    "task_required": true,
+    "main_agent_can_execute": true,
+    "hook_hard_block_allowed": false,
+    "vault_update_required": true,
+    "reason": "Organization repair must not depend on the broken organization path."
+  }
+}
