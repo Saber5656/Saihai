@@ -1,0 +1,49 @@
+{
+  "skill_name": "contents-researcher",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "skills/ ディレクトリ内の全スキルを横断調査し、各スキルの allowed-tools 指定有無と傾向を一覧にまとめてください。ファイル作成ではなく、調査結果として報告してください。",
+      "expected_output": "Research Plan、allowed-tools の一覧表、パターン分析、ファイルパス根拠、未調査・不確実な点、Vault 記録先または記録内容の明示。",
+      "files": [],
+      "expectations": [
+        "3ファイル以上または横断検索のため Explore / Agent 委託を使う判断が明示されている",
+        "Research Plan があり、調査目的、調査項目、情報源、並列化可否が整理されている",
+        "スキル名と allowed-tools の対応表がある",
+        "ローカル根拠としてファイルパス:行番号が記載されている",
+        "[確認済] / [推測] / [未確認] のいずれかで情報の確度が区別されている",
+        "未調査・不確実な点と Vault 記録欄がある"
+      ]
+    },
+    {
+      "id": 1,
+      "prompt": "Claude Code のスキルシステムと MCP サーバーを、記事化の前提調査として比較してください。用途、強み、適切なユースケース、更新日リスクを整理してください。",
+      "expected_output": "Web 情報を含む比較レポート。URL、確認日、一次情報かどうか、[確認済]/[推測]/[未確認] ラベル、比較表、更新日リスク、後続担当への handoff を含む。",
+      "files": [],
+      "expectations": [
+        "WebSearch または WebFetch を使って外部情報を取得している",
+        "URL と確認日が記載されている",
+        "一次情報または公式情報を優先し、二次情報だけで完結していない",
+        "比較表がある",
+        "[確認済] / [推測] / [未確認] ラベルが使われている",
+        "更新日リスクまたは最新性リスクが明示されている",
+        "contents-formatter または contents-quality-manager への handoff がある"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "AI エージェント常駐運用の記事を書く前提で、Claude Code 直接利用、OpenClaw 経由、Codex remote access の違いを調査してください。技術的な設計判断が必要な点は結論にせず、適切な tech 系ロールへ引き継いでください。",
+      "expected_output": "比較表と調査結論を含むが、技術選定や設計採否は CR が確定せず、tech-architect / tech-debugger / tech-lead のいずれかへの handoff として整理している。",
+      "files": [],
+      "expectations": [
+        "調査目的、対象、情報源候補、未調査リスクが Research Plan にある",
+        "3対象の比較表がある",
+        "技術判断を CR の最終結論として断定していない",
+        "tech-architect / tech-debugger / tech-lead のいずれかへの handoff がある",
+        "[確認済] / [推測] / [未確認] ラベルが技術 handoff の論点にも使われている",
+        "根拠 URL またはファイルパスが記載されている",
+        "Vault に残すべき調査結果と未解決論点が明示されている"
+      ]
+    }
+  ]
+}

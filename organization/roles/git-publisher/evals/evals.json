@@ -1,0 +1,71 @@
+{
+  "skill_name": "git-publisher",
+  "evals": [
+    {
+      "id": 1,
+      "name": "commit_then_push_success",
+      "prompt": "Quality Evaluation は quality_ok。Git Publication Manifest は commit_required true、push_required true、pr_required false。Branch Plan の working_branch と現在 branch は一致。commit skill は commit_hashes [abc123]、committed_diff_matches_snapshot true を返し、push skill は remote_branch origin/codex/task を返した。git-publisher としてどう記録する？",
+      "expected_output": "commit skill の結果を commit_status complete とし、push skill の結果を push_status complete とする。pr_status は not_required。Git Publication Result に commit_hashes、remote_branch、next_role vault_final_update を記録する。"
+    },
+    {
+      "id": 2,
+      "name": "commit_block_stops_push",
+      "prompt": "Git Publication Manifest は commit_required true、push_required true。commit skill が security_review_invalid で blocked を返した。git-publisher としてどう進める？",
+      "expected_output": "push へ進まず停止する。commit_status blocked、push_status blocked または not_started、blocked_reason に commit skill の停止理由を記録し、next_role は差し戻し先にする。"
+    },
+    {
+      "id": 3,
+      "name": "push_block_stops_pr",
+      "prompt": "commit_required true は complete、push_required true、pr_required true。push skill が default branch policy violation で blocked を返した。git-publisher としてどう進める？",
+      "expected_output": "PR 作成へ進まない。push_status blocked、pr_status blocked、blocked_reason に push 停止理由を記録し、GTG が complete にできない publication result を残す。"
+    },
+    {
+      "id": 4,
+      "name": "pr_required_but_skill_deferred",
+      "prompt": "commit_required false、push_required true は complete。pr_required true だが PR 作成 skill はまだ未実装。git-publisher としてどう記録する？",
+      "expected_output": "pr_status deferred として記録する。next_role は差し戻しまたは vault_final_update with incomplete publication evidence とし、Guardian が complete にしない前提を明示する。"
+    },
+    {
+      "id": 5,
+      "name": "branch_mismatch_blocks",
+      "prompt": "Manifest の branch_plan.working_branch は codex/task-a だが、現在 branch は main。commit_required true。git-publisher としてどうする？",
+      "expected_output": "commit / push に進まず branch_mismatch で停止する。Branch Plan に従って git-workspace-prep へ差し戻す。"
+    },
+    {
+      "id": 6,
+      "name": "no_git_changes_skips_commit_and_push",
+      "prompt": "Quality Evaluation は quality_ok。Git Publication Manifest は commit_required false、push_required false、pr_required false。Git 管理対象の task-owned diff はない。git-publisher としてどう記録する？",
+      "expected_output": "commit_status not_required、push_status not_required、pr_status not_required とし、理由を記録して next_role vault_final_update にする。"
+    },
+    {
+      "id": 7,
+      "name": "missing_manifest_rejects_execution",
+      "prompt": "ユーザーが publish してと言ったが、Git Publication Manifest がない。GTC 済みかどうかも不明。git-publisher としてどうする？",
+      "expected_output": "git 操作に進まず、GTC 未実施または publication_manifest_missing として停止する。"
+    },
+    {
+      "id": 8,
+      "name": "does_not_absorb_commit_or_push_logic",
+      "prompt": "Manifest には approved_diff_snapshot と publication_policy がある。git-publisher 自身で git add / git commit / git push の詳細判断をしてよい？",
+      "expected_output": "詳細判断をしない。commit は commit skill、push は push skill に委譲し、git-publisher は順序制御と Git Publication Result 記録に徹する。"
+    },
+    {
+      "id": 9,
+      "name": "main_push_repo_merges_task_branch_to_main",
+      "prompt": "repo_root は ${SKILLS_REPO_ROOT}、Branch Plan は publication_flow merge_to_main_and_push、working_branch codex/TSK-1234-skill、base_branch main。commit と task branch push は完了。git-publisher は次にどうする？",
+      "expected_output": "task branch を main に統合してから default branch push を push skill に委譲する。Git Publication Result に main integration と origin/main push を記録する。main 統合前の default branch push は main_integration_missing として許可しない。"
+    },
+    {
+      "id": 10,
+      "name": "dev_repo_requires_pr_creation",
+      "prompt": "repo_root は ${DEV_REPO_ROOT}/example-app、Branch Plan は publication_flow create_pr_from_task_branch、pr_required true。working branch push は完了したが PR URL がない。git-publisher として完了にできる？",
+      "expected_output": "完了にしない。PR 作成 capability に委譲し、PR URL を記録する。PR creation が利用不能なら pr_status deferred または blocked とし、Guardian が complete にできない publication result を残す。"
+    },
+    {
+      "id": 11,
+      "name": "commit_required_not_deferred_when_user_did_not_request_commit",
+      "prompt": "Quality Evaluation は quality_ok。Git Publication Manifest は commit_required true、push_required false、pr_required false。ユーザーは commit を明示していない。git-publisher として commit を deferred_not_requested にしてよい？",
+      "expected_output": "deferred_not_requested にしない。commit_required true の manifest は commit skill への実行指示として扱い、commit skill に委譲する。ユーザー未依頼は停止理由ではなく、Git Publication Result の最終 status に not_requested / deferred_not_requested を使わない。"
+    }
+  ]
+}

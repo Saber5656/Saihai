@@ -8,7 +8,7 @@
 |---|---|
 | 組織原則 | Agents-Vault `03-Contexts/Policies/AI-Organization.md` |
 | Gate I/O | Agents-Vault `03-Contexts/Policies/Gate-IO-Contract.md` |
-| ロール定義 | 各 `skills/<agent_id>/SKILL.md` frontmatter and Flow Contract |
+| ロール定義 | `organization/roles/<agent_id>/skill.md` frontmatter and Flow Contract |
 | モデル設定 | `references/model-registry.md` |
 | Completion chain / final gate required sections | `config/completion-chain.yaml` |
 | 起動 lifecycle | `infra-team-bootstrap` |

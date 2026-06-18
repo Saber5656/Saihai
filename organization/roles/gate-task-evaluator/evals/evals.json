@@ -1,0 +1,75 @@
+{
+  "skill_name": "gate-task-evaluator",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "assessor は ready_for_evaluation。成果物、レビュー、JSON validation は OK。git status に skills/foo/SKILL.md の変更がある。次に何をする？",
+      "expected_output": "evaluation_status: quality_ok、Task Change Manifest を作成し、approved_scope と approved_diff_snapshot を含める。task-owned approved diff があるため commit_required: true。Git Publication Manifest を作成し、handoff_to: git-publisher とする。"
+    },
+    {
+      "id": 2,
+      "prompt": "assessor は ready_for_evaluation だが、Director 作業内の相互レビュー証跡が missing。成果物は存在する。完了評価して。",
+      "expected_output": "evaluation_status: needs_rework。レビュー証跡不足を理由に差し戻し、git-publisher へ進めない。"
+    },
+    {
+      "id": 3,
+      "prompt": "全レビューと検証は OK。変更は Vault のみで Git 管理対象ファイルの差分はない。Quality Evaluation を作って。",
+      "expected_output": "commit_required: false、push_required: false、pr_required: false と理由を記録し、publication 不要として handoff_to を vault_final_update にする。"
+    },
+    {
+      "id": 4,
+      "prompt": "assessor は ready_for_evaluation。Git 管理対象の source と CI 設定に code-like diff があるが、tech-qa の QA review evidence が missing。Quality Evaluation を作って。",
+      "expected_output": "Code-like Diff QA Satisfied を false とし、evaluation_status: needs_rework。tech-qa の QA Scope、Readability Check、Changeability Check、Verification Link、QA Verdict が不足しているため git-publisher へ進めない。"
+    },
+    {
+      "id": 5,
+      "prompt": "assessor は ready_for_evaluation。code-like diff があり、tech-qa の QA Verdict は qa_pass、tech-reviewer の review evidence と validation も OK。Git 管理対象の変更がある。次に何をする？",
+      "expected_output": "Code-like Diff QA Satisfied を true、Task Change Manifest を作成し、approved_scope と approved_diff_snapshot を記録する。evaluation_status: quality_ok、commit_required: true。Branch Plan と publication policy を含む Git Publication Manifest を作り、handoff_to: git-publisher にする。"
+    },
+    {
+      "id": 6,
+      "prompt": "assessor は ready_for_evaluation。成果物とレビューは OK だが Invocation Evidence に effective_model と session_id がない。Quality Evaluation を作って。",
+      "expected_output": "Invocation Evidence Satisfied を false とし、evaluation_status: needs_rework。intended/effective model、requestId、sessionId、usage source が揃うまで git-publisher / final update へ進めない。"
+    },
+    {
+      "id": 7,
+      "prompt": "assessor は ready_for_evaluation。intended_model は claude-haiku-4-5 だが effective_model が gpt-5.5 と記録されている。完了評価して。",
+      "expected_output": "モデル不一致として evaluation_status: needs_rework。mismatch を記録し、正しい provider/model/session 証跡を取り直すまで完了扱いにしない。"
+    },
+    {
+      "id": 8,
+      "prompt": "assessor は ready_for_evaluation。レビューと検証は OK。Task TSK-2001 が所有する skills/foo/SKILL.md の差分が Git 管理対象にあり、同じ repo に別タスク由来の skills/bar/SKILL.md 変更も残っている。Quality Evaluation を作って。",
+      "expected_output": "Task Change Manifest を作成し、owned_paths に skills/foo/SKILL.md、unrelated_dirty_paths に skills/bar/SKILL.md を記録する。task-owned approved diff があるため commit_required: true。Git Publication Manifest を作成し、handoff_to: git-publisher とする。"
+    },
+    {
+      "id": 9,
+      "prompt": "レビューと検証は OK。成果物は Agents-Vault の Task Detail 更新だけで、Git 管理対象の task-owned diff はない。repo には別タスクの dirty diff が残っている。Quality Evaluation を作って。",
+      "expected_output": "Task Change Manifest を作成し、Git 管理対象の task-owned approved diff がないため commit_required: false とする。repo に残る別タスク dirty diff は unrelated_dirty_paths に記録し、commit_required 判定へ混ぜない。push_required / pr_required も false なら handoff_to は vault_final_update。"
+    },
+    {
+      "id": 10,
+      "prompt": "Git 管理対象の変更がある task。レビュー済み成果物は skills/baz/SKILL.md の hunk A だけで、同じファイルに未レビューの hunk B もある。Quality Evaluation と publication handoff を作って。",
+      "expected_output": "Task Change Manifest の approved_diff_snapshot にレビュー済み hunk A だけを記録し、未レビュー hunk B は excluded_paths または unrelated_dirty_paths / excluded_diffs 相当として扱う。commit_required は task-owned approved diff の hunk A に対して true。Git Publication Manifest には snapshot と hunk-level scope を含め、git-publisher へ渡す。"
+    },
+    {
+      "id": 11,
+      "prompt": "assessor は ready_for_evaluation。成果物、レビュー、validation は OK。Task Change Manifest あり、Branch Plan は source repo の codex/TSK-1234 branch、publication policy は push_required true、PR は不要。Quality Evaluation を作って。",
+      "expected_output": "evaluation_status: quality_ok。Git Publication Manifest に task_id、repo_root、branch_plan、task_change_manifest、commit_required、push_required true、pr_required false、publication_policy、handoff_to git-publisher を含める。"
+    },
+    {
+      "id": 12,
+      "prompt": "assessor は ready_for_evaluation。PR 必須の source repo で、成果物とレビューは OK。PR skill はまだ未実装。GTE はどう扱う？",
+      "expected_output": "pr_required: true を Git Publication Manifest に記録し、git-publisher へ渡す。PR skill 未実装を理由に GTE で品質 NG にはせず、PR の実行可否と deferred / blocked 記録は git-publisher と GTG に委ねる。"
+    },
+    {
+      "id": 13,
+      "prompt": "assessor は ready_for_evaluation。成果物とレビューは OK。Branch Plan は main-push-repos.md にない repo の main branch。task-owned diff はある。GTE は push_required をどう判定する？",
+      "expected_output": "commit_required: true は維持するが、default branch が main-push whitelist 外なので push_required: false とし、push_decision_reason または publication_policy に default_branch_not_whitelisted を記録する。Git Publication Manifest は git-publisher へ渡し、push 不要理由を残す。"
+    },
+    {
+      "id": 14,
+      "prompt": "assessor は ready_for_evaluation。成果物、レビュー、validation は OK。skills/foo/SKILL.md に task-owned approved diff があるが、ユーザーは今回の依頼文で commit とは言っていない。Quality Evaluation を作って。",
+      "expected_output": "evaluation_status: quality_ok。ユーザーが commit と明示していなくても task-owned approved diff が Git 管理対象にあるため commit_required: true とする。deferred_not_requested / not_requested / user_did_not_request_commit を commit 不要理由にせず、Git Publication Manifest を作成して handoff_to git-publisher にする。"
+    }
+  ]
+}

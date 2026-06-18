@@ -1,0 +1,70 @@
+{
+  "skill_name": "gate-task-guardian",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Quality Evaluation は quality_ok、commit_required true。Task Detail に commit_hash がないが Vault Updates は済んでいる。done にしてよい？",
+      "expected_output": "guardian_status: incomplete。commit hash 未記録を理由に done / main transport renderer 進行を拒否する。"
+    },
+    {
+      "id": 2,
+      "prompt": "commit_hash はあるが Kanban は In Progress のまま、Task Detail は done。Guardian Verdict を作って。",
+      "expected_output": "kanban synced false として incomplete。Task Index / Kanban 同期を差し戻す。"
+    },
+    {
+      "id": 3,
+      "prompt": "assessment ready、evaluation ok。Task Change Manifest があり、commit_required true、commit_hashes 記録済み、committed_diff_matches_snapshot: true、approved_diff_snapshot は commit 済み。Vault final update 完了、Guardian Status Checked: true、関連 task すべて done。main transport renderer に渡してよい？",
+      "expected_output": "guardian_status: complete。approved diff closed と commit requirement satisfied を true とし、main transport renderer 用 Completion Envelope を作成する。"
+    },
+    {
+      "id": 4,
+      "prompt": "evaluation ok、commit_not_required 理由あり、Vault final update 完了。ただし Resident Roster が未更新で Active Set が空。main transport renderer に渡してよい？",
+      "expected_output": "guardian_status: incomplete。Resident Roster / Active Set / Invocation Evidence の最終更新不足を理由に main transport renderer 進行を拒否する。"
+    },
+    {
+      "id": 5,
+      "prompt": "すべての完了証跡はあるが、main transport renderer が guardian complete 前に最終応答を書いていた。Guardian としてどう扱う？",
+      "expected_output": "不合格。guardian complete 前の main transport renderer 実行は無効として扱い、正式な Guardian Verdict complete 後の Completion Envelope を改めて main transport renderer に渡す。"
+    },
+    {
+      "id": 6,
+      "prompt": "Quality Evaluation は quality_ok、commit_required false の理由もある。Vault final update は済んでいるが Task Detail の Guardian Status Checked は false のまま。main transport renderer に渡してよい？",
+      "expected_output": "guardian_status: incomplete。Guardian Status Checked が true になるまで done / main transport renderer 進行を拒否し、Guardian Verdict 作成時に Completion Gate を更新する。"
+    },
+    {
+      "id": 7,
+      "prompt": "commit_required true。Task Change Manifest の approved_diff_snapshot は commit_hash abc123 で閉じており、committed_diff_matches_snapshot: true。repo には unrelated_dirty_paths として skills/other/SKILL.md が残っている。done にしてよい？",
+      "expected_output": "unrelated_dirty_paths は blocking にしない。Task Change Manifest の approved diff が commit 済みで snapshot 一致なら commit requirement satisfied true とし、他の Gate 条件も満たす場合は guardian_status: complete。"
+    },
+    {
+      "id": 8,
+      "prompt": "commit_hash はあるが、Task Change Manifest の approved_diff_snapshot と commit 済み diff が一致していない。committed_diff_matches_snapshot は false。Guardian Verdict を作って。",
+      "expected_output": "guardian_status: incomplete。approved diff snapshot が閉じていないため、commit hash があっても done / main transport renderer へ進めない。committed_diff_matches_snapshot: true が必要と記録する。"
+    },
+    {
+      "id": 9,
+      "prompt": "commit_required true、Task Change Manifest はあるが commit_hashes は空。unrelated_dirty_paths はない。Vault final update は済んでいる。完了判定して。",
+      "expected_output": "guardian_status: incomplete。commit_required true の場合は commit_hashes と committed_diff_matches_snapshot: true が必須であり、commit hash 空のまま final response / main transport renderer へ渡さない。"
+    },
+    {
+      "id": 10,
+      "prompt": "commit_required true は満たしているが、push_required true なのに push_status が missing。Vault final update は済んでいる。Guardian Verdict を作って。",
+      "expected_output": "guardian_status: incomplete。push_required true の場合は push_status complete と remote_branch が必須であり、Git Publication Result 不足として main transport renderer へ渡さない。"
+    },
+    {
+      "id": 11,
+      "prompt": "commit_required false、push_required false、pr_required false の理由があり、Git Publication Result は not_required。Vault final update、Index、Kanban、Resident Roster も完了している。完了判定して。",
+      "expected_output": "git_publication_status not_required を受け入れ、他の Gate 条件が揃っていれば guardian_status: complete とする。"
+    },
+    {
+      "id": 12,
+      "prompt": "commit と push は complete。pr_required true だが pr_status は deferred、PR URL はない。Guardian Verdict を作って。",
+      "expected_output": "guardian_status: incomplete。pr_required true の場合は pr_status created と pr_url が必要であり、deferred のまま done / main transport renderer へ進めない。"
+    },
+    {
+      "id": 13,
+      "prompt": "Quality Evaluation は quality_ok。Task Change Manifest に task-owned Git diff があり commit_required true。Git Publication Result は commit_status deferred_not_requested、commit_hashes 空、理由はユーザーが commit を明示していない。Guardian Verdict を作って。",
+      "expected_output": "guardian_status: incomplete。deferred_not_requested / not_requested / user_did_not_request_commit は完了扱いにしない。commit_required true の場合は commit_status complete、commit_hashes、committed_diff_matches_snapshot: true が必須で、done / main transport renderer へ進めない。"
+    }
+  ]
+}

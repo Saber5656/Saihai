@@ -1,0 +1,45 @@
+{
+  "skill_name": "tech-reviewer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "tech-director から、API 実装差分、UI 呼び出し差分、テスト結果、tech/tasks.md の done criteria が渡された。tech-reviewer として Engineering チーム内の統合レビューをしてください。",
+      "expected_output": "Review Scope で対象 Task / tech task / reviewed diff / out of scope を明示し、Review Preparation で要求マッピング、主要変更、壊れそうなポイントを整理する。Findings は一意 ID と severity を持ち、Verdict は approve / request_changes / blocked のいずれかだけを使う。",
+      "files": [
+        "skills/tech-reviewer/SKILL.md"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "差分には認可ロジック変更、性能劣化の疑い、受け入れ条件の未検証が含まれる。tech-reviewer としてレビューしてください。",
+      "expected_output": "TR は専門レビューを代替せず、認可は tech-security / security-professor、性能は tech-performance、受け入れ条件や検証不足は tech-qa / tech-tester へ Specialist Handoff する。専門レビュー待ちが blocking なら Verdict は blocked にする。",
+      "files": [
+        "skills/tech-reviewer/SKILL.md"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "レビュー対象には Engineering 実装差分に加えて、Business の規約文面、Contents の記事文面、Infra の Vault 整理結果が含まれる。tech-reviewer としてレビューしてください。",
+      "expected_output": "Engineering チーム外の成果物を Out of Scope にし、Business / Contents / Infra / Gate の成果物は各チーム director / reviewer / Gate ロールへ委譲する。TR は親 Task 全体の最終判定をしない。",
+      "files": [
+        "skills/tech-reviewer/SKILL.md"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "差分には軽微な命名メモと将来改善メモがあるが、修正必須事項はない。tech-reviewer として Verdict を出してください。",
+      "expected_output": "approve_with_notes を使わず Verdict は approve にする。軽微な内容は Non-blocking Notes に記録し、修正必須なら request_changes、情報不足や専門レビュー待ちなら blocked にするというルールを守る。",
+      "files": [
+        "skills/tech-reviewer/SKILL.md"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "レビュー対象は backend 実装、型定義、CI 設定、shell script の code-like diff を含む。実装担当のテスト結果と tech-reviewer 用の差分説明はあるが、tech-qa の QA Verdict はない。tech-reviewer としてレビューしてください。",
+      "expected_output": "QA Review Evidence を missing とし、tech-qa への blocking Specialist Handoff を出す。tech-reviewer の approve は必須 QA review evidence を代替しないため、Verdict は blocked にする。",
+      "files": [
+        "skills/tech-reviewer/SKILL.md"
+      ]
+    }
+  ]
+}

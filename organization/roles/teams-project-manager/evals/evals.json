@@ -1,0 +1,60 @@
+{
+  "skill_name": "teams-project-manager",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "GTC から Git 管理対象のスキル更新タスクが渡された。TPM として Team Routing Decision を作る。",
+      "expected_output": "主担当チーム、支援チーム、レビュー証跡要件、director handoff、Branch Plan に加え、Completion Gate として director 完了後の handoff 先を常に gate-task-assessor にする。"
+    },
+    {
+      "id": 2,
+      "prompt": "Director が完了報告したので、TPM が直接 main transport renderer に渡そうとしている。この判断を検査して。",
+      "expected_output": "不合格。Team Director 完了後は必ず gate-task-assessor へ渡し、assessor / evaluator / git-publisher / guardian を通る必要がある。main transport renderer へ直接渡してはならない。"
+    },
+    {
+      "id": 3,
+      "prompt": "Resident Roster がある Task Detail を受けた。TPM として Gate / Infra と Tech タスクの active set をどう宣言する？",
+      "expected_output": "Gate / Infra を Always Active に置き、Tech director または対象 tech チームを Task Active に置く。Contents / Business など対象外 resident は Idle Resident とし、個別 worker の最終選定は tech-director に委ねる。"
+    },
+    {
+      "id": 4,
+      "prompt": "TPM が commit と Obsidian CLI を resident active set に含めようとしている。判定して。",
+      "expected_output": "不合格。commit、git-publisher、push、git-workspace-prep、save、bridge、Obsidian CLI などは道具スキルであり resident agent にしない。必要時に一時実行ツールとして扱う。"
+    },
+    {
+      "id": 5,
+      "prompt": "TPM が Chat A の tech-director instance ではなく、別チャットの同名 tech-director を active set に入れようとしている。判定して。",
+      "expected_output": "不合格。TPM は role_id ではなく、同じ organization_instance_id / chat_session_id に属する agent_instance_id だけを active 化する。"
+    },
+    {
+      "id": 6,
+      "prompt": "TPM の処理結果がメインエージェントへ返ったので、そのままユーザーへ最終回答してよい？",
+      "expected_output": "不可。メインエージェントへの返却は transport であり workflow output ではない。TPM の正規 output は director handoff と Team Routing Decision である。"
+    },
+    {
+      "id": 7,
+      "prompt": "1つの親Taskに tech-director と infra-director が関わる。各Directorが別々に branch を切ってよい？",
+      "expected_output": "不可。TPM が Branch Plan に単一 working_branch / worktree_path を記録し、shared_by_teams に対象 team を列挙する。branch / worktree 作成は git-workspace-prep に委譲し、Director は独自 branch を作らない。branch_action none は明示例外時だけ使う。"
+    },
+    {
+      "id": 8,
+      "prompt": "${SKILLS_REPO_ROOT} は main-push-repos.md に記載済みで、base_branch は main。TPM は codex/TSK-1234 の branch を作る Branch Plan にすべき？",
+      "expected_output": "はい。main-push repo でも task worktree 作成は免除しない。workspace_mode task_worktree、worktree_required true、working_branch codex/TSK-1234-slug、worktree_path ${WORKTREE_ROOT}/skills-repo/TSK-1234-slug、publication_flow merge_to_main_and_push を記録し、git-workspace-prep に委譲する。"
+    },
+    {
+      "id": 9,
+      "prompt": "${DEV_REPO_ROOT}/example-app の実装タスクを GTC から受けた。現在 branch は codex/TSK-9999-old-task。TPM の Branch Plan はどうする？",
+      "expected_output": "現在 branch を使い回さない。workspace_mode task_worktree、worktree_required true、working_branch codex/TSK-####-slug、worktree_path ${WORKTREE_ROOT}/example-app/<TSK-####-slug>、branch_action create_task_worktree または checkout_task_worktree、publication_flow create_pr_from_task_branch、pr_required true を記録し、git-workspace-prep に委譲する。"
+    },
+    {
+      "id": 10,
+      "prompt": "Vault repository と dotfiles の変更を含むタスク。TPM は task-specific worktree を切る？",
+      "expected_output": "はい。Vault 系と ${DOTFILES_ROOT} は default branch push 可能だが task worktree から除外しない。workspace_mode task_worktree、worktree_required true、publication_flow merge_to_main_and_push を記録し、最後に main へ統合して main push する flow にする。"
+    },
+    {
+      "id": 11,
+      "prompt": "GTC から Git 管理対象の変更を含まない調査整理タスクが渡された。TPM は Branch Plan 13項目を推論する？",
+      "expected_output": "推論しない。Branch Plan は not_applicable、branch_action none、workspace_mode not_required、worktree_required false、publication_flow not_required、Workspace Prep Handoff not_required とし、Git 管理対象変更なしの理由だけを記録して閉じる。"
+    }
+  ]
+}
