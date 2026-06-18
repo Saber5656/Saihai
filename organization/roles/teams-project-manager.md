@@ -86,11 +86,11 @@ TPM は role 定義ではなく、現チャットセッションの agent instan
    - Git 管理対象の変更を含まない調査、整理、会話、承認待ち、外部判断だけのタスクでは、Branch Plan 13 項目を展開しない。`Branch Plan: not_applicable`、`branch_action: none`、`workspace_mode: not_required`、`worktree_required: false`、`publication_flow: not_required`、`Workspace Prep Handoff: not_required` と理由を記録して閉じる。
    - Git 管理対象の作業では、`repo_root`、`repo_kind`、`base_branch`、`working_branch`、`branch_owner`、`shared_by_teams`、`default_branch_push_allowed`、`branch_action`、`workspace_mode`、`worktree_required`、`worktree_path` を Task Detail に記録する。
    - `push` skill の `references/main-push-repos.md` に記載されている repo では、default branch push を許可する。ただし task worktree 作成を免除しない。通常は `workspace_mode: task_worktree`、`worktree_required: true`、`branch_action: create_task_worktree` または `checkout_task_worktree`、`publication_flow: merge_to_main_and_push` を記録する。
-   - `skills-repo`、Vault 系 repository、`/Users/takagiyasushi/dotfiles` は default branch push 可能 repo であり、task-specific worktree branch で作業した後、最終的に `main` へ統合して `main` を push する。
-   - `/Users/takagiyasushi/dev/*` 配下の source repository では、`workspace_mode: task_worktree`、`worktree_required: true`、`branch_action: create_task_worktree` または `checkout_task_worktree`、`publication_flow: create_pr_from_task_branch`、`pr_required: true` を記録する。
-   - `/Users/takagiyasushi/dev/*` では、現在 branch が main 以外でも、その branch を task branch として使い回さない。Branch Plan の `working_branch` と `worktree_path` に一致する場合だけ利用を許可する。
-   - standard worktree path は `/Users/takagiyasushi/dev/_worktrees/<repo-name>/<TSK-####-slug>` とし、既存 project convention がある場合だけ理由付きで変更する。
-   - `/Users/takagiyasushi/dev/*` では GitHub PR 作成を必須の publication step として扱う。PR URL が作成されるまで `finalization-check` は complete にしない。
+   - `skills-repo`、Vault 系 repository、`${DOTFILES_ROOT}` は default branch push 可能 repo であり、task-specific worktree branch で作業した後、最終的に `main` へ統合して `main` を push する。
+   - `${DEV_ROOT}/*` 配下の source repository では、`workspace_mode: task_worktree`、`worktree_required: true`、`branch_action: create_task_worktree` または `checkout_task_worktree`、`publication_flow: create_pr_from_task_branch`、`pr_required: true` を記録する。
+   - `${DEV_ROOT}/*` では、現在 branch が main 以外でも、その branch を task branch として使い回さない。Branch Plan の `working_branch` と `worktree_path` に一致する場合だけ利用を許可する。
+   - standard worktree path は `${DEV_WORKTREES_ROOT}/<repo-name>/<TSK-####-slug>` とし、既存 project convention がある場合だけ理由付きで変更する。
+   - `${DEV_ROOT}/*` では GitHub PR 作成を必須の publication step として扱う。PR URL が作成されるまで `finalization-check` は complete にしない。
    - 1つの親 task に複数 Director が関わる場合も、原則として `branch_owner: task` の単一 `working_branch` を共有させる。
    - `branch_action: none` は read-only task、emergency task、または人間が明示した例外だけに使い、理由を記録する。
    - branch 名は `codex/TSK-####-slug` を標準にし、環境制約で slash 付き ref を作れない場合は `codex-TSK-####-slug` を許容して理由を記録する。
@@ -217,7 +217,7 @@ Task Detail には次を残す。
 | branch / worktree 実行を `git-workspace-prep` へ委譲した、または `branch_action: none` の理由を記録した | When applicable |
 | managed writable repo では task-specific git worktree を計画し、現在 non-main branch の使い回しを許可していない | When applicable |
 | skills-repo / Vault / dotfiles は task worktree branch から main 統合 flow として計画した | When applicable |
-| `/Users/takagiyasushi/dev/*` では branch ごとの PR 作成を必須にした | When applicable |
+| `${DEV_ROOT}/*` では branch ごとの PR 作成を必須にした | When applicable |
 | director への handoff 先を明記した | Yes |
 | controlled_micro_flow の場合、strict escalation trigger が無いことを確認した | When applicable |
 | controlled_micro_flow の場合も director handoff と Completion Gate を保持した | When applicable |
@@ -251,8 +251,8 @@ Narration policy: act on routine flow checks silently; surface only anomaly or a
 
 | Policy | Status | SHA1 | Bytes | Source |
 |---|---|---:|---:|---|
-| AI-Organization | `ready` | `380b4a2cab2325b88f68993485ae997428265913` | 31825 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/AI-Organization.md` |
-| Gate-IO-Contract | `ready` | `7af1c38f0b140feb45a11009ca94f70da542344d` | 34482 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Gate-IO-Contract.md` |
-| Dispatcher-IO-Contract | `ready` | `75cd888d160d7ae0a87640cefd1268ea84b4209e` | 6188 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Dispatcher-IO-Contract.md` |
-| Task-File-Conventions | `ready` | `ac5b009a443216dd7b00ebaa5541eaecfe341176` | 18748 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Task-File-Conventions.md` |
+| AI-Organization | `ready` | `380b4a2cab2325b88f68993485ae997428265913` | 31825 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/AI-Organization.md` |
+| Gate-IO-Contract | `ready` | `7af1c38f0b140feb45a11009ca94f70da542344d` | 34482 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Gate-IO-Contract.md` |
+| Dispatcher-IO-Contract | `ready` | `75cd888d160d7ae0a87640cefd1268ea84b4209e` | 6188 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Dispatcher-IO-Contract.md` |
+| Task-File-Conventions | `ready` | `ac5b009a443216dd7b00ebaa5541eaecfe341176` | 18748 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Task-File-Conventions.md` |
 <!-- ITB_POLICY_DIGEST_SNAPSHOT_END -->

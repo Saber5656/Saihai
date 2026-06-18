@@ -14,8 +14,8 @@ agent_id: business-marketing-director
 
 # Business Marketing Director
 
-このスキルは旧名称の互換用だよ。  
-新しい正本は `/Users/takagiyasushi/skills-repo/skills/business-director/SKILL.md`。
+このスキルは旧名称の互換用だよ。
+新しい正本は `${SKILLS_ROOT}/business-director/SKILL.md`。
 
 ## 移行ルール
 

@@ -15,7 +15,7 @@ referenced_by: ~/dotfiles/COMMON-AGENTS.md
 `gate-prompt-formatter` 以降の流れは、このノート、Gate I/O Contract、Dispatcher I/O Contract、各スキルの Flow Contract / SKILL.md、ITB model registry が正本になる。Vault、Task Index、Kanban は複数 Organization Instance から更新され得る共有資源であり、GTC / infra-task-dispatcher が排他・重複検出・同期確認を担う。
 
 TSK-1244 以降、組織メンバーの実行単位は「Skill を直接呼ぶこと」ではなく、`infra-team-bootstrap` の role-agent registry、durable queue、独立 worker process によって管理する。Skill はロール定義と Flow Contract の正本であり、実行中のチーム構成、provider、model、queue consumer、worker process は registry / model-registry / runtime evidence を正本にする。
-Completion Gate の機械検証用チェーン、pre-final 必須 section、main-agent 禁止 role 集合は `/Users/takagiyasushi/dev/Agent-Teams-Viewer/organization/runtime/infra-team-bootstrap/config/completion-chain.yaml` を正本とする。このノート内の図表は説明用であり、ITB builder / Gate role は config を参照する。
+Completion Gate の機械検証用チェーン、pre-final 必須 section、main-agent 禁止 role 集合は `${AGENT_TEAMS_VIEWER_ROOT}/organization/runtime/infra-team-bootstrap/config/completion-chain.yaml` を正本とする。このノート内の図表は説明用であり、ITB builder / Gate role は config を参照する。
 
 ## 最重要原則
 
@@ -406,7 +406,7 @@ main transport renderer は完了判定を行わない。`finalization-check` co
 
 `infra-task-dispatcher` の受付、採番、状態同期、完了条件は [[03-Contexts/Policies/Dispatcher-IO-Contract]] に整理する。
 
-この契約は `Task-Gateway.md`、`Task-Index.md`、`Kanban.md`、Task Detail の関係を定義する。  
+この契約は `Task-Gateway.md`、`Task-Index.md`、`Kanban.md`、Task Detail の関係を定義する。
 `Task Detail` の `status` を正とし、`Task-Index.md` と `Kanban.md` はそこから同期する。
 
 タスクノートの配置先、ファイル名、粒度判断（個別ノート vs バックログ束ね）、Project フォルダ選定は [[03-Contexts/Policies/Task-File-Conventions]] を正本とする。

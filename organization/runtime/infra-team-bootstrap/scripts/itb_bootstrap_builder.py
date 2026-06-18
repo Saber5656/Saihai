@@ -31,7 +31,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised when PyYAML is absen
 ITB_ROOT = Path(__file__).resolve().parents[1]
 AGENT_TEAMS_VIEWER_ROOT = Path(os.environ.get("AGENT_TEAMS_VIEWER_ROOT", str(ITB_ROOT.parents[2])))
 ATV_ROLE_ROOT = AGENT_TEAMS_VIEWER_ROOT / "organization" / "roles"
-SKILLS_ROOT = Path(os.environ.get("SKILLS_REPO_SKILLS_ROOT", "/Users/takagiyasushi/skills-repo/skills"))
+SKILLS_ROOT = Path(
+    os.environ.get("SKILLS_REPO_SKILLS_ROOT")
+    or os.environ.get("SKILLS_ROOT")
+    or str(Path.home() / "skills-repo" / "skills")
+).expanduser()
 ATV_MIGRATED_ROLE_IDS = frozenset(
     {
         "business-director",
@@ -83,7 +87,12 @@ ROLE_AGENT_REGISTRY = ITB_ROOT / "config" / "role-agent-registry.yaml"
 COMPLETION_CHAIN_CONFIG = ITB_ROOT / "config" / "completion-chain.yaml"
 GATE_OUTPUT_SCHEMAS_CONFIG = ITB_ROOT / "config" / "gate-output-schemas.yaml"
 CHILD_AGENT_ENV = "ITB_AGENT_CHILD"
-AGENTS_VAULT_ROOT = Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault"
+AGENTS_VAULT_ROOT = Path(
+    os.environ.get(
+        "AGENTS_VAULT_ROOT",
+        str(Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault"),
+    )
+).expanduser()
 POLICY_ROOT = AGENTS_VAULT_ROOT / "03-Contexts/Policies"
 POLICY_DIGEST_SOURCES = {
     "AI-Organization": POLICY_ROOT / "AI-Organization.md",
@@ -93,7 +102,12 @@ POLICY_DIGEST_SOURCES = {
 }
 POLICY_DIGEST_SKILL_BLOCK_BEGIN = "<!-- ITB_POLICY_DIGEST_SNAPSHOT_START -->"
 POLICY_DIGEST_SKILL_BLOCK_END = "<!-- ITB_POLICY_DIGEST_SNAPSHOT_END -->"
-YASU_VAULT_ROOT = Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Yasu's Vault"
+USER_VAULT_ROOT = Path(
+    os.environ.get("USER_VAULT_ROOT")
+    or os.environ.get("YASU_VAULT_ROOT")
+    or str(Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Personal Vault")
+).expanduser()
+YASU_VAULT_ROOT = USER_VAULT_ROOT
 DEFAULT_AGENT_PROCESS_MODE = "provider_cli"
 DEFAULT_PROVIDER_PERMISSION_MODE = "auto"
 DEFAULT_CODEX_APPROVAL_POLICY = "never"
@@ -273,6 +287,8 @@ def expand_config_path_value(value: Any) -> str:
     replacements = {
         "${AGENTS_VAULT_ROOT}": str(AGENTS_VAULT_ROOT),
         "$AGENTS_VAULT_ROOT": str(AGENTS_VAULT_ROOT),
+        "${USER_VAULT_ROOT}": str(USER_VAULT_ROOT),
+        "$USER_VAULT_ROOT": str(USER_VAULT_ROOT),
         "${YASU_VAULT_ROOT}": str(YASU_VAULT_ROOT),
         "$YASU_VAULT_ROOT": str(YASU_VAULT_ROOT),
         "${HOME}": str(Path.home()),

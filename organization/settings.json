@@ -11,9 +11,9 @@
   },
   "knowledge": {
     "canonical_repo": "Agent-Teams-Viewer",
-    "canonical_repo_path": "/Users/takagiyasushi/dev/Agent-Teams-Viewer",
-    "context_vault_path": "/Users/takagiyasushi/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault",
-    "legacy_skills_repo_path": "/Users/takagiyasushi/skills-repo",
+    "canonical_repo_path": "${AGENT_TEAMS_VIEWER_ROOT}",
+    "context_vault_path": "${AGENTS_VAULT_ROOT}",
+    "legacy_skills_repo_path": "${SKILLS_REPO_ROOT}",
     "policy_location": "organization/policies",
     "role_location": "organization/roles",
     "runtime_location": "organization/runtime"

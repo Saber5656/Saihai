@@ -14551,7 +14551,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
 
         command, runtime_kind = builder.build_agent_command(
             row,
-            "/Users/takagiyasushi/skills-repo",
+            "/private/tmp/itb-worktrees/skills-repo",
             "provider_cli",
             permission_mode="plan",
             tools="Read",
@@ -14578,7 +14578,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
         with mock.patch.dict(os.environ, {"ITB_PROVIDER_PERMISSION_MODE": ""}, clear=False):
             command, runtime_kind = builder.build_agent_command(
                 row,
-                "/Users/takagiyasushi/skills-repo",
+                "/private/tmp/itb-worktrees/skills-repo",
                 "provider_cli",
             )
 
@@ -14608,7 +14608,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
 
         command, runtime_kind = builder.build_agent_command(
             row,
-            "/Users/takagiyasushi/skills-repo",
+            "/private/tmp/itb-worktrees/skills-repo",
             "provider_cli",
         )
 
@@ -14636,7 +14636,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
 
         command, runtime_kind = builder.build_agent_command(
             row,
-            "/Users/takagiyasushi/skills-repo",
+            "/private/tmp/itb-worktrees/skills-repo",
             "provider_cli",
         )
 
@@ -14681,7 +14681,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
 
         command, runtime_kind = builder.build_agent_command(
             row,
-            "/Users/takagiyasushi/skills-repo",
+            "/private/tmp/itb-worktrees/skills-repo",
             "provider_cli",
         )
 
@@ -14867,13 +14867,13 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
             with mock.patch.dict(os.environ, {}, clear=True):
                 command, runtime_kind = builder.build_agent_command(
                     row,
-                    "/Users/takagiyasushi/skills-repo",
+                    "/private/tmp/itb-worktrees/skills-repo",
                     "provider_cli",
                 )
             claude_state_dir = root / "state" / "test-session" / "provider-state" / "gate-task-creator" / "claude"
 
         self.assertEqual(runtime_kind, "claude_tmux")
-        self.assertIn("cd /Users/takagiyasushi/skills-repo", command)
+        self.assertIn("cd /private/tmp/itb-worktrees/skills-repo", command)
         self.assertIn("ITB_PROVIDER_STATE_DIR=''", command)
         self.assertIn("ITB_PROVIDER_CONFIG_DIR=''", command)
         self.assertNotIn("CLAUDE_CONFIG_DIR=", command)
@@ -14898,7 +14898,9 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             vault = root / "Agents-Vault"
+            workspace = root / "skills-repo"
             vault.mkdir()
+            workspace.mkdir()
             row["state_root"] = str(root / "state")
             with mock.patch.dict(
                 os.environ,
@@ -14912,7 +14914,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
             ):
                 command, runtime_kind = builder.build_agent_command(
                     row,
-                    "/Users/takagiyasushi/skills-repo",
+                    str(workspace),
                     "provider_cli",
             )
             codex_state_dir = root / "state" / "test-session" / "provider-state" / "tech-backend" / "codex"
@@ -14930,7 +14932,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
         self.assertIn("xhigh", command)
         self.assertIn("service_tier=", command)
         self.assertIn("fast", command)
-        self.assertIn("--add-dir /Users/takagiyasushi/skills-repo", command)
+        self.assertIn(f"--add-dir {workspace.resolve()}", command)
         self.assertIn(f"--add-dir {vault.resolve()}", command)
         self.assertIn("ITB_CODEX_APPROVAL_POLICY_EFFECTIVE=never", command)
         self.assertIn("ITB_CODEX_MODEL_EFFECTIVE=gpt-5.5", command)
@@ -14945,7 +14947,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
         self.assertEqual(memory_policy["policy"], "isolated_session_config")
         self.assertEqual(memory_policy["auth_policy"], "provider_default_auth")
         self.assertEqual(memory_policy["auth_seed"]["status"], "not_applicable")
-        self.assertEqual(memory_policy["workspace_cwd"], "/Users/takagiyasushi/skills-repo")
+        self.assertEqual(memory_policy["workspace_cwd"], str(workspace))
         self.assertEqual(memory_policy["launch_cwd"], str(codex_state_dir))
         self.assertTrue(codex_memory_files_exist)
 
@@ -14966,7 +14968,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
             with self.assertRaisesRegex(ValueError, "codex exec provider adapter"):
                 builder.build_agent_command(
                     row,
-                    "/Users/takagiyasushi/skills-repo",
+                    "/private/tmp/itb-worktrees/skills-repo",
                     "provider_cli",
                 )
 
@@ -15001,7 +15003,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
             request_id="req123",
             agent_id="gate-prompt-formatter",
             source_agent="codex-main",
-            cwd="/Users/takagiyasushi/skills-repo",
+            cwd="/private/tmp/itb-worktrees/skills-repo",
             dispatch_manifest_ref="dispatch/agent-dispatch/gate-prompt-formatter/req123/manifest.yaml",
             dispatch_manifest_path="/tmp/queue/dispatch/agent-dispatch/gate-prompt-formatter/req123/manifest.yaml",
             instruction_ref="dispatch/agent-dispatch/gate-prompt-formatter/req123/instruction.yaml",
@@ -15031,7 +15033,7 @@ printf '%s\n' '{"type":"result","subtype":"success","model":"gpt-5.5","session_i
             request_id="req123",
             agent_id="gate-prompt-formatter",
             source_agent="claude-main",
-            cwd="/Users/takagiyasushi/skills-repo",
+            cwd="/private/tmp/itb-worktrees/skills-repo",
             dispatch_manifest_ref="dispatch/agent-dispatch/gate-prompt-formatter/req123/manifest.yaml",
             instruction_ref="dispatch/agent-dispatch/gate-prompt-formatter/req123/instruction.yaml",
             report_ref="reports/agent-dispatch/gate-prompt-formatter/req123.yaml",
@@ -15810,7 +15812,7 @@ Marker format: [MARKER_NAME id=MARKER_ID]
         result, error = builder.ensure_provider_cli_for_agent(
             row=row,
             state={"organization_instance_id": "org-test", "tmux_session": "itb-org-test"},
-            cwd="/Users/takagiyasushi/skills-repo",
+            cwd="/private/tmp/itb-worktrees/skills-repo",
             now="2026-01-01T00:00:00+09:00",
         )
 

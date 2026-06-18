@@ -338,8 +338,8 @@ Narration policy: act on routine flow checks silently; surface only anomaly or a
 
 | Policy | Status | SHA1 | Bytes | Source |
 |---|---|---:|---:|---|
-| AI-Organization | `ready` | `380b4a2cab2325b88f68993485ae997428265913` | 31825 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/AI-Organization.md` |
-| Gate-IO-Contract | `ready` | `7af1c38f0b140feb45a11009ca94f70da542344d` | 34482 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Gate-IO-Contract.md` |
-| Dispatcher-IO-Contract | `ready` | `75cd888d160d7ae0a87640cefd1268ea84b4209e` | 6188 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Dispatcher-IO-Contract.md` |
-| Task-File-Conventions | `ready` | `ac5b009a443216dd7b00ebaa5541eaecfe341176` | 18748 | `~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Task-File-Conventions.md` |
+| AI-Organization | `ready` | `380b4a2cab2325b88f68993485ae997428265913` | 31825 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/AI-Organization.md` |
+| Gate-IO-Contract | `ready` | `7af1c38f0b140feb45a11009ca94f70da542344d` | 34482 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Gate-IO-Contract.md` |
+| Dispatcher-IO-Contract | `ready` | `75cd888d160d7ae0a87640cefd1268ea84b4209e` | 6188 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Dispatcher-IO-Contract.md` |
+| Task-File-Conventions | `ready` | `ac5b009a443216dd7b00ebaa5541eaecfe341176` | 18748 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Task-File-Conventions.md` |
 <!-- ITB_POLICY_DIGEST_SNAPSHOT_END -->

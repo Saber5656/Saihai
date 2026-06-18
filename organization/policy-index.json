@@ -2,25 +2,25 @@
   "schema_version": 1,
   "policies": [
     {
-      "source": "/Users/takagiyasushi/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/AI-Organization.md",
+      "source": "${AGENTS_VAULT_ROOT}/03-Contexts/Policies/AI-Organization.md",
       "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/policies/AI-Organization.md",
       "bytes": 32964,
       "sha1": "2c5b08a4b94d488b69abb3ab3074d831277de7de"
     },
     {
-      "source": "/Users/takagiyasushi/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Gate-IO-Contract.md",
+      "source": "${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Gate-IO-Contract.md",
       "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/policies/Gate-IO-Contract.md",
       "bytes": 35466,
       "sha1": "e16580e83bca21c108782daebe4855ae97dd584e"
     },
     {
-      "source": "/Users/takagiyasushi/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Dispatcher-IO-Contract.md",
+      "source": "${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Dispatcher-IO-Contract.md",
       "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/policies/Dispatcher-IO-Contract.md",
       "bytes": 6361,
       "sha1": "df7bc7057ed5c15f8e3b9c641b8b30728143b04c"
     },
     {
-      "source": "/Users/takagiyasushi/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault/03-Contexts/Policies/Task-File-Conventions.md",
+      "source": "${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Task-File-Conventions.md",
       "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/policies/Task-File-Conventions.md",
       "bytes": 18799,
       "sha1": "e330c941127cc05844bb0be35aedde3a5adae046"

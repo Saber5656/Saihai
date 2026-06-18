@@ -11,14 +11,24 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 from pathlib import Path
 
-DEFAULT_AGENT_VAULT = Path(
-    "/Users/takagiyasushi/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault"
+
+def env_path(name: str, default: Path) -> Path:
+    return Path(os.environ.get(name, str(default))).expanduser()
+
+
+DEFAULT_AGENT_VAULT = env_path(
+    "AGENTS_VAULT_ROOT",
+    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault",
 )
-DEFAULT_SKILLS_ROOT = Path("/Users/takagiyasushi/skills-repo/skills")
+DEFAULT_SKILLS_ROOT = env_path(
+    "SKILLS_REPO_SKILLS_ROOT",
+    env_path("SKILLS_ROOT", Path.home() / "skills-repo" / "skills"),
+)
 
 POLICY_REFS = [
     "AI-Organization.md",
@@ -35,6 +45,22 @@ RUNTIME_REFS = {
 
 TEAM_PREFIXES = ("gate-", "teams-", "tech-", "contents-", "business-", "infra-")
 TOOL_ROLE_ALLOWLIST = {"git-publisher"}
+PATH_ALIASES = (
+    ("AGENTS_VAULT_ROOT", DEFAULT_AGENT_VAULT),
+    ("SKILLS_ROOT", DEFAULT_SKILLS_ROOT),
+)
+
+
+def public_path(path: Path) -> str:
+    resolved = path.expanduser()
+    for alias, root in PATH_ALIASES:
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            continue
+        suffix = relative.as_posix()
+        return f"${{{alias}}}/{suffix}" if suffix else f"${{{alias}}}"
+    return str(path)
 
 
 def sha1(path: Path) -> str:
@@ -74,8 +100,8 @@ def copy_with_record(src: Path, dst: Path) -> dict[str, str | int]:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     return {
-        "source": str(src),
-        "path": str(dst),
+        "source": public_path(src),
+        "path": public_path(dst),
         "bytes": dst.stat().st_size,
         "sha1": sha1(dst),
     }
@@ -156,8 +182,8 @@ def main() -> None:
                 "policy_count": len(policies),
                 "runtime_ref_count": len(runtime),
                 "role_count": len(roles),
-                "agent_vault": str(args.agent_vault),
-                "skills_root": str(args.skills_root),
+                "agent_vault": public_path(args.agent_vault),
+                "skills_root": public_path(args.skills_root),
             },
             ensure_ascii=False,
             indent=2,

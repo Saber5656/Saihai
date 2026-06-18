@@ -8,12 +8,12 @@ last_updated: 2026-06-10
 
 # Dispatcher I/O Contract
 
-このノートは `infra-task-dispatcher` が Obsidian Vault を正本としてタスク受付、採番、進行管理を行うための再利用ポリシーだよ。  
+このノートは `infra-task-dispatcher` が Obsidian Vault を正本としてタスク受付、採番、進行管理を行うための再利用ポリシーだよ。
 詳細な実施ログは [[01-Projects/AI-Agent-Organization/TSK-1001-dispatcher-io-contract]] を参照する。
 
 ## Source of Truth
 
-Completion Gate の機械検証用チェーン、pre-final 必須 section、main-agent 禁止 role 集合は `/Users/takagiyasushi/dev/Agent-Teams-Viewer/organization/runtime/infra-team-bootstrap/config/completion-chain.yaml` を正本とする。このノート内の completion gate 記述は Vault 運用向け説明であり、ITB builder / Gate role は config を参照する。
+Completion Gate の機械検証用チェーン、pre-final 必須 section、main-agent 禁止 role 集合は `${AGENT_TEAMS_VIEWER_ROOT}/organization/runtime/infra-team-bootstrap/config/completion-chain.yaml` を正本とする。このノート内の completion gate 記述は Vault 運用向け説明であり、ITB builder / Gate role は config を参照する。
 
 | Artifact | Role |
 |---|---|

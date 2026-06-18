@@ -18,15 +18,29 @@ import sys
 from pathlib import Path
 from typing import Any
 
+def env_path(name: str, default: Path) -> Path:
+    return Path(os.environ.get(name, str(default))).expanduser()
 
-AGENTS_VAULT = Path(
-    "/Users/takagiyasushi/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault"
+
+def first_env_path(names: list[str], default: Path) -> Path:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return Path(value).expanduser()
+    return default.expanduser()
+
+
+AGENTS_VAULT = env_path(
+    "AGENTS_VAULT_ROOT",
+    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault",
 )
-YASU_VAULT = Path(
-    "/Users/takagiyasushi/Library/Mobile Documents/iCloud~md~obsidian/Documents/Yasu's Vault"
+USER_VAULT = first_env_path(
+    ["USER_VAULT_ROOT", "YASU_VAULT_ROOT"],
+    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Personal Vault",
 )
-SKILLS_REPO = Path("/Users/takagiyasushi/skills-repo")
-DOTFILES = Path("/Users/takagiyasushi/dotfiles")
+YASU_VAULT = USER_VAULT
+SKILLS_REPO = env_path("SKILLS_REPO_ROOT", Path.home() / "skills-repo")
+DOTFILES = env_path("DOTFILES_ROOT", Path.home() / "dotfiles")
 
 DEFAULT_REPORT = AGENTS_VAULT / "03-Contexts/Reports/ITD-Monitoring-Report.md"
 DEFAULT_ROOTS = [AGENTS_VAULT, YASU_VAULT, SKILLS_REPO, DOTFILES]
