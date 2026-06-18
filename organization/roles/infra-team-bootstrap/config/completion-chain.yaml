@@ -1,0 +1,150 @@
+{
+  "completion_chain": [
+    "team-completion-check",
+    "gate-task-evaluator",
+    "git-publisher",
+    "vault_final_update",
+    "finalization-check",
+    "main_transport_renderer"
+  ],
+  "completion_gate_required_hops": [
+    "team-completion-check",
+    "finalization-check",
+    "main_transport_renderer"
+  ],
+  "gate_sla": {
+    "default_pending_seconds": 900,
+    "role_pending_seconds": {
+      "gate-prompt-formatter": 120,
+      "teams-project-manager": 300,
+      "gate-task-evaluator": 300,
+      "tech-director": 600,
+      "contents-director": 600,
+      "business-director": 600,
+      "infra-director": 600
+    },
+    "hop_pending_seconds": {
+      "gate-task-creator->teams-project-manager": 120,
+      "teams-project-manager->gate-task-evaluator": 120
+    },
+    "notification_classes": [
+      "silent",
+      "flow_alert",
+      "approval_wait",
+      "done"
+    ],
+    "breach_notification_class": "flow_alert",
+    "dead_letter_notification_class": "flow_alert",
+    "approval_wait_notification_class": "approval_wait",
+    "done_notification_class": "done",
+    "idle_notification_class": "silent"
+  },
+  "assessor_integration_policy": {
+    "mode": "tpm_team_completion_check",
+    "human_approval_required_for_mode_change": true,
+    "allowed_modes": [
+      "tpm_completion_assessment",
+      "tpm_team_completion_check"
+    ],
+    "notes": "gate-task-assessor is compatibility reference only. Team Directors report completion to teams-project-manager; TPM records Team Completion Check evidence before gate-task-evaluator."
+  },
+  "guardian_integration_policy": {
+    "mode": "gte_vault_finalization_check",
+    "human_approval_required_for_mode_change": true,
+    "allowed_modes": [
+      "gte_vault_finalization_check"
+    ],
+    "notes": "gate-task-guardian is compatibility reference only. Finalization Check verifies GTE final review, Git publication closure, Vault final update, and transport readiness."
+  },
+  "auto_queue_handoffs": [
+    {
+      "from_role": "gate-prompt-formatter",
+      "to_role": "teams-project-manager",
+      "on_status": "done",
+      "handoff_type": "command_then_queue",
+      "command": "gtc-scaffold",
+      "command_owner_role": "gate-task-creator",
+      "queue_after_command": true
+    },
+    {
+      "from_role": "teams-project-manager",
+      "to_role": "gate-task-evaluator",
+      "on_status": "done",
+      "precheck_command": "team-completion-check",
+      "command_gate_role": "team-completion-check",
+      "command_flow_phase": "post_routing",
+      "require_next_phase_allowed": true
+    },
+    {
+      "from_role": "gate-task-evaluator",
+      "to_role": "git-publisher",
+      "on_status": "done",
+      "required_report_result": "quality_ok",
+      "required_handoff_to": "git-publisher",
+      "publication_gate_phase": "manifest"
+    },
+    {
+      "from_role": "gate-task-evaluator",
+      "to_role": "vault_final_update",
+      "on_status": "done",
+      "handoff_type": "command",
+      "command": "vault-final-update",
+      "required_report_result": "quality_ok",
+      "required_handoff_to": "vault_final_update",
+      "auto_finalization_check": true,
+      "auto_final_transport_render_check": true
+    },
+    {
+      "from_role": "git-publisher",
+      "to_role": "vault_final_update",
+      "on_status": "done",
+      "handoff_type": "command",
+      "command": "vault-final-update",
+      "required_handoff_to": "vault_final_update",
+      "auto_finalization_check": true,
+      "auto_final_transport_render_check": true
+    }
+  ],
+  "main_agent_evidence_roles": [
+    "main-agent",
+    "main_agent",
+    "codex-main",
+    "claude-main",
+    "entrypoint",
+    "user-prompt-submit",
+    "main_transport_renderer",
+    "main-transport-renderer"
+  ],
+  "main_agent_executor_roles": [
+    "codex_main",
+    "claude_main",
+    "entrypoint",
+    "main",
+    "main_agent",
+    "main_transport_renderer"
+  ],
+  "pre_final_required_sections": [
+    "Quality Evaluation",
+    "Task Change Manifest",
+    "Role Execution Evidence",
+    "Team Completion Check",
+    "Finalization Check",
+    "Completion Envelope",
+    "Final Transport Render Check"
+  ],
+  "schema_version": 1,
+  "valid_routing_directors": [
+    "tech-director",
+    "contents-director",
+    "business-director",
+    "infra-director",
+    "gate-prompt-formatter",
+    "gate-task-creator",
+    "teams-project-manager",
+    "team-completion-check",
+    "gate-task-evaluator",
+    "vault_final_update",
+    "finalization-check",
+    "main_transport_renderer"
+  ]
+}

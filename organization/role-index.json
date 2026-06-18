@@ -2,10 +2,10 @@
   "schema_version": 1,
   "roles": [
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/business-director/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/business-director.md",
-      "bytes": 11454,
-      "sha1": "fa0e02b7f87c4dc88cc7b6432078187a09d77d45",
+      "source": "${SKILLS_ROOT}/business-director/SKILL.md",
+      "path": "organization/roles/business-director/skill.md",
+      "bytes": 12168,
+      "sha1": "25b1d04a2f4e026fa92b749c6e0765be5aeeadf4",
       "role_id": "business-director",
       "team": "business",
       "category": "Team Role",
@@ -13,13 +13,28 @@
       "purpose": "business チーム内の担当割り振り、上流判断、レビュー線を統括する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/business-director/SKILL.md",
+          "path": "organization/roles/business-director/skill.md",
+          "bytes": 12168,
+          "sha1": "25b1d04a2f4e026fa92b749c6e0765be5aeeadf4"
+        },
+        {
+          "source": "${SKILLS_ROOT}/business-director/evals/evals.json",
+          "path": "organization/roles/business-director/evals/evals.json",
+          "bytes": 3522,
+          "sha1": "07a6306137780d9b7517bf236acc404a37362e39"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/business-information-strategy/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/business-information-strategy.md",
-      "bytes": 5944,
-      "sha1": "0ee1b452d7eb1b118e211e26da457135cc88d622",
+      "source": "${SKILLS_ROOT}/business-information-strategy/SKILL.md",
+      "path": "organization/roles/business-information-strategy/skill.md",
+      "bytes": 5868,
+      "sha1": "55b941e85518b35abfe8940e4a1e44aae8927401",
       "role_id": "business-information-strategy",
       "team": "business",
       "category": "Team Role",
@@ -27,13 +42,22 @@
       "purpose": "情報整理軸、伝達設計、意思決定観点を整理する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/business-information-strategy/SKILL.md",
+          "path": "organization/roles/business-information-strategy/skill.md",
+          "bytes": 5868,
+          "sha1": "55b941e85518b35abfe8940e4a1e44aae8927401"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/business-legal-reviewer/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/business-legal-reviewer.md",
-      "bytes": 6031,
-      "sha1": "0f1830e22915064cb74ec1dfb7dcba3eab257e81",
+      "source": "${SKILLS_ROOT}/business-legal-reviewer/SKILL.md",
+      "path": "organization/roles/business-legal-reviewer/skill.md",
+      "bytes": 5955,
+      "sha1": "6f511512f68b6a60159b920baccc104eaeaa8220",
       "role_id": "business-legal-reviewer",
       "team": "business",
       "category": "Team Role",
@@ -41,13 +65,22 @@
       "purpose": "契約、規約、表現リスク、運用上の法的懸念を整理する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/business-legal-reviewer/SKILL.md",
+          "path": "organization/roles/business-legal-reviewer/skill.md",
+          "bytes": 5955,
+          "sha1": "6f511512f68b6a60159b920baccc104eaeaa8220"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/business-marketing-director/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/business-marketing-director.md",
-      "bytes": 1424,
-      "sha1": "f73acdf55a2ecf5fe9efa8b0d14cf4325a4eeb13",
+      "source": "${SKILLS_ROOT}/business-marketing-director/SKILL.md",
+      "path": "organization/roles/business-marketing-director/skill.md",
+      "bytes": 1397,
+      "sha1": "643afe5afc750b67819d335388ce63b703606946",
       "role_id": "business-marketing-director",
       "team": "business",
       "category": "Team Role",
@@ -55,13 +88,22 @@
       "purpose": "business-director への移行用エイリアス",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/business-marketing-director/SKILL.md",
+          "path": "organization/roles/business-marketing-director/skill.md",
+          "bytes": 1397,
+          "sha1": "643afe5afc750b67819d335388ce63b703606946"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/business-partnership-manager/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/business-partnership-manager.md",
-      "bytes": 5979,
-      "sha1": "83023e09369409dd8b520d06205612dd8f47443f",
+      "source": "${SKILLS_ROOT}/business-partnership-manager/SKILL.md",
+      "path": "organization/roles/business-partnership-manager/skill.md",
+      "bytes": 5903,
+      "sha1": "62df022a6c94e568b1b4faf006fa6ae8a53a2337",
       "role_id": "business-partnership-manager",
       "team": "business",
       "category": "Team Role",
@@ -69,13 +111,22 @@
       "purpose": "提携調整、合意事項整理、協業観点の下準備を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/business-partnership-manager/SKILL.md",
+          "path": "organization/roles/business-partnership-manager/skill.md",
+          "bytes": 5903,
+          "sha1": "62df022a6c94e568b1b4faf006fa6ae8a53a2337"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/business-strategy/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/business-strategy.md",
-      "bytes": 5926,
-      "sha1": "5e40f722b89f5dd0fea51f5ce730be4165a4ba06",
+      "source": "${SKILLS_ROOT}/business-strategy/SKILL.md",
+      "path": "organization/roles/business-strategy/skill.md",
+      "bytes": 5850,
+      "sha1": "258d769b21e85d228a455e24290b428068de44c2",
       "role_id": "business-strategy",
       "team": "business",
       "category": "Team Role",
@@ -83,13 +134,22 @@
       "purpose": "上流要件、優先順位、事業トレードオフ、意思決定材料を整理する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/business-strategy/SKILL.md",
+          "path": "organization/roles/business-strategy/skill.md",
+          "bytes": 5850,
+          "sha1": "258d769b21e85d228a455e24290b428068de44c2"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/contents-director/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/contents-director.md",
-      "bytes": 12227,
-      "sha1": "8435e480ec8e9c3063cc406e24198e848e0a8952",
+      "source": "${SKILLS_ROOT}/contents-director/SKILL.md",
+      "path": "organization/roles/contents-director/skill.md",
+      "bytes": 12983,
+      "sha1": "84a66f9cc3685d3a644c60bf7177af49b21553bb",
       "role_id": "contents-director",
       "team": "contents",
       "category": "Team Role",
@@ -97,13 +157,28 @@
       "purpose": "contents チーム内の担当割り振り、品質基準、レビュー線を統括する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/contents-director/SKILL.md",
+          "path": "organization/roles/contents-director/skill.md",
+          "bytes": 12983,
+          "sha1": "84a66f9cc3685d3a644c60bf7177af49b21553bb"
+        },
+        {
+          "source": "${SKILLS_ROOT}/contents-director/evals/evals.json",
+          "path": "organization/roles/contents-director/evals/evals.json",
+          "bytes": 3511,
+          "sha1": "fd0fc1ba66ba1c5ef7dd3bea81af22c37563e1c6"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/contents-formatter/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/contents-formatter.md",
-      "bytes": 5928,
-      "sha1": "11fc107ede65941cddc558a01cffd2c140e9cef1",
+      "source": "${SKILLS_ROOT}/contents-formatter/SKILL.md",
+      "path": "organization/roles/contents-formatter/skill.md",
+      "bytes": 5852,
+      "sha1": "92996b33597e10a553ceeb5fc4f967fd076ffdcf",
       "role_id": "contents-formatter",
       "team": "contents",
       "category": "Team Role",
@@ -111,13 +186,22 @@
       "purpose": "長文整形、提出形式化、読みやすさ改善、AI っぽさ低減を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/contents-formatter/SKILL.md",
+          "path": "organization/roles/contents-formatter/skill.md",
+          "bytes": 5852,
+          "sha1": "92996b33597e10a553ceeb5fc4f967fd076ffdcf"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/contents-quality-manager/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/contents-quality-manager.md",
-      "bytes": 5964,
-      "sha1": "3f31a7ce92e09c544454641350669de02accd367",
+      "source": "${SKILLS_ROOT}/contents-quality-manager/SKILL.md",
+      "path": "organization/roles/contents-quality-manager/skill.md",
+      "bytes": 5888,
+      "sha1": "df68acf379245758d17869f49aba812f9afb9dfe",
       "role_id": "contents-quality-manager",
       "team": "contents",
       "category": "Team Role",
@@ -125,13 +209,22 @@
       "purpose": "内容の抜け漏れ、読みやすさ、トーン、一貫性の品質管理を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/contents-quality-manager/SKILL.md",
+          "path": "organization/roles/contents-quality-manager/skill.md",
+          "bytes": 5888,
+          "sha1": "df68acf379245758d17869f49aba812f9afb9dfe"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/contents-researcher/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/contents-researcher.md",
-      "bytes": 13431,
-      "sha1": "5de93120605412ab7f8899710c834fd3c34486d1",
+      "source": "${SKILLS_ROOT}/contents-researcher/SKILL.md",
+      "path": "organization/roles/contents-researcher/skill.md",
+      "bytes": 13355,
+      "sha1": "705c02e022739ec8d877cb76012eb226b91250c7",
       "role_id": "contents-researcher",
       "team": "contents",
       "category": "Team Role",
@@ -139,13 +232,28 @@
       "purpose": "記事化・要約・説明文作成の前提調査、論点整理、出典整理、後続担当への handoff を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/contents-researcher/SKILL.md",
+          "path": "organization/roles/contents-researcher/skill.md",
+          "bytes": 13355,
+          "sha1": "705c02e022739ec8d877cb76012eb226b91250c7"
+        },
+        {
+          "source": "${SKILLS_ROOT}/contents-researcher/evals/evals.json",
+          "path": "organization/roles/contents-researcher/evals/evals.json",
+          "bytes": 3416,
+          "sha1": "82603a4577428388bec7ba7b4a13ac5ab07c9b85"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/gate-prompt-formatter/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/gate-prompt-formatter.md",
-      "bytes": 7132,
-      "sha1": "97108ff2d11e3ce1732be88ccf757b2757befc7c",
+      "source": "${SKILLS_ROOT}/gate-prompt-formatter/SKILL.md",
+      "path": "organization/roles/gate-prompt-formatter/skill.md",
+      "bytes": 8693,
+      "sha1": "27aaa0e5f1d7ab8196c654b295b139f8c34a7463",
       "role_id": "gate-prompt-formatter",
       "team": "gate",
       "category": "Team Role",
@@ -153,13 +261,22 @@
       "purpose": "人間依頼を最小限の Gate Intake Envelope に高速正規化する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/gate-prompt-formatter/SKILL.md",
+          "path": "organization/roles/gate-prompt-formatter/skill.md",
+          "bytes": 8693,
+          "sha1": "27aaa0e5f1d7ab8196c654b295b139f8c34a7463"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/gate-response-humanizer/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/gate-response-humanizer.md",
-      "bytes": 9578,
-      "sha1": "4af56abcc0cd70a14fdbba6782241ab8d195df69",
+      "source": "${SKILLS_ROOT}/gate-response-humanizer/SKILL.md",
+      "path": "organization/roles/gate-response-humanizer/skill.md",
+      "bytes": 9852,
+      "sha1": "85e97eeea81ef4521145ca2ad0711be0172af07a",
       "role_id": "gate-response-humanizer",
       "team": "gate",
       "category": "Team Role",
@@ -167,41 +284,104 @@
       "purpose": "main transport renderer が使う最終応答文体プロファイルの互換参照",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 4,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/gate-response-humanizer/SKILL.md",
+          "path": "organization/roles/gate-response-humanizer/skill.md",
+          "bytes": 9852,
+          "sha1": "85e97eeea81ef4521145ca2ad0711be0172af07a"
+        },
+        {
+          "source": "${SKILLS_ROOT}/gate-response-humanizer/evals/benchmark.md",
+          "path": "organization/roles/gate-response-humanizer/evals/benchmark.md",
+          "bytes": 2959,
+          "sha1": "4f70b3394eb4ef907dea578b13936ca3dc685dc6"
+        },
+        {
+          "source": "${SKILLS_ROOT}/gate-response-humanizer/evals/evals.json",
+          "path": "organization/roles/gate-response-humanizer/evals/evals.json",
+          "bytes": 6023,
+          "sha1": "88b4a5b1e4144e4bf9bacd8c1e2c128461c72cce"
+        },
+        {
+          "source": "${SKILLS_ROOT}/gate-response-humanizer/references/imouto-sweet.md",
+          "path": "organization/roles/gate-response-humanizer/references/imouto-sweet.md",
+          "bytes": 10896,
+          "sha1": "2adc9a731b8ca967e8b2525f71ff99bb3e64088c"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/gate-task-assessor/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/gate-task-assessor.md",
-      "bytes": 8752,
-      "sha1": "eacc28851baab27c7499e52c6c40de0f319a7e49",
+      "source": "${SKILLS_ROOT}/gate-task-assessor/SKILL.md",
+      "path": "organization/roles/gate-task-assessor/skill.md",
+      "bytes": 5747,
+      "sha1": "7d90aa400c088b4c6fad49a0d18100a1fc3e6745",
       "role_id": "gate-task-assessor",
       "team": "gate",
       "category": "Team Role",
-      "status": "active",
-      "purpose": "Team Director 完了報告を集約し、全 team task 完了と相互レビュー完了を確認して evaluator へ渡す",
+      "status": "reference",
+      "purpose": "旧 Completion Assessment 契約の互換参照。runtime resident agent としては使わず、TPM の Team Completion Check を正本にする",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/gate-task-assessor/SKILL.md",
+          "path": "organization/roles/gate-task-assessor/skill.md",
+          "bytes": 5747,
+          "sha1": "7d90aa400c088b4c6fad49a0d18100a1fc3e6745"
+        },
+        {
+          "source": "${SKILLS_ROOT}/gate-task-assessor/evals/evals.json",
+          "path": "organization/roles/gate-task-assessor/evals/evals.json",
+          "bytes": 2202,
+          "sha1": "4c683c79a8c955ee1dc05218e016d40a3a08ae4b"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/gate-task-creator/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/gate-task-creator.md",
-      "bytes": 23376,
-      "sha1": "92400da7c8d5324bc33140384c05ead10ecd3b44",
+      "source": "${SKILLS_ROOT}/gate-task-creator/SKILL.md",
+      "path": "organization/roles/gate-task-creator/skill.md",
+      "bytes": 7884,
+      "sha1": "b81241404a2d7b98a84d534c6e39b136fe46d8f8",
       "role_id": "gate-task-creator",
       "team": "gate",
       "category": "Team Role",
       "status": "active",
-      "purpose": "Gate 入口で正規化された依頼を Vault タスク成果物へ変換し、teams-project-manager へ必ず引き渡す",
+      "purpose": "Gate Intake Envelope から Task artifact を作る責務境界を定義し、builder scaffold 結果を teams-project-manager へ渡す",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 3,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/gate-task-creator/SKILL.md",
+          "path": "organization/roles/gate-task-creator/skill.md",
+          "bytes": 7884,
+          "sha1": "b81241404a2d7b98a84d534c6e39b136fe46d8f8"
+        },
+        {
+          "source": "${SKILLS_ROOT}/gate-task-creator/evals/evals.json",
+          "path": "organization/roles/gate-task-creator/evals/evals.json",
+          "bytes": 3758,
+          "sha1": "77d9cfd8a39678ae7b83447bff81584d273bb663"
+        },
+        {
+          "source": "${SKILLS_ROOT}/gate-task-creator/references/task-management-rule-boundary.md",
+          "path": "organization/roles/gate-task-creator/references/task-management-rule-boundary.md",
+          "bytes": 1192,
+          "sha1": "6363fc6fcfdb12790f8f3f828966058601c4ef5d"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/gate-task-evaluator/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/gate-task-evaluator.md",
-      "bytes": 13976,
-      "sha1": "e50d5d13c809039fd061d7825839948e703cd93d",
+      "source": "${SKILLS_ROOT}/gate-task-evaluator/SKILL.md",
+      "path": "organization/roles/gate-task-evaluator/skill.md",
+      "bytes": 12245,
+      "sha1": "59b444201780958b1cc53ff81710ba59303c21f2",
       "role_id": "gate-task-evaluator",
       "team": "gate",
       "category": "Team Role",
@@ -209,27 +389,57 @@
       "purpose": "全チーム完了後の成果物品質と Git publication 要否を評価し、git-publisher または final update へ進める",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/gate-task-evaluator/SKILL.md",
+          "path": "organization/roles/gate-task-evaluator/skill.md",
+          "bytes": 12245,
+          "sha1": "59b444201780958b1cc53ff81710ba59303c21f2"
+        },
+        {
+          "source": "${SKILLS_ROOT}/gate-task-evaluator/evals/evals.json",
+          "path": "organization/roles/gate-task-evaluator/evals/evals.json",
+          "bytes": 7573,
+          "sha1": "bad6ddf88ab1566152a18924798aa3f06d902fb5"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/gate-task-guardian/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/gate-task-guardian.md",
-      "bytes": 14515,
-      "sha1": "f8aea199f74738a5bc094735ab3d0b11d5121f15",
+      "source": "${SKILLS_ROOT}/gate-task-guardian/SKILL.md",
+      "path": "organization/roles/gate-task-guardian/skill.md",
+      "bytes": 7461,
+      "sha1": "97f00c92365d390db1cda95b9be3edee0b72b585",
       "role_id": "gate-task-guardian",
       "team": "gate",
       "category": "Team Role",
-      "status": "active",
-      "purpose": "Completion Gate の最終番人として、done / main transport renderer 進行前に全証跡を検査する",
+      "status": "reference",
+      "purpose": "旧 Guardian Verdict 契約の互換参照。runtime resident agent としては使わず、Finalization Check を正本にする",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/gate-task-guardian/SKILL.md",
+          "path": "organization/roles/gate-task-guardian/skill.md",
+          "bytes": 7461,
+          "sha1": "97f00c92365d390db1cda95b9be3edee0b72b585"
+        },
+        {
+          "source": "${SKILLS_ROOT}/gate-task-guardian/evals/evals.json",
+          "path": "organization/roles/gate-task-guardian/evals/evals.json",
+          "bytes": 6142,
+          "sha1": "feb8494c909aa998a940d7df177ca0aab61c5a29"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/git-publisher/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/git-publisher.md",
-      "bytes": 11618,
-      "sha1": "f0168246fbc53b0dc6d38e1364f707c461c9c736",
+      "source": "${SKILLS_ROOT}/git-publisher/SKILL.md",
+      "path": "organization/roles/git-publisher/skill.md",
+      "bytes": 14238,
+      "sha1": "2857d7fe567c9283952453e29743336e50adfe94",
       "role_id": "git-publisher",
       "team": "git",
       "category": "Dev",
@@ -237,13 +447,28 @@
       "purpose": "Git Publication Manifest に基づき commit / push / PR 作成を安全な順序で委譲し、結果を記録する",
       "user_invocable": "true",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/git-publisher/SKILL.md",
+          "path": "organization/roles/git-publisher/skill.md",
+          "bytes": 14238,
+          "sha1": "2857d7fe567c9283952453e29743336e50adfe94"
+        },
+        {
+          "source": "${SKILLS_ROOT}/git-publisher/evals/evals.json",
+          "path": "organization/roles/git-publisher/evals/evals.json",
+          "bytes": 5963,
+          "sha1": "a0c4dcefe55f81680988141f07cb2e96577b881c"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/infra-director/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/infra-director.md",
-      "bytes": 13027,
-      "sha1": "f9682611df8818556bfc8cab0293bf4fd472dc64",
+      "source": "${SKILLS_ROOT}/infra-director/SKILL.md",
+      "path": "organization/roles/infra-director/skill.md",
+      "bytes": 13790,
+      "sha1": "61864a2dd83e9c411cb73048876180ac7b2960a4",
       "role_id": "infra-director",
       "team": "infra",
       "category": "Team Role",
@@ -251,13 +476,28 @@
       "purpose": "infra チーム内の担当割り振り、Vault 安全性、状態同期、レビュー線を統括する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/infra-director/SKILL.md",
+          "path": "organization/roles/infra-director/skill.md",
+          "bytes": 13790,
+          "sha1": "61864a2dd83e9c411cb73048876180ac7b2960a4"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-director/evals/evals.json",
+          "path": "organization/roles/infra-director/evals/evals.json",
+          "bytes": 3564,
+          "sha1": "fbe200d3b32a9c556e7a9c89912cb17316c6dbd5"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/infra-local-qa/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/infra-local-qa.md",
-      "bytes": 9868,
-      "sha1": "5cfe7782152694d1c548b530ecac16657b882925",
+      "source": "${SKILLS_ROOT}/infra-local-qa/SKILL.md",
+      "path": "organization/roles/infra-local-qa/skill.md",
+      "bytes": 9844,
+      "sha1": "488c1ff67bf5081a402b4f082c55b7df15223175",
       "role_id": "infra-local-qa",
       "team": "infra",
       "category": "Team Role",
@@ -265,13 +505,28 @@
       "purpose": "Vault とローカル作業領域の品質管理、コンテキスト整理、フォルダ構成最適化、復旧可能な安全整理を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/infra-local-qa/SKILL.md",
+          "path": "organization/roles/infra-local-qa/skill.md",
+          "bytes": 9844,
+          "sha1": "488c1ff67bf5081a402b4f082c55b7df15223175"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-local-qa/evals/evals.json",
+          "path": "organization/roles/infra-local-qa/evals/evals.json",
+          "bytes": 2517,
+          "sha1": "7d7eafc4f9195a703397b7098d49fb563f315226"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/infra-task-dispatcher/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/infra-task-dispatcher.md",
-      "bytes": 10044,
-      "sha1": "3e005cc6e8402fcf079057b4a234b1aba86a6130",
+      "source": "${SKILLS_ROOT}/infra-task-dispatcher/SKILL.md",
+      "path": "organization/roles/infra-task-dispatcher/skill.md",
+      "bytes": 9662,
+      "sha1": "d77068422872a25d87946e323f884e36dbd8e3f5",
       "role_id": "infra-task-dispatcher",
       "team": "infra",
       "category": "Team Role",
@@ -279,13 +534,28 @@
       "purpose": "ITD として組織品質を定期監視し、問題候補を専用レポートに記録する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/infra-task-dispatcher/SKILL.md",
+          "path": "organization/roles/infra-task-dispatcher/skill.md",
+          "bytes": 9662,
+          "sha1": "d77068422872a25d87946e323f884e36dbd8e3f5"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-task-dispatcher/scripts/itd_monitor.py",
+          "path": "organization/roles/infra-task-dispatcher/scripts/itd_monitor.py",
+          "bytes": 16889,
+          "sha1": "045b389611d0ce6f1cd5620c054aeadbd25ee80a"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/infra-team-bootstrap/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/infra-team-bootstrap.md",
-      "bytes": 30547,
-      "sha1": "c8a57d381c888db51ca97c3dc867c5f266ea9c13",
+      "source": "${SKILLS_ROOT}/infra-team-bootstrap/SKILL.md",
+      "path": "organization/roles/infra-team-bootstrap/skill.md",
+      "bytes": 53964,
+      "sha1": "54b2b1ce371dea6e772095fa0683ad20f7ad714e",
       "role_id": "infra-team-bootstrap",
       "team": "infra",
       "category": "Team Role",
@@ -293,11 +563,164 @@
       "purpose": "チャットセッション単位の Organization Instance を bootstrap / resume / shutdown する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 25,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/SKILL.md",
+          "path": "organization/roles/infra-team-bootstrap/skill.md",
+          "bytes": 53964,
+          "sha1": "54b2b1ce371dea6e772095fa0683ad20f7ad714e"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/config/completion-chain.yaml",
+          "path": "organization/roles/infra-team-bootstrap/config/completion-chain.yaml",
+          "bytes": 4512,
+          "sha1": "c0b6fbb36715854aa38c75d76b0ef3e07c7f756b"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/config/gate-output-schemas.yaml",
+          "path": "organization/roles/infra-team-bootstrap/config/gate-output-schemas.yaml",
+          "bytes": 4738,
+          "sha1": "0f2b8c803d8b03e9f51e1174b4f73a5def8a8a97"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/config/role-agent-registry.yaml",
+          "path": "organization/roles/infra-team-bootstrap/config/role-agent-registry.yaml",
+          "bytes": 3738,
+          "sha1": "f05b92c4f70328578eb747ef5506a81b2c435c95"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/evals/evals.json",
+          "path": "organization/roles/infra-team-bootstrap/evals/evals.json",
+          "bytes": 9423,
+          "sha1": "89d527116a0f338ea8b955b4b714a36e84f6b600"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/README.md",
+          "path": "organization/roles/infra-team-bootstrap/hooks/README.md",
+          "bytes": 4063,
+          "sha1": "2796d754a0f36f77c8612ab7459a016aac0e1ef6"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/claude-settings-hooks.example.json",
+          "path": "organization/roles/infra-team-bootstrap/hooks/claude-settings-hooks.example.json",
+          "bytes": 1836,
+          "sha1": "9a331f76126b38d2ca00cf4f1382504a6f82ae3f"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/codex-config.example.toml",
+          "path": "organization/roles/infra-team-bootstrap/hooks/codex-config.example.toml",
+          "bytes": 30,
+          "sha1": "c7049e2276b8b58e20e2cb85cb6b6cd43a62cedb"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/codex-hooks.example.json",
+          "path": "organization/roles/infra-team-bootstrap/hooks/codex-hooks.example.json",
+          "bytes": 1474,
+          "sha1": "d494e988b639f4380ad332f3c37773e8d724fcb7"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/itb-final-response-guard.sh",
+          "path": "organization/roles/infra-team-bootstrap/hooks/itb-final-response-guard.sh",
+          "bytes": 236,
+          "sha1": "6dda5fa602950f5b3cfbaae6985f657ec2f35373"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/itb-hook-common.sh",
+          "path": "organization/roles/infra-team-bootstrap/hooks/itb-hook-common.sh",
+          "bytes": 1179,
+          "sha1": "9e6eb38bc9d1a4606d9f5424398a7a22b446c3fe"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/itb-pretooluse-guard.sh",
+          "path": "organization/roles/infra-team-bootstrap/hooks/itb-pretooluse-guard.sh",
+          "bytes": 232,
+          "sha1": "fa19980a456ab688625cd5e0e19a85d53134a657"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/itb-prompt-preflight.sh",
+          "path": "organization/roles/infra-team-bootstrap/hooks/itb-prompt-preflight.sh",
+          "bytes": 232,
+          "sha1": "7a53c8d9c6d2e8c5e9bb462893748244a9b08ef3"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/itb-session-end.sh",
+          "path": "organization/roles/infra-team-bootstrap/hooks/itb-session-end.sh",
+          "bytes": 227,
+          "sha1": "540c6ffbd9a728ba62b494ec545b3e34ff662c31"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/itb-session-start.sh",
+          "path": "organization/roles/infra-team-bootstrap/hooks/itb-session-start.sh",
+          "bytes": 245,
+          "sha1": "0169447d6a5136db3c4d0490e7ff2f5de7dc2a83"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/references/adapters/claude-team.md",
+          "path": "organization/roles/infra-team-bootstrap/references/adapters/claude-team.md",
+          "bytes": 14433,
+          "sha1": "aee817646cb5883bdafbebe60a8166e448c7d4e0"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/references/adapters/codex-team.md",
+          "path": "organization/roles/infra-team-bootstrap/references/adapters/codex-team.md",
+          "bytes": 19880,
+          "sha1": "69c9e9b225baad243ec45ebcea10d7876bfca8da"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/references/model-registry.md",
+          "path": "organization/roles/infra-team-bootstrap/references/model-registry.md",
+          "bytes": 13702,
+          "sha1": "40ba3252608e91b7752e5a59779d6a6af09e348b"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/references/resident-organization-comprehensive-plan.md",
+          "path": "organization/roles/infra-team-bootstrap/references/resident-organization-comprehensive-plan.md",
+          "bytes": 36307,
+          "sha1": "8c790d402dc22065b8c6f749841d2c80be2a6955"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/references/team-config.md",
+          "path": "organization/roles/infra-team-bootstrap/references/team-config.md",
+          "bytes": 6124,
+          "sha1": "68edfb27aa5955ddaa432c521e376ea4eb648ad7"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/scripts/itb_bootstrap_builder.py",
+          "path": "organization/roles/infra-team-bootstrap/scripts/itb_bootstrap_builder.py",
+          "bytes": 1030887,
+          "sha1": "c36cc38d9b47824808c5e75f408805f66f9ace5c"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/tests/fixtures/gate_command_ambiguity_cases.json",
+          "path": "organization/roles/infra-team-bootstrap/tests/fixtures/gate_command_ambiguity_cases.json",
+          "bytes": 2126,
+          "sha1": "4708991fb129e3bbd31d269e523a87ee6609b8f9"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/tests/fixtures/gate_flow_e2e_fixture.json",
+          "path": "organization/roles/infra-team-bootstrap/tests/fixtures/gate_flow_e2e_fixture.json",
+          "bytes": 2206,
+          "sha1": "6a2d01e6fa6037eab4a300a58f3613af648d4e87"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/tests/fixtures/pre_gpf_classifier_cases.json",
+          "path": "organization/roles/infra-team-bootstrap/tests/fixtures/pre_gpf_classifier_cases.json",
+          "bytes": 2646,
+          "sha1": "a7f72000f784746de5184a5b09560c648d18a158"
+        },
+        {
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/tests/test_itb_bootstrap_builder.py",
+          "path": "organization/roles/infra-team-bootstrap/tests/test_itb_bootstrap_builder.py",
+          "bytes": 878527,
+          "sha1": "1e6477bbcf50a81f606af0e327c7fe8f0640cbad"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/teams-developer/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/teams-developer.md",
+      "source": "${SKILLS_ROOT}/teams-developer/SKILL.md",
+      "path": "organization/roles/teams-developer/skill.md",
       "bytes": 9279,
       "sha1": "f4d20c970ac9c0eda78c90bb7897334c3bc46653",
       "role_id": "teams-developer",
@@ -307,13 +730,28 @@
       "purpose": "旧 Claude Teams 実験時の実装プロセスメモを参照用に保持する legacy スキル",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/teams-developer/SKILL.md",
+          "path": "organization/roles/teams-developer/skill.md",
+          "bytes": 9279,
+          "sha1": "f4d20c970ac9c0eda78c90bb7897334c3bc46653"
+        },
+        {
+          "source": "${SKILLS_ROOT}/teams-developer/evals/evals.json",
+          "path": "organization/roles/teams-developer/evals/evals.json",
+          "bytes": 2128,
+          "sha1": "2d3eaefc9376a3cfa74210c000bba5c61dbcacd2"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/teams-project-manager/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/teams-project-manager.md",
-      "bytes": 17488,
-      "sha1": "2cddf481f4ac6ae145c0240cabfe9ff807a316fa",
+      "source": "${SKILLS_ROOT}/teams-project-manager/SKILL.md",
+      "path": "organization/roles/teams-project-manager/skill.md",
+      "bytes": 19225,
+      "sha1": "d4419112488feb8cec0c4433dbde915bd65a308a",
       "role_id": "teams-project-manager",
       "team": "tech",
       "category": "Team Role",
@@ -321,13 +759,28 @@
       "purpose": "GTC 後のタスクをチーム単位で配送し、各チーム director へ引き渡す",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/teams-project-manager/SKILL.md",
+          "path": "organization/roles/teams-project-manager/skill.md",
+          "bytes": 19225,
+          "sha1": "d4419112488feb8cec0c4433dbde915bd65a308a"
+        },
+        {
+          "source": "${SKILLS_ROOT}/teams-project-manager/evals/evals.json",
+          "path": "organization/roles/teams-project-manager/evals/evals.json",
+          "bytes": 5114,
+          "sha1": "0f6da2bf1aec4e6ef5d5a5d7f0592efc5a30f00c"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-architect/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-architect.md",
-      "bytes": 6059,
-      "sha1": "b7182819ac92178ae26f48d79ad911221314fcce",
+      "source": "${SKILLS_ROOT}/tech-architect/SKILL.md",
+      "path": "organization/roles/tech-architect/skill.md",
+      "bytes": 5983,
+      "sha1": "eee75e6754c29fdf54f420e32bd7b374a5cb1eca",
       "role_id": "tech-architect",
       "team": "tech",
       "category": "Team Role",
@@ -335,13 +788,22 @@
       "purpose": "システム境界、責務分離、拡張パス、長期構造判断を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-architect/SKILL.md",
+          "path": "organization/roles/tech-architect/skill.md",
+          "bytes": 5983,
+          "sha1": "eee75e6754c29fdf54f420e32bd7b374a5cb1eca"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-backend/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-backend.md",
-      "bytes": 6029,
-      "sha1": "b9f3732e662f5a3c0cf359a742f0033c88769e42",
+      "source": "${SKILLS_ROOT}/tech-backend/SKILL.md",
+      "path": "organization/roles/tech-backend/skill.md",
+      "bytes": 5953,
+      "sha1": "e94fba8f1e610d2efdf92ec5c04093527928b0ff",
       "role_id": "tech-backend",
       "team": "tech",
       "category": "Team Role",
@@ -349,13 +811,22 @@
       "purpose": "API、業務ロジック、データ処理、サーバーサイド改修を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-backend/SKILL.md",
+          "path": "organization/roles/tech-backend/skill.md",
+          "bytes": 5953,
+          "sha1": "e94fba8f1e610d2efdf92ec5c04093527928b0ff"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-data-structure/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-data-structure.md",
-      "bytes": 5936,
-      "sha1": "4336e49d5e4819249e7d938013d62a90f51f71c8",
+      "source": "${SKILLS_ROOT}/tech-data-structure/SKILL.md",
+      "path": "organization/roles/tech-data-structure/skill.md",
+      "bytes": 5860,
+      "sha1": "e76576199b2fecf86ec887d7bb646702ad7f2e7b",
       "role_id": "tech-data-structure",
       "team": "tech",
       "category": "Team Role",
@@ -363,13 +834,22 @@
       "purpose": "型、スキーマ、データフロー、構造整合性を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-data-structure/SKILL.md",
+          "path": "organization/roles/tech-data-structure/skill.md",
+          "bytes": 5860,
+          "sha1": "e76576199b2fecf86ec887d7bb646702ad7f2e7b"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-debugger/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-debugger.md",
-      "bytes": 5897,
-      "sha1": "996aec4d35c4f3921f4969b8b932b2396fb917a8",
+      "source": "${SKILLS_ROOT}/tech-debugger/SKILL.md",
+      "path": "organization/roles/tech-debugger/skill.md",
+      "bytes": 5821,
+      "sha1": "ec6bb2694a1d447e9c922dfabb143decdbbd13c5",
       "role_id": "tech-debugger",
       "team": "tech",
       "category": "Team Role",
@@ -377,13 +857,22 @@
       "purpose": "不具合再現、原因切り分け、ログ読解、観測点整理を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-debugger/SKILL.md",
+          "path": "organization/roles/tech-debugger/skill.md",
+          "bytes": 5821,
+          "sha1": "ec6bb2694a1d447e9c922dfabb143decdbbd13c5"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-designer/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-designer.md",
-      "bytes": 18581,
-      "sha1": "b4427855b98f07f52699e72d80224dc568454f34",
+      "source": "${SKILLS_ROOT}/tech-designer/SKILL.md",
+      "path": "organization/roles/tech-designer/skill.md",
+      "bytes": 18505,
+      "sha1": "c5d687ba0d7709e942871a5bb0f9405039f46362",
       "role_id": "tech-designer",
       "team": "tech",
       "category": "Team Role",
@@ -391,13 +880,52 @@
       "purpose": "実装に近い UI/UX 判断、情報設計、デザインスペック、アクセシビリティ、frontend handoff を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 6,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-designer/SKILL.md",
+          "path": "organization/roles/tech-designer/skill.md",
+          "bytes": 18505,
+          "sha1": "c5d687ba0d7709e942871a5bb0f9405039f46362"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-designer/references/design-review-checklist.md",
+          "path": "organization/roles/tech-designer/references/design-review-checklist.md",
+          "bytes": 2796,
+          "sha1": "a45221efb852dd2a7592e104c7a3aec127d15e6c"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-designer/references/generated-ui-review-workflow.md",
+          "path": "organization/roles/tech-designer/references/generated-ui-review-workflow.md",
+          "bytes": 3722,
+          "sha1": "4e33b04bd118f9e84e0e602b8dbf22c391c35634"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-designer/references/token-copy-mobile-patterns.md",
+          "path": "organization/roles/tech-designer/references/token-copy-mobile-patterns.md",
+          "bytes": 2884,
+          "sha1": "380588614f604ec1d0fde448dbb97f8fedbf8ff9"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-designer/references/viewport-and-screenshot-matrix.md",
+          "path": "organization/roles/tech-designer/references/viewport-and-screenshot-matrix.md",
+          "bytes": 2156,
+          "sha1": "47e7d9c2f20c67f1e46a7ca7c95f08f090192822"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-designer/references/worked-examples.md",
+          "path": "organization/roles/tech-designer/references/worked-examples.md",
+          "bytes": 5949,
+          "sha1": "91f1427dba1e218ec0da660a55b5e9a03ec891c6"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-devopssec/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-devopssec.md",
-      "bytes": 5935,
-      "sha1": "e076b2430f16f177f8e33ef3287747eea8f9d9e2",
+      "source": "${SKILLS_ROOT}/tech-devopssec/SKILL.md",
+      "path": "organization/roles/tech-devopssec/skill.md",
+      "bytes": 5859,
+      "sha1": "d01e05838f88a67bdd1e94ffe9049de52f1282aa",
       "role_id": "tech-devopssec",
       "team": "tech",
       "category": "Team Role",
@@ -405,13 +933,22 @@
       "purpose": "CI/CD、IaC、権限、デプロイ安全性を横断して担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-devopssec/SKILL.md",
+          "path": "organization/roles/tech-devopssec/skill.md",
+          "bytes": 5859,
+          "sha1": "d01e05838f88a67bdd1e94ffe9049de52f1282aa"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-director/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-director.md",
-      "bytes": 15831,
-      "sha1": "5a41dbd124c48aba5f3bce46f0fefddedc914dc5",
+      "source": "${SKILLS_ROOT}/tech-director/SKILL.md",
+      "path": "organization/roles/tech-director/skill.md",
+      "bytes": 16598,
+      "sha1": "162ec784bc4a174952869ef88ae4fa65bc4b5c47",
       "role_id": "tech-director",
       "team": "tech",
       "category": "Team Role",
@@ -419,13 +956,28 @@
       "purpose": "tech チーム内の担当割り振り、レビュー線、完了ゲートを統括する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-director/SKILL.md",
+          "path": "organization/roles/tech-director/skill.md",
+          "bytes": 16598,
+          "sha1": "162ec784bc4a174952869ef88ae4fa65bc4b5c47"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-director/evals/evals.json",
+          "path": "organization/roles/tech-director/evals/evals.json",
+          "bytes": 5254,
+          "sha1": "714e4dce3d6b7d4bc71728842a2d1f1f6f6b76a9"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-docs/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-docs.md",
-      "bytes": 5883,
-      "sha1": "463982df3a93a5f6e6fbc96222c44e9e57fd2d4e",
+      "source": "${SKILLS_ROOT}/tech-docs/SKILL.md",
+      "path": "organization/roles/tech-docs/skill.md",
+      "bytes": 5807,
+      "sha1": "cb391c9eadb7565a9a7c5d5e22cbbc8d76bf77b1",
       "role_id": "tech-docs",
       "team": "tech",
       "category": "Team Role",
@@ -433,13 +985,22 @@
       "purpose": "実装内容、設計変更、運用手順、技術判断の文書化を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-docs/SKILL.md",
+          "path": "organization/roles/tech-docs/skill.md",
+          "bytes": 5807,
+          "sha1": "cb391c9eadb7565a9a7c5d5e22cbbc8d76bf77b1"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-frontend/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-frontend.md",
-      "bytes": 6047,
-      "sha1": "f2d39e62e8ee36c700db1964427b4795d3e7492e",
+      "source": "${SKILLS_ROOT}/tech-frontend/SKILL.md",
+      "path": "organization/roles/tech-frontend/skill.md",
+      "bytes": 5971,
+      "sha1": "fc6147bdde75479f5a7cea680f467805e48337a7",
       "role_id": "tech-frontend",
       "team": "tech",
       "category": "Team Role",
@@ -447,13 +1008,22 @@
       "purpose": "UI 実装、状態管理、画面修正、フロントエンド挙動を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-frontend/SKILL.md",
+          "path": "organization/roles/tech-frontend/skill.md",
+          "bytes": 5971,
+          "sha1": "fc6147bdde75479f5a7cea680f467805e48337a7"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-infrastructure/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-infrastructure.md",
-      "bytes": 6086,
-      "sha1": "70e516b03dfa81cfb107a481254448a434ba5db8",
+      "source": "${SKILLS_ROOT}/tech-infrastructure/SKILL.md",
+      "path": "organization/roles/tech-infrastructure/skill.md",
+      "bytes": 6010,
+      "sha1": "9d3db67d6212ccd2af339a984fded43ed4d17b40",
       "role_id": "tech-infrastructure",
       "team": "tech",
       "category": "Team Role",
@@ -461,13 +1031,22 @@
       "purpose": "依存関係、ローカル実行、ビルド基盤、開発環境、技術基盤実装を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-infrastructure/SKILL.md",
+          "path": "organization/roles/tech-infrastructure/skill.md",
+          "bytes": 6010,
+          "sha1": "9d3db67d6212ccd2af339a984fded43ed4d17b40"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-lead/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-lead.md",
-      "bytes": 10603,
-      "sha1": "42de650a967856f2a0b0901da4266aeb5b25be5e",
+      "source": "${SKILLS_ROOT}/tech-lead/SKILL.md",
+      "path": "organization/roles/tech-lead/skill.md",
+      "bytes": 10538,
+      "sha1": "8dd9d845e203b61d96a6710775cae5d53f5d3e9a",
       "role_id": "tech-lead",
       "team": "tech",
       "category": "Team Role",
@@ -475,13 +1054,22 @@
       "purpose": "Opus 前提で最も強い推論を使い、重要な技術判断と技術的課題解決を統合する",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-lead/SKILL.md",
+          "path": "organization/roles/tech-lead/skill.md",
+          "bytes": 10538,
+          "sha1": "8dd9d845e203b61d96a6710775cae5d53f5d3e9a"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-mobile/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-mobile.md",
-      "bytes": 5914,
-      "sha1": "fb7396d9fac7d2dcd3ea5411ee01f54bf5888440",
+      "source": "${SKILLS_ROOT}/tech-mobile/SKILL.md",
+      "path": "organization/roles/tech-mobile/skill.md",
+      "bytes": 5838,
+      "sha1": "bfb08737b948f5659d7044503225939915abbb56",
       "role_id": "tech-mobile",
       "team": "tech",
       "category": "Team Role",
@@ -489,13 +1077,22 @@
       "purpose": "モバイル実装、端末固有挙動、モバイル検証を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-mobile/SKILL.md",
+          "path": "organization/roles/tech-mobile/skill.md",
+          "bytes": 5838,
+          "sha1": "bfb08737b948f5659d7044503225939915abbb56"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-performance/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-performance.md",
-      "bytes": 5865,
-      "sha1": "be4dc8711eefb7b44f2432b68eefe65180d54a18",
+      "source": "${SKILLS_ROOT}/tech-performance/SKILL.md",
+      "path": "organization/roles/tech-performance/skill.md",
+      "bytes": 5789,
+      "sha1": "649efab9f1db6e87956e0a37fdd7a560affd75de",
       "role_id": "tech-performance",
       "team": "tech",
       "category": "Team Role",
@@ -503,13 +1100,22 @@
       "purpose": "性能調査、計測、改善案比較、性能リスク整理を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-performance/SKILL.md",
+          "path": "organization/roles/tech-performance/skill.md",
+          "bytes": 5789,
+          "sha1": "649efab9f1db6e87956e0a37fdd7a560affd75de"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-qa/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-qa.md",
-      "bytes": 9735,
-      "sha1": "9eb419845f25aa56b32ec98b8fe6deabba08549c",
+      "source": "${SKILLS_ROOT}/tech-qa/SKILL.md",
+      "path": "organization/roles/tech-qa/skill.md",
+      "bytes": 9659,
+      "sha1": "834ab17fc53fc21f0853384a9bea079a44b77ab6",
       "role_id": "tech-qa",
       "team": "tech",
       "category": "Team Role",
@@ -517,13 +1123,28 @@
       "purpose": "要件充足、受け入れ条件、コード品質 QA、品質ゲートを担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 2,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-qa/SKILL.md",
+          "path": "organization/roles/tech-qa/skill.md",
+          "bytes": 9659,
+          "sha1": "834ab17fc53fc21f0853384a9bea079a44b77ab6"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-qa/evals/evals.json",
+          "path": "organization/roles/tech-qa/evals/evals.json",
+          "bytes": 2219,
+          "sha1": "2d948b2428addd7ef7afaddcff7e90010589a14c"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-reviewer/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-reviewer.md",
-      "bytes": 11121,
-      "sha1": "da438658f3eee9e0561325c6635abb816f4ae5ba",
+      "source": "${SKILLS_ROOT}/tech-reviewer/SKILL.md",
+      "path": "organization/roles/tech-reviewer/skill.md",
+      "bytes": 11045,
+      "sha1": "fd6865a86fe8b374a56f05487de9211a663d0be2",
       "role_id": "tech-reviewer",
       "team": "tech",
       "category": "Team Role",
@@ -531,13 +1152,34 @@
       "purpose": "Engineering チーム内の統合レビュー、差分整合性確認、専門レビュー委譲判断を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 3,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-reviewer/SKILL.md",
+          "path": "organization/roles/tech-reviewer/skill.md",
+          "bytes": 11045,
+          "sha1": "fd6865a86fe8b374a56f05487de9211a663d0be2"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-reviewer/evals/benchmark.md",
+          "path": "organization/roles/tech-reviewer/evals/benchmark.md",
+          "bytes": 1769,
+          "sha1": "78c721072b8074ea7a72705b9df95d79db44651a"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-reviewer/evals/evals.json",
+          "path": "organization/roles/tech-reviewer/evals/evals.json",
+          "bytes": 3105,
+          "sha1": "acd24052784d6ec5165a54e5502b2546d5f010b3"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-security/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-security.md",
-      "bytes": 8656,
-      "sha1": "472ff9ae45a475baba1ecc078bc341cd4961155f",
+      "source": "${SKILLS_ROOT}/tech-security/SKILL.md",
+      "path": "organization/roles/tech-security/skill.md",
+      "bytes": 8580,
+      "sha1": "cf37b1bc7cc3b8e81619ce03d0bd5da4bd4a0b25",
       "role_id": "tech-security",
       "team": "tech",
       "category": "Team Role",
@@ -545,13 +1187,22 @@
       "purpose": "認証、認可、秘密情報、外部入力、攻撃面のレビューを担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 1,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-security/SKILL.md",
+          "path": "organization/roles/tech-security/skill.md",
+          "bytes": 8580,
+          "sha1": "cf37b1bc7cc3b8e81619ce03d0bd5da4bd4a0b25"
+        }
+      ]
     },
     {
-      "source": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills/tech-tester/SKILL.md",
-      "path": "/private/tmp/itb-worktrees/Agent-Teams-Viewer/TSK-1263-agent-teams-org-pivot/organization/roles/tech-tester.md",
-      "bytes": 15182,
-      "sha1": "5ec2ab2f1a308f640bc5e0498d0e83b326728fa6",
+      "source": "${SKILLS_ROOT}/tech-tester/SKILL.md",
+      "path": "organization/roles/tech-tester/skill.md",
+      "bytes": 15139,
+      "sha1": "6dceb79f9d0675de8ad485c8442a5b0c4de147ee",
       "role_id": "tech-tester",
       "team": "tech",
       "category": "Team Role",
@@ -559,7 +1210,28 @@
       "purpose": "テスト設計、作成、実行、改善、再現確認、検証証跡化を担う",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
-      "migration_stage": "mirrored_not_deleted"
+      "migration_stage": "directory_mirror",
+      "artifact_count": 3,
+      "artifacts": [
+        {
+          "source": "${SKILLS_ROOT}/tech-tester/SKILL.md",
+          "path": "organization/roles/tech-tester/skill.md",
+          "bytes": 15139,
+          "sha1": "6dceb79f9d0675de8ad485c8442a5b0c4de147ee"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-tester/evals/benchmark.md",
+          "path": "organization/roles/tech-tester/evals/benchmark.md",
+          "bytes": 2282,
+          "sha1": "3da87e76f363022442b3574823263680ed7060a3"
+        },
+        {
+          "source": "${SKILLS_ROOT}/tech-tester/evals/evals.json",
+          "path": "organization/roles/tech-tester/evals/evals.json",
+          "bytes": 3720,
+          "sha1": "c2a261916bd963cfcc25c151433be8a4fa0c6965"
+        }
+      ]
     }
   ]
 }

@@ -1,0 +1,23 @@
+{
+  "skill_name": "teams-developer",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "ユーザー登録APIエンドポイント（POST /api/users）を実装してください。設計書には「メールアドレスとパスワードを受け取り、DBに保存してJWTトークンを返す」と記載されています。使用スタック: TypeScript / Next.js App Router / Prisma / PostgreSQL",
+      "expected_output": "実装前に設計確認→コーディング（DRY・単一責任）→テスト作成→/security-professorによるセキュリティチェック→完了報告フォーマットでの提出という一連のフローが実施されること",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "以下の2つの関数が別ファイルに存在します。共通化すべきか判断し、必要であればリファクタリングしてください。\n\n```typescript\n// posts.ts\nasync function fetchPosts(userId: string) {\n  const res = await fetch(`/api/posts?userId=${userId}`);\n  if (!res.ok) throw new Error('Failed to fetch posts');\n  return res.json();\n}\n\n// comments.ts\nasync function fetchComments(postId: string) {\n  const res = await fetch(`/api/comments?postId=${postId}`);\n  if (!res.ok) throw new Error('Failed to fetch comments');\n  return res.json();\n}\n```",
+      "expected_output": "Grep-firstでコードベースを調査→DRY原則（3の法則）に基づいて共通化の要否を判断→YAGNIを守った最小限の共通化→セキュリティチェック実施",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "ログインフォームのバリデーション処理を実装してください。要件: メールアドレス形式チェック・パスワード8文字以上・エラーメッセージの表示。React / TypeScript で実装し、テストも作成してください。",
+      "expected_output": "XSSリスクを意識した実装・境界値を含むエッジケースのテスト・/security-professorによるチェック・完了報告フォーマットでの提出",
+      "files": []
+    }
+  ]
+}

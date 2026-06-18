@@ -38,7 +38,7 @@ python3 server.py --port 8799
 | `~/.codex/state/itb/` | Codex 側 state（存在すれば同様に読む） |
 | `organization/settings.json` | 組織運用 enabled / disabled / maintenance、fast / strict、Hook observer 方針 |
 | `organization/policies/*.md` | 組織運用 Policy のミラー正本 |
-| `organization/roles/*.md` | Team Role 定義のミラー正本（既存 skill は削除せず互換保持） |
+| `organization/roles/<role>/skill.md` | Team Role 定義のミラー正本（既存 skill は削除せず互換保持） |
 | `organization/runtime/*` | role registry / model registry / team config の runtime 参照 |
 
 ## 稼働判定（status）

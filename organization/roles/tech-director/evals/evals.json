@@ -1,0 +1,58 @@
+{
+  "skill_name": "tech-director",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "TPM から tech チームへ、React の画面修正と API のレスポンス型変更を含む Task Detail が渡された。review requirements にはレビュー証跡が必要とある。tech-director として主担当、支援担当、相互レビュー担当、実行順序、Completion Report へ渡す条件を整理してください。",
+      "expected_output": "tech-frontend と tech-backend または tech-data-structure を適切に割り振り、Team Task Context として `01-Projects/<Project>/TSK-####-<slug>/tech/tasks.md` を使い、各 `TT-TSK-####-tech-NNN` が親 `task.md` / `TSK-####` にリンクすることを示す。TPM handoff の review requirements / approval status / open questions を保持し、tech-reviewer や tech-tester を含む相互レビュー線、Vault Record Destination、レビュー証跡なしで team task を done にしない完了ゲートを示す。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "TPM から tech チームへ、認可ロジック変更、秘密情報の取り扱い、デプロイ設定変更を含むタスクが渡された。承認要否は未確定。tech-director として実行可否と担当割り振りを判断してください。",
+      "expected_output": "tech-security、security-professor、tech-devopssec を含め、権限モデル変更や秘密情報リスクがあるため human approval を waiting_human または required_before_execution として扱う。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "主担当の tech-backend だけが作業を終えた段階で、ユーザーに成果物を提示してよいか確認された。tech-director として回答してください。",
+      "expected_output": "`tech/tasks.md` 上の全 team task が `done` になり、支援担当、チーム内相互レビュー、レビュー証跡、Vault 記録が完了していない限り成果物を提示してはならないと判断する。親 `task.md` へ細かい進捗を直接書かない。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "tech-director が team task を作ったが、親 TSK-2001 へのリンクがなく、親 task.md に細かい進捗を書こうとしている。tech-director としてこの出力を検査してください。",
+      "expected_output": "team task が親 `task.md` / `TSK-2001` へリンクしていないため不合格とし、細かい進捗は親 `task.md` ではなく `TSK-2001-<slug>/tech/tasks.md` に記録するよう修正を求める。",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "tech/tasks.md の全 team task と相互レビューが完了した。tech-director として次に直接ユーザーへ成果物を返してよいか判断してください。",
+      "expected_output": "直接ユーザーへ返さず、Completion Report を作成して gate-task-assessor へ渡す。組織全体の完了判定は assessor / evaluator / guardian に委ねる。",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "tech/tasks.md の team task に実装完了と書かれているが、実行者とは別の相互レビュー証跡がない。tech-director として done にしてよいか判断してください。",
+      "expected_output": "レビュー証跡なし完了禁止として done を拒否する。別担当の相互レビュー、指摘対応または accepted risk、Vault 記録が揃うまで Completion Report を作成しない。",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "TPM から tech チームへ、UI コンポーネント、API route、CI 設定、shell script を変更するタスクが渡された。tech-director として担当割り振りと Completion Report 条件を整理してください。",
+      "expected_output": "code-like diff があるため tech-qa を必須レビュー線に含める。tech-reviewer は統合レビュー、tech-qa は受け入れ条件、可読性、変更容易性、検証十分性の QA Verdict を担当する。tech-qa の QA Verdict が揃うまで team task を done にせず、Completion Report を作成しない。",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "実装担当と tech-reviewer は approve したが、code-like diff に対する tech-qa の QA Verdict がない。tech-director として gate-task-assessor へ Completion Report を出してよいか。",
+      "expected_output": "出してはいけない。tech-reviewer の approve は tech-qa の必須 QA review evidence を代替しないため、tech-qa に QA Scope、Readability Check、Changeability Check、Verification Link、QA Verdict を依頼する。",
+      "files": []
+    },
+    {
+      "id": 9,
+      "prompt": "tech-director の Completion Report がメインエージェントに返った。メインエージェントがそのままユーザーへ結果を返してよいか判定して。",
+      "expected_output": "返してはいけない。メインエージェント返却は transport であり、workflow output は gate-task-assessor への Completion Report handoff である。"
+    }
+  ]
+}
