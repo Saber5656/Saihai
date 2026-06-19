@@ -20,6 +20,13 @@ ITB_RUNTIME_ROOT = ORG_ROOT / "runtime" / "infra-team-bootstrap"
 ITB_BUILDER = ITB_RUNTIME_ROOT / "scripts" / "itb_bootstrap_builder.py"
 ITB_HOOKS = ITB_RUNTIME_ROOT / "hooks"
 ITD_MONITOR = ORG_ROOT / "runtime" / "infra-task-dispatcher" / "scripts" / "itd_monitor.py"
+ITB_FACADE_COMMANDS = {
+    "agent-call",
+    "agent-switch",
+    "provider-failover",
+    "agent-surfaces",
+    "transport-status",
+}
 
 TRUTHY = {"1", "true", "yes", "on", "enabled"}
 FALSY = {"0", "false", "no", "off", "disabled"}
@@ -127,7 +134,8 @@ def runtime_paths() -> dict[str, Any]:
         "itb_hooks": ITB_HOOKS,
         "itd_monitor": ITD_MONITOR,
         "role_root": ORG_ROOT / "roles",
-        "runtime_registry": ORG_ROOT / "runtime" / "role-agent-registry.yaml",
+        "runtime_registry": ITB_RUNTIME_ROOT / "config" / "role-agent-registry.yaml",
+        "runtime_registry_mirror": ORG_ROOT / "runtime" / "role-agent-registry.yaml",
     }
     return {
         "schema_version": 1,
@@ -168,6 +176,7 @@ def classify(prompt: str, *, requested_mode: str = "", organization_state: str =
     control = settings.get("control") or {}
     maintenance = settings.get("maintenance") or {}
     hook_policy = settings.get("hook_policy") or {}
+    provider_transport_policy = settings.get("provider_transport_policy") or {}
     modes = settings.get("modes") or {}
 
     env_enabled = bool_env("AGENT_ORG_ENABLED")
@@ -230,6 +239,7 @@ def classify(prompt: str, *, requested_mode: str = "", organization_state: str =
             "mode": hook_policy.get("mode", "observer"),
             "hard_block": bool(hook_policy.get("hard_block", False)),
         },
+        "provider_transport_policy": provider_transport_policy,
         "performance_target_seconds": mode_config.get("performance_target_seconds"),
         "agent_teams_viewer_root": str(REPO_ROOT),
         "role_count": state["role_count"],
@@ -243,6 +253,8 @@ def main() -> None:
         raise SystemExit(run_runtime_script(ITB_BUILDER, sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "itd-monitor":
         raise SystemExit(run_runtime_script(ITD_MONITOR, sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] in ITB_FACADE_COMMANDS:
+        raise SystemExit(run_runtime_script(ITB_BUILDER, sys.argv[1:]))
 
     parser = argparse.ArgumentParser(description="Configure organization execution mode")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -256,6 +268,9 @@ def main() -> None:
     itb_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     itd_parser = sub.add_parser("itd-monitor", help="Run the Agent-Teams-Viewer ITD monitor runtime")
     itd_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
+    for command in sorted(ITB_FACADE_COMMANDS):
+        facade_parser = sub.add_parser(command, help=f"Run ITB facade command: {command}")
+        facade_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
     if args.command == "status":
@@ -266,6 +281,8 @@ def main() -> None:
         raise SystemExit(run_runtime_script(ITB_BUILDER, args.runtime_args))
     elif args.command == "itd-monitor":
         raise SystemExit(run_runtime_script(ITD_MONITOR, args.runtime_args))
+    elif args.command in ITB_FACADE_COMMANDS:
+        raise SystemExit(run_runtime_script(ITB_BUILDER, [args.command, *args.runtime_args]))
     else:
         payload = classify(
             args.prompt,

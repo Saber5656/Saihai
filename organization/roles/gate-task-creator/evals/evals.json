@@ -1,0 +1,45 @@
+{
+  "skill_name": "gate-task-creator",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Git 管理対象の SKILL.md 更新を含む Gate Intake Envelope を Task Detail 化する。GTC として done criteria と handoff に何を入れる？",
+      "expected_output": "commit_required と publication_required を仮置きし、Completion Gate として gate-task-assessor -> gate-task-evaluator -> git-publisher -> vault_final_update -> gate-task-guardian -> main_transport_renderer を記録する。guardian OK 前に done にしない。"
+    },
+    {
+      "id": 2,
+      "prompt": "Vault ノートのみの軽微更新タスクを起票する。Git 差分が出るかは不明。GTC として commit 不要と断定してよい？",
+      "expected_output": "GTC は publication 不要の最終判断をしない。commit_required / publication_required を unknown または not_expected として記録し、最終判定は gate-task-evaluator と git-publisher に委ねる。"
+    },
+    {
+      "id": 3,
+      "prompt": "Resident Organization Roster v2 を含む Gate Intake Envelope を Task Detail 化する。GTC として何を初期化する？",
+      "expected_output": "既存の Task Detail / Index / Kanban / PM Handoff / review line を保持したうえで、Resident Team Roster、Active Set、Invocation Evidence を初期化し、Gate / Infra は常時 active、Tech / Contents / Business は resident だが必要時 active、道具スキルは常駐外と記録する。"
+    },
+    {
+      "id": 4,
+      "prompt": "既存の Completion Gate eval を持つ GTC に Resident Roster テストを追加する。既存ケースを置き換えてよい？",
+      "expected_output": "置き換えない。既存テストケースを保持し、Resident Roster / Active Set / Invocation Evidence の追加ケースを追記する。"
+    },
+    {
+      "id": 5,
+      "prompt": "Chat A と Chat B から同時に GPF->GTC が来た。どちらも Task Index と Kanban を更新しようとしている。GTC として何を確認する？",
+      "expected_output": "Task ID、Task Detail、Task Index 行、Kanban entry の重複を確認し、同時 intake の可能性があれば infra-task-dispatcher と同期してから記録する。"
+    },
+    {
+      "id": 6,
+      "prompt": "Task Detail に Resident Roster を初期化する。role_id と agent_instance_id は同じものとして扱ってよい？",
+      "expected_output": "同一視しない。role_id はスキル/論理ロール、agent_instance_id はチャットセッションごとの実体として分け、organization_instance_id と chat_session_id を記録する。"
+    },
+    {
+      "id": 7,
+      "prompt": "Git 管理対象のソース修正を含む Gate Intake Envelope を起票する。GTC は branch 名や push 可否を決めてよい？",
+      "expected_output": "GTC は branch 名や push 可否を最終決定しない。Project Manager Handoff と done criteria に git-publisher publication タスクを含め、Branch Plan は TPM、branch 実行は git-workspace-prep、push 判定は push skill に委ねる。"
+    },
+    {
+      "id": 8,
+      "prompt": "Git 管理対象の SKILL.md 更新を含む依頼だが、ユーザーは commit とは言っていない。GTC は done criteria に publication_deferred_not_requested を入れてよい？",
+      "expected_output": "入れない。Git 管理対象の変更を含む可能性があるため Completion Gate に git-publisher publication タスクを含め、commit_required / publication_required は expected または unknown として仮置きする。ユーザー未依頼や deferred_not_requested は done criteria の成功状態にしない。"
+    }
+  ]
+}

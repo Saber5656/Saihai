@@ -1,0 +1,37 @@
+{
+  "skill_name": "tech-qa",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "tech-director から、API 実装差分、型定義変更、テスト結果、done criteria が渡された。tech-qa として code-like diff の QA レビューをしてください。",
+      "expected_output": "QA Scope で code-like diff の有無、対象差分、対象外差分を明示し、Acceptance Criteria Check、Readability Check、Changeability Check、Verification Link、QA Verdict を出す。可読性と変更容易性の観点を含め、問題がなければ qa_pass として gate-task-evaluator へ渡す。",
+      "files": [
+        "skills/tech-qa/SKILL.md"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "UI コンポーネント変更の差分はあるが、tech-tester の検証結果がなく、回帰確認も未記録。tech-qa として完了可能か判断してください。",
+      "expected_output": "Verification Link に未検証理由と未検証リスクを明示し、QA Verdict は qa_needs_tests にする。tech-tester へ追加検証を handoff し、qa_pass やリリース承認にしない。",
+      "files": [
+        "skills/tech-qa/SKILL.md"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "コードの責務分離が悪く変更容易性に問題があるので、tech-qa としてその場で実装修正までやってください。",
+      "expected_output": "tech-qa は実装修正を代行しない。Readability / Changeability の問題を evidence と recommendation として記録し、QA Verdict は qa_needs_fix として実装担当へ差し戻す。",
+      "files": [
+        "skills/tech-qa/SKILL.md"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Markdown の説明文だけを更新したタスクを tech-qa としてレビューしてください。コード、設定、CI、スクリプトの変更はありません。",
+      "expected_output": "Code-like Diff は no または not_applicable とし、必須 Code Quality QA の対象外であることを明示する。ただし受け入れ条件や Vault 記録が必要なら通常の QA 観点で確認する。",
+      "files": [
+        "skills/tech-qa/SKILL.md"
+      ]
+    }
+  ]
+}

@@ -10,9 +10,9 @@ last_updated: 2026-06-14
 
 このノートは `gate-prompt-formatter`、`gate-task-creator`、`teams-project-manager`、`gate-task-evaluator`、`finalization-check`、main transport renderer が共通して使う入出力契約を定義する。
 
-`infra-task-dispatcher` の Vault 状態同期、採番、Kanban 連携は [[03-Contexts/Policies/Dispatcher-IO-Contract]] を正とする。  
+`infra-task-dispatcher` の Vault 状態同期、採番、Kanban 連携は [[03-Contexts/Policies/Dispatcher-IO-Contract]] を正とする。
 この契約は、その前段と後段で Gate がどの情報を渡すかを定義する。
-Completion Gate の機械検証用チェーン、pre-final 必須 section、main-agent 禁止 role 集合は `/Users/takagiyasushi/dev/Agent-Teams-Viewer/organization/runtime/infra-team-bootstrap/config/completion-chain.yaml` を正本とする。このノート内の flow 表は人間向け説明であり、ITB builder / Gate role は config を参照する。
+Completion Gate の機械検証用チェーン、pre-final 必須 section、main-agent 禁止 role 集合は `organization/runtime/infra-team-bootstrap/config/completion-chain.yaml` を正本とする。このノート内の flow 表は人間向け説明であり、ITB builder / Gate role は config を参照する。
 
 ## Scope
 
@@ -345,7 +345,7 @@ Codex main が直接作業した場合も、`Invocation Evidence` または team
 
 ## Project Manager Handoff
 
-`gate-task-creator` はタスク作成後、必ず `teams-project-manager` へ handoff する。  
+`gate-task-creator` はタスク作成後、必ず `teams-project-manager` へ handoff する。
 `Project Manager Handoff` がない Task Detail は Gate 起票完了として扱わない。
 
 | Field | Required | Meaning |
@@ -416,8 +416,8 @@ Task Change Manifest の最小 fields は次を正とする。
 | `commit_hashes` | When committed | approved diff を閉じた commit hash |
 | `unrelated_dirty_paths` | When applicable | repo に残る別タスク由来の dirty diff |
 
-`gate-task-evaluator` は repo dirty 全体ではなく `approved_diff_snapshot` を基準に `commit_required` を判定する。  
-`commit` は `approved_scope` / `approved_diff_snapshot` なしの unscoped commit を拒否し、task-owned diff だけを stage / commit する。  
+`gate-task-evaluator` は repo dirty 全体ではなく `approved_diff_snapshot` を基準に `commit_required` を判定する。
+`commit` は `approved_scope` / `approved_diff_snapshot` なしの unscoped commit を拒否し、task-owned diff だけを stage / commit する。
 `finalization-check` は repo clean を要求しない。`approved_diff_snapshot` が `commit_hashes` と `committed_diff_matches_snapshot: true`、または明示的な commit 不要理由で閉じているかを確認する。
 同じ repo に別タスク由来の dirty diff が残る場合は `unrelated_dirty_paths` として記録し、当該 task の完了を妨げない。
 
@@ -478,7 +478,7 @@ main transport renderer は、`finalization-check` が complete と判定し、`
 | `risks_or_limits` | 残るリスク、未対応範囲 |
 | `next_actions` | 次に進めるべき作業 |
 
-事実、判断、リスク、ファイルパス、Vault リンクは変更しない。  
+事実、判断、リスク、ファイルパス、Vault リンクは変更しない。
 文体だけを読みやすく整える。
 
 ## Final Transport Render Check

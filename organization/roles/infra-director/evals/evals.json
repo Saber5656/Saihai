@@ -1,0 +1,41 @@
+{
+  "skill_name": "infra-director",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "TPM から infra チームへ、Task Detail の status 更新、Task Index 同期、Kanban 重複確認を行うタスクが渡された。infra-director として主担当、支援担当、相互レビュー担当、実行順序を整理してください。",
+      "expected_output": "infra-task-dispatcher を主担当に、infra-local-qa をレビューまたは支援に割り振り、Team Task Context として `01-Projects/<Project>/TSK-####-<slug>/infra/tasks.md` を使う。各 `TT-TSK-####-infra-NNN` が親 `task.md` / `TSK-####` にリンクし、TPM handoff の review requirements / approval status / open questions を保持し、Vault Record Destination を示す。親 Task Detail / Index / Kanban の status 更新が必要な場合は GTC / Dispatcher に戻す。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Obsidian の .base と .canvas を更新し、不要ノートの削除も提案されているタスクが infra チームへ渡された。infra-director として担当割り振りと承認要否を判断してください。",
+      "expected_output": "obsidian-bases、json-canvas、infra-local-qa を使い分け、削除や知識損失リスクは human approval 待ちにし、承認前の代替として退避案を提示する。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "obsidian-cli によるノート作成だけが完了した段階で、infra チーム成果物として提示してよいか確認された。infra-director として回答してください。",
+      "expected_output": "`infra/tasks.md` 上の全 team task が `done` になり、相互レビュー、状態同期確認、レビュー証跡、Vault 記録が完了していない限り成果物を提示してはならないと判断する。親 `task.md` へ細かい進捗を直接書かない。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "infra-director が team task を作ったが、親 TSK-2004 へのリンクがなく、親 task.md に細かい Kanban 同期進捗を書こうとしている。infra-director としてこの出力を検査してください。",
+      "expected_output": "team task が親 `task.md` / `TSK-2004` へリンクしていないため不合格とし、細かい進捗は親 `task.md` ではなく `TSK-2004-<slug>/infra/tasks.md` に記録するよう修正を求める。親 Task Index / Kanban の更新が必要なら GTC / Dispatcher に戻す。",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "infra/tasks.md の全 team task と相互レビューが完了した。infra-director として次に直接ユーザーへ成果物を返してよいか判断してください。",
+      "expected_output": "直接ユーザーへ返さず、Completion Report を作成して gate-task-assessor へ渡す。組織全体の完了判定は assessor / evaluator / guardian に委ねる。",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "infra/tasks.md の Vault 更新 team task が完了扱いだが、別 infra メンバーのレビュー証跡がない。infra-director として done にしてよいか判断してください。",
+      "expected_output": "レビュー証跡なし完了禁止として done を拒否する。別担当による状態同期、Vault 規約、Obsidian 構文、知識損失リスクの確認と Vault 記録が揃うまで Completion Report を作成しない。",
+      "files": []
+    }
+  ]
+}

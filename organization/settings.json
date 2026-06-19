@@ -11,9 +11,9 @@
   },
   "knowledge": {
     "canonical_repo": "Agent-Teams-Viewer",
-    "canonical_repo_path": "/Users/takagiyasushi/dev/Agent-Teams-Viewer",
-    "context_vault_path": "/Users/takagiyasushi/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault",
-    "legacy_skills_repo_path": "/Users/takagiyasushi/skills-repo",
+    "canonical_repo_path": "${AGENT_TEAMS_VIEWER_ROOT}",
+    "context_vault_path": "${AGENTS_VAULT_ROOT}",
+    "legacy_skills_repo_path": "${SKILLS_REPO_ROOT}",
     "policy_location": "organization/policies",
     "role_location": "organization/roles",
     "runtime_location": "organization/runtime"
@@ -33,6 +33,29 @@
       "require_provider_response_before_main_agent_can_help",
       "mutate_task_state_without_user_or_main_agent_intent"
     ]
+  },
+  "provider_transport_policy": {
+    "external_context_transmission": {
+      "default": "human_approval_required",
+      "organization_flow": "preapproved",
+      "approved_scope": [
+        "co/ITB organization-internal role dispatch",
+        "agent-call, agent-dispatch, agent-dispatch-batch, role-queue, provider-activate, agent-switch, and provider-failover transport payloads",
+        "bounded task instructions, context refs, queue manifests, report paths, and provider evidence needed for the active task"
+      ],
+      "human_approval_record": {
+        "task_id": "TSK-1293",
+        "approved_at": "2026-06-17",
+        "approved_by": "human_user"
+      },
+      "disallowed_scope": [
+        "secrets, credentials, auth tokens, or private keys",
+        "unbounded Vault, repository, home directory, or transcript dumps",
+        "personal data unrelated to the active organization task",
+        "persistent provider/model registry changes without separate human approval"
+      ],
+      "host_safety_boundary": "Repository policy cannot bypass Codex host-level sandbox, escalation, or external-provider safety review."
+    }
   },
   "modes": {
     "fast": {

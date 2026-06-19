@@ -1,0 +1,30 @@
+{
+  "skill_name": "gate-task-assessor",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "TSK-2001 の tech/tasks.md に TT-TSK-2001-tech-001 done、TT-TSK-2001-tech-002 in_progress があり、tech-director が完了報告した。assessor として次工程に進めるか判定して。",
+      "expected_output": "assessment_status: incomplete。未完了 team task を列挙し、gate-task-evaluator へ進めず tech-director へ差し戻す。"
+    },
+    {
+      "id": 2,
+      "prompt": "TSK-2002 の tech/tasks.md と contents/tasks.md は全 task done、相互レビューも完了、blocker なし。Completion Assessment を作って。",
+      "expected_output": "required teams と board checked を明記し、all team tasks done / mutual reviews complete を true、assessment_status を ready_for_evaluation、handoff を gate-task-evaluator にする。"
+    },
+    {
+      "id": 3,
+      "prompt": "team task は done だが、business/tasks.md の法務承認欄が waiting_human のまま。完了扱いにしてよいか。",
+      "expected_output": "human approval incomplete として incomplete。承認記録が揃うまで evaluator に進めない。"
+    },
+    {
+      "id": 4,
+      "prompt": "tech/tasks.md は全 task done、相互レビューも完了。ただし source と CI 設定の code-like diff があり、tech-qa の QA Verdict が記録されていない。assessor として evaluator に進めるか判定して。",
+      "expected_output": "Code-like Diff QA Complete を false とし、assessment_status: incomplete にする。tech-qa の QA Scope、Readability Check、Changeability Check、Verification Link、QA Verdict が揃うまで gate-task-evaluator へ進めない。"
+    },
+    {
+      "id": 5,
+      "prompt": "Team tasks は done だが Active Set に必要な tech-director が active 化された証跡がなく、Gate / Infra も idle と記録されている。assessor として evaluator に進める？",
+      "expected_output": "進めない。Active Set Satisfied を false、assessment_status: incomplete とし、Gate / Infra は常時 active、必要 director の active 証跡が揃うまで差し戻す。"
+    }
+  ]
+}

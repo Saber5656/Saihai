@@ -1,0 +1,45 @@
+{
+  "skill_name": "tech-tester",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "新しいスキルを作成した。evals.json には happy path のプロンプトが2件だけあり、assertion は曖昧で baseline 比較もない。tech-tester としてスキルテストの品質をレビューし、追加すべき eval と assertion を提案してください。",
+      "expected_output": "Test Scope を固定し、Trigger coverage、Boundary coverage、Assertion quality、Baseline comparison を確認する。happy path だけでは不足と判断し、対象外ケース、承認待ち、失敗条件、without_skill または旧仕様比較を含む追加 eval と客観的 assertion を提案する。Tester Verdict は test_needs_more_coverage にする。",
+      "files": [
+        "skills/tech-tester/SKILL.md"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Web/API 機能を実装した。差分にはフォーム UI、POST API、入力バリデーション、DB 保存が含まれる。tech-tester として unit / integration / E2E / regression のテスト戦略とケースを作ってください。",
+      "expected_output": "Test Strategy で unit、integration、E2E、regression の必要性と理由を分ける。Test Cases には正常系、入力エラー、API エラー、DB 保存、回帰確認を含め、期待結果、失敗シグナル、実行コマンドまたは planned evidence を示す。品質ゲート最終判定は tech-qa に渡す。",
+      "files": [
+        "skills/tech-tester/SKILL.md"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "CI で統合テストが失敗している。ログには timeout と requestId があり、ローカルでは再現していない。tech-tester として失敗ログから再現手順、追加検証、handoff を作ってください。",
+      "expected_output": "Failure / Reproduction Notes に repro status、再現手順、期待結果、実際結果、ログや requestId を整理する。再現できていない場合は not_reproduced とし、追加で見るログ、環境差分、最小再現案を出す。原因修正は tech-debugger または実装担当へ handoff し、Tester Verdict は test_failed または test_blocked にする。",
+      "files": [
+        "skills/tech-tester/SKILL.md"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "既存テストスイートが遅く、flaky で、mock が多すぎる。重要な認可境界の回帰テストも足りない。tech-tester としてテストスイートの品質改善方針を出してください。",
+      "expected_output": "Coverage and Gaps で flaky、遅さ、過剰 mock、未網羅な認可境界を整理する。改善できるテスト資産、分離すべき integration / E2E、追加すべき regression、観測点を提案する。本体設計変更や品質ゲート判定は抱え込まず、必要に応じて tech-director / tech-qa / tech-reviewer へ handoff する。",
+      "files": [
+        "skills/tech-tester/SKILL.md"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Resident Organization Roster v2 のテスト設計をレビューする。既存 Gate flow テストはどう扱う？",
+      "expected_output": "既存テストは削除・上書きせず保持する。追加で roster 対象判定、Gate/Infra 常時 active、他チーム切替、誤常駐防止、Gate flow の guardian -> main transport renderer 完走、guardian complete 前の main transport renderer 失敗系を追加する。Tester Verdict は coverage 状況に応じて test_pass または test_needs_more_coverage にする。",
+      "files": [
+        "skills/tech-tester/SKILL.md"
+      ]
+    }
+  ]
+}

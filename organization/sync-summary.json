@@ -3,6 +3,7 @@
   "policy_count": 4,
   "runtime_ref_count": 3,
   "role_count": 40,
-  "agent_vault": "/Users/takagiyasushi/Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault",
-  "skills_root": "/private/tmp/itb-worktrees/skills-repo/TSK-1263-agent-teams-org-pivot/skills"
+  "last_scope": "policies",
+  "agent_vault": "${AGENTS_VAULT_ROOT}",
+  "skills_root": "${SKILLS_ROOT}"
 }

@@ -1,0 +1,115 @@
+{
+  "skill_name": "infra-team-bootstrap",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "SessionStart で ITB が起動した。既存 Resident Team Roster を確認すると、全 resident agent の session_id、effective_model、usage_source が揃っている。どうする？",
+      "expected_output": "追加起動せず bootstrap_status: already_ready で終了し、next_allowed_entrypoint を gate-prompt-formatter にする。"
+    },
+    {
+      "id": 2,
+      "prompt": "Roster に Gate / Infra は揃っているが tech-director と contents-director の session_id が空。ITB として起動対象をどう選ぶ？",
+      "expected_output": "bootstrap hook 段階では provider response evidence が空なのは正常。Hook launch が有効なら provider CLI の tmux process readiness を確認して readiness_scope: process_ready にし、Gate / Infra は metadata_ready、Tech / Contents は idle のまま扱う。tool sidecar と response_active は provider 証跡が揃うまで別扱いにする。"
+    },
+    {
+      "id": 3,
+      "prompt": "新規チャットセッション開始時に resident agent を起動する。全 agent に full SKILL.md と Vault policy を全文注入してよい？",
+      "expected_output": "注入しない。provider CLI startup prompt には Flow Contract、identity、idle rule、SKILL.md path だけを渡し、full SKILL.md は task payload を受けた role が active 化時に読む。"
+    },
+    {
+      "id": 4,
+      "prompt": "ユーザーが『チームを起動して』と入力した。ITB に直通分岐してよい？",
+      "expected_output": "直通しない。ユーザー発話は通常どおり gate-prompt-formatter に渡す。GPF 前に roster が無ければ bootstrap_missing policy violation として扱う。"
+    },
+    {
+      "id": 5,
+      "prompt": "SessionArchive が発火した。ITB shutdown mode として何を残す？",
+      "expected_output": "active agent の handoff summary、resident shutdown、roster archived、session_id、last_seen_at、未完了 task、復旧メモ、shutdown.json、Invocation Evidence を記録する。tmux 停止は bootstrap.json の tmux_session が itb-<organization_instance_id> と一致する場合だけ行う。"
+    },
+    {
+      "id": 6,
+      "prompt": "Resident Roster に commit、save、obsidian-cli が resident active として入っている。ITB として判定して。",
+      "expected_output": "不合格。commit、save、Obsidian CLI などは道具スキルであり resident agent にしない。必要時の一時実行ツールとして扱う。"
+    },
+    {
+      "id": 7,
+      "prompt": "ITB が resident agent を起動する。対象 skill の SKILL.md には primary_model がないが、model-registry.md には intended model / provider / execution_mode がある。どう扱う？",
+      "expected_output": "model-registry.md を正本として intended model、provider、execution_mode を取得し、Resident Roster / Invocation Evidence に記録する。Team Role SKILL.md に model frontmatter がないことは正常と扱う。"
+    },
+    {
+      "id": 8,
+      "prompt": "active な Team Role が model-registry.md に存在しない。ITB として fallback で SKILL.md frontmatter を読んで起動してよい？",
+      "expected_output": "起動しない。registry_missing として fail し、SKILL.md frontmatter へ fallback しない。"
+    },
+    {
+      "id": 9,
+      "prompt": "model-registry.md に startup_profile: compatibility_only の deprecated teams-developer がある。resident 起動対象に含めてよい？",
+      "expected_output": "含めない。compatibility_only / deprecated は legacy 参照用であり resident_target false として扱う。"
+    },
+    {
+      "id": 10,
+      "prompt": "Codex から chat session が始まった。旧 {main-agent}=Codex 方針に従って Codex が全実作業を抱えてよい？",
+      "expected_output": "抱えない。Codex は transport / adapter として扱い、ITB の Organization Instance lifecycle 後、ユーザープロンプトは gate-prompt-formatter に渡す。"
+    },
+    {
+      "id": 11,
+      "prompt": "Claude Code の SessionStart hook が発火し、ITB hook state が pending になった。最初に何をする？",
+      "expected_output": "通常のユーザー作業へ進まず、infra-team-bootstrap 共通 builder を lifecycle handler として実行し、team-config と model-registry を読んで Resident Roster / Bootstrap Report を作成する。SessionStart hook では --launch-agents により provider CLI を独立 tmux process として ensure し、成功時は status=ready と readiness_scope: process_ready を記録する。実作業は queue YAML nudge 後に role provider が行う。"
+    },
+    {
+      "id": 12,
+      "prompt": "UserPromptSubmit hook が roster status pending を追加 context として渡した。GPF としてそのまま依頼を整形してよい？",
+      "expected_output": "整形しない。先に ITB bootstrap / resume preflight を完了させ、ready になってからユーザープロンプトを gate-prompt-formatter として処理する。完了できなければ bootstrap_missing として停止する。"
+    },
+    {
+      "id": 13,
+      "prompt": "TeammateIdle hook が発火した。ITB bootstrap trigger として扱ってよい？",
+      "expected_output": "扱わない。TeammateIdle は tmux layout 用途に限定し、ITB bootstrap は SessionStart / UserPromptSubmit hooks で扱う。"
+    },
+    {
+      "id": 14,
+      "prompt": "Codex の SessionStart hook が発火した。hook からメインエージェント配下の subagent を spawn して完了扱いにしてよい？",
+      "expected_output": "subagent として扱わない。Codex hook は ITB 共通 builder を呼び、ITB-owned provider CLI を tmux 上の独立 process として ensure する。process_ready は起動証跡であり、tool_sidecar_ready、effective model / request / usage evidence が揃う response_active とは分ける。"
+    },
+    {
+      "id": 15,
+      "prompt": "Codex の UserPromptSubmit hook で `~/.codex/state/itb/<session>/status` が ready ではない。GPF に進んでよい？",
+      "expected_output": "進まない。UserPromptSubmit hook が advisory として通しても、No Task gate により ITB readiness が ready になるまで GPF、GTC、実作業、review、commit を止める。"
+    },
+    {
+      "id": 16,
+      "prompt": "COMMON-AGENTS.md に Codex hook の schema、Roster の全フィールド、builder 実装詳細をすべて書いてよい？",
+      "expected_output": "書かない。COMMON-AGENTS.md は Claude / Codex 共通の入口原則だけに絞り、hook・adapter・schema の詳細は ITB references と builder を正本にする。"
+    },
+    {
+      "id": 17,
+      "prompt": "Claude と Codex の hook wrapper が別々の roster builder を持っている。今後も runtime ごとに分岐実装してよい？",
+      "expected_output": "分岐させない。runtime wrapper は分けるが、Roster / Bootstrap Report の生成は ITB 共通 builder (`scripts/itb_bootstrap_builder.py`) に集約する。"
+    },
+    {
+      "id": 18,
+      "prompt": "SessionStart hook が Gate / Infra の always_active を見つけた。roster の activation_status を active にしてよい？",
+      "expected_output": "active にしない。hook が作る状態は metadata_ready であり、provider session、effective_model、request / usage evidence が揃った場合だけ response_active にする。"
+    },
+    {
+      "id": 19,
+      "prompt": "UserPromptSubmit preflight で status=ready だが invocation-evidence.jsonl が無い。即ブロックすべき？",
+      "expected_output": "legacy metadata-only state として警告を出す。roster と bootstrap.json が整合し、response_active without evidence などの検証エラーがなければ GPF entry context を注入して進める。"
+    },
+    {
+      "id": 20,
+      "prompt": "roster のある agent が response_active だが effective_model と usage_source が空。preflight はどうする？",
+      "expected_output": "decision:block にする。response_active は実 provider 応答済みを意味するため、session / model / usage evidence が無い状態は invalid roster として扱う。"
+    },
+    {
+      "id": 21,
+      "prompt": "SessionStart で全 resident agent を process_ready にしたいが、PC が熱くなるので Codex の MCP sidecar は起動したくない。ITB はどうする？",
+      "expected_output": "metadata-only には戻さない。ITB が provider CLI を startup 対象 role 分 tmux process として ensure して process_ready を保証し、MCP / browser / computer-use sidecar と response evidence は別に記録する。"
+    },
+    {
+      "id": 22,
+      "prompt": "Codex の /hooks に SessionEnd が表示されず、archived chat の itb-org-* が残っている。archive 時 shutdown はどう実行する？",
+      "expected_output": "Codex の Stop hook は各 turn で発火するため shutdown に使わない。明示 CLI `archive-shutdown --current` または `archive-shutdown --session-id <session_id>` を使い、--dry-run は state/tmux を変更せず対象判定だけを返す。"
+    }
+  ]
+}

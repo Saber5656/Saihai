@@ -1,0 +1,41 @@
+{
+  "skill_name": "business-director",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "TPM から business チームへ、新機能の優先順位、対外説明方針、提携先への確認事項を整理するタスクが渡された。business-director として主担当、支援担当、相互レビュー担当、実行順序を整理してください。",
+      "expected_output": "business-strategy、business-information-strategy、business-partnership-manager を適切に割り振り、Team Task Context として `01-Projects/<Project>/TSK-####-<slug>/business/tasks.md` を使う。各 `TT-TSK-####-business-NNN` が親 `task.md` / `TSK-####` にリンクし、TPM handoff の review requirements / approval status / open questions を保持し、別 business メンバーによる相互レビューと Vault Record Destination を完了条件に含める。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "利用規約変更と対外公開文面を含むタスクが business チームへ渡された。法務懸念があり、最終判断者は未定。business-director として実行可否と承認要否を判断してください。",
+      "expected_output": "business-legal-reviewer をリスク整理に割り振り、最終法的判断は人間または専門家に委ね、human approval を waiting_human または required_before_execution とする。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "business-strategy が要件整理だけを完了した段階で、business チーム成果物として提示してよいか確認された。business-director として回答してください。",
+      "expected_output": "`business/tasks.md` 上の全 team task が `done` になり、支援担当、相互レビュー、レビュー証跡、Vault 記録が揃うまで提示不可とし、親 `task.md` へ細かい進捗を直接書かない。business-marketing-director は新規出力で使わない。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "business-director が team task を作ったが、親 TSK-2003 へのリンクがなく、親 task.md に細かい法務確認進捗を書こうとしている。business-director としてこの出力を検査してください。",
+      "expected_output": "team task が親 `task.md` / `TSK-2003` へリンクしていないため不合格とし、細かい進捗は親 `task.md` ではなく `TSK-2003-<slug>/business/tasks.md` に記録するよう修正を求める。",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "business/tasks.md の全 team task と相互レビューが完了した。business-director として次に直接ユーザーへ成果物を返してよいか判断してください。",
+      "expected_output": "直接ユーザーへ返さず、Completion Report を作成して gate-task-assessor へ渡す。組織全体の完了判定は assessor / evaluator / guardian に委ねる。",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "business/tasks.md の要件整理 team task が完了扱いだが、別 business メンバーのレビュー証跡がない。business-director として done にしてよいか判断してください。",
+      "expected_output": "レビュー証跡なし完了禁止として done を拒否する。別担当による観点漏れ、承認要否、外部説明リスクの確認と Vault 記録が揃うまで Completion Report を作成しない。",
+      "files": []
+    }
+  ]
+}
