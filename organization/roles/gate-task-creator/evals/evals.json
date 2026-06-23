@@ -14,7 +14,7 @@
     {
       "id": 3,
       "prompt": "Headless Organization Context v2 を含む Gate Intake Envelope を Task Detail 化する。GTC として何を初期化する？",
-      "expected_output": "既存の Task Detail / Index / Kanban / PM Handoff / review line を保持したうえで、Role Context、Active Set、Invocation Evidence を初期化し、Gate / Infra は常時 active、Tech / Contents / Business は organization-scoped だが必要時 active、道具スキルは常駐外と記録する。"
+      "expected_output": "既存の Task Detail / Index / Kanban / PM Handoff / review line を保持したうえで、Role Context、Active Set、Invocation Evidence を初期化し、Gate / Infra は常時 active、Tech / Contents / Business は organization-scoped だが必要時 active、道具スキルは active set 外と記録する。"
     },
     {
       "id": 4,

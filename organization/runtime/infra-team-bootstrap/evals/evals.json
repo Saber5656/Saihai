@@ -5,7 +5,7 @@
     {
       "name": "session_start_metadata_only",
       "prompt": "SessionStart で ITB が起動した。何を書いてよい？",
-      "expected_output": "session_id、runtime、cwd、started_at、harness/config digest、active_execution_context:null、active_execution_context_pointer_path だけを書く。provider readiness、queue state、role dispatch state は書かない。"
+      "expected_output": "session_id、runtime、cwd、started_at、harness/config digest、active_execution_context:null、active_execution_context_pointer_path だけを書く。provider応答確認、queue state、role dispatch state は書かない。"
     },
     {
       "name": "stop_final_gate_read_only",

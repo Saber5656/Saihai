@@ -38,8 +38,8 @@ Completion Gate の機械検証用チェーン、pre-final 必須 section、main
 | `project_manager_handoff_created` | Task Detail に `Project Manager Handoff` があり、`teams-project-manager` へ渡せる |
 | `review_line_defined` | レビュー証跡要件、レビュー担当、人間承認要否が Task Detail または handoff に記録されている |
 | `organization_instance_bootstrapped` | ITB により Organization Instance が ready または already_ready である |
-| `team_roster_recorded` | Task Detail または Project note に Resident Team Roster がある |
-| `active_set_declared` | Gate core / Infra core、lazy role、タスク別 active set が記録されている |
+| `team_roster_recorded` | Task Detail または Project note に Organization Active Set がある |
+| `active_set_declared` | Gate core / Infra core、on-call role、タスク別 active set が記録されている |
 
 実行後に GTC 未実施が判明した場合、その作業は完了扱いにしない。逸脱 Task として原因、影響、未完了 gate、再発防止を Vault に記録する。
 
@@ -322,8 +322,8 @@ flowchart TD
 | 2 | タスク起点判定 | 人間ユーザーのプロンプト起点か、`infra-task-dispatcher` の自動フェッチ起点かを判定する |
 | 3 | 入口整形 / 候補収集 | 人間起点では ITB が `gate-prompt-formatter` inbox へ queue message を作成し、自動起点では `infra-task-dispatcher` が候補タスクを収集する |
 | 4 | タスク作成 | `gate-task-creator` がどちらの起点でも `00-Inbox&Tasks` と `Task-Index.md` に初期タスクを作成する |
-| 4.5 | 実行前チェック | Organization Instance、`Gate Intake Envelope`、Task Detail、Task Index、Kanban、Project Manager Handoff、review line、Resident Team Roster、Active Set、Queue Evidence が揃うまで実作業に進まない |
-| 5 | ルーティング | `teams-project-manager` が主担当チーム、支援チーム、Branch Plan、Gate/Infra core、lazy role、タスク別 active set を決め、各 director へ渡す |
+| 4.5 | 実行前チェック | Organization Instance、`Gate Intake Envelope`、Task Detail、Task Index、Kanban、Project Manager Handoff、review line、Organization Active Set、Queue Evidence が揃うまで実作業に進まない |
+| 5 | ルーティング | `teams-project-manager` が主担当チーム、支援チーム、Branch Plan、Gate/Infra core、on-call role、タスク別 active set を決め、各 director へ渡す |
 | 5.5 | Workspace prep | Git 管理対象の作業で Branch Plan がある場合、`git-workspace-prep` が task 共有 branch を準備する。`main-push-repos.md` 記載 repo の default branch 作業は `branch_action: none` として branch を切らない |
 | 6 | レビュー証跡要件設定 | 成果物の性質に応じて、チーム内相互レビュー、別観点レビュー、人間承認要否を先に決める。レビューは独立ステージではなく、Director 作業、`team-completion-check`、GTE が確認する証跡として扱う |
 | 7 | 担当エージェント作業 | 主担当と支援担当が、相談、修正、レビュー反映、整合性確認を含む作業ループを反復する |
@@ -332,7 +332,7 @@ flowchart TD
 | 10 | Team completion check | 各 Director の structured completion signal を受け、TPM が `team-completion-check` command で全 team task、相互レビュー、blocker、承認待ちの有無を確認する |
 | 11 | Evaluator | `gate-task-evaluator` が品質、要求充足、validation、commit / push / PR 要否を確認し、`main-push-repos.md` の default branch push whitelist を参照して Git Publication Manifest を作る |
 | 12 | Git publication / Vault final update | publication が必要なら `git-publisher` が commit / push / PR を専用スキルへ委譲して Git Publication Result を記録し、その後 Vault final update を行う |
-| 13 | Finalization check | Vault final update 後に `finalization-check` command が関連 task、Git Publication Result、Vault、Index、Kanban、Resident Roster、Active Set、Invocation Evidence、Completion Envelope の完了証跡を確認する |
+| 13 | Finalization check | Vault final update 後に `finalization-check` command が関連 task、Git Publication Result、Vault、Index、Kanban、Organization Active Set、Invocation Evidence、Completion Envelope の完了証跡を確認する |
 | 14 | 人間承認 | 設計変更、要件追加、権限モデル変更、方針転換は人間承認なしに進めない |
 
 ## Gate I/O Contract

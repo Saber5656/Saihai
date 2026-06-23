@@ -25,7 +25,7 @@ TPM は `tech-backend`、`infra-local-qa`、`contents-formatter` などの個別
 | 区分 | 内容 |
 |---|---|
 | In | Task Detail、routing hint、review requirements、approval status、open questions |
-| Out | 主担当チーム、支援チーム、レビュー担当チーム、実行順序、Branch Plan、Resident Roster の active set、director handoff、Team Completion Check、completion gate handoff |
+| Out | 主担当チーム、支援チーム、レビュー担当チーム、実行順序、Branch Plan、Organization Active Set、director handoff、Team Completion Check、completion gate handoff |
 | 前ロール | `gate-task-creator` |
 | 次ロール | 各チーム director または Gate 固定フロー |
 | 対象外 | 個別エージェント選定、実作業、レビュー実施、Kanban 同期実装、Task ID 採番 |
@@ -45,7 +45,7 @@ TPM は `tech-backend`、`infra-local-qa`、`contents-formatter` などの個別
 TPM は全チーム共通の「チーム配車係」として振る舞う。
 
 各チーム内で誰が作業するかは、チーム内 director が決める。
-Resident Organization Roster 運用では、TPM は Gate / Infra を常時 active として扱い、タスクごとに active 化するチームと director までを宣言する。Tech / Contents / Business の個別 worker active 化は各 director の責務とする。
+Organization Active Set 運用では、TPM は Gate / Infra を常時 active として扱い、タスクごとに active 化するチームと director までを宣言する。Tech / Contents / Business の個別 worker active 化は各 director の責務とする。
 TPM は role 定義ではなく、現チャットセッションの agent instance を active set に載せる。全チャット横断の singleton agent を前提にしない。
 
 | 主担当チーム | TPM が渡す先 | チーム内の割り振り責任 |
@@ -109,7 +109,7 @@ TPM は role 定義ではなく、現チャットセッションの agent instan
    - Task Detail には `task-detail-append` command で status、1行 summary、report path、report sha256 だけを残す。
    - Vault に記録していない判断を共有済み事実として扱わないが、長文本文を Task Detail へ直接貼らない。
 
-7.5. Resident Roster の active set を残す。
+7.5. Organization Active Set を残す。
    - Gate / Infra は常時 active として `Always Active` に記録する。
    - 主担当チームと支援チームの director を `Task Active` に記録する。
    - タスク対象外のチームは inactive team として記録する。
@@ -171,14 +171,14 @@ TPM の出力は次の形式を基本にする。
 | Micro Team Record | `in_task_certificate` / `team_task_board_required` |
 ```
 
-## Resident Active Set
+## Organization Active Set
 
 Task Detail には次を残す。
 
 ```markdown
 ## Active Set
 
-| Task Phase | Always Active | Task Active | Idle Resident | Reason |
+| Task Phase | Always Active | Task Active | Deferred Role | Reason |
 |---|---|---|---|---|
 | routing | Gate + Infra | <main/support directors> | <non-target teams> | Gate/Infra operate cross-task; other teams activate only when in scope. |
 ```

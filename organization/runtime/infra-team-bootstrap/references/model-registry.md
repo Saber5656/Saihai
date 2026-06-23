@@ -41,7 +41,7 @@ Team Role `SKILL.md` files define role identity, Flow Contract, and behavior. Th
 | infra-director | infra | active | true | anthropic | claude-sonnet-4-6 | claude-haiku-4-5, gpt-5.5 | agent | medium | medium |  | Vault 運用、タスク同期、Obsidian 関連作業の責務分解とレビュー線調整を安定して扱うため |
 | infra-local-qa | infra | active | false | anthropic | claude-sonnet-4-6 | claude-haiku-4-5 | agent | medium | medium |  | Infra Director が必要時に起動する専門メンバー。2026-06-11: auto mode 対応のため haiku-4-5 から昇格（Haiku 4.5 は auto/fast 非対応） |
 | infra-task-dispatcher | infra | active | false | anthropic | claude-sonnet-4-6 | claude-haiku-4-5, gpt-5.2 | agent | medium | medium | gpt-5.2 | Infra Director または定期実行側が必要時に起動する運行メンバー。2026-06-11: auto mode 対応のため haiku-4-5 から昇格（Haiku 4.5 は auto/fast 非対応） |
-| infra-team-bootstrap | infra | active | true | anthropic | claude-sonnet-4-6 | claude-haiku-4-5, gpt-5.4 | agent | medium | medium |  | 起動確認、roster 照合、証跡記録、軽量な運行判断が中心のため。2026-06-11: auto mode 対応のため haiku-4-5 から昇格（Haiku 4.5 は auto/fast 非対応） |
+| infra-team-bootstrap | infra | active | true | anthropic | claude-sonnet-4-6 | claude-haiku-4-5, gpt-5.4 | agent | medium | medium |  | CLI surface確認、active set 照合、証跡記録、軽量な運行判断が中心のため。2026-06-11: auto mode 対応のため haiku-4-5 から昇格（Haiku 4.5 は auto/fast 非対応） |
 | teams-coordination | tech | deprecated | false | anthropic | claude-sonnet-4-6 | claude-haiku-4-5, gpt-5.5 | agent | medium | medium |  | 旧 Claude Teams 実験用。現行 runtime 対象外 |
 | teams-developer | tech | deprecated | false | openai | gpt-5.5 | claude-sonnet-4-6, gpt-5.2 | codex | medium | medium | gpt-5.2 | 旧 Claude Teams 実験用。現行 runtime 対象外 |
 | teams-project-manager | gate | active | true | anthropic | claude-sonnet-4-6 | claude-haiku-4-5, gpt-5.5 | agent | medium | medium |  | Gate 起票後の組織横断ルーティング、レビュー線、実行順序を扱う |

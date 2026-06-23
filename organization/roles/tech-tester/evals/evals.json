@@ -35,8 +35,8 @@
     },
     {
       "id": 5,
-      "prompt": "Resident Organization Roster v2 のテスト設計をレビューする。既存 Gate flow テストはどう扱う？",
-      "expected_output": "既存テストは削除・上書きせず保持する。追加で roster 対象判定、Gate/Infra 常時 active、他チーム切替、誤常駐防止、Gate flow の guardian -> main transport renderer 完走、guardian complete 前の main transport renderer 失敗系を追加する。Tester Verdict は coverage 状況に応じて test_pass または test_needs_more_coverage にする。",
+      "prompt": "Organization Active Set v2 のテスト設計をレビューする。既存 Gate flow テストはどう扱う？",
+      "expected_output": "既存テストは削除・上書きせず保持する。追加で active set 対象判定、Gate/Infra 常時 active、他チーム切替、誤 active 化防止、Gate flow の guardian -> main transport renderer 完走、guardian complete 前の main transport renderer 失敗系を追加する。Tester Verdict は coverage 状況に応じて test_pass または test_needs_more_coverage にする。",
       "files": [
         "skills/tech-tester/SKILL.md"
       ]
