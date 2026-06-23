@@ -10064,7 +10064,9 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     session_dir.mkdir(parents=True, exist_ok=True)
     now = current_timestamp()
 
-    state = read_json(state_path) if state_path.exists() else {}
+    state_missing = not state_path.exists()
+    roster_missing = not roster_path.exists()
+    state = read_json(state_path) if not state_missing else {}
     if not isinstance(state, dict):
         state = {}
     organization_instance_id = str(
@@ -10079,7 +10081,7 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     state.setdefault("cwd", str(hook_input.get("cwd") or os.getcwd()))
     state.setdefault("bootstrap_status", "headless_metadata")
     state.setdefault("readiness_scope", "metadata_only")
-    roster = read_json(roster_path) if roster_path.exists() else role_agent_rows(
+    roster = read_json(roster_path) if not roster_missing else role_agent_rows(
         organization_instance_id=organization_instance_id,
     )
     if not isinstance(roster, list):
@@ -10350,37 +10352,55 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     session_dir = state_root / safe_id(str(session_id))
     state_path = session_dir / "bootstrap.json"
     roster_path = session_dir / "roster.json"
+    session_dir.mkdir(parents=True, exist_ok=True)
     now = current_timestamp()
-
-    if not state_path.exists() or not roster_path.exists():
-        state = {
-            "runtime": runtime,
-            "session_id": session_id,
-            "bootstrap_status": "missing",
-            "readiness_scope": "missing",
-            "spawn_mode": "unknown",
-            "unavailable_agents": [],
-            "outputs": {"state_dir": str(session_dir)},
-            "validation_errors": ["bootstrap.json or roster.json missing"],
-        }
-        return {"decision": "block", "reason": block_reason(state)}
-
-    state = read_json(state_path)
-    roster = read_json(roster_path)
-    if not isinstance(roster, list):
-        return {"decision": "block", "reason": "roster.json is not a list"}
-
     agent_id = str(hook_input.get("agent_id") or hook_input.get("agentId") or "gate-prompt-formatter")
     prompt = str(
         hook_input.get("prompt")
         or "Return a compact JSON object with keys agent_id, provider, and task_summary for ITB provider activation verification."
     )
+
+    state_missing = not state_path.exists()
+    roster_missing = not roster_path.exists()
+    state = read_json(state_path) if not state_missing else {}
+    if not isinstance(state, dict):
+        return {"decision": "block", "reason": "bootstrap.json is not an object"}
+    organization_instance_id = str(
+        state.get("organization_instance_id")
+        or hook_input.get("organization_instance_id")
+        or hook_input.get("organizationInstanceId")
+        or organization_id(str(session_id))
+    )
+    state.setdefault("runtime", runtime)
+    state.setdefault("session_id", session_id)
+    state.setdefault("organization_instance_id", organization_instance_id)
+    state.setdefault("cwd", str(hook_input.get("cwd") or os.getcwd()))
+    state.setdefault("bootstrap_status", "headless_metadata")
+    state.setdefault("readiness_scope", "metadata_only")
+    state.setdefault("outputs", {"state_dir": str(session_dir)})
+
+    roster = read_json(roster_path) if not roster_missing else role_agent_rows(
+        organization_instance_id=organization_instance_id,
+    )
+    if not isinstance(roster, list):
+        return {"decision": "block", "reason": "roster.json is not a list"}
+
     row = next((item for item in roster if item.get("agent_id") == agent_id), None)
     if row is None:
-        return {"decision": "block", "reason": f"agent not found in roster: {agent_id}"}
+        if roster_missing:
+            row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+            if not row:
+                return {"decision": "block", "reason": f"agent not found in registry: {agent_id}"}
+            roster.append(row)
+        else:
+            return {"decision": "block", "reason": f"agent not found in roster: {agent_id}"}
     registry_row = registry_row_for(agent_id)
     if not row.get("fallback_models") and registry_row.get("fallback_models"):
         row["fallback_models"] = registry_row["fallback_models"]
+    if state_missing:
+        write_json_yaml(state_path, state)
+    if roster_missing:
+        write_json_yaml(roster_path, roster)
     max_budget_usd, budget_source = claude_activation_budget(row, hook_input)
 
     provider_runtime = agent_runtime(row)

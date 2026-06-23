@@ -107,6 +107,76 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             self.assertFalse((session_dir / "bootstrap.json").exists())
             self.assertFalse((session_dir / "status").exists())
 
+    def test_provider_activate_after_metadata_only_session_start_uses_registry_roster(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            builder.session_start_metadata_output(
+                runtime="codex",
+                state_root=state_root,
+                hook_input={"session_id": "headless-session", "cwd": "/tmp/project", "source": "startup"},
+            )
+            session_dir = state_root / "headless-session"
+            self.assertFalse((session_dir / "bootstrap.json").exists())
+            self.assertFalse((session_dir / "roster.json").exists())
+
+            stdout = json.dumps(
+                {
+                    "type": "result",
+                    "result": "activation ok",
+                    "usage": {"input_tokens": 1, "output_tokens": 2},
+                    "duration_api_ms": 3,
+                    "model": "gpt-5.5",
+                    "request_id": "req-test",
+                    "session_id": "provider-session",
+                    "num_turns": 1,
+                }
+            ) + "\n"
+            completed = subprocess.CompletedProcess(args=["codex"], returncode=0, stdout=stdout, stderr="")
+
+            with mock.patch.object(builder.shutil, "which", return_value="/usr/bin/codex"), mock.patch.object(
+                builder.subprocess,
+                "run",
+                return_value=completed,
+            ) as run_mock:
+                output = builder.provider_activate(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={"session_id": "headless-session", "agent_id": "tech-backend", "cwd": "/tmp/project"},
+                )
+
+            self.assertNotIn("decision", output)
+            self.assertEqual(output["activation"]["provider"], "openai")
+            self.assertTrue(run_mock.called)
+            state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+            roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["bootstrap_status"], "headless_metadata")
+            self.assertEqual(state["readiness_scope"], "response_evidence")
+            self.assertTrue(any(item.get("agent_id") == "tech-backend" for item in roster))
+            self.assertTrue((session_dir / "invocation-evidence.jsonl").exists())
+
+    def test_provider_activate_invalid_existing_roster_blocks_before_subprocess(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = state_root / "headless-session"
+            session_dir.mkdir(parents=True)
+            (session_dir / "active-execution-context.json").write_text(
+                json.dumps({"session_id": "headless-session", "active_execution_context_pointer_path": "x"}),
+                encoding="utf-8",
+            )
+            (session_dir / "roster.json").write_text(json.dumps({"agent_id": "tech-backend"}), encoding="utf-8")
+
+            with mock.patch.object(builder.subprocess, "run", side_effect=AssertionError("provider must not run")):
+                output = builder.provider_activate(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={"session_id": "headless-session", "agent_id": "tech-backend"},
+                )
+
+        self.assertEqual(output["decision"], "block")
+        self.assertEqual(output["reason"], "roster.json is not a list")
+
     def test_role_agent_rows_expose_headless_metadata_only(self) -> None:
         builder = load_builder_module()
         rows = builder.role_agent_rows(organization_instance_id="org-test")
