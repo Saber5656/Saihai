@@ -16,7 +16,7 @@ agent_id: gate-task-evaluator
 
 ## 役割
 
-`gate-task-evaluator` は、builder / queue-watch が `teams-project-manager` の terminal report を受けて `team-completion-check` command evidence を実行し、`status: pass` / `next_phase_allowed: true` と確認した後に queue される。Evaluator はその入力を前提に、成果物全体が元依頼、Task Detail、レビュー要件、検証要件を満たしているかを評価する。
+`gate-task-evaluator` は、builder が `teams-project-manager` の terminal report を受けて `team-completion-check` command evidence を実行し、`status: pass` / `next_phase_allowed: true` と確認した後に queue される。Evaluator はその入力を前提に、成果物全体が元依頼、Task Detail、レビュー要件、検証要件を満たしているかを評価する。
 前段 contract は `skills/infra-team-bootstrap/config/completion-chain.yaml` の `assessor_integration_policy` を正本にする。現行 mode は `tpm_team_completion_check` のため `Team Completion Check` を入力とし、旧 `gate-task-assessor` は互換参照に限る。
 
 品質 OK の場合、Task Change Manifest と Git Publication Manifest を作成し、task-owned の approved diff や push / PR 要件がある場合だけ `git-publisher` へ渡す。品質不足、検証不足、承認不足がある場合は該当 Director へ差し戻す。
@@ -39,7 +39,7 @@ allowed-tools は判定に必要な参照 tool だけを表し、queue transport
 
 ## Builder Precheck
 
-Evaluator 起動前に ITB builder / queue-watch が `evaluator-precheck` を実行し、`gatePrecheck.precheck_status`、`git_diff_status`、`suggested_task_change_manifest`、`suggested_git_publication_manifest` を role input として渡す。
+Evaluator 起動前に ITB builder が `evaluator-precheck` を実行し、`gatePrecheck.precheck_status`、`git_diff_status`、`suggested_task_change_manifest`、`suggested_git_publication_manifest` を role input として渡す。
 Evaluator はこの command artifact を再実行せず、品質 verdict と manifest 採否理由だけを返す。
 
 | Precheck | Required |
@@ -54,7 +54,7 @@ Evaluator はこの command artifact を再実行せず、品質 verdict と man
 
 ## Controlled Micro-Flow Combined Verdict
 
-`prompt-preflight` が `micro_fast_path.status: pass` を返した read-only / no-diff / single-team prompt では、Evaluator provider turn は起動しない。
+controlled micro-flow が `micro_fast_path.status: pass` を返した read-only / no-diff / single-team prompt では、Evaluator provider turn は起動しない。
 builder が `state/<session>/gates/<micro-task>/evaluation.json` と `finalization.json` を deterministic に作成し、Completion Envelope を main transport renderer へ渡す。`vault-final-update` command が compact gate artifacts を `vault_final_update.json` と Task Detail の `Vault Final Update` thin section へ一度だけ rollup する。`finalization.json` / `finalization-check` command artifact の `notification_class` は最終表示・operator alert 判断の正本であり、自由文 reason を再推論しない。
 
 この combined verdict は次の条件が揃う場合だけ有効。

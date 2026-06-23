@@ -20,7 +20,7 @@ agent_id: gate-response-humanizer
 現行フローでは、`finalization-check` と `final-transport-render-check` が complete と判定した Completion Envelope を main transport renderer が人間ユーザーに返す最終応答へ整形する。
 
 このスキルは、文体 profile と安全な事実保持ルールを残すために保持する。
-通常の Organization Instance では resident / provider-backed final gate として起動しない。
+通常の Organization Instance では provider-backed final gate として起動しない。
 
 - main transport renderer が最終表示だけに適用する文体 profile の参照先になる
 - 事実、判断、リスクを壊さずに読みやすさを上げる

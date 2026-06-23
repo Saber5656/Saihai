@@ -112,15 +112,15 @@ TPM は role 定義ではなく、現チャットセッションの agent instan
 7.5. Resident Roster の active set を残す。
    - Gate / Infra は常時 active として `Always Active` に記録する。
    - 主担当チームと支援チームの director を `Task Active` に記録する。
-   - タスク対象外の resident チームは `Idle Resident` に記録する。
+   - タスク対象外のチームは inactive team として記録する。
    - `role_id` と `agent_instance_id` を区別し、`chat_session_id` / `organization_instance_id` が一致する agent instance だけを active 化する。
-   - bridge、commit、git-publisher、push、git-workspace-prep、save、Obsidian CLI などの道具スキルを resident active set に混ぜない。
+   - bridge、commit、git-publisher、push、git-workspace-prep、save、Obsidian CLI などの道具スキルを organization active set に混ぜない。
    - モデル、session、request、usage の証跡は `Invocation Evidence` に記録する前提を維持する。
 
 8. Team Completion Check と Completion Gate handoff を維持する。
    - 各 Director は担当チームの作業・レビュー完了後、TPM へ completion report を返す。
    - TPM は `team-completion-check` command evidence として、対象チームの完了報告、未解決 blocker、human approval、レビュー証跡を集約し、全チーム完了時だけ `Completion Status: ready_for_evaluation` を記録する。
-   - Director 完了報告後の次工程は `skills/infra-team-bootstrap/config/completion-chain.yaml` の `completion_chain`、`auto_queue_handoffs`、`assessor_integration_policy` に従う。現行 mode は `tpm_team_completion_check` のため、TPM の terminal report 後に builder / queue-watch が `team-completion-check` command を実行し、`pass` の場合だけ `gate-task-evaluator` を queue する。
+   - Director 完了報告後の次工程は `skills/infra-team-bootstrap/config/completion-chain.yaml` の `completion_chain`、`auto_queue_handoffs`、`assessor_integration_policy` に従う。現行 mode は `tpm_team_completion_check` のため、TPM の terminal report 後に builder が `team-completion-check` command を実行し、`pass` の場合だけ `gate-task-evaluator` を queue する。
    - TPM は evaluator inbox を手書き生成しない。command が `block` / `ambiguous` の場合は `missing_evidence`、`blockers`、`reason` を直してから再 report する。
    - TPM は品質評価、commit 実行、finalization 判定を行わない。
    - TPM は Director 完了報告を main transport renderer へ直接渡さない。
@@ -180,7 +180,7 @@ Task Detail には次を残す。
 
 | Task Phase | Always Active | Task Active | Idle Resident | Reason |
 |---|---|---|---|---|
-| routing | Gate + Infra | <main/support directors> | <non-target resident teams> | Gate/Infra operate cross-task; other teams activate only when in scope. |
+| routing | Gate + Infra | <main/support directors> | <non-target teams> | Gate/Infra operate cross-task; other teams activate only when in scope. |
 ```
 
 ## 判断基準
@@ -228,7 +228,7 @@ Task Detail には次を残す。
 | Team Completion Check を Task Detail に記録した | Yes |
 | Completion Gate の後段フローを保持した | Yes |
 | Gate / Infra を常時 active として扱い、タスク別 active set を記録した | Yes |
-| 道具スキルを resident active set に混ぜていない | Yes |
+| 道具スキルを organization active set に混ぜていない | Yes |
 
 ## Related Notes
 

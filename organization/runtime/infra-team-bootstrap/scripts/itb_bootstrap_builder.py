@@ -108,7 +108,6 @@ USER_VAULT_ROOT = Path(
     or str(Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Personal Vault")
 ).expanduser()
 YASU_VAULT_ROOT = USER_VAULT_ROOT
-DEFAULT_AGENT_PROCESS_MODE = "provider_cli"
 DEFAULT_PROVIDER_PERMISSION_MODE = "auto"
 DEFAULT_CODEX_APPROVAL_POLICY = "never"
 DEFAULT_CLAUDE_HAIKU_SONNET_EFFORT = "medium"
@@ -116,7 +115,6 @@ DEFAULT_CLAUDE_OPUS_EFFORT = "max"
 DEFAULT_CODEX_MODEL = "gpt-5.5"
 DEFAULT_CODEX_REASONING_EFFORT = "xhigh"
 DEFAULT_CODEX_SERVICE_TIER = "fast"
-LAZY_STARTUP_PROFILES = {"lazy_activation", "on_demand"}
 ALLOWED_QUEUE_FINALIZERS = {"role-report"}
 ALLOWED_REPORT_WRITE_MODES = {"builder_atomic"}
 STATIC_ROLE_LAYERS = frozenset({"gate", "tpm", "director", "worker"})
@@ -206,22 +204,24 @@ MODEL_REGISTRY_REQUIRED_COLUMNS = {
     "agent_id",
     "team",
     "status",
-    "resident_target",
     "always_active",
     "provider",
     "primary_model",
     "execution_mode",
-    "startup_profile",
 }
 HOOK_WRAPPER_INSTALL_FILES = (
     "itb-hook-common.sh",
     "itb-session-start.sh",
-    "itb-prompt-preflight.sh",
     "itb-final-response-guard.sh",
-    "itb-pretooluse-guard.sh",
-    "itb-session-end.sh",
 )
 SESSION_START_COMPACT_SOURCE_MARKERS = {"resume", "clear", "compact"}
+EXECUTION_CONTEXT_TYPES = {"none", "intake", "execution"}
+FINAL_GATE_REASON_CODES = {"no_active_context", "complete", "incomplete", "required_approval", "blocked"}
+FINAL_GATE_NEXT_ACTIONS = {"plan", "fix", "ask_human", "mark_blocked"}
+FINAL_GATE_DEFAULT_RECOVERY_CYCLE_BUDGET = 5
+FINAL_GATE_RECOVERY_CYCLE_TUNING_RANGE = [5, 8]
+FINAL_GATE_SAME_BLOCKER_CONSECUTIVE_CAP = 2
+FINAL_GATE_BUDGET_UNIT = "gate_block_recovery_cycle"
 
 
 def load_hook_input() -> dict[str, Any]:
@@ -685,11 +685,10 @@ def tools_argument_for_role(row: dict[str, Any]) -> str:
 
 def transport_tools_argument_for_role(row: dict[str, Any]) -> str:
     tools = normalize_allowed_tools(row.get("allowed_tools", []))
-    transport_finalizer = normalize_cell(row.get("transport_finalizer"))
     if (
         truthy_input(row.get("queue_consumer"))
         and normalize_cell(row.get("queue_finalizer")) == "role-report"
-    ) or transport_finalizer == "agent-dispatch-report":
+    ):
         for tool in sorted(QUEUE_FINALIZER_TRANSPORT_TOOLS):
             if tool not in tools:
                 tools.append(tool)
@@ -722,22 +721,6 @@ def role_report_writer_command(
     return shlex.join(args)
 
 
-def agent_dispatch_report_writer_command(runtime: str, state_root: Path | str, session_id: str) -> str:
-    return shlex.join(
-        [
-            "python3",
-            str(ITB_ROOT / "scripts" / "itb_bootstrap_builder.py"),
-            "agent-dispatch-report",
-            "--runtime",
-            runtime,
-            "--state-root",
-            str(state_root),
-            "--session-id",
-            session_id,
-        ]
-    )
-
-
 def claude_transport_allowed_tools_argument_for_role(row: dict[str, Any]) -> str:
     patterns: list[str] = []
     runtime = normalize_cell(row.get("runtime")) or "codex"
@@ -752,12 +735,6 @@ def claude_transport_allowed_tools_argument_for_role(row: dict[str, Any]) -> str
             patterns.append(
                 f"Bash(python3 {ITB_ROOT / 'scripts' / 'itb_bootstrap_builder.py'} role-report * --role-id {role_id} --message-id * --report-json *)"
             )
-    if normalize_cell(row.get("transport_finalizer")) == "agent-dispatch-report":
-        if state_root and session_id:
-            writer_command = agent_dispatch_report_writer_command(runtime, state_root, session_id)
-            patterns.append(f"Bash({writer_command} *)")
-        else:
-            patterns.append(f"Bash(python3 {ITB_ROOT / 'scripts' / 'itb_bootstrap_builder.py'} agent-dispatch-report *)")
     return ",".join(dict.fromkeys(patterns))
 
 
@@ -1113,13 +1090,11 @@ def load_gate_output_schemas(path: Path | None = None) -> dict[str, Any]:
     return {"schema_version": 1, "sections": sections}
 
 
-def active_resident_model_rows() -> list[dict[str, str]]:
+def active_role_model_rows() -> list[dict[str, str]]:
     return [
         row
         for row in parse_registry()
         if row.get("status") == "active"
-        and bool_cell(row.get("resident_target", "false"))
-        and row.get("startup_profile") != "compatibility_only"
     ]
 
 
@@ -1140,7 +1115,7 @@ def role_agent_rows(*, organization_instance_id: str = "{org_instance_id}") -> l
     overrides = registry.get("agents") if isinstance(registry.get("agents"), dict) else {}
     role_layers = registry.get("role_layers") if isinstance(registry.get("role_layers"), dict) else {}
     rows: list[dict[str, Any]] = []
-    for model_row in active_resident_model_rows():
+    for model_row in active_role_model_rows():
         role_id = model_row["agent_id"]
         team = model_row.get("team", "")
         override = overrides.get(role_id, {}) if isinstance(overrides, dict) else {}
@@ -1150,21 +1125,6 @@ def role_agent_rows(*, organization_instance_id: str = "{org_instance_id}") -> l
         model_source = registry_row_for(model_ref)
         if not model_source:
             raise ValueError(f"role-agent registry model_registry_ref not found: {role_id} -> {model_ref}")
-        tmux_session = role_agent_template_value(
-            override.get("tmux_session") or defaults.get("tmux_session") or "itb-{org_instance_id}",
-            role_id=role_id,
-            team=team,
-            org_instance_id=organization_instance_id,
-        )
-        tmux_window = safe_tmux_name(
-            role_agent_template_value(
-                override.get("tmux_window") or defaults.get("tmux_window") or "{role_id}",
-                role_id=role_id,
-                team=team,
-                org_instance_id=organization_instance_id,
-            )
-        )
-        tmux_pane = int(override.get("tmux_pane", defaults.get("tmux_pane", 0)))
         inbox_template = override.get("inbox_path") or defaults.get("inbox_path") or "inbox/{role_id}.yaml"
         report_template = override.get("report_dir") or defaults.get("report_dir") or "reports/{role_id}"
         queue_consumer = truthy_input(override.get("queue_consumer", defaults.get("queue_consumer", False)))
@@ -1205,6 +1165,7 @@ def role_agent_rows(*, organization_instance_id: str = "{org_instance_id}") -> l
             {
                 "role_id": role_id,
                 "agent_id": role_id,
+                "organization_instance_id": organization_instance_id,
                 "team": team,
                 "role_layer": role_layer,
                 "model_registry_ref": model_ref,
@@ -1212,7 +1173,6 @@ def role_agent_rows(*, organization_instance_id: str = "{org_instance_id}") -> l
                 "intended_model": model_source.get("primary_model", ""),
                 "fallback_models": model_source.get("fallback_models", ""),
                 "execution_mode": model_source.get("execution_mode", ""),
-                "startup_profile": model_source.get("startup_profile", ""),
                 "always_active": bool_cell(model_source.get("always_active", "false")),
                 "queue_consumer": queue_consumer,
                 "queue_finalizer": queue_finalizer,
@@ -1220,10 +1180,6 @@ def role_agent_rows(*, organization_instance_id: str = "{org_instance_id}") -> l
                 "allowed_tools": allowed_tools,
                 "context_dirs": context_dirs,
                 "git_operations_allowed": git_operations_allowed,
-                "tmux_session": tmux_session,
-                "tmux_window": tmux_window,
-                "tmux_pane": tmux_pane,
-                "tmux_target": f"{tmux_session}:{tmux_window}.{tmux_pane}",
                 "inbox_path": role_agent_template_value(
                     inbox_template,
                     role_id=role_id,
@@ -1361,12 +1317,7 @@ def managed_role_skill_rows(
     managed: list[dict[str, str]] = []
     for row in registry_rows:
         status = normalize_cell(row.get("status"))
-        startup_profile = normalize_cell(row.get("startup_profile"))
-        if (
-            status == "active"
-            and bool_cell(row.get("resident_target", "false"))
-            and startup_profile != "compatibility_only"
-        ):
+        if status == "active":
             managed.append(row)
         elif include_reference_roles and status == "reference":
             managed.append(row)
@@ -1435,7 +1386,7 @@ def sync_policy_digest_skills(
     unresolved_requested = sorted(requested - {normalize_cell(row.get("agent_id")) for row in target_rows})
     if unresolved_requested:
         for role_id in unresolved_requested:
-            errors.append({"agent_id": role_id, "error": "role_id is not an active resident Team Role"})
+            errors.append({"agent_id": role_id, "error": "role_id is not an active Team Role"})
 
     status = "failed" if errors or missing else "ready"
     summary = {
@@ -1684,13 +1635,6 @@ def release_queue_lock(lock_path: Path) -> None:
 def resolved_path(value: Any) -> Path:
     return Path(str(value)).expanduser().resolve(strict=False)
 
-
-def path_is_within(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
 
 
 def shared_file_root_for(path: Path) -> Path | None:
@@ -2187,182 +2131,10 @@ def queue_nudge_cooldown_status(message: dict[str, Any], now: str, hook_input: d
     }
 
 
-def queue_watch_result_for_counts(
-    *,
-    nudged_count: int = 0,
-    recovered_count: int = 0,
-    dead_letter_count: int = 0,
-    sla_breach_count: int = 0,
-    cooldown_skipped_count: int = 0,
-    provider_busy_count: int = 0,
-    approval_wait_count: int = 0,
-    errors: bool = False,
-    has_summaries: bool = True,
-) -> str:
-    if errors:
-        return "partial_error" if has_summaries else "error"
-    if dead_letter_count:
-        return "dead_lettered"
-    if provider_busy_count and approval_wait_count >= provider_busy_count:
-        return "provider_busy"
-    if sla_breach_count:
-        return "sla_breached"
-    if provider_busy_count:
-        return "provider_busy"
-    if nudged_count:
-        return "nudged"
-    if recovered_count:
-        return "recovered"
-    if cooldown_skipped_count:
-        return "nudge_cooldown"
-    return "idle"
 
 
-def queue_watch_approval_wait_count(events: list[dict[str, Any]]) -> int:
-    count = 0
-    for event in events:
-        if normalize_cell(event.get("notification_class")) == "approval_wait":
-            count += 1
-            continue
-        nudge = event.get("nudge") if isinstance(event.get("nudge"), dict) else {}
-        provider_status = normalize_cell(nudge.get("provider_status"))
-        nudge_result = normalize_cell(nudge.get("result"))
-        if provider_status == "approval_wait" or nudge_result == "nudge_deferred_provider_approval":
-            count += 1
-    return count
 
 
-def queue_watch_summary_has_approval_wait(events: list[dict[str, Any]]) -> bool:
-    return queue_watch_approval_wait_count(events) > 0
-
-
-def roster_tmux_target_for_role(session_dir: Path, role_id: str, role_row: dict[str, Any]) -> str:
-    target = normalize_cell(role_row.get("tmux_target"))
-    if target:
-        return target
-    roster_path = session_dir / "roster.json"
-    try:
-        roster = read_json(roster_path) if roster_path.exists() else []
-    except (OSError, json.JSONDecodeError):
-        roster = []
-    if not isinstance(roster, list):
-        return ""
-    for row in roster:
-        if not isinstance(row, dict):
-            continue
-        if normalize_cell(row.get("agent_id") or row.get("role_id")) == role_id:
-            return normalize_cell(row.get("tmux_target"))
-    return ""
-
-
-def queue_provider_approval_probe(
-    *,
-    session_dir: Path,
-    role_id: str,
-    role_row: dict[str, Any],
-    history_lines: int = 160,
-) -> dict[str, Any]:
-    target = roster_tmux_target_for_role(session_dir, role_id, role_row)
-    if not target:
-        return {}
-    captured, error = tmux_capture_pane(target, history_lines)
-    if error or not captured_tail_provider_approval(captured):
-        return {}
-    tail = "\n".join(line for line in captured.splitlines()[-16:] if line.strip())
-    return {
-        "result": "nudge_deferred_provider_approval",
-        "sent": False,
-        "tmux_target": target,
-        "error": "provider approval prompt detected while queue message is pending",
-        "provider_status": "approval_wait",
-        "captured_tail": tail[:4000],
-    }
-
-
-def record_queue_provider_busy_event(
-    *,
-    runtime: str,
-    session_dir: Path,
-    session_id: str,
-    organization_instance_id: str,
-    queue_root: Path,
-    inbox_path: Path,
-    role_id: str,
-    message: dict[str, Any],
-    now: str,
-    retry_count: int,
-    nudge: dict[str, Any],
-    result: str = "provider_busy",
-    metric_result: str = "provider_busy",
-    dry_run: bool = False,
-    update_last_nudged_at: bool = False,
-) -> dict[str, Any]:
-    nudge_result = normalize_cell(nudge.get("result"))
-    provider_status = normalize_cell(nudge.get("provider_status"))
-    if not provider_status:
-        provider_status = "approval_wait" if nudge_result == "nudge_deferred_provider_approval" else "prompt_not_ready"
-    if not dry_run:
-        update_roster_role_runtime_state(
-            session_dir=session_dir,
-            role_id=role_id,
-            organization_instance_id=organization_instance_id,
-            session_id=session_id,
-            now=now,
-            response_status="busy",
-            provider_status=provider_status,
-            notes=normalize_cell(nudge.get("error")) or f"queue-watch live probe found provider {provider_status}",
-            extra={
-                "last_probe_message_id": normalize_cell(message.get("message_id")),
-                "last_probe_result": nudge_result,
-            },
-        )
-    event = {
-        "ts": now,
-        "runtime": runtime,
-        "event_type": "queue_watch",
-        "session_id": session_id,
-        "organization_instance_id": organization_instance_id,
-        "role_id": role_id,
-        "task_id": normalize_cell(message.get("task_id")),
-        "message_id": normalize_cell(message.get("message_id")),
-        "result": result,
-        "retry_count": retry_count,
-        "dry_run": dry_run,
-        "nudge": nudge,
-        **gate_sla_status_for_message(role_id, message, now),
-    }
-    event["notification_class"] = notification_class_for_event(
-        event_type="queue_watch",
-        result=provider_status if provider_status == "approval_wait" else result,
-        sla_breached=bool(event.get("sla_breached")),
-    )
-    if not dry_run:
-        inbox_update = {"last_nudge_result": nudge_result}
-        if update_last_nudged_at:
-            inbox_update["last_nudged_at"] = now
-        update_inbox_message(
-            inbox_path,
-            role_id,
-            normalize_cell(message.get("message_id")),
-            queue_root,
-            inbox_update,
-        )
-        append_jsonl_atomic(session_dir / "queue-events.jsonl", event)
-        append_queue_metric(
-            session_dir=session_dir,
-            queue_root=queue_root,
-            runtime=runtime,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            role_id=role_id,
-            message=message,
-            event_type="watch_provider_busy",
-            result=metric_result,
-            now=now,
-            retry_count=retry_count,
-            extra={"nudge_result": nudge_result, "provider_status": provider_status},
-        )
-    return event
 
 
 def notification_class_for_event(
@@ -4014,7 +3786,7 @@ def gate_latency_prompt_submit_comparison(metrics: list[dict[str, Any]], hook_in
         speedup_verdict = "not_faster_than_llm_baseline"
     return {
         "status": "ready" if deterministic_ready else "insufficient_samples",
-        "entrypoint": "UserPromptSubmit",
+        "entrypoint": "legacy_prompt_chain",
         "target_seconds": target_seconds,
         "target_verdict": gate_latency_verdict(deterministic_total_p50, target_seconds, ready=deterministic_ready),
         "combined_sla_seconds": combined_sla_seconds,
@@ -4555,7 +4327,6 @@ INTERACTIVE_READINESS_BLOCKING_STATUSES = {
     "blocked_trust_prompt",
     "prompt_busy",
     "prompt_not_ready",
-    "tmux_copy_mode",
 }
 QUEUE_STATUS_VALUES = {"pending", "processing", "done", "failed", "archived"}
 LOCAL_STUB_USAGE_SOURCE = "role_agent_worker_local_stub"
@@ -6464,7 +6235,7 @@ def gate_entry_codex_exec_enabled(row: dict[str, Any] | None, hook_input: dict[s
     forced = truthy_input(hook_input.get("force_gate_entry_codex_exec") or hook_input.get("forceGateEntryCodexExec"))
     if not row:
         return False
-    if agent_runtime(row) != ("codex_tmux", "codex"):
+    if agent_runtime(row) != ("codex_exec", "codex"):
         return forced
     return forced or env_flag("ITB_GATE_ENTRY_CODEX_EXEC", default=True)
 
@@ -9214,7 +8985,7 @@ def role_report(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -
 
     role_row = role_agent_row_for(role_id, organization_instance_id=organization_instance_id)
     if not role_row:
-        return {"decision": "block", "reason": f"role-agent registry has no active resident role: {role_id}"}
+        return {"decision": "block", "reason": f"role-agent registry has no active role: {role_id}"}
     if truthy_input(hook_input.get("queue_consumer_override") or hook_input.get("queueConsumerOverride")):
         role_row = dict(role_row)
         role_row["queue_consumer"] = True
@@ -9244,7 +9015,7 @@ def role_report(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -
     provider_evidence.setdefault("provider", normalize_cell(role_row.get("provider")) or "unknown")
     provider_evidence.setdefault("intended_model", normalize_cell(role_row.get("intended_model")))
     provider_evidence.setdefault("effective_model", normalize_cell(hook_input.get("effective_model") or hook_input.get("effectiveModel") or role_row.get("intended_model")))
-    provider_evidence.setdefault("provider_session_id", normalize_cell(hook_input.get("provider_session_id") or hook_input.get("providerSessionId") or role_row.get("tmux_target")))
+    provider_evidence.setdefault("provider_session_id", normalize_cell(hook_input.get("provider_session_id") or hook_input.get("providerSessionId") or session_id))
     provider_evidence.setdefault("request_id", normalize_cell(hook_input.get("request_id") or hook_input.get("requestId") or "interactive-role-report"))
     provider_evidence.setdefault("usage_source", normalize_cell(hook_input.get("usage_source") or hook_input.get("usageSource") or "provider_authored_role_report"))
     provider_evidence.setdefault("transcript_path", normalize_cell(hook_input.get("transcript_path") or hook_input.get("transcriptPath")))
@@ -9418,44 +9189,20 @@ def env_csv(name: str) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
-def agent_process_mode() -> str:
-    value = os.environ.get("ITB_AGENT_PROCESS_MODE", DEFAULT_AGENT_PROCESS_MODE)
-    normalized = value.strip().lower().replace("-", "_")
-    aliases = {
-        "shell": "resident_shell",
-        "sentinel": "resident_shell",
-        "lightweight": "resident_shell",
-        "provider": "provider_cli",
-        "provider_process": "provider_cli",
-    }
-    return aliases.get(normalized, normalized if normalized in {"resident_shell", "provider_cli"} else DEFAULT_AGENT_PROCESS_MODE)
 
 
-def startup_profile(row: dict[str, Any]) -> str:
-    return (row.get("startup_profile") or "provider_cli").strip().lower()
 
 
-def starts_at_session_start(row: dict[str, Any]) -> bool:
-    return startup_profile(row) not in LAZY_STARTUP_PROFILES
-
-
-def safe_tmux_name(value: str, max_length: int = 48) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value or "unknown")
-    cleaned = cleaned.strip("._-") or "unknown"
-    return cleaned[:max_length]
-
-
-def resident_shell_prompt(row: dict[str, Any]) -> str:
+def role_execution_prompt(row: dict[str, Any]) -> str:
     agent_id = row["agent_id"]
     skill_path = role_definition_path(agent_id)
-    return f"""You are `{agent_id}` in organization instance `{row['organization_instance_id']}`.
-Current state: resident / {row['activation_status']}.
+    organization_instance_id = normalize_cell(row.get("organization_instance_id")) or "unknown-organization"
+    return f"""You are `{agent_id}` in organization instance `{organization_instance_id}`.
 Provider: {row.get('provider', '')}.
 Intended model: {row.get('intended_model', '')}.
 Execution mode: {row.get('execution_mode', '')}.
 SKILL.md: {skill_path}
-Do not perform task work until activated by a valid Director or upstream role in the organization flow.
-When activated, read your SKILL.md, follow its Flow Contract, and write decisions, evidence, and handoffs to Agents-Vault.
+Read your SKILL.md, follow its Flow Contract, and write decisions, evidence, and handoffs to Agents-Vault.
 Output discipline: act on flow instructions silently; report work content only. Use [FLOW-ALERT] once only for blockers or approval waits.
 """
 
@@ -9464,32 +9211,13 @@ def agent_runtime(row: dict[str, Any]) -> tuple[str, str] | None:
     provider = row.get("provider", "")
     execution_mode = row.get("execution_mode", "")
     if provider == "anthropic":
-        return ("claude_tmux", "claude")
+        return ("claude_cli", "claude")
     if provider == "openai" or execution_mode == "codex":
-        return ("codex_tmux", "codex")
+        return ("codex_exec", "codex")
     return None
 
 
-def interactive_codex_resident_enabled() -> bool:
-    return env_flag("ITB_ALLOW_INTERACTIVE_CODEX_RESIDENT", default=False)
 
-
-def interactive_codex_resident_disabled(row: dict[str, Any], process_mode: str) -> bool:
-    runtime = agent_runtime(row)
-    return (
-        process_mode == "provider_cli"
-        and runtime is not None
-        and runtime[0] == "codex_tmux"
-        and not interactive_codex_resident_enabled()
-    )
-
-
-def interactive_codex_resident_disabled_reason(row: dict[str, Any]) -> str:
-    return (
-        "interactive Codex resident provider_cli is disabled by default; "
-        f"use a codex exec provider adapter for {row.get('agent_id', '<unknown>')} "
-        "or set ITB_ALLOW_INTERACTIVE_CODEX_RESIDENT=1 for explicit diagnostics"
-    )
 
 
 def validate_provider_evidence(
@@ -9813,7 +9541,6 @@ def context_surface_report_output(
                 "agent_id": row.get("agent_id"),
                 "provider": row.get("provider"),
                 "execution_mode": row.get("execution_mode"),
-                "startup_profile": row.get("startup_profile"),
                 "queue_consumer": bool(row.get("queue_consumer")),
                 "context_dir_count": len(row.get("context_dirs") or []),
                 "effective_add_dir_count": len(add_dirs),
@@ -9907,412 +9634,20 @@ def codex_service_tier() -> str:
     return normalize_cell(os.environ.get("ITB_CODEX_SERVICE_TIER") or DEFAULT_CODEX_SERVICE_TIER)
 
 
-def provider_state_dir(row: dict[str, Any], runtime_kind: str) -> str:
-    if not normalize_cell(row.get("state_root")):
-        return ""
-    state_root = Path(str(row.get("state_root"))).expanduser()
-    session_id = safe_id(str(row.get("parent_session_id") or "unknown-session"))
-    agent_id = safe_id(str(row.get("agent_id") or "unknown-agent"))
-    provider_name = "claude" if runtime_kind == "claude_tmux" else "codex" if runtime_kind == "codex_tmux" else "provider"
-    path = state_root / session_id / "provider-state" / agent_id / provider_name
-    path.mkdir(parents=True, exist_ok=True)
-    return str(path)
 
 
-def provider_config_dir(row: dict[str, Any], runtime_kind: str) -> str:
-    if not normalize_cell(row.get("state_root")):
-        return ""
-    state_root = Path(str(row.get("state_root"))).expanduser()
-    session_id = safe_id(str(row.get("parent_session_id") or "unknown-session"))
-    agent_id = safe_id(str(row.get("agent_id") or "unknown-agent"))
-    provider_name = "claude" if runtime_kind == "claude_tmux" else "codex" if runtime_kind == "codex_tmux" else "provider"
-    path = state_root / session_id / "provider-config" / agent_id / provider_name
-    path.mkdir(parents=True, exist_ok=True)
-    return str(path)
 
 
-def provider_memory_isolation_enabled() -> bool:
-    return env_flag("ITB_PROVIDER_MEMORY_ISOLATION", default=False)
 
 
-def provider_config_isolation_enabled() -> bool:
-    return env_flag("ITB_PROVIDER_CONFIG_ISOLATION", default=False)
 
 
-def provider_auth_share_enabled() -> bool:
-    return env_flag("ITB_PROVIDER_AUTH_SHARE", default=True)
 
 
-def read_json_object_if_exists(path: Path) -> dict[str, Any]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
-def write_json_object(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_yaml(path, data)
 
 
-def path_is_within(path: Path, root: Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-        return True
-    except ValueError:
-        return False
-
-
-def trust_seed_path_allowed(path_value: str) -> bool:
-    if not path_value:
-        return False
-    path = Path(path_value).expanduser()
-    allowed_roots = (
-        Path.home(),
-        Path("/private/tmp"),
-        Path("/tmp"),
-    )
-    return any(path_is_within(path, root) for root in allowed_roots)
-
-
-def backup_json_file_once(path: Path, *, label: str) -> str:
-    if not path.exists():
-        return ""
-    timestamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_path = path.with_name(f"{path.name}.{label}-{timestamp}-{uuid.uuid4().hex[:8]}.bak")
-    shutil.copy2(path, backup_path)
-    return str(backup_path)
-
-
-def global_claude_theme_settings() -> dict[str, Any]:
-    theme_settings: dict[str, Any] = {}
-    for source in (
-        Path.home() / ".claude.json",
-        Path.home() / ".claude" / "settings.json",
-        Path.home() / ".config" / "claude" / "settings.json",
-    ):
-        data = read_json_object_if_exists(source)
-        for key in ("theme", "textStyle", "colorTheme", "syntaxTheme"):
-            if key in data and key not in theme_settings:
-                theme_settings[key] = data[key]
-    return theme_settings
-
-
-def seed_provider_auth_state(
-    *,
-    config_dir: str,
-    row: dict[str, Any],
-    runtime_kind: str,
-    launch_cwd: str,
-    workspace_cwd: str,
-    add_dirs: list[str],
-    auth_share: bool,
-) -> dict[str, Any]:
-    evidence = {
-        "status": "not_applicable",
-        "runtime_kind": runtime_kind,
-        "auth_share": auth_share,
-        "seeded_files": [],
-        "backup_files": [],
-        "rejected_trust_paths": [],
-        "errors": [],
-    }
-    if runtime_kind != "claude_tmux":
-        return evidence
-
-    claude_state_path = Path.home() / ".claude.json"
-    claude_state = read_json_object_if_exists(claude_state_path)
-    original_claude_state = json.loads(json.dumps(claude_state, ensure_ascii=False))
-    projects = claude_state.get("projects") if isinstance(claude_state.get("projects"), dict) else {}
-    for project_path in dict.fromkeys([launch_cwd, workspace_cwd, *add_dirs]):
-        if not project_path:
-            continue
-        if not trust_seed_path_allowed(project_path):
-            evidence["rejected_trust_paths"].append(project_path)
-            continue
-        project_state = projects.get(project_path) if isinstance(projects.get(project_path), dict) else {}
-        project_state["hasTrustDialogAccepted"] = True
-        projects[project_path] = project_state
-    claude_state["hasCompletedOnboarding"] = True
-    claude_state["projects"] = projects
-    if claude_state != original_claude_state:
-        try:
-            backup_path = backup_json_file_once(claude_state_path, label="itb-trust-seed")
-            if backup_path:
-                evidence["backup_files"].append(backup_path)
-            write_json_object(claude_state_path, claude_state)
-            evidence["seeded_files"].append(str(claude_state_path))
-        except OSError as exc:
-            evidence["errors"].append(f"{claude_state_path}: {type(exc).__name__}: {exc}")
-
-    theme_settings = global_claude_theme_settings()
-    if theme_settings and config_dir:
-        try:
-            config_path = Path(config_dir)
-            config_path.mkdir(parents=True, exist_ok=True)
-            settings_path = config_path / "settings.json"
-            settings = read_json_object_if_exists(settings_path)
-            settings.update({key: value for key, value in theme_settings.items() if value is not None})
-            write_json_object(settings_path, settings)
-            evidence["seeded_files"].append(str(settings_path))
-        except OSError as exc:
-            evidence["errors"].append(f"{config_dir}: {type(exc).__name__}: {exc}")
-
-    evidence.update(
-        {
-            "status": "seed_failed" if evidence["errors"] else "seeded",
-            "agent_id": normalize_cell(row.get("agent_id")),
-            "onboarding_seeded": True,
-            "trust_seeded_paths": sorted(projects.keys()),
-            "theme_seeded": bool(theme_settings),
-            "claude_state_changed": claude_state != original_claude_state,
-            "trust_seed_policy": "global_claude_json",
-        }
-    )
-    return evidence
-
-
-def provider_config_policy(config_dir: str) -> str:
-    return "isolated_provider_config" if config_dir else "global_provider_config"
-
-
-def provider_auth_policy(runtime_kind: str, config_dir: str, auth_share: bool) -> str:
-    if runtime_kind == "claude_tmux" and config_dir:
-        return "shared_secure_storage" if auth_share else "isolated_config_secure_storage"
-    if runtime_kind == "codex_tmux" and config_dir:
-        return "isolated_codex_home"
-    return "provider_default_auth"
-
-
-def write_provider_memory_policy(
-    *,
-    state_dir: str,
-    config_dir: str,
-    row: dict[str, Any],
-    runtime_kind: str,
-    launch_cwd: str,
-    workspace_cwd: str,
-    add_dirs: list[str],
-    memory_policy: str,
-    config_policy: str,
-    auth_policy: str,
-    auth_seed: dict[str, Any],
-) -> str:
-    if not state_dir:
-        return ""
-    state_path = Path(state_dir)
-    state_path.mkdir(parents=True, exist_ok=True)
-    minimal_memory = (
-        "ITB resident provider isolated memory.\n"
-        "Follow ITB_RESIDENT_PROMPT and explicit queue/dispatch instructions.\n"
-        "Do not apply main-agent AGENTS.md / CLAUDE.md policy as role execution evidence.\n"
-    )
-    for filename in ("AGENTS.md", "CLAUDE.md"):
-        target = state_path / filename
-        if not target.exists():
-            target.write_text(minimal_memory, encoding="utf-8")
-    policy = {
-        "schema_version": 1,
-        "agent_id": normalize_cell(row.get("agent_id")),
-        "runtime_kind": runtime_kind,
-        "policy": memory_policy,
-        "launch_cwd": launch_cwd,
-        "workspace_cwd": workspace_cwd,
-        "state_dir": state_dir,
-        "config_dir": config_dir,
-        "config_policy": config_policy,
-        "auth_policy": auth_policy,
-        "auth_seed": auth_seed,
-        "add_dirs": add_dirs,
-        "global_memory": "isolated_by_provider_state_dir" if state_dir else "provider_default_config",
-        "project_memory": (
-            "suppressed_by_launching_from_provider_state_dir"
-            if memory_policy == "isolated_session_config"
-            else "workspace_cwd_project_memory_may_apply"
-        ),
-        "minimal_memory_files": ["AGENTS.md", "CLAUDE.md"],
-    }
-    policy_path = state_path / "memory-policy.json"
-    write_json_yaml(policy_path, policy)
-    return str(policy_path)
-
-
-def build_agent_command(
-    row: dict[str, Any],
-    cwd: str,
-    process_mode: str,
-    *,
-    permission_mode: str = "",
-    tools: str = "default",
-    extra_add_dirs: list[str | Path] | None = None,
-) -> tuple[str, str]:
-    runtime = agent_runtime(row)
-    if process_mode == "provider_cli" and runtime is None:
-        raise ValueError(f"unsupported provider/execution mode for {row['agent_id']}")
-    if interactive_codex_resident_disabled(row, process_mode):
-        raise ValueError(interactive_codex_resident_disabled_reason(row))
-    runtime_kind, command = runtime if runtime else ("unknown_provider", "")
-    model = row.get("intended_model", "")
-    prompt = resident_shell_prompt(row)
-    memory_isolation = provider_memory_isolation_enabled()
-    state_dir = provider_state_dir(row, runtime_kind) if process_mode == "provider_cli" and memory_isolation else ""
-    # Provider config homes contain authentication/config state. Keep them shared
-    # by default; role separation is handled by launch cwd, prompt, tools, dirs,
-    # and queue evidence instead of duplicating provider auth files.
-    config_dir = (
-        provider_config_dir(row, runtime_kind)
-        if process_mode == "provider_cli" and provider_config_isolation_enabled() and runtime_kind == "claude_tmux"
-        else ""
-    )
-    isolate_memory = bool(state_dir and process_mode == "provider_cli")
-    launch_cwd = state_dir if isolate_memory else cwd
-    add_dir_extras: list[str | Path] = list(extra_add_dirs or [])
-    if isolate_memory:
-        add_dir_extras.insert(0, cwd)
-    add_dirs = provider_add_dirs(launch_cwd, row=row, extra_dirs=add_dir_extras) if process_mode == "provider_cli" else []
-    permission_mode = provider_permission_mode_for_model(model, permission_mode)
-    tools = normalize_cell(tools or "default")
-    if tools == "default":
-        tools = transport_tools_argument_for_role(row) if process_mode == "provider_cli" else tools_argument_for_role(row)
-    codex_approval = codex_approval_policy()
-    claude_effort = claude_effort_for_model(model) if runtime_kind == "claude_tmux" else ""
-    # Fast mode is Claude-Opus-only and intentionally disabled for every resident
-    # Claude provider (org decision 2026-06-11). "disabled" is the evidence signature;
-    # CLAUDE_CODE_DISABLE_FAST_MODE forces the CLI off regardless of any persisted toggle.
-    claude_fast_mode = "disabled" if runtime_kind == "claude_tmux" else ""
-    codex_model = codex_model_for_agent(row) if runtime_kind == "codex_tmux" else ""
-    codex_effort = codex_reasoning_effort() if runtime_kind == "codex_tmux" else ""
-    codex_tier = codex_service_tier() if runtime_kind == "codex_tmux" else ""
-    claude_allowed_tools = (
-        claude_transport_allowed_tools_argument_for_role(row)
-        if runtime_kind == "claude_tmux" and process_mode == "provider_cli"
-        else ""
-    )
-    auth_share = provider_auth_share_enabled()
-    config_policy = provider_config_policy(config_dir)
-    auth_policy = provider_auth_policy(runtime_kind, config_dir, auth_share)
-    memory_policy = "isolated_session_config" if isolate_memory else "workspace_cwd"
-    auth_seed = seed_provider_auth_state(
-        config_dir=config_dir,
-        row=row,
-        runtime_kind=runtime_kind,
-        launch_cwd=launch_cwd,
-        workspace_cwd=cwd,
-        add_dirs=add_dirs,
-        auth_share=auth_share,
-    )
-    memory_policy_file = write_provider_memory_policy(
-        state_dir=state_dir,
-        config_dir=config_dir,
-        row=row,
-        runtime_kind=runtime_kind,
-        launch_cwd=launch_cwd,
-        workspace_cwd=cwd,
-        add_dirs=add_dirs,
-        memory_policy=memory_policy,
-        config_policy=config_policy,
-        auth_policy=auth_policy,
-        auth_seed=auth_seed,
-    )
-    exports = {
-        CHILD_AGENT_ENV: "1",
-        "ITB_AGENT_ID": row["agent_id"],
-        "ITB_AGENT_INSTANCE_ID": row["agent_instance_id"],
-        "ITB_ORGANIZATION_INSTANCE_ID": row["organization_instance_id"],
-        "ITB_PARENT_SESSION_ID": row.get("parent_session_id", ""),
-        "ITB_AGENT_PROCESS_MODE": process_mode,
-        "ITB_PROVIDER_RUNTIME_KIND": runtime_kind,
-        "ITB_PROVIDER_READY": "0",
-        "ITB_TOOL_SIDECAR_READY": "0",
-        "ITB_RESIDENT_PROMPT": prompt,
-        "ITB_RUNTIME": row.get("runtime", ""),
-        "ITB_STATE_ROOT": row.get("state_root", ""),
-        "ITB_BUILDER_SCRIPT": str(Path(__file__).resolve()),
-        "ITB_PROVIDER_WORKSPACE_CWD": cwd,
-        "ITB_PROVIDER_LAUNCH_CWD": launch_cwd,
-        "ITB_PROVIDER_ADD_DIRS_EFFECTIVE": os.pathsep.join(add_dirs),
-        "ITB_PROVIDER_STATE_DIR": state_dir,
-        "ITB_PROVIDER_CONFIG_DIR": config_dir,
-        "ITB_PROVIDER_CONFIG_POLICY": config_policy,
-        "ITB_PROVIDER_AUTH_POLICY": auth_policy,
-        "ITB_PROVIDER_MEMORY_POLICY": memory_policy,
-        "ITB_PROVIDER_MEMORY_POLICY_FILE": memory_policy_file,
-        "ITB_PROVIDER_PERMISSION_MODE_EFFECTIVE": permission_mode,
-        "ITB_PROVIDER_TOOLS_EFFECTIVE": tools,
-        "ITB_CLAUDE_ALLOWED_TOOLS_EFFECTIVE": claude_allowed_tools,
-        "ITB_CODEX_APPROVAL_POLICY_EFFECTIVE": codex_approval,
-        "ITB_CLAUDE_EFFORT_EFFECTIVE": claude_effort,
-        "ITB_CLAUDE_FAST_MODE_EFFECTIVE": claude_fast_mode,
-        "ITB_CODEX_MODEL_EFFECTIVE": codex_model,
-        "ITB_CODEX_REASONING_EFFORT_EFFECTIVE": codex_effort,
-        "ITB_CODEX_SERVICE_TIER_EFFECTIVE": codex_tier,
-    }
-    if runtime_kind == "claude_tmux":
-        # Hard-disable Opus fast mode so no resident Claude provider opts into it.
-        exports["CLAUDE_CODE_DISABLE_FAST_MODE"] = "1"
-        if config_dir:
-            exports["CLAUDE_CONFIG_DIR"] = config_dir
-        if config_dir and auth_share:
-            exports["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = ""
-    export_cmd = " ".join(f"{key}={shlex.quote(value)}" for key, value in exports.items())
-    quoted_cwd = shlex.quote(launch_cwd)
-
-    if process_mode == "resident_shell":
-        shell_script = (
-            "printf '%s\\n' \"$ITB_RESIDENT_PROMPT\"; "
-            "printf '%s\\n' '[ITB] resident shell is process_ready only; queue completion requires provider-authored report evidence.'; "
-            "trap 'exit 0' INT TERM; "
-            "while :; do sleep 3600; done"
-        )
-        return (
-            f"cd {quoted_cwd} && export {export_cmd} && exec /bin/sh -lc {shlex.quote(shell_script)}",
-            "resident_shell_tmux",
-        )
-
-    if runtime_kind == "claude_tmux":
-        args = [
-            command,
-            "--safe-mode",
-            "--model",
-            model,
-            "--permission-mode",
-            permission_mode,
-            "--effort",
-            claude_effort,
-            "--append-system-prompt",
-            prompt,
-            "--name",
-            row["agent_id"],
-        ]
-        if add_dirs:
-            args.extend(["--add-dir", *add_dirs])
-        if tools != "default":
-            args.extend(["--tools", tools])
-        if claude_allowed_tools:
-            args.extend(["--allowedTools", claude_allowed_tools])
-    else:
-        args = [
-            command,
-            "--model",
-            codex_model,
-            "--cd",
-            launch_cwd,
-            "--sandbox",
-            "workspace-write",
-            "--ask-for-approval",
-            codex_approval,
-            "-c",
-            f'model_reasoning_effort="{codex_effort}"',
-            "-c",
-            f'service_tier="{codex_tier}"',
-            "--no-alt-screen",
-        ]
-        for add_dir in add_dirs:
-            args.extend(["--add-dir", add_dir])
-
-    quoted_args = " ".join(shlex.quote(arg) for arg in args if arg)
-    return f"cd {quoted_cwd} && export {export_cmd} && exec {quoted_args}", runtime_kind
 
 
 def int_from_nested(data: dict[str, Any], paths: list[tuple[str, ...]]) -> int | None:
@@ -10389,7 +9724,7 @@ def claude_activation_command(row: dict[str, Any], prompt: str, max_budget_usd: 
         "--max-budget-usd",
         max_budget_usd,
         "--append-system-prompt",
-        resident_shell_prompt(row),
+        role_execution_prompt(row),
         prompt,
     ]
     fallback_model = first_claude_fallback(row)
@@ -10467,7 +9802,7 @@ def parse_codex_json_output(stdout: str) -> dict[str, Any]:
 
 
 def codex_exec_role_prompt(row: dict[str, Any], prompt: str) -> str:
-    return f"""{resident_shell_prompt(row).strip()}
+    return f"""{role_execution_prompt(row).strip()}
 
 Provider request:
 {prompt.strip()}
@@ -10484,22 +9819,29 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     session_dir = state_root / safe_id(session_id)
     state_path = session_dir / "bootstrap.json"
     roster_path = session_dir / "roster.json"
+    session_dir.mkdir(parents=True, exist_ok=True)
     now = current_timestamp()
 
-    if not state_path.exists() or not roster_path.exists():
-        return {"decision": "block", "reason": "bootstrap.json or roster.json missing"}
-
-    state = read_json(state_path)
-    roster = read_json(roster_path)
-    if not isinstance(roster, list):
-        return {"decision": "block", "reason": "roster.json is not a list"}
-
+    state = read_json(state_path) if state_path.exists() else {}
+    if not isinstance(state, dict):
+        state = {}
     organization_instance_id = str(
         state.get("organization_instance_id")
         or hook_input.get("organization_instance_id")
         or hook_input.get("organizationInstanceId")
         or organization_id(session_id)
     )
+    state.setdefault("runtime", runtime)
+    state.setdefault("session_id", session_id)
+    state.setdefault("organization_instance_id", organization_instance_id)
+    state.setdefault("cwd", str(hook_input.get("cwd") or os.getcwd()))
+    state.setdefault("bootstrap_status", "headless_metadata")
+    state.setdefault("readiness_scope", "metadata_only")
+    roster = read_json(roster_path) if roster_path.exists() else role_agent_rows(
+        organization_instance_id=organization_instance_id,
+    )
+    if not isinstance(roster, list):
+        return {"decision": "block", "reason": "roster.json is not a list"}
     agent_id = normalize_cell(hook_input.get("agent_id") or hook_input.get("agentId"))
     prompt = str(hook_input.get("prompt") or "")
     if not agent_id:
@@ -10509,8 +9851,11 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
 
     row = next((item for item in roster if isinstance(item, dict) and item.get("agent_id") == agent_id), None)
     if row is None:
-        return {"decision": "block", "reason": f"agent not found in roster: {agent_id}"}
-    if agent_runtime(row) != ("codex_tmux", "codex"):
+        row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+        if not row:
+            return {"decision": "block", "reason": f"agent not found in registry: {agent_id}"}
+        roster.append(row)
+    if agent_runtime(row) != ("codex_exec", "codex"):
         return {
             "decision": "block",
             "reason": (
@@ -10608,11 +9953,7 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         row["response_status"] = "not_invoked"
         row["notes"] = "Codex exec one-shot agent-dispatch produced no response text or inference evidence."
 
-    state["resident_agents_response_ready"] = sum(
-        1 for item in roster if isinstance(item, dict) and item.get("response_status") == "invoked"
-    )
-    sync_readiness_alias_fields(state, provider_response_ready=state["resident_agents_response_ready"])
-    state["resident_agents_provider_ready"] = max(int(state.get("resident_agents_provider_ready", 0)), 1)
+    update_provider_response_state(state, roster)
     state["last_agent_dispatch_agent"] = agent_id
     state["last_agent_dispatch_at"] = now
     state["last_agent_dispatch_usage_source"] = row["usage_source"]
@@ -10684,6 +10025,261 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     }
 
 
+def claude_cli_role_prompt(row: dict[str, Any], prompt: str) -> str:
+    return f"""{role_execution_prompt(row).strip()}
+
+Provider request:
+{prompt.strip()}
+"""
+
+
+def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
+    session_id = str(
+        hook_input.get("session_id")
+        or hook_input.get("sessionId")
+        or current_session_id(state_root, hook_input)
+        or "unknown-session"
+    )
+    session_dir = state_root / safe_id(session_id)
+    state_path = session_dir / "bootstrap.json"
+    roster_path = session_dir / "roster.json"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    now = current_timestamp()
+
+    state = read_json(state_path) if state_path.exists() else {}
+    if not isinstance(state, dict):
+        state = {}
+    organization_instance_id = str(
+        state.get("organization_instance_id")
+        or hook_input.get("organization_instance_id")
+        or hook_input.get("organizationInstanceId")
+        or organization_id(session_id)
+    )
+    state.setdefault("runtime", runtime)
+    state.setdefault("session_id", session_id)
+    state.setdefault("organization_instance_id", organization_instance_id)
+    state.setdefault("cwd", str(hook_input.get("cwd") or os.getcwd()))
+    state.setdefault("bootstrap_status", "headless_metadata")
+    state.setdefault("readiness_scope", "metadata_only")
+    roster = read_json(roster_path) if roster_path.exists() else role_agent_rows(
+        organization_instance_id=organization_instance_id,
+    )
+    if not isinstance(roster, list):
+        return {"decision": "block", "reason": "roster.json is not a list"}
+
+    agent_id = normalize_cell(hook_input.get("agent_id") or hook_input.get("agentId"))
+    prompt = str(hook_input.get("prompt") or "")
+    if not agent_id:
+        return {"decision": "block", "reason": "claude CLI provider adapter requires agent_id"}
+    if not prompt.strip():
+        return {"decision": "block", "reason": "claude CLI provider adapter requires prompt"}
+
+    row = next((item for item in roster if isinstance(item, dict) and item.get("agent_id") == agent_id), None)
+    if row is None:
+        row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+        if not row:
+            return {"decision": "block", "reason": f"agent not found in registry: {agent_id}"}
+        roster.append(row)
+    if agent_runtime(row) != ("claude_cli", "claude"):
+        return {
+            "decision": "block",
+            "reason": (
+                f"claude CLI provider adapter requires Anthropic/Claude role: "
+                f"{agent_id} provider={row.get('provider', '')} execution_mode={row.get('execution_mode', '')}"
+            ),
+        }
+    if shutil.which("claude") is None:
+        return {"decision": "block", "reason": "claude command not found"}
+
+    request_id = normalize_cell(hook_input.get("request_id") or hook_input.get("requestId") or f"req-{uuid.uuid4().hex}")
+    transcript_dir = session_dir / "provider-exec" / safe_id(agent_id)
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = transcript_dir / f"{safe_id(request_id)}.json"
+    max_budget_usd, budget_source = claude_activation_budget(row, hook_input)
+    command = claude_activation_command(row, claude_cli_role_prompt(row, prompt), max_budget_usd)
+    started = time.monotonic()
+    completed = subprocess.run(
+        command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=env_int("ITB_CLAUDE_CLI_DISPATCH_TIMEOUT_SECONDS") or env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
+        check=False,
+    )
+    elapsed_seconds = time.monotonic() - started
+    elapsed_ms = int(elapsed_seconds * 1000)
+    transcript_path.write_text(completed.stdout, encoding="utf-8")
+    if completed.returncode != 0:
+        append_jsonl_atomic(
+            session_dir / "invocation-evidence.jsonl",
+            invocation_evidence_entry(
+                ts=now,
+                runtime=runtime,
+                event_type="agent_dispatch",
+                session_id=session_id,
+                organization_instance_id=organization_instance_id,
+                agent_id=agent_id,
+                result="provider_process_failed",
+                usage_source="claude_print_json",
+                effective_model=row.get("intended_model", ""),
+                request_id=request_id,
+                duration_api_ms=elapsed_ms,
+                notes=completed.stderr.strip() or completed.stdout.strip(),
+                extra={"transcript_path": str(transcript_path), "max_budget_usd": max_budget_usd, "budget_source": budget_source},
+            ),
+        )
+        return {"decision": "block", "reason": completed.stderr.strip() or completed.stdout.strip()}
+
+    try:
+        claude_result = parse_claude_json_output(completed.stdout)
+    except json.JSONDecodeError as exc:
+        return {"decision": "block", "reason": f"claude json output unreadable: {exc}"}
+
+    input_tokens = int_from_nested(
+        claude_result,
+        [("usage", "input_tokens"), ("usage", "inputTokens"), ("input_tokens",), ("inputTokens",)],
+    )
+    output_tokens = int_from_nested(
+        claude_result,
+        [("usage", "output_tokens"), ("usage", "outputTokens"), ("output_tokens",), ("outputTokens",)],
+    )
+    claude_duration_api_ms = int_from_nested(
+        claude_result,
+        [("duration_api_ms",), ("durationApiMs",), ("metrics", "duration_api_ms")],
+    )
+    duration_api_ms = claude_duration_api_ms if claude_duration_api_ms is not None else elapsed_ms
+    provider_session_id = str_from_nested(claude_result, [("session_id",), ("sessionId",)])
+    output_request_id = str_from_nested(claude_result, [("request_id",), ("requestId",)]) or request_id
+    effective_model = str_from_nested(claude_result, [("model",), ("effective_model",), ("effectiveModel",)]) or row.get("intended_model", "")
+    result_text = str(claude_result.get("result") or claude_result.get("message") or "").strip()
+    num_turns = int_from_nested(claude_result, [("num_turns",), ("numTurns",)])
+    has_inference_evidence = bool(
+        result_text
+        or (input_tokens is not None and input_tokens > 0)
+        or (output_tokens is not None and output_tokens > 0)
+        or (claude_duration_api_ms is not None and claude_duration_api_ms > 0)
+        or (num_turns is not None and num_turns > 0)
+    )
+    result_name = "provider_response_ready" if has_inference_evidence and result_text else "provider_response_no_inference"
+    row["last_seen_at"] = now
+    row["last_request_id"] = output_request_id
+    row["effective_model"] = effective_model
+    row["session_id"] = provider_session_id
+    row["usage_source"] = "claude_print_json" if result_name == "provider_response_ready" else "claude_print_json_no_inference"
+    row["provider_status"] = result_name
+    if result_name == "provider_response_ready":
+        row["activation_status"] = "response_active"
+        row["response_status"] = "invoked"
+        row["notes"] = "Claude CLI one-shot agent-dispatch completed with response evidence."
+    else:
+        row["response_status"] = "not_invoked"
+        row["notes"] = "Claude CLI one-shot agent-dispatch produced no response text or inference evidence."
+
+    update_provider_response_state(state, roster)
+    state["last_agent_dispatch_agent"] = agent_id
+    state["last_agent_dispatch_at"] = now
+    state["last_agent_dispatch_usage_source"] = row["usage_source"]
+    if result_name == "provider_response_ready":
+        state["readiness_scope"] = "response_evidence"
+
+    roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    append_jsonl_atomic(
+        session_dir / "invocation-evidence.jsonl",
+        invocation_evidence_entry(
+            ts=now,
+            runtime=runtime,
+            event_type="agent_dispatch",
+            session_id=session_id,
+            organization_instance_id=organization_instance_id,
+            agent_id=agent_id,
+            result=result_name,
+            usage_source=row["usage_source"],
+            effective_model=effective_model,
+            request_id=output_request_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            duration_api_ms=duration_api_ms,
+            num_turns=num_turns,
+            notes="Claude CLI one-shot agent-dispatch completed." if result_name == "provider_response_ready" else "Claude CLI one-shot produced no inference evidence.",
+            extra={
+                "provider_session_id": provider_session_id,
+                "transcript_path": str(transcript_path),
+                "stdout_result_present": bool(result_text),
+                "max_budget_usd": max_budget_usd,
+                "budget_source": budget_source,
+            },
+        ),
+    )
+    if result_name != "provider_response_ready":
+        return {
+            "decision": "block",
+            "reason": "claude CLI provider adapter produced no response evidence",
+            "agentDispatch": {
+                "agent_id": agent_id,
+                "request_id": output_request_id,
+                "result": result_name,
+                "usage_source": row["usage_source"],
+                "effective_model": effective_model,
+                "transcript_path": str(transcript_path),
+            },
+        }
+
+    return {
+        "agentDispatch": {
+            "agent_id": agent_id,
+            "request_id": output_request_id,
+            "result": "provider_response_ready",
+            "provider": "anthropic",
+            "intended_model": row.get("intended_model", ""),
+            "effective_model": effective_model,
+            "usage_source": "claude_print_json",
+            "provider_session_id": provider_session_id,
+            "session_id": session_id,
+            "organization_instance_id": organization_instance_id,
+            "transcript_path": str(transcript_path),
+            "response": result_text,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "duration_api_ms": duration_api_ms,
+            "duration_sec": round(max(0.0, elapsed_seconds), 3),
+            "num_turns": num_turns,
+            "max_budget_usd": max_budget_usd,
+            "budget_source": budget_source,
+        }
+    }
+
+
+def agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
+    session_id = str(
+        hook_input.get("session_id")
+        or hook_input.get("sessionId")
+        or current_session_id(state_root, hook_input)
+        or "unknown-session"
+    )
+    organization_instance_id = str(
+        hook_input.get("organization_instance_id")
+        or hook_input.get("organizationInstanceId")
+        or organization_id(session_id)
+    )
+    agent_id = normalize_cell(hook_input.get("agent_id") or hook_input.get("agentId"))
+    if not agent_id:
+        return {"decision": "block", "reason": "agent-dispatch requires agent_id"}
+    row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+    if not row:
+        session_dir = state_root / safe_id(session_id)
+        roster_path = session_dir / "roster.json"
+        roster = read_json(roster_path) if roster_path.exists() else []
+        if isinstance(roster, list):
+            row = next((item for item in roster if isinstance(item, dict) and item.get("agent_id") == agent_id), {})
+    provider_runtime = agent_runtime(row) if row else None
+    if provider_runtime == ("codex_exec", "codex"):
+        return codex_exec_agent_dispatch(runtime=runtime, state_root=state_root, hook_input=hook_input)
+    if provider_runtime == ("claude_cli", "claude"):
+        return claude_cli_agent_dispatch(runtime=runtime, state_root=state_root, hook_input=hook_input)
+    return {"decision": "block", "reason": f"unsupported headless agent-dispatch provider for {agent_id}"}
+
+
 def reset_response_evidence(
     row: dict[str, Any],
     now: str,
@@ -10706,105 +10302,16 @@ def reset_response_evidence(
     row["notes"] = note
 
 
-def readiness_count(value: Any) -> int:
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
+def provider_response_ready_count(roster: list[Any]) -> int:
+    return sum(1 for item in roster if isinstance(item, dict) and item.get("response_status") == "invoked")
 
 
-def provider_response_scope(response_ready: int) -> str:
-    return "response_evidence" if response_ready > 0 else "not_invoked"
-
-
-def sync_readiness_alias_fields(
-    state: dict[str, Any],
-    *,
-    prompt_ready: int | None = None,
-    prompt_scope: str | None = None,
-    provider_response_ready: int | None = None,
-) -> None:
-    prompt_count = (
-        readiness_count(prompt_ready)
-        if prompt_ready is not None
-        else readiness_count(state.get("resident_agents_interactive_ready"))
-    )
-    prompt_scope_value = normalize_cell(prompt_scope)
-    if not prompt_scope_value:
-        prompt_scope_value = normalize_cell(state.get("interactive_readiness_scope")) or "unknown"
-    provider_count = (
-        readiness_count(provider_response_ready)
-        if provider_response_ready is not None
-        else readiness_count(state.get("resident_agents_response_ready"))
-    )
-    state["resident_agents_prompt_ready"] = prompt_count
-    state["prompt_readiness_scope"] = prompt_scope_value
-    state["resident_agents_provider_response_ready"] = provider_count
-    state["provider_response_readiness_scope"] = provider_response_scope(provider_count)
-
-
-def sync_state_readiness_counts_from_roster(state: dict[str, Any], roster: list[Any]) -> None:
-    roster_rows = [item for item in roster if isinstance(item, dict)]
-    def interactive_probe_recorded(item: dict[str, Any]) -> bool:
-        status = normalize_cell(item.get("interactive_status"))
-        return bool(
-            normalize_cell(item.get("interactive_checked_at"))
-            or normalize_cell(item.get("interactive_evidence_source"))
-            or (status and not status.startswith("not_checked"))
-        )
-
-    process_ready = sum(
-        1 for item in roster_rows if item.get("process_status") == "process_ready"
-    )
-    interactive_ready = sum(
-        1 for item in roster_rows if truthy_input(item.get("interactive_ready"))
-    )
-    interactive_checked_rows = [
-        item
-        for item in roster_rows
-        if interactive_probe_recorded(item)
-    ]
-    interactive_blocker_count = sum(
-        1
-        for item in interactive_checked_rows
-        if not truthy_input(item.get("interactive_ready"))
-        and normalize_cell(item.get("interactive_status")) not in {"", "interactive_ready"}
-        and not normalize_cell(item.get("interactive_status")).startswith("not_checked")
-    )
-    response_ready = sum(
-        1 for item in roster_rows if item.get("response_status") == "invoked"
-    )
-    provider_ready = sum(
-        1
-        for item in roster_rows
-        if item.get("provider_status") in {"provider_process_ready", "provider_response_ready"}
-    )
-    state["resident_agents_process_ready"] = process_ready
-    state["resident_agents_interactive_ready"] = interactive_ready
-    state["resident_agents_response_ready"] = response_ready
-    state["resident_agents_provider_ready"] = provider_ready
-    prompt_scope = normalize_cell(state.get("interactive_readiness_scope"))
-    if interactive_checked_rows:
-        if interactive_blocker_count:
-            prompt_scope = "interactive_blocked" if interactive_ready == 0 else "interactive_partial"
-        elif process_ready and interactive_ready == process_ready:
-            prompt_scope = "interactive_ready"
-        elif interactive_ready > 0:
-            prompt_scope = "interactive_partial"
-        else:
-            prompt_scope = "not_checked_startup_targets"
-        state["interactive_readiness_scope"] = prompt_scope
-        state["interactive_checked_count"] = len(interactive_checked_rows)
-        state["interactive_blocker_count"] = interactive_blocker_count
-    elif interactive_ready > 0:
-        prompt_scope = "interactive_ready" if process_ready and interactive_ready == process_ready else "interactive_partial"
-        state["interactive_readiness_scope"] = prompt_scope
-    sync_readiness_alias_fields(
-        state,
-        prompt_ready=interactive_ready,
-        prompt_scope=prompt_scope,
-        provider_response_ready=response_ready,
-    )
+def update_provider_response_state(state: dict[str, Any], roster: list[Any]) -> None:
+    response_ready = provider_response_ready_count(roster)
+    state["provider_response_ready_count"] = response_ready
+    state["provider_response_scope"] = "response_evidence" if response_ready else "not_invoked"
+    if response_ready == 0 and state.get("readiness_scope") == "response_evidence":
+        state["readiness_scope"] = "metadata_only"
 
 
 def parse_claude_json_output(stdout: str) -> dict[str, Any]:
@@ -10831,8 +10338,6 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             "bootstrap_status": "missing",
             "readiness_scope": "missing",
             "spawn_mode": "unknown",
-            "resident_agents_ready": 0,
-            "resident_agents_total": 0,
             "unavailable_agents": [],
             "outputs": {"state_dir": str(session_dir)},
             "validation_errors": ["bootstrap.json or roster.json missing"],
@@ -10858,7 +10363,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     max_budget_usd, budget_source = claude_activation_budget(row, hook_input)
 
     provider_runtime = agent_runtime(row)
-    if provider_runtime == ("codex_tmux", "codex"):
+    if provider_runtime == ("codex_exec", "codex"):
         if shutil.which("codex") is None:
             return {"decision": "block", "reason": "codex command not found"}
         cwd = str(hook_input.get("cwd") or state.get("cwd") or os.getcwd())
@@ -10932,10 +10437,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 "Codex exec returned no inference evidence; previous response evidence, if any, was invalidated.",
                 usage_source="codex_exec_json_no_inference",
             )
-            state["resident_agents_response_ready"] = sum(1 for item in roster if item.get("response_status") == "invoked")
-            sync_readiness_alias_fields(state, provider_response_ready=state["resident_agents_response_ready"])
-            if state["resident_agents_response_ready"] == 0 and state.get("readiness_scope") == "response_evidence":
-                state["readiness_scope"] = "process_ready" if state.get("resident_agents_process_ready") else "metadata_only"
+            update_provider_response_state(state, roster)
             state["last_provider_activation_agent"] = agent_id
             state["last_provider_activation_at"] = now
             state["last_provider_activation_usage_source"] = "codex_exec_json_no_inference"
@@ -10980,9 +10482,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         row["last_seen_at"] = now
         row["notes"] = "Codex exec provider activation produced runtime response evidence."
 
-        state["resident_agents_response_ready"] = sum(1 for item in roster if item.get("response_status") == "invoked")
-        sync_readiness_alias_fields(state, provider_response_ready=state["resident_agents_response_ready"])
-        state["resident_agents_provider_ready"] = max(int(state.get("resident_agents_provider_ready", 0)), 1)
+        update_provider_response_state(state, roster)
         state["readiness_scope"] = "response_evidence"
         state["last_provider_activation_agent"] = agent_id
         state["last_provider_activation_at"] = now
@@ -11030,7 +10530,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 "usage_source": "codex_exec_json",
             },
         }
-    if provider_runtime != ("claude_tmux", "claude"):
+    if provider_runtime != ("claude_cli", "claude"):
         return {
             "decision": "block",
             "reason": f"agent is not routed to Claude provider: {agent_id} provider={row.get('provider', '')}",
@@ -11108,10 +10608,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             now,
             "Claude --print returned no inference evidence; previous response evidence, if any, was invalidated.",
         )
-        state["resident_agents_response_ready"] = sum(1 for item in roster if item.get("response_status") == "invoked")
-        sync_readiness_alias_fields(state, provider_response_ready=state["resident_agents_response_ready"])
-        if state["resident_agents_response_ready"] == 0 and state.get("readiness_scope") == "response_evidence":
-            state["readiness_scope"] = "process_ready" if state.get("resident_agents_process_ready") else "metadata_only"
+        update_provider_response_state(state, roster)
         state["last_provider_activation_agent"] = agent_id
         state["last_provider_activation_at"] = now
         state["last_provider_activation_usage_source"] = "claude_print_json_no_inference"
@@ -11158,9 +10655,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     row["last_seen_at"] = now
     row["notes"] = "Claude provider activation produced runtime response evidence."
 
-    state["resident_agents_response_ready"] = sum(1 for item in roster if item.get("response_status") == "invoked")
-    sync_readiness_alias_fields(state, provider_response_ready=state["resident_agents_response_ready"])
-    state["resident_agents_provider_ready"] = max(int(state.get("resident_agents_provider_ready", 0)), 1)
+    update_provider_response_state(state, roster)
     state["readiness_scope"] = "response_evidence"
     state["last_provider_activation_agent"] = agent_id
     state["last_provider_activation_at"] = now
@@ -11215,1071 +10710,29 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     }
 
 
-def run_tmux(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
-    command = ["tmux", *args]
-    try:
-        return subprocess.run(
-            command,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(
-            command,
-            124,
-            stdout=exc.stdout or "",
-            stderr=f"tmux command timed out after {timeout}s",
-        )
 
 
-def run_tmux_with_input(
-    args: list[str], stdin: str, timeout: float = 5.0
-) -> subprocess.CompletedProcess[str]:
-    command = ["tmux", *args]
-    try:
-        return subprocess.run(
-            command,
-            input=stdin,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(
-            command,
-            124,
-            stdout=exc.stdout or "",
-            stderr=f"tmux command timed out after {timeout}s",
-        )
 
 
-def tmux_session_exists(session_name: str) -> bool:
-    return run_tmux(["has-session", "-t", session_name], timeout=2.0).returncode == 0
 
 
-def tmux_window_count(session_name: str) -> tuple[int | None, str]:
-    completed = run_tmux(["list-windows", "-t", session_name, "-F", "#{window_name}"], timeout=2.0)
-    if completed.returncode != 0:
-        return None, completed.stderr.strip() or completed.stdout.strip()
-    return len([line for line in completed.stdout.splitlines() if line.strip()]), ""
 
 
-def configure_tmux_capture_settings(session_name: str) -> dict[str, Any]:
-    history_limit = env_int_default("ITB_TMUX_HISTORY_LIMIT", 50000)
-    default_cols = env_int_default("ITB_TMUX_DEFAULT_COLS", 160)
-    default_rows = env_int_default("ITB_TMUX_DEFAULT_ROWS", 48)
-    errors: list[str] = []
-    for command in (
-        ["set-option", "-t", session_name, "history-limit", str(history_limit)],
-        ["set-option", "-t", session_name, "default-size", f"{default_cols}x{default_rows}"],
-    ):
-        completed = run_tmux(command, timeout=2.0)
-        if completed.returncode != 0:
-            errors.append(completed.stderr.strip() or completed.stdout.strip() or "tmux option update failed")
-    return {
-        "tmux_history_limit": history_limit,
-        "tmux_default_size": f"{default_cols}x{default_rows}",
-        "tmux_config_status": "configured" if not errors else "failed",
-        "tmux_config_error": "; ".join(errors),
-    }
 
 
-def list_itb_tmux_sessions() -> tuple[list[dict[str, Any]], str]:
-    completed = run_tmux(
-        ["list-sessions", "-F", "#{session_name}\t#{session_created}\t#{session_windows}"],
-        timeout=3.0,
-    )
-    if completed.returncode != 0:
-        return [], completed.stderr.strip() or completed.stdout.strip()
 
-    sessions: list[dict[str, Any]] = []
-    for line in completed.stdout.splitlines():
-        cells = line.split("\t")
-        if len(cells) < 3:
-            continue
-        name, created_raw, windows_raw = cells[:3]
-        if not name.startswith("itb-org-"):
-            continue
-        try:
-            created = int(created_raw)
-        except ValueError:
-            created = 0
-        try:
-            windows = int(windows_raw)
-        except ValueError:
-            windows = 0
-        sessions.append({"session_name": name, "created": created, "windows": windows})
-    return sessions, ""
 
 
-def cleanup_stale_tmux_sessions(*, current_session_name: str, now_epoch: int) -> dict[str, Any]:
-    enabled = env_flag("ITB_STALE_TMUX_CLEANUP", default=True)
-    dry_run = env_flag("ITB_STALE_TMUX_CLEANUP_DRY_RUN")
-    min_age_seconds = env_int_default("ITB_STALE_TMUX_MIN_AGE_SECONDS", 6 * 60 * 60)
-    keep_recent = env_int_default("ITB_STALE_TMUX_KEEP_RECENT", 1)
-    summary: dict[str, Any] = {
-        "enabled": enabled,
-        "dry_run": dry_run,
-        "min_age_seconds": min_age_seconds,
-        "keep_recent": keep_recent,
-        "current_session": current_session_name,
-        "total_itb_sessions": 0,
-        "stale_candidate_count": 0,
-        "killed_count": 0,
-        "failed_count": 0,
-        "skipped_count": 0,
-        "killed_sessions": [],
-        "failed_sessions": [],
-        "skipped_sessions": [],
-        "error": "",
-    }
-    if not enabled:
-        return summary
-    if shutil.which("tmux") is None:
-        summary["error"] = "tmux command not found"
-        return summary
 
-    sessions, error = list_itb_tmux_sessions()
-    if error:
-        summary["error"] = error
-        return summary
 
-    other_sessions = [
-        session for session in sessions if session["session_name"] != current_session_name
-    ]
-    other_sessions.sort(key=lambda session: int(session.get("created", 0)), reverse=True)
-    summary["total_itb_sessions"] = len(sessions)
 
-    for index, session in enumerate(other_sessions):
-        age_seconds = max(0, now_epoch - int(session.get("created", 0)))
-        session_summary = {
-            "session_name": session["session_name"],
-            "age_seconds": age_seconds,
-            "windows": session.get("windows", 0),
-        }
-        if index < keep_recent:
-            summary["skipped_count"] += 1
-            summary["skipped_sessions"].append(session_summary | {"reason": "kept_recent"})
-            continue
-        if age_seconds < min_age_seconds:
-            summary["skipped_count"] += 1
-            summary["skipped_sessions"].append(session_summary | {"reason": "below_min_age"})
-            continue
 
-        summary["stale_candidate_count"] += 1
-        if dry_run:
-            summary["killed_sessions"].append(session_summary | {"result": "dry_run"})
-            continue
 
-        completed = run_tmux(["kill-session", "-t", session["session_name"]], timeout=5.0)
-        if completed.returncode == 0:
-            summary["killed_count"] += 1
-            summary["killed_sessions"].append(session_summary | {"result": "tmux_killed"})
-        else:
-            summary["failed_count"] += 1
-            summary["failed_sessions"].append(
-                session_summary
-                | {
-                    "result": "tmux_kill_failed",
-                    "error": completed.stderr.strip() or completed.stdout.strip(),
-                }
-            )
-    return summary
 
 
-def cleanup_archived_state_dirs(*, state_root: Path, current_session_id: str, now_epoch: int) -> dict[str, Any]:
-    enabled = env_flag("ITB_STATE_DIR_RETENTION", default=True)
-    dry_run = env_flag("ITB_STATE_DIR_RETENTION_DRY_RUN")
-    min_age_seconds = env_int_default("ITB_STATE_DIR_MIN_AGE_SECONDS", 7 * 24 * 60 * 60)
-    orphan_enabled = env_flag("ITB_STATE_DIR_ORPHAN_RETENTION", default=True)
-    orphan_min_age_seconds = env_int_default("ITB_STATE_DIR_ORPHAN_MIN_AGE_SECONDS", 2 * 60 * 60)
-    keep_recent = env_int_default("ITB_STATE_DIR_KEEP_RECENT", 10)
-    archive_root = state_root / "archive" / "sessions"
-    summary: dict[str, Any] = {
-        "enabled": enabled,
-        "dry_run": dry_run,
-        "min_age_seconds": min_age_seconds,
-        "orphan_enabled": orphan_enabled,
-        "orphan_min_age_seconds": orphan_min_age_seconds,
-        "keep_recent": keep_recent,
-        "current_session_id": current_session_id,
-        "archive_root": str(archive_root),
-        "archived_candidate_count": 0,
-        "orphan_candidate_count": 0,
-        "moved_count": 0,
-        "failed_count": 0,
-        "skipped_count": 0,
-        "moved_sessions": [],
-        "failed_sessions": [],
-        "skipped_sessions": [],
-        "error": "",
-    }
-    if not enabled:
-        return summary
-    try:
-        state_root.mkdir(parents=True, exist_ok=True)
-        candidates: list[dict[str, Any]] = []
-        for path in state_root.iterdir():
-            if not path.is_dir() or path.name == "archive" or path.name == current_session_id:
-                continue
-            status_path = path / "status"
-            status = status_path.read_text(encoding="utf-8").strip() if status_path.exists() else ""
-            archived = status == "archived" or (path / "shutdown.json").exists()
-            stat = path.stat()
-            age_seconds = max(0, now_epoch - int(stat.st_mtime))
-            if not archived:
-                orphan_reason = ""
-                if orphan_enabled and age_seconds >= orphan_min_age_seconds and shutil.which("tmux") is not None:
-                    try:
-                        state = read_json(path / "bootstrap.json") if (path / "bootstrap.json").exists() else {}
-                    except (OSError, json.JSONDecodeError):
-                        state = {}
-                    tmux_session = normalize_cell(state.get("tmux_session") if isinstance(state, dict) else "")
-                    if tmux_session and not tmux_session_exists(tmux_session):
-                        orphan_reason = "orphan_tmux_missing"
-                    elif tmux_session:
-                        summary["skipped_count"] += 1
-                        summary["skipped_sessions"].append(
-                            {
-                                "session_id": path.name,
-                                "reason": "live_tmux_session",
-                                "age_seconds": age_seconds,
-                                "tmux_session": tmux_session,
-                            }
-                        )
-                        continue
-                if not orphan_reason:
-                    summary["skipped_count"] += 1
-                    summary["skipped_sessions"].append({"session_id": path.name, "reason": "not_archived", "age_seconds": age_seconds})
-                    continue
-            candidates.append(
-                {
-                    "session_id": path.name,
-                    "path": path,
-                    "modified": int(stat.st_mtime),
-                    "age_seconds": age_seconds,
-                    "reason": "archived" if archived else orphan_reason,
-                    "min_age_seconds": min_age_seconds if archived else orphan_min_age_seconds,
-                }
-            )
-    except OSError as exc:
-        summary["error"] = str(exc)
-        return summary
 
-    candidates.sort(key=lambda item: int(item["modified"]), reverse=True)
-    summary["archived_candidate_count"] = sum(1 for item in candidates if item.get("reason") == "archived")
-    summary["orphan_candidate_count"] = sum(1 for item in candidates if item.get("reason") == "orphan_tmux_missing")
-    for index, candidate in enumerate(candidates):
-        session_id = str(candidate["session_id"])
-        age_seconds = int(candidate["age_seconds"])
-        required_min_age = int(candidate.get("min_age_seconds") or min_age_seconds)
-        session_summary = {"session_id": session_id, "age_seconds": age_seconds, "reason": candidate.get("reason", "")}
-        if index < keep_recent:
-            summary["skipped_count"] += 1
-            summary["skipped_sessions"].append(session_summary | {"reason": "kept_recent"})
-            continue
-        if age_seconds < required_min_age:
-            summary["skipped_count"] += 1
-            summary["skipped_sessions"].append(session_summary | {"reason": "below_min_age", "min_age_seconds": required_min_age})
-            continue
-        destination = archive_root / session_id
-        if destination.exists():
-            destination = archive_root / f"{session_id}-{now_epoch}"
-        if dry_run:
-            summary["moved_sessions"].append(session_summary | {"result": "dry_run", "destination": str(destination)})
-            continue
-        try:
-            archive_root.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(candidate["path"]), str(destination))
-            summary["moved_count"] += 1
-            summary["moved_sessions"].append(session_summary | {"result": "moved", "destination": str(destination)})
-        except OSError as exc:
-            summary["failed_count"] += 1
-            summary["failed_sessions"].append(session_summary | {"result": "move_failed", "error": str(exc)})
-    return summary
 
 
-def tmux_window_exists(session_name: str, window_name: str) -> bool:
-    completed = run_tmux(["list-windows", "-t", session_name, "-F", "#{window_name}"], timeout=2.0)
-    if completed.returncode != 0:
-        return False
-    return window_name in completed.stdout.splitlines()
-
-
-def tmux_pane_info(session_name: str, window_name: str) -> dict[str, str] | None:
-    target = f"{session_name}:{window_name}.0"
-    completed = run_tmux(
-        [
-            "list-panes",
-            "-t",
-            target,
-            "-F",
-            "#{pane_current_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_current_path}\t#{pane_start_command}",
-        ],
-        timeout=2.0,
-    )
-    if completed.returncode != 0 or not completed.stdout.strip():
-        return None
-    cells = completed.stdout.splitlines()[0].split("\t", 4)
-    while len(cells) < 5:
-        cells.append("")
-    return {
-        "pane_current_command": cells[0],
-        "pane_dead": cells[1],
-        "pane_pid": cells[2],
-        "pane_current_path": cells[3],
-        "pane_start_command": cells[4],
-    }
-
-
-def tmux_session_pane_info(session_name: str) -> tuple[dict[str, dict[str, str]], str]:
-    completed = run_tmux(
-        [
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{window_name}\t#{pane_index}\t#{pane_current_command}\t#{pane_dead}\t#{pane_pid}\t#{pane_current_path}\t#{pane_start_command}",
-        ],
-        timeout=3.0,
-    )
-    if completed.returncode != 0:
-        return {}, completed.stderr.strip() or completed.stdout.strip()
-    panes: dict[str, dict[str, str]] = {}
-    for line in completed.stdout.splitlines():
-        cells = line.split("\t", 7)
-        while len(cells) < 8:
-            cells.append("")
-        pane_session, window_name, pane_index = cells[:3]
-        if pane_session != session_name or pane_index != "0":
-            continue
-        panes[window_name] = {
-            "pane_current_command": cells[3],
-            "pane_dead": cells[4],
-            "pane_pid": cells[5],
-            "pane_current_path": cells[6],
-            "pane_start_command": cells[7],
-        }
-    return panes, ""
-
-
-def pane_matches_agent(info: dict[str, str], row: dict[str, Any], command: str, process_mode: str) -> bool:
-    start_command = info.get("pane_start_command", "")
-    current_command = info.get("pane_current_command", "")
-    if process_mode == "provider_cli":
-        return (
-            f"ITB_AGENT_ID={row['agent_id']}" in start_command
-            and "ITB_AGENT_PROCESS_MODE=provider_cli" in start_command
-            and "ITB_PROVIDER_ADD_DIRS_EFFECTIVE=" in start_command
-            and "ITB_PROVIDER_STATE_DIR=" in start_command
-            and "ITB_PROVIDER_CONFIG_POLICY=" in start_command
-            and "ITB_PROVIDER_AUTH_POLICY=" in start_command
-            and "ITB_PROVIDER_PERMISSION_MODE_EFFECTIVE=" in start_command
-            and "ITB_PROVIDER_TOOLS_EFFECTIVE=" in start_command
-            and "ITB_CODEX_APPROVAL_POLICY_EFFECTIVE=" in start_command
-            and "ITB_CLAUDE_EFFORT_EFFECTIVE=" in start_command
-            and "ITB_CLAUDE_FAST_MODE_EFFECTIVE=" in start_command
-            and "ITB_CODEX_MODEL_EFFECTIVE=" in start_command
-            and "ITB_CODEX_REASONING_EFFORT_EFFECTIVE=" in start_command
-            and "ITB_CODEX_SERVICE_TIER_EFFECTIVE=" in start_command
-            and (command in start_command or current_command == command)
-        )
-    if process_mode == "resident_shell":
-        return (
-            f"ITB_AGENT_ID={row['agent_id']}" in start_command
-            and "ITB_AGENT_PROCESS_MODE=resident_shell" in start_command
-        )
-    return (
-        row["agent_id"] in start_command
-        or f"ITB_AGENT_ID={row['agent_id']}" in start_command
-        or command in start_command
-        or current_command == command
-    )
-
-
-def pane_is_resident_shell_for_agent(info: dict[str, str], row: dict[str, Any]) -> bool:
-    start_command = info.get("pane_start_command", "")
-    return (
-        f"ITB_AGENT_ID={row['agent_id']}" in start_command
-        and "ITB_AGENT_PROCESS_MODE=resident_shell" in start_command
-    )
-
-
-def pane_is_provider_cli_for_agent(info: dict[str, str], row: dict[str, Any]) -> bool:
-    start_command = info.get("pane_start_command", "")
-    return (
-        f"ITB_AGENT_ID={row['agent_id']}" in start_command
-        and "ITB_AGENT_PROCESS_MODE=provider_cli" in start_command
-    )
-
-
-def should_respawn_conflicting_itb_pane(
-    *,
-    session_name: str,
-    window_name: str,
-    row: dict[str, Any],
-) -> bool:
-    if not env_flag("ITB_RESPAWN_CONFLICTING_ITB_PANE", default=True):
-        return False
-    return session_name.startswith("itb-") and window_name == safe_tmux_name(row["agent_id"])
-
-
-def mark_launch_result(row: dict[str, Any], result: dict[str, Any]) -> None:
-    for key in (
-        "process_status",
-        "launch_status",
-        "runtime_kind",
-        "tmux_session",
-        "tmux_window",
-        "tmux_target",
-        "process_evidence_source",
-        "process_started_at",
-        "launch_error",
-        "process_mode",
-        "provider_runtime_kind",
-        "provider_status",
-        "tool_sidecar_status",
-    ):
-        row[key] = result.get(key, "")
-    for key in (
-        "interactive_status",
-        "interactive_ready",
-        "interactive_error",
-        "interactive_checked_at",
-        "interactive_evidence_source",
-        "interactive_startup_target",
-    ):
-        if key in result:
-            row[key] = result.get(key, "")
-
-
-def startup_interactive_ready_agent_ids() -> set[str]:
-    configured = env_csv("ITB_STARTUP_INTERACTIVE_READY_AGENT_IDS")
-    if not configured:
-        return {GATE_ENTRY_AGENT_ID}
-    if configured & {"none", "off", "disabled"}:
-        return set()
-    return configured
-
-
-def classify_interactive_prompt_error(error: str) -> str:
-    lowered = error.lower()
-    if "workspace trust" in lowered or "quick safety check" in lowered:
-        return "blocked_trust_prompt"
-    if "onboarding" in lowered or "login prompt" in lowered or "select login method" in lowered:
-        return "blocked_provider_onboarding"
-    if "approval" in lowered or "allow codex" in lowered or "do you want to allow" in lowered:
-        return "blocked_provider_approval"
-    if "copy-mode" in lowered or "copy mode" in lowered:
-        return "tmux_copy_mode"
-    if "busy" in lowered:
-        return "prompt_busy"
-    return "prompt_not_ready"
-
-
-def annotate_startup_interactive_readiness(
-    row: dict[str, Any],
-    result: dict[str, Any],
-    *,
-    dry_run: bool,
-    now: str,
-) -> dict[str, Any]:
-    agent_id = normalize_cell(row.get("agent_id") or result.get("agent_id"))
-    target_ids = startup_interactive_ready_agent_ids()
-    is_startup_target = (
-        bool(agent_id)
-        and agent_id in target_ids
-        and result.get("process_status") == "process_ready"
-        and result.get("process_mode") == "provider_cli"
-        and result.get("provider_status") == "provider_process_ready"
-    )
-    result.setdefault("interactive_ready", False)
-    result.setdefault("interactive_error", "")
-    result.setdefault("interactive_checked_at", "")
-    result["interactive_startup_target"] = is_startup_target
-
-    if result.get("process_status") != "process_ready":
-        result["interactive_status"] = "not_checked_process_not_ready"
-        result["interactive_evidence_source"] = "process_status"
-        return result
-    if dry_run:
-        result["interactive_status"] = "not_checked_dry_run"
-        result["interactive_evidence_source"] = "dry_run"
-        return result
-    if result.get("process_mode") != "provider_cli":
-        result["interactive_status"] = "not_applicable_resident_shell"
-        result["interactive_evidence_source"] = "process_mode"
-        return result
-    if not is_startup_target:
-        result["interactive_status"] = "not_checked_startup_scope"
-        result["interactive_evidence_source"] = "startup_scope"
-        return result
-    target = normalize_cell(result.get("tmux_target"))
-    if not target:
-        result["interactive_status"] = "not_checked_missing_tmux_target"
-        result["interactive_evidence_source"] = "tmux"
-        return result
-
-    timeout_seconds = bounded_float_input(
-        os.environ.get("ITB_STARTUP_INTERACTIVE_READY_TIMEOUT_SECONDS"),
-        default=8.0,
-        minimum=0.0,
-        maximum=8.0,
-    )
-    poll_interval_seconds = bounded_float_input(
-        os.environ.get("ITB_STARTUP_INTERACTIVE_READY_POLL_SECONDS"),
-        default=0.25,
-        minimum=0.05,
-        maximum=2.0,
-    )
-    if timeout_seconds <= 0:
-        result["interactive_status"] = "not_checked_disabled"
-        result["interactive_evidence_source"] = "disabled"
-        return result
-
-    ready, error = wait_for_interactive_prompt(
-        target=target,
-        timeout_seconds=timeout_seconds,
-        poll_interval_seconds=poll_interval_seconds,
-    )
-    result["interactive_ready"] = ready
-    result["interactive_error"] = error
-    result["interactive_checked_at"] = now
-    result["interactive_evidence_source"] = "tmux_capture"
-    result["interactive_status"] = "interactive_ready" if ready else classify_interactive_prompt_error(error)
-    return result
-
-
-def ensure_agent_processes(
-    *,
-    roster: list[dict[str, Any]],
-    cwd: str,
-    session_id: str,
-    organization_instance_id: str,
-    queue_root: Path,
-    now: str,
-) -> dict[str, Any]:
-    launch_filter = env_csv("ITB_AGENT_LAUNCH_FILTER")
-    launch_limit = env_int("ITB_AGENT_LAUNCH_LIMIT")
-    dry_run = env_flag("ITB_AGENT_LAUNCH_DRY_RUN")
-    process_mode = agent_process_mode()
-    child_context = os.environ.get(CHILD_AGENT_ENV) == "1"
-    tmux_path = shutil.which("tmux")
-    selected: list[dict[str, Any]] = []
-    session_name = safe_tmux_name(f"itb-{organization_instance_id}", max_length=60)
-    stale_cleanup = cleanup_stale_tmux_sessions(
-        current_session_name=session_name,
-        now_epoch=int(time.time()),
-    )
-
-    for row in roster:
-        if child_context:
-            selected.append(row)
-            continue
-        if launch_filter and row["agent_id"] not in launch_filter:
-            mark_launch_result(
-                row,
-                {
-                    "process_status": "not_launched",
-                    "launch_status": "skipped_by_filter",
-                    "process_evidence_source": "itb_launch_filter",
-                },
-            )
-            continue
-        if not launch_filter and not starts_at_session_start(row):
-            mark_launch_result(
-                row,
-                {
-                    "process_status": "not_launched",
-                    "launch_status": "skipped_by_startup_profile",
-                    "process_evidence_source": startup_profile(row),
-                },
-            )
-            continue
-        if launch_limit is not None and len(selected) >= launch_limit:
-            mark_launch_result(
-                row,
-                {
-                    "process_status": "not_launched",
-                    "launch_status": "skipped_by_limit",
-                    "process_evidence_source": "itb_launch_limit",
-                },
-            )
-            continue
-        selected.append(row)
-
-    results: list[dict[str, Any]] = []
-    tmux_config_cache: dict[str, Any] | None = None
-    pane_info_cache: dict[str, dict[str, str]] | None = None
-    pane_info_cache_error = ""
-
-    def session_tmux_config() -> dict[str, Any]:
-        nonlocal tmux_config_cache
-        if tmux_config_cache is None:
-            tmux_config_cache = configure_tmux_capture_settings(session_name)
-            tmux_config_cache["tmux_config_scope"] = "session"
-        return tmux_config_cache
-
-    def refresh_pane_info_cache() -> None:
-        nonlocal pane_info_cache, pane_info_cache_error
-        pane_info_cache, pane_info_cache_error = tmux_session_pane_info(session_name)
-
-    def cached_tmux_pane_info(window_name: str) -> dict[str, str] | None:
-        nonlocal pane_info_cache
-        if pane_info_cache is None:
-            refresh_pane_info_cache()
-        if pane_info_cache is not None and window_name in pane_info_cache:
-            return pane_info_cache[window_name]
-        return tmux_pane_info(session_name, window_name)
-
-    def finish_launch_result(row: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-        if pane_info_cache_error and not result.get("pane_info_cache_error"):
-            result["pane_info_cache_error"] = pane_info_cache_error
-        annotate_startup_interactive_readiness(row, result, dry_run=dry_run, now=now)
-        mark_launch_result(row, result)
-        return result
-
-    for row in selected:
-        registry_row = role_agent_row_for(row["agent_id"], organization_instance_id=organization_instance_id)
-        launch_row = dict(registry_row)
-        launch_row.update(row)
-        provider_runtime = agent_runtime(launch_row)
-        runtime_kind = "resident_shell_tmux" if process_mode == "resident_shell" else (provider_runtime[0] if provider_runtime else "")
-        provider_status = "deferred" if process_mode == "resident_shell" else "not_started"
-        tool_sidecar_status = "deferred" if process_mode == "resident_shell" else "not_verified"
-        window_name = safe_tmux_name(launch_row["agent_id"])
-        target = f"{session_name}:{window_name}.0"
-        base_result: dict[str, Any] = {
-            "agent_id": launch_row["agent_id"],
-            "process_status": "not_launched",
-            "launch_status": "not_attempted",
-            "runtime_kind": runtime_kind,
-            "process_mode": process_mode,
-            "provider_runtime_kind": provider_runtime[0] if provider_runtime else "",
-            "provider_status": provider_status,
-            "tool_sidecar_status": tool_sidecar_status,
-            "interactive_status": "not_checked",
-            "interactive_ready": False,
-            "interactive_error": "",
-            "interactive_checked_at": "",
-            "interactive_evidence_source": "",
-            "interactive_startup_target": False,
-            "tmux_session": session_name,
-            "tmux_window": window_name,
-            "tmux_target": target,
-            "process_evidence_source": "tmux",
-            "process_started_at": "",
-            "launch_error": "",
-        }
-
-        if child_context:
-            result = base_result | {
-                "launch_status": "skipped_child_agent_context",
-                "process_evidence_source": "child_agent_env",
-            }
-            result = finish_launch_result(row, result)
-            results.append(result)
-            continue
-
-        if process_mode == "provider_cli" and provider_runtime is None:
-            result = base_result | {
-                "process_status": "launch_failed",
-                "launch_status": "unsupported_runtime",
-                "launch_error": f"provider={launch_row.get('provider', '')} execution_mode={launch_row.get('execution_mode', '')}",
-            }
-            result = finish_launch_result(row, result)
-            results.append(result)
-            continue
-
-        if interactive_codex_resident_disabled(launch_row, process_mode):
-            result = base_result | {
-                "process_status": "not_launched",
-                "launch_status": "interactive_codex_resident_disabled",
-                "process_evidence_source": "itb_interactive_codex_guard",
-                "launch_error": interactive_codex_resident_disabled_reason(launch_row),
-            }
-            result = finish_launch_result(row, result)
-            results.append(result)
-            continue
-
-        command = "/bin/sh" if process_mode == "resident_shell" else provider_runtime[1]
-        if dry_run:
-            result = base_result | {
-                "process_status": "process_ready",
-                "launch_status": "dry_run_process_ready",
-                "runtime_kind": runtime_kind,
-                "provider_status": "provider_process_ready" if process_mode == "provider_cli" else provider_status,
-                "process_evidence_source": "dry_run",
-                "process_started_at": now,
-            }
-            result = finish_launch_result(row, result)
-            results.append(result)
-            continue
-
-        if tmux_path is None:
-            result = base_result | {
-                "process_status": "launch_failed",
-                "launch_status": "tmux_unavailable",
-                "runtime_kind": runtime_kind,
-                "launch_error": "tmux command not found",
-            }
-            result = finish_launch_result(row, result)
-            results.append(result)
-            continue
-
-        if shutil.which(command) is None:
-            result = base_result | {
-                "process_status": "launch_failed",
-                "launch_status": f"{command}_unavailable",
-                "runtime_kind": runtime_kind,
-                "launch_error": f"{command} command not found",
-            }
-            result = finish_launch_result(row, result)
-            results.append(result)
-            continue
-
-        launch_command, runtime_kind = build_agent_command(
-            launch_row,
-            cwd,
-            process_mode,
-            extra_add_dirs=[queue_root],
-        )
-        session_exists = tmux_session_exists(session_name)
-        window_exists = session_exists and tmux_window_exists(session_name, window_name)
-        tmux_config: dict[str, Any] = {}
-
-        if window_exists:
-            info = cached_tmux_pane_info(window_name)
-            if info and info.get("pane_dead") == "0":
-                if pane_matches_agent(info, launch_row, command, process_mode):
-                    tmux_config = session_tmux_config()
-                    result = base_result | {
-                        "process_status": "process_ready",
-                        "launch_status": "already_running",
-                        "runtime_kind": runtime_kind,
-                        "provider_status": "provider_process_ready" if process_mode == "provider_cli" else provider_status,
-                        "process_started_at": now,
-                        "pane_current_command": info.get("pane_current_command", ""),
-                        "pane_pid": info.get("pane_pid", ""),
-                    } | tmux_config
-                    result = finish_launch_result(row, result)
-                    results.append(result)
-                    continue
-                if process_mode == "provider_cli" and pane_is_resident_shell_for_agent(info, launch_row):
-                    completed = run_tmux(["respawn-pane", "-k", "-t", target, launch_command], timeout=5.0)
-                    action = "upgraded_resident_shell"
-                elif should_respawn_conflicting_itb_pane(
-                    session_name=session_name,
-                    window_name=window_name,
-                    row=launch_row,
-                ):
-                    completed = run_tmux(["respawn-pane", "-k", "-t", target, launch_command], timeout=5.0)
-                    action = "replaced_conflicting_itb_pane"
-                else:
-                    result = base_result | {
-                        "process_status": "launch_failed",
-                        "launch_status": "window_conflict",
-                        "runtime_kind": runtime_kind,
-                        "launch_error": f"existing pane command={info.get('pane_current_command', '')}",
-                    }
-                    result = finish_launch_result(row, result)
-                    results.append(result)
-                    continue
-
-            else:
-                completed = run_tmux(["respawn-pane", "-k", "-t", target, launch_command], timeout=5.0)
-                action = "respawned_window"
-        elif session_exists:
-            completed = run_tmux(["new-window", "-d", "-t", session_name, "-n", window_name, launch_command], timeout=5.0)
-            action = "created_window"
-        else:
-            completed = run_tmux(["new-session", "-d", "-s", session_name, "-n", window_name, launch_command], timeout=5.0)
-            action = "created_session"
-
-        if completed.returncode != 0:
-            result = base_result | {
-                "process_status": "launch_failed",
-                "launch_status": action,
-                "runtime_kind": runtime_kind,
-                "launch_error": completed.stderr.strip() or completed.stdout.strip(),
-            }
-            result = finish_launch_result(row, result)
-            results.append(result)
-            continue
-
-        tmux_config = session_tmux_config()
-        refresh_pane_info_cache()
-        info = None
-        for _ in range(4):
-            time.sleep(0.1)
-            refresh_pane_info_cache()
-            info = cached_tmux_pane_info(window_name)
-            if info and info.get("pane_dead") == "0":
-                break
-
-        if info and info.get("pane_dead") == "0":
-            result = base_result | {
-                "process_status": "process_ready",
-                "launch_status": action,
-                "runtime_kind": runtime_kind,
-                "provider_status": "provider_process_ready" if process_mode == "provider_cli" else provider_status,
-                "process_started_at": now,
-                "pane_current_command": info.get("pane_current_command", ""),
-                "pane_pid": info.get("pane_pid", ""),
-            } | tmux_config
-        else:
-            result = base_result | {
-                "process_status": "launch_failed",
-                "launch_status": f"{action}_exited",
-                "runtime_kind": runtime_kind,
-                "launch_error": "tmux pane did not remain live after launch",
-            }
-        result = finish_launch_result(row, result)
-        results.append(result)
-
-    ready_count = sum(1 for result in results if result.get("process_status") == "process_ready")
-    failure_count = sum(1 for result in results if result.get("process_status") == "launch_failed")
-    interactive_startup_targets = [
-        result for result in results if truthy_input(result.get("interactive_startup_target"))
-    ]
-    interactive_blockers = [
-        {
-            "agent_id": result.get("agent_id", ""),
-            "interactive_status": result.get("interactive_status", ""),
-            "interactive_error": result.get("interactive_error", ""),
-            "tmux_target": result.get("tmux_target", ""),
-            "launch_status": result.get("launch_status", ""),
-        }
-        for result in interactive_startup_targets
-        if result.get("interactive_status") in INTERACTIVE_READINESS_BLOCKING_STATUSES
-    ]
-    return {
-        "enabled": True,
-        "dry_run": dry_run,
-        "child_context": child_context,
-        "process_mode": process_mode,
-        "filter": sorted(launch_filter),
-        "limit": launch_limit,
-        "tmux_session": session_name,
-        "tmux_config_scope": normalize_cell((tmux_config_cache or {}).get("tmux_config_scope")),
-        "tmux_config_status": normalize_cell((tmux_config_cache or {}).get("tmux_config_status")),
-        "pane_info_cache_status": "failed" if pane_info_cache_error else ("ready" if pane_info_cache is not None else "not_used"),
-        "pane_info_cache_error": pane_info_cache_error,
-        "target_count": len(selected),
-        "lazy_count": sum(1 for row in roster if row.get("launch_status") == "skipped_by_startup_profile"),
-        "process_ready_count": ready_count,
-        "provider_ready_count": sum(
-            1
-            for result in results
-            if result.get("process_status") == "process_ready"
-            and result.get("provider_status") == "provider_process_ready"
-        ),
-        "interactive_startup_target_count": len(interactive_startup_targets),
-        "interactive_checked_count": sum(
-            1 for result in interactive_startup_targets if result.get("interactive_evidence_source") == "tmux_capture"
-        ),
-        "interactive_ready_count": sum(1 for result in interactive_startup_targets if truthy_input(result.get("interactive_ready"))),
-        "interactive_blocker_count": len(interactive_blockers),
-        "interactive_blockers": interactive_blockers,
-        "tool_sidecar_ready_count": sum(
-            1 for result in results if result.get("tool_sidecar_status") == "ready"
-        ),
-        "failure_count": failure_count,
-        "results": results,
-        "stale_cleanup": stale_cleanup,
-    }
-
-
-def session_start_compact_source(source: Any, hook_input: dict[str, Any]) -> bool:
-    values = [
-        source,
-        hook_input.get("source"),
-        hook_input.get("hook_event_name"),
-        hook_input.get("hookEventName"),
-        hook_input.get("event"),
-        hook_input.get("event_name"),
-        hook_input.get("eventName"),
-        hook_input.get("matcher"),
-        hook_input.get("session_start_reason"),
-        hook_input.get("sessionStartReason"),
-        hook_input.get("reason"),
-    ]
-    text = " ".join(normalize_cell(value).lower() for value in values if normalize_cell(value))
-    return any(marker in text for marker in SESSION_START_COMPACT_SOURCE_MARKERS)
-
-
-def session_start_guard_fingerprint(
-    *,
-    runtime: str,
-    cwd: str,
-    launch_agents: bool,
-    resident_rows: list[dict[str, Any]],
-    registry_sha1: str,
-    role_agent_registry_sha1: str,
-    policy_digest: list[dict[str, Any]],
-) -> dict[str, Any]:
-    launch_filter = sorted(env_csv("ITB_AGENT_LAUNCH_FILTER"))
-    launch_limit = env_int("ITB_AGENT_LAUNCH_LIMIT")
-    resident_agent_ids = [normalize_cell(row.get("agent_id")) for row in resident_rows]
-    startup_agent_ids = [
-        normalize_cell(row.get("agent_id"))
-        for row in resident_rows
-        if starts_at_session_start(row)
-    ]
-    return {
-        "schema_version": 1,
-        "runtime": runtime,
-        "cwd": cwd,
-        "launch_agents": launch_agents,
-        "agent_process_mode": agent_process_mode(),
-        "agent_launch_filter": launch_filter,
-        "agent_launch_limit": launch_limit,
-        "agent_launch_dry_run": env_flag("ITB_AGENT_LAUNCH_DRY_RUN"),
-        "allow_interactive_codex_resident": env_flag("ITB_ALLOW_INTERACTIVE_CODEX_RESIDENT"),
-        "startup_interactive_ready_agent_ids": sorted(startup_interactive_ready_agent_ids()),
-        "model_registry_sha1": registry_sha1,
-        "role_agent_registry_sha1": role_agent_registry_sha1,
-        "completion_chain_sha1": file_sha1(COMPLETION_CHAIN_CONFIG),
-        "gate_output_schemas_sha1": file_sha1(GATE_OUTPUT_SCHEMAS_CONFIG),
-        "policy_digest_sha1": policy_digest_sha1(policy_digest),
-        "resident_agent_ids": resident_agent_ids,
-        "startup_agent_ids": startup_agent_ids,
-    }
-
-
-def previous_session_tmux_liveness(previous_state: dict[str, Any], roster_path: Path) -> dict[str, Any]:
-    tmux_session = normalize_cell(previous_state.get("tmux_session"))
-    target_count = int(previous_state.get("process_launch_target_count") or 0)
-    if not tmux_session or target_count <= 0:
-        return {"required": False, "status": "not_required_no_tmux_targets"}
-    if truthy_input(previous_state.get("launch_dry_run")):
-        return {"required": False, "status": "not_required_dry_run"}
-    if shutil.which("tmux") is None:
-        return {"required": True, "status": "failed_tmux_unavailable", "tmux_session": tmux_session}
-    if not tmux_session_exists(tmux_session):
-        return {"required": True, "status": "failed_session_missing", "tmux_session": tmux_session}
-
-    expected_windows: list[str] = []
-    try:
-        roster_data = read_json(roster_path) if roster_path.exists() else []
-    except Exception:
-        roster_data = []
-    if isinstance(roster_data, list):
-        for row in roster_data:
-            if not isinstance(row, dict):
-                continue
-            if normalize_cell(row.get("process_status")) != "process_ready":
-                continue
-            window_name = normalize_cell(row.get("tmux_window")) or safe_tmux_name(normalize_cell(row.get("agent_id")))
-            if window_name:
-                expected_windows.append(window_name)
-    expected_windows = sorted(set(expected_windows))
-    if not expected_windows:
-        return {"required": True, "status": "failed_no_previous_process_ready_windows", "tmux_session": tmux_session}
-
-    completed = run_tmux(["list-windows", "-t", tmux_session, "-F", "#{window_name}"], timeout=2.0)
-    if completed.returncode != 0:
-        return {
-            "required": True,
-            "status": "failed_window_list",
-            "tmux_session": tmux_session,
-            "error": completed.stderr.strip() or completed.stdout.strip(),
-        }
-    live_windows = {line.strip() for line in completed.stdout.splitlines() if line.strip()}
-    missing_windows = [window for window in expected_windows if window not in live_windows]
-    if missing_windows:
-        return {
-            "required": True,
-            "status": "failed_windows_missing",
-            "tmux_session": tmux_session,
-            "missing_windows": missing_windows,
-        }
-    return {
-        "required": True,
-        "status": "alive",
-        "tmux_session": tmux_session,
-        "checked_windows": expected_windows,
-    }
-
-
-def session_start_compact_guard(
-    *,
-    source: Any,
-    hook_input: dict[str, Any],
-    previous_state: dict[str, Any],
-    current_fingerprint: dict[str, Any],
-    roster_path: Path,
-) -> dict[str, Any]:
-    if not env_flag("ITB_SESSION_START_COMPACT_UNCHANGED", default=True):
-        return {"allowed": False, "reason": "disabled_by_env"}
-    if truthy_input(hook_input.get("force_session_start_rebuild") or hook_input.get("forceSessionStartRebuild")):
-        return {"allowed": False, "reason": "force_session_start_rebuild"}
-    if not session_start_compact_source(source, hook_input):
-        return {"allowed": False, "reason": "source_not_compactable", "source": normalize_cell(source)}
-    if not previous_state:
-        return {"allowed": False, "reason": "previous_state_missing"}
-    if normalize_cell(previous_state.get("bootstrap_status")) != "ready":
-        return {"allowed": False, "reason": "previous_state_not_ready"}
-    previous_fingerprint = previous_state.get("session_start_guard_fingerprint")
-    if not isinstance(previous_fingerprint, dict):
-        return {"allowed": False, "reason": "previous_fingerprint_missing"}
-    if previous_fingerprint != current_fingerprint:
-        return {"allowed": False, "reason": "fingerprint_changed"}
-    liveness = previous_session_tmux_liveness(previous_state, roster_path)
-    if liveness.get("required") and liveness.get("status") != "alive":
-        return {"allowed": False, "reason": "tmux_liveness_failed", "tmux_liveness": liveness}
-    return {"allowed": True, "reason": "unchanged_session_start_guard", "tmux_liveness": liveness}
-
-
-def compacted_session_start_state(
-    *,
-    previous_state: dict[str, Any],
-    current_fingerprint: dict[str, Any],
-    guard: dict[str, Any],
-    runtime: str,
-    event: str,
-    source: Any,
-    session_id: str,
-    cwd: str,
-    model: str,
-    permission_mode: str,
-    now: str,
-) -> dict[str, Any]:
-    state = dict(previous_state)
-    notes = state.get("notes")
-    if not isinstance(notes, list):
-        notes = [normalize_cell(notes)] if normalize_cell(notes) else []
-    notes = list(notes)
-    notes.append(
-        "SessionStart compacted because registry/policy/agent set and tmux liveness were unchanged; "
-        "bootstrap rebuild, stale GC, and process launch were skipped."
-    )
-    state.update(
-        {
-            "runtime": runtime,
-            "event": event,
-            "session_id": session_id,
-            "cwd": cwd,
-            "model": model,
-            "permission_mode": permission_mode,
-            "bootstrap_status": "ready",
-            "created_at": now,
-            "last_session_start_source": normalize_cell(source),
-            "session_start_compacted": True,
-            "session_start_compact_reason": normalize_cell(guard.get("reason")),
-            "session_start_guard_fingerprint": current_fingerprint,
-            "session_start_guard_check": guard,
-            "state_dir_gc": {"enabled": False, "result": "skipped_session_start_compacted"},
-            "state_dir_gc_moved_count": 0,
-            "state_dir_gc_failed_count": 0,
-            "notes": notes,
-        }
-    )
-    return state
 
 
 def invocation_evidence_entry(
@@ -12501,10 +10954,9 @@ def validate_task_detail_provider_evidence(
             usage_source=row.get("Usage Source", ""),
         )
         errors.extend(f"{task_detail_path}: {error}" for error in evidence_errors)
-        if truthy_input(registry_row.get("resident_target"), default=True):
-            tier_warning = model_tier_mismatch_warning(agent_id, intended_model, effective_model)
-            if tier_warning:
-                warnings.append(f"{task_detail_path}: {tier_warning}")
+        tier_warning = model_tier_mismatch_warning(agent_id, intended_model, effective_model)
+        if tier_warning:
+            warnings.append(f"{task_detail_path}: {tier_warning}")
 
         if provider_evidence_log_path is not None and matching_provider_activation(row, provider_entries) is None:
             session_id = row.get("Session ID", "").strip() or "<empty>"
@@ -12638,18 +11090,6 @@ def validate_preflight_state(session_dir: Path, state: dict[str, Any]) -> tuple[
             errors.append(f"roster.json unreadable: {exc}")
             roster = []
 
-    expected_total = state.get("resident_agents_total")
-    if isinstance(expected_total, int) and roster and len(roster) != expected_total:
-        errors.append(f"roster count mismatch: expected {expected_total}, found {len(roster)}")
-
-    expected_interactive_ready = state.get("resident_agents_interactive_ready")
-    if isinstance(expected_interactive_ready, int) and roster:
-        interactive_ready = sum(1 for row in roster if truthy_input(row.get("interactive_ready")))
-        if expected_interactive_ready != interactive_ready:
-            errors.append(
-                f"interactive ready count mismatch: expected {expected_interactive_ready}, found {interactive_ready}"
-            )
-
     registry_sha1 = state.get("model_registry_sha1")
     if registry_sha1 and MODEL_REGISTRY.exists() and registry_sha1 != file_sha1(MODEL_REGISTRY):
         warnings.append("model registry hash changed since bootstrap")
@@ -12657,38 +11097,8 @@ def validate_preflight_state(session_dir: Path, state: dict[str, Any]) -> tuple[
     if not evidence_path.exists():
         warnings.append("invocation-evidence.jsonl missing; legacy metadata-only state")
 
-    if state.get("interactive_readiness_scope") == "interactive_blocked":
-        blockers = state.get("startup_interactive_blockers", [])
-        blocker_summary = ""
-        if blockers and isinstance(blockers[0], dict):
-            blocker_summary = normalize_cell(blockers[0].get("interactive_status"))
-            blocker_error = normalize_cell(blockers[0].get("interactive_error"))
-            if blocker_error:
-                blocker_summary = f"{blocker_summary}: {blocker_error}" if blocker_summary else blocker_error
-        warnings.append(
-            "startup interactive readiness blocked"
-            + (f": {blocker_summary}" if blocker_summary else "")
-        )
-
-    if state.get("readiness_scope") == "process_ready":
-        process_ready = sum(1 for row in roster if row.get("process_status") == "process_ready")
-        expected_process_ready = state.get("resident_agents_process_ready")
-        if expected_process_ready != process_ready:
-            errors.append(
-                f"process ready count mismatch: expected {expected_process_ready}, found {process_ready}"
-            )
-        for row in roster:
-            if row.get("launch_status") == "skipped_by_startup_profile":
-                continue
-            if row.get("process_status") != "process_ready":
-                errors.append(f"{row.get('agent_id', '<unknown>')}: process_ready bootstrap without process_ready row")
-            if not row.get("tmux_target"):
-                errors.append(f"{row.get('agent_id', '<unknown>')}: process_ready bootstrap without tmux_target")
-            if not row.get("process_mode"):
-                warnings.append(f"{row.get('agent_id', '<unknown>')}: process_ready row missing process_mode")
-
-    # The bootstrap builder never writes response_active. Activation code may
-    # use it only after runtime provider evidence is recorded on the row.
+    # Metadata-only SessionStart never proves provider readiness. Activation
+    # code may mark response_active only after provider evidence is recorded.
     for row in roster:
         status = row.get("activation_status", "")
         usage_source = row.get("usage_source", "")
@@ -12758,1422 +11168,76 @@ def command_line_matches_session_daemon(command_line: str, command_name: str) ->
     return "itb_bootstrap_builder.py" in normalized and f" {command_name}" in normalized
 
 
-def stop_session_detached_process(
-    *,
-    session_dir: Path,
-    pid_filename: str,
-    command_name: str,
-    label: str,
-    now: str,
-    dry_run: bool,
-    timeout_seconds: float = 2.0,
-) -> dict[str, Any]:
-    pid_path = session_dir / pid_filename
-    result: dict[str, Any] = {
-        "label": label,
-        "command_name": command_name,
-        "pid_path": str(pid_path),
-        "pid": 0,
-        "command_line": "",
-        "result": "no_pid_file",
-        "error": "",
-        "dry_run": dry_run,
-        "terminate_attempted": False,
-        "kill_attempted": False,
-        "pid_file_removed": False,
-        "checked_at": now,
-    }
-    if not pid_path.exists():
-        return result
-    try:
-        pid = int(pid_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError) as exc:
-        result["result"] = "unreadable_pid_file"
-        result["error"] = f"{type(exc).__name__}: {exc}"
-        return result
-    result["pid"] = pid
-    if not process_is_running(pid):
-        result["result"] = "stale_pid_file"
-        if not dry_run:
-            try:
-                pid_path.unlink()
-                result["pid_file_removed"] = True
-            except OSError as exc:
-                result["error"] = f"{type(exc).__name__}: {exc}"
-        return result
 
-    command_line = process_command_line(pid)
-    result["command_line"] = command_line
-    if not command_line_matches_session_daemon(command_line, command_name):
-        result["result"] = "refused_unsafe_process"
-        result["error"] = "pid command line does not match ITB session daemon"
-        return result
 
-    if dry_run:
-        result["result"] = "terminate_dry_run"
-        return result
 
-    try:
-        os.kill(pid, signal.SIGTERM)
-        result["terminate_attempted"] = True
-    except ProcessLookupError:
-        result["result"] = "already_stopped"
-    except PermissionError as exc:
-        result["result"] = "terminate_failed"
-        result["error"] = f"{type(exc).__name__}: {exc}"
-        return result
-    except OSError as exc:
-        result["result"] = "terminate_failed"
-        result["error"] = f"{type(exc).__name__}: {exc}"
-        return result
 
-    deadline = time.monotonic() + max(0.0, timeout_seconds)
-    while process_is_running(pid) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if process_is_running(pid):
+
+def session_start_config_digest() -> str:
+    hasher = hashlib.sha256()
+    for path in (
+        Path(__file__).resolve(),
+        HOOK_BUNDLE_DIR / "codex-hooks.example.json",
+        HOOK_BUNDLE_DIR / "claude-settings-hooks.example.json",
+        AGENT_TEAMS_VIEWER_ROOT / "organization" / "settings.json",
+    ):
+        hasher.update(str(path).encode("utf-8"))
+        hasher.update(b"\0")
         try:
-            os.kill(pid, signal.SIGKILL)
-            result["kill_attempted"] = True
-        except ProcessLookupError:
-            pass
-        except PermissionError as exc:
-            result["result"] = "kill_failed"
-            result["error"] = f"{type(exc).__name__}: {exc}"
-            return result
+            hasher.update(path.read_bytes())
         except OSError as exc:
-            result["result"] = "kill_failed"
-            result["error"] = f"{type(exc).__name__}: {exc}"
-            return result
-        deadline = time.monotonic() + max(0.0, timeout_seconds)
-        while process_is_running(pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
-    if process_is_running(pid):
-        result["result"] = "still_running"
-        return result
-
-    try:
-        pid_path.unlink()
-        result["pid_file_removed"] = True
-    except FileNotFoundError:
-        result["pid_file_removed"] = True
-    except OSError as exc:
-        result["error"] = f"{type(exc).__name__}: {exc}"
-    if result["result"] in {"not_attempted", "already_stopped"}:
-        result["result"] = "terminated"
-    elif result["result"] == "no_pid_file":
-        result["result"] = "terminated"
-    else:
-        result["result"] = "terminated"
-    return result
+            hasher.update(f"{type(exc).__name__}:{exc}".encode("utf-8", errors="replace"))
+        hasher.update(b"\0")
+    return "sha256:" + hasher.hexdigest()
 
 
-def stop_session_detached_processes(
-    *,
-    session_dir: Path,
-    now: str,
-    dry_run: bool,
-) -> dict[str, Any]:
-    processes = {
-        "queue_watch_daemon": stop_session_detached_process(
-            session_dir=session_dir,
-            pid_filename="queue-watch-daemon.pid",
-            command_name="queue-watch-daemon",
-            label="queue_watch_daemon",
-            now=now,
-            dry_run=dry_run,
-        ),
-        "interactive_readiness_followup": stop_session_detached_process(
-            session_dir=session_dir,
-            pid_filename="interactive-readiness-followup.pid",
-            command_name="interactive-readiness-followup",
-            label="interactive_readiness_followup",
-            now=now,
-            dry_run=dry_run,
-        ),
-    }
-    stopped = sum(1 for item in processes.values() if item["result"] in {"terminated", "stale_pid_file"})
-    refused = sum(1 for item in processes.values() if item["result"] == "refused_unsafe_process")
-    return {
-        "result": (
-            "refused"
-            if refused
-            else "stopped"
-            if stopped
-            else "nothing_to_stop"
-        ),
-        "stopped_count": stopped,
-        "refused_count": refused,
-        "processes": processes,
-    }
-
-
-def queue_report_watch_dirs(queue_root: Path, *, max_dirs: int = 512, max_depth: int = 3) -> list[Path]:
-    reports_root = queue_root / "reports"
-    candidates: list[Path] = []
-    for path in (queue_root, reports_root):
-        try:
-            if path.exists() and path.is_dir():
-                candidates.append(path)
-        except OSError:
-            continue
-    if reports_root.exists():
-        try:
-            for path in reports_root.rglob("*"):
-                if len(candidates) >= max_dirs:
-                    break
-                try:
-                    if not path.is_dir():
-                        continue
-                    if len(path.relative_to(reports_root).parts) > max_depth:
-                        continue
-                except (OSError, ValueError):
-                    continue
-                candidates.append(path)
-        except OSError:
-            pass
-    deduped: list[Path] = []
-    seen: set[str] = set()
-    for path in candidates:
-        key = str(path.resolve(strict=False))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(path)
-    return deduped
-
-
-def queue_watch_wait_for_event(
-    *,
-    queue_root: Path,
-    timeout_seconds: float,
-    event_driven: bool,
-    max_watch_dirs: int = 512,
-) -> dict[str, Any]:
-    wait_seconds = max(0.0, float(timeout_seconds))
-    if wait_seconds <= 0:
-        return {
-            "result": "skipped_zero_timeout",
-            "mode": "none",
-            "wait_seconds": 0.0,
-            "event_count": 0,
-            "watch_dir_count": 0,
-        }
-    if not event_driven:
-        time.sleep(wait_seconds)
-        return {
-            "result": "slept",
-            "mode": "sleep",
-            "wait_seconds": wait_seconds,
-            "event_count": 0,
-            "watch_dir_count": 0,
-        }
-
-    kqueue_factory = getattr(_select, "kqueue", None)
-    kevent_factory = getattr(_select, "kevent", None)
-    if not kqueue_factory or not kevent_factory:
-        time.sleep(wait_seconds)
-        return {
-            "result": "sleep_fallback",
-            "mode": "sleep",
-            "wait_seconds": wait_seconds,
-            "event_count": 0,
-            "watch_dir_count": 0,
-            "reason": "kqueue_unavailable",
-        }
-
-    watch_dirs = queue_report_watch_dirs(queue_root, max_dirs=max_watch_dirs)
-    if not watch_dirs:
-        time.sleep(wait_seconds)
-        return {
-            "result": "sleep_fallback",
-            "mode": "sleep",
-            "wait_seconds": wait_seconds,
-            "event_count": 0,
-            "watch_dir_count": 0,
-            "reason": "no_report_watch_dirs",
-        }
-
-    kqueue = None
-    fds: list[int] = []
-    path_by_fd: dict[int, str] = {}
-    changes: list[Any] = []
-    try:
-        kqueue = kqueue_factory()
-        fflags = (
-            _select.KQ_NOTE_WRITE
-            | _select.KQ_NOTE_EXTEND
-            | _select.KQ_NOTE_ATTRIB
-            | _select.KQ_NOTE_RENAME
-            | _select.KQ_NOTE_DELETE
-        )
-        for path in watch_dirs:
-            try:
-                fd = os.open(path, os.O_RDONLY)
-            except OSError:
-                continue
-            fds.append(fd)
-            path_by_fd[fd] = str(path)
-            changes.append(
-                kevent_factory(
-                    fd,
-                    filter=_select.KQ_FILTER_VNODE,
-                    flags=_select.KQ_EV_ADD | _select.KQ_EV_ENABLE | _select.KQ_EV_CLEAR,
-                    fflags=fflags,
-                )
-            )
-        if not changes:
-            time.sleep(wait_seconds)
-            return {
-                "result": "sleep_fallback",
-                "mode": "sleep",
-                "wait_seconds": wait_seconds,
-                "event_count": 0,
-                "watch_dir_count": 0,
-                "reason": "no_open_watch_dirs",
-            }
-        kqueue.control(changes, 0, 0)
-        events = kqueue.control([], 16, wait_seconds)
-        event_paths = [path_by_fd.get(int(event.ident), "") for event in events]
-        return {
-            "result": "event" if events else "timeout",
-            "mode": "kqueue",
-            "wait_seconds": wait_seconds,
-            "event_count": len(events),
-            "watch_dir_count": len(changes),
-            "event_paths": [path for path in event_paths if path],
-        }
-    except (OSError, ValueError, AttributeError) as exc:
-        time.sleep(wait_seconds)
-        return {
-            "result": "sleep_fallback",
-            "mode": "sleep",
-            "wait_seconds": wait_seconds,
-            "event_count": 0,
-            "watch_dir_count": len(changes),
-            "reason": "kqueue_error",
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-    finally:
-        if kqueue is not None:
-            try:
-                kqueue.close()
-            except OSError:
-                pass
-        for fd in fds:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-
-
-def start_queue_watch_daemon_if_needed(
-    *,
-    runtime: str,
-    state_root: Path,
-    session_dir: Path,
-    session_id: str,
-    launch_summary: dict[str, Any] | None,
-) -> dict[str, Any]:
-    enabled = env_flag("ITB_QUEUE_WATCH_DAEMON_AUTOSTART", default=True)
-    summary: dict[str, Any] = {
-        "enabled": enabled,
-        "result": "disabled",
-        "pid": "",
-        "pid_path": str(session_dir / "queue-watch-daemon.pid"),
-    }
-    if not enabled:
-        return summary
-    if not launch_summary:
-        return summary | {"result": "skipped_no_launch_summary"}
-    if launch_summary.get("dry_run"):
-        return summary | {"result": "skipped_dry_run"}
-    if launch_summary.get("child_context"):
-        return summary | {"result": "skipped_child_context"}
-
-    pid_path = session_dir / "queue-watch-daemon.pid"
-    try:
-        existing_pid = int(pid_path.read_text(encoding="utf-8").strip()) if pid_path.exists() else 0
-    except (OSError, ValueError):
-        existing_pid = 0
-    if process_is_running(existing_pid):
-        return summary | {"result": "already_running", "pid": existing_pid}
-
-    log_path = session_dir / "queue-watch-daemon.log"
-    err_path = session_dir / "queue-watch-daemon.err.log"
-    command = [
-        sys.executable or "python3",
-        str(Path(__file__).resolve()),
-        "queue-watch-daemon",
-        "--runtime",
-        runtime,
-        "--state-root",
-        str(state_root),
-        "--session-id",
-        session_id,
-        "--max-cycles",
-        "0",
-        "--poll-interval-seconds",
-        normalize_cell(os.environ.get("ITB_QUEUE_WATCH_DAEMON_POLL_SECONDS") or "5"),
-    ]
-    try:
-        with log_path.open("ab") as stdout_fh, err_path.open("ab") as stderr_fh:
-            proc = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_fh,
-                stderr=stderr_fh,
-                start_new_session=True,
-                close_fds=True,
-            )
-        atomic_write_text(pid_path, f"{proc.pid}\n")
-    except OSError as exc:
-        return summary | {
-            "result": "start_failed",
-            "error": f"{type(exc).__name__}: {exc}",
-            "command": command,
-            "log_path": str(log_path),
-            "err_path": str(err_path),
-        }
-
-    return summary | {
-        "result": "started",
-        "pid": proc.pid,
-        "command": command,
-        "log_path": str(log_path),
-        "err_path": str(err_path),
-    }
-
-
-INTERACTIVE_READINESS_CAPTURE_SOURCES = {"tmux_capture", "tmux_capture_followup", "queue_activation_prompt_probe"}
-
-
-def provider_cli_process_ready_row(row: dict[str, Any]) -> bool:
-    return (
-        row.get("process_status") == "process_ready"
-        and row.get("process_mode") == "provider_cli"
-        and row.get("provider_status") == "provider_process_ready"
-        and bool(normalize_cell(row.get("tmux_target")))
-    )
-
-
-def interactive_readiness_followup_targets(
-    roster: list[Any],
-    *,
-    role_ids: set[str] | None = None,
-    include_checked: bool = False,
-) -> list[dict[str, Any]]:
-    targets: list[dict[str, Any]] = []
-    for row in roster:
-        if not isinstance(row, dict) or not provider_cli_process_ready_row(row):
-            continue
-        agent_id = normalize_cell(row.get("agent_id"))
-        if role_ids and agent_id not in role_ids:
-            continue
-        if not include_checked and normalize_cell(row.get("interactive_evidence_source")) in INTERACTIVE_READINESS_CAPTURE_SOURCES:
-            continue
-        targets.append(row)
-    return targets
-
-
-def interactive_readiness_counts(roster: list[Any]) -> dict[str, Any]:
-    targets = [row for row in roster if isinstance(row, dict) and provider_cli_process_ready_row(row)]
-    checked = [
-        row
-        for row in targets
-        if normalize_cell(row.get("interactive_evidence_source")) in INTERACTIVE_READINESS_CAPTURE_SOURCES
-    ]
-    blockers = [
-        {
-            "agent_id": normalize_cell(row.get("agent_id")),
-            "interactive_status": normalize_cell(row.get("interactive_status")),
-            "interactive_error": normalize_cell(row.get("interactive_error")),
-            "tmux_target": normalize_cell(row.get("tmux_target")),
-            "launch_status": normalize_cell(row.get("launch_status")),
-        }
-        for row in checked
-        if normalize_cell(row.get("interactive_status")) in INTERACTIVE_READINESS_BLOCKING_STATUSES
-    ]
-    ready_count = sum(1 for row in targets if truthy_input(row.get("interactive_ready")))
-    if blockers:
-        scope = "interactive_blocked"
-    elif targets and len(checked) == len(targets) and ready_count == len(targets):
-        scope = "interactive_ready"
-    elif checked:
-        scope = "interactive_partial"
-    elif targets:
-        scope = "not_checked_startup_targets"
-    else:
-        scope = "not_checked_no_startup_targets"
-    return {
-        "interactive_readiness_scope": scope,
-        "resident_agents_interactive_ready": ready_count,
-        "prompt_readiness_scope": scope,
-        "resident_agents_prompt_ready": ready_count,
-        "interactive_readiness_target_count": len(targets),
-        "interactive_checked_count": len(checked),
-        "interactive_blocker_count": len(blockers),
-        "startup_interactive_blockers": blockers,
-    }
-
-
-def interactive_readiness_followup(
+def session_start_metadata_pointer(
     *,
     runtime: str,
     state_root: Path,
     hook_input: dict[str, Any],
 ) -> dict[str, Any]:
-    session_id, session_source = resolve_session_id(state_root, hook_input)
-    if not session_id:
-        return {"decision": "block", "reason": "interactive-readiness-followup requires session_id"}
-    session_dir = state_root / safe_id(session_id)
-    state_path = session_dir / "bootstrap.json"
-    roster_path = session_dir / "roster.json"
-    state = read_bootstrap_state(state_path)
-    if not state:
-        return {
-            "decision": "block",
-            "reason": f"bootstrap state not found or unreadable: {state_path}",
-            "interactiveReadinessFollowup": {"session_id": session_id, "session_source": session_source},
-        }
-    try:
-        roster_raw = read_json(roster_path) if roster_path.exists() else []
-    except (OSError, json.JSONDecodeError) as exc:
-        return {
-            "decision": "block",
-            "reason": f"roster unreadable: {type(exc).__name__}: {exc}",
-            "interactiveReadinessFollowup": {"session_id": session_id, "roster_path": str(roster_path)},
-        }
-    if not isinstance(roster_raw, list):
-        return {
-            "decision": "block",
-            "reason": "roster.json must contain a list",
-            "interactiveReadinessFollowup": {"session_id": session_id, "roster_path": str(roster_path)},
-        }
-    roster: list[Any] = roster_raw
-    now = current_timestamp()
-    role_ids = env_csv("ITB_INTERACTIVE_READINESS_FOLLOWUP_ROLE_IDS")
-    input_role_ids = normalize_string_list(hook_input.get("role_ids") or hook_input.get("roleIds"))
-    role_id = normalize_cell(hook_input.get("role_id") or hook_input.get("roleId"))
-    if input_role_ids or role_id:
-        role_ids = set(input_role_ids)
-        if role_id:
-            role_ids.add(role_id)
-    include_checked = truthy_input(hook_input.get("include_checked") or hook_input.get("includeChecked"))
-    dry_run = truthy_input(hook_input.get("dry_run") or hook_input.get("dryRun"))
-    timeout_seconds = bounded_float_input(
-        hook_input.get("timeout_seconds")
-        or hook_input.get("timeoutSeconds")
-        or os.environ.get("ITB_INTERACTIVE_READINESS_FOLLOWUP_TIMEOUT_SECONDS"),
-        default=8.0,
-        minimum=0.0,
-        maximum=30.0,
-    )
-    poll_interval_seconds = bounded_float_input(
-        hook_input.get("poll_interval_seconds")
-        or hook_input.get("pollIntervalSeconds")
-        or os.environ.get("ITB_INTERACTIVE_READINESS_FOLLOWUP_POLL_SECONDS"),
-        default=0.25,
-        minimum=0.05,
-        maximum=2.0,
-    )
-    max_agents = env_int("ITB_INTERACTIVE_READINESS_FOLLOWUP_MAX_AGENTS")
-    if normalize_cell(hook_input.get("max_agents") or hook_input.get("maxAgents")):
-        max_agents = bounded_int_input(
-            hook_input.get("max_agents") or hook_input.get("maxAgents"),
-            default=0,
-            minimum=0,
-            maximum=1000,
-        )
-    targets = interactive_readiness_followup_targets(
-        roster,
-        role_ids=role_ids,
-        include_checked=include_checked,
-    )
-    if max_agents is not None and max_agents > 0:
-        targets = targets[:max_agents]
-    results: list[dict[str, Any]] = []
-    updated_rows: list[dict[str, Any]] = []
-    for row in targets:
-        agent_id = normalize_cell(row.get("agent_id"))
-        target = normalize_cell(row.get("tmux_target"))
-        if dry_run or timeout_seconds <= 0:
-            status = "not_checked_dry_run" if dry_run else "not_checked_disabled"
-            ready = False
-            error = ""
-        else:
-            ready, error = wait_for_interactive_prompt(
-                target=target,
-                timeout_seconds=timeout_seconds,
-                poll_interval_seconds=poll_interval_seconds,
-            )
-            status = "interactive_ready" if ready else classify_interactive_prompt_error(error)
-        row_update = {
-            "agent_id": agent_id,
-            "interactive_ready": ready,
-            "interactive_status": status,
-            "interactive_error": error,
-            "interactive_checked_at": now if not dry_run and timeout_seconds > 0 else "",
-            "interactive_evidence_source": "tmux_capture_followup" if not dry_run and timeout_seconds > 0 else "dry_run",
-            "interactive_followup_target": True,
-            "interactive_followup_checked_at": now,
-        }
-        row.update(row_update)
-        updated_rows.append(row_update)
-        results.append(
-            {
-                "agent_id": agent_id,
-                "tmux_target": target,
-                "interactive_ready": ready,
-                "interactive_status": status,
-                "interactive_error": error,
-            }
-        )
-
-    counts = interactive_readiness_counts(roster)
-    summary = {
-        "session_id": session_id,
-        "session_source": session_source,
-        "state_path": str(state_path),
-        "roster_path": str(roster_path),
-        "dry_run": dry_run,
-        "include_checked": include_checked,
-        "target_count": len(targets),
-        "checked_count": sum(1 for item in results if item["interactive_status"] not in {"not_checked_dry_run", "not_checked_disabled"}),
-        "ready_count": counts["resident_agents_interactive_ready"],
-        "blocker_count": counts["interactive_blocker_count"],
-        "interactive_readiness_scope": counts["interactive_readiness_scope"],
-        "results": results,
-    }
-    if dry_run:
-        return {"interactiveReadinessFollowup": summary | {"state_updated": False}}
-
-    roster = merge_roster_agent_rows_locked(roster_path, roster, updated_rows)
-    counts = interactive_readiness_counts(roster)
-    summary.update(
-        {
-            "ready_count": counts["resident_agents_interactive_ready"],
-            "blocker_count": counts["interactive_blocker_count"],
-            "interactive_readiness_scope": counts["interactive_readiness_scope"],
-        }
-    )
-    updates = counts | {
-        "interactive_followup_last_run_at": now,
-        "interactive_followup_target_count": len(targets),
-        "interactive_followup_result": counts["interactive_readiness_scope"],
-    }
-    state = merge_json_object_locked(
-        state_path,
-        state,
-        updates,
-        lock_path=state_path.with_name("bootstrap.json.lock.d"),
-    )
-    write_json_yaml(session_dir / "interactive-readiness-followup.json", summary)
-    atomic_write_text(session_dir / "bootstrap-report.md", render_report(state))
-    append_jsonl_atomic(
-        session_dir / "invocation-evidence.jsonl",
-        invocation_evidence_entry(
-            ts=now,
-            runtime=runtime,
-            event_type="interactive_readiness_followup",
-            session_id=session_id,
-            organization_instance_id=normalize_cell(state.get("organization_instance_id")) or organization_id(session_id),
-            result=counts["interactive_readiness_scope"],
-            usage_source="tmux_capture_followup",
-            notes="detached interactive readiness follow-up updated provider prompt readiness for process-ready residents",
-            extra=summary,
-        ),
-    )
-    return {"interactiveReadinessFollowup": summary | {"state_updated": True}}
-
-
-def start_interactive_readiness_followup_if_needed(
-    *,
-    runtime: str,
-    state_root: Path,
-    session_dir: Path,
-    session_id: str,
-    launch_summary: dict[str, Any] | None,
-) -> dict[str, Any]:
-    enabled = env_flag("ITB_INTERACTIVE_READINESS_FOLLOWUP_AUTOSTART", default=True)
-    summary: dict[str, Any] = {
-        "enabled": enabled,
-        "result": "disabled",
-        "pid": "",
-        "pid_path": str(session_dir / "interactive-readiness-followup.pid"),
-    }
-    if not enabled:
-        return summary
-    if not launch_summary:
-        return summary | {"result": "skipped_no_launch_summary"}
-    if launch_summary.get("dry_run"):
-        return summary | {"result": "skipped_dry_run"}
-    if launch_summary.get("child_context"):
-        return summary | {"result": "skipped_child_context"}
-    if launch_summary.get("process_mode") != "provider_cli":
-        return summary | {"result": "skipped_not_provider_cli"}
-    followup_targets = interactive_readiness_followup_targets(launch_summary.get("results", []))
-    if not followup_targets:
-        return summary | {"result": "skipped_no_followup_targets"}
-
-    pid_path = session_dir / "interactive-readiness-followup.pid"
-    try:
-        existing_pid = int(pid_path.read_text(encoding="utf-8").strip()) if pid_path.exists() else 0
-    except (OSError, ValueError):
-        existing_pid = 0
-    if process_is_running(existing_pid):
-        return summary | {"result": "already_running", "pid": existing_pid}
-
-    log_path = session_dir / "interactive-readiness-followup.log"
-    err_path = session_dir / "interactive-readiness-followup.err.log"
-    command = [
-        sys.executable or "python3",
-        str(Path(__file__).resolve()),
-        "interactive-readiness-followup",
-        "--runtime",
-        runtime,
-        "--state-root",
-        str(state_root),
-        "--session-id",
-        session_id,
-    ]
-    try:
-        with log_path.open("ab") as stdout_fh, err_path.open("ab") as stderr_fh:
-            proc = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_fh,
-                stderr=stderr_fh,
-                start_new_session=True,
-                close_fds=True,
-            )
-        atomic_write_text(pid_path, f"{proc.pid}\n")
-    except OSError as exc:
-        return summary | {
-            "result": "start_failed",
-            "error": f"{type(exc).__name__}: {exc}",
-            "command": command,
-            "log_path": str(log_path),
-            "err_path": str(err_path),
-        }
-
-    return summary | {
-        "result": "started",
-        "pid": proc.pid,
-        "command": command,
-        "log_path": str(log_path),
-        "err_path": str(err_path),
-        "target_count": len(followup_targets),
-    }
-
-
-def build_roster(
-    *,
-    runtime: str,
-    event: str,
-    state_root: Path,
-    hook_input: dict[str, Any],
-    launch_agents: bool = False,
-) -> dict[str, Any]:
-    session_id = (
+    session_id = normalize_cell(
         hook_input.get("session_id")
         or hook_input.get("sessionId")
         or hook_input.get("conversation_id")
         or "unknown-session"
     )
-    cwd = hook_input.get("cwd") or os.getcwd()
-    model = hook_input.get("model") or ""
-    permission_mode = provider_permission_mode(hook_input.get("permission_mode") or hook_input.get("permissionMode"))
-    source = hook_input.get("source") or hook_input.get("hook_event_name") or event
-    safe_session = safe_id(session_id)
-    session_dir = state_root / safe_session
+    cwd = normalize_cell(hook_input.get("cwd") or os.getcwd())
+    session_dir = state_root / safe_id(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
     state_root.mkdir(parents=True, exist_ok=True)
-    session_queue_root = queue_root_for(session_dir, hook_input)
-    session_queue_root.mkdir(parents=True, exist_ok=True)
-
-    registry_rows = parse_registry()
-    resident_rows = [
-        row
-        for row in registry_rows
-        if row.get("status") == "active"
-        and bool_cell(row.get("resident_target", "false"))
-        and row.get("startup_profile") != "compatibility_only"
-    ]
-
-    unavailable: list[str] = []
-    roster: list[dict[str, Any]] = []
-    org_id = organization_id(session_id)
-    now = current_timestamp()
-    registry_sha1 = file_sha1(MODEL_REGISTRY)
-    role_agent_registry_sha1 = file_sha1(ROLE_AGENT_REGISTRY)
-    policy_digest = policy_digest_entries()
-    policy_digest_status = "ready" if all(entry["status"] == "ready" for entry in policy_digest) else "partial"
-    session_start_fingerprint = session_start_guard_fingerprint(
-        runtime=runtime,
-        cwd=str(cwd),
-        launch_agents=launch_agents,
-        resident_rows=resident_rows,
-        registry_sha1=registry_sha1,
-        role_agent_registry_sha1=role_agent_registry_sha1,
-        policy_digest=policy_digest,
-    )
-    previous_state = read_json_object_if_exists(session_dir / "bootstrap.json")
-    compact_guard = session_start_compact_guard(
-        source=source,
-        hook_input=hook_input,
-        previous_state=previous_state,
-        current_fingerprint=session_start_fingerprint,
-        roster_path=session_dir / "roster.json",
-    )
-    if compact_guard.get("allowed"):
-        state = compacted_session_start_state(
-            previous_state=previous_state,
-            current_fingerprint=session_start_fingerprint,
-            guard=compact_guard,
-            runtime=runtime,
-            event=event,
-            source=source,
-            session_id=session_id,
-            cwd=str(cwd),
-            model=str(model),
-            permission_mode=permission_mode,
-            now=now,
-        )
-        write_json_yaml(session_dir / "hook-input.json", hook_input)
-        write_json_yaml_locked(session_dir / "bootstrap.json", state, lock_path=session_dir / "bootstrap.json.lock.d")
-        atomic_write_text(session_dir / "bootstrap-report.md", render_report(state))
-        append_jsonl_atomic(
-            session_dir / "invocation-evidence.jsonl",
-            invocation_evidence_entry(
-                ts=now,
-                runtime=runtime,
-                event_type="session_start_compacted",
-                session_id=session_id,
-                organization_instance_id=normalize_cell(state.get("organization_instance_id")) or org_id,
-                result="session_start_compacted",
-                usage_source="bootstrap_metadata_only",
-                notes="SessionStart compacted unchanged startup guard; bootstrap rebuild and process launch skipped.",
-                extra={
-                    "source": normalize_cell(source),
-                    "session_start_guard_check": compact_guard,
-                    "session_start_guard_fingerprint": session_start_fingerprint,
-                },
-            ),
-        )
-        atomic_write_text(session_dir / "status", "ready\n")
-        atomic_write_text(session_dir / "last_event", f"{event} {now}\n")
-        atomic_write_text(state_root / "last-session", session_id + "\n")
-        return state | {
-            "outputs": {
-                "state_dir": str(session_dir),
-                "state_path": str(session_dir / "bootstrap.json"),
-                "roster_path": str(session_dir / "roster.json"),
-                "report_path": str(session_dir / "bootstrap-report.md"),
-            }
-        }
-    state_dir_gc = cleanup_archived_state_dirs(
-        state_root=state_root,
-        current_session_id=safe_session,
-        now_epoch=int(time.time()),
-    )
-
-    for row in resident_rows:
-        agent_id = row["agent_id"]
-        skill_path = role_definition_path(agent_id)
-        if not skill_path.exists():
-            unavailable.append(agent_id)
-        always_active = bool_cell(row.get("always_active", "false"))
-        activation_status = "metadata_ready" if always_active else "idle"
-        roster.append(
-            {
-                "agent_id": agent_id,
-                "agent_instance_id": f"{agent_id}@{safe_session}",
-                "organization_instance_id": org_id,
-                "parent_session_id": session_id,
-                "runtime": runtime,
-                "state_root": str(state_root),
-                "team": row.get("team", ""),
-                "resident_status": "resident",
-                "activation_status": activation_status,
-                "metadata_status": "metadata_ready",
-                "response_status": "not_invoked",
-                "always_active": always_active,
-                "provider": row.get("provider", ""),
-                "intended_model": row.get("primary_model", ""),
-                "fallback_models": row.get("fallback_models", ""),
-                "effective_model": "",
-                "execution_mode": row.get("execution_mode", ""),
-                "startup_profile": row.get("startup_profile", "resident_shell"),
-                "session_id": "",
-                "last_request_id": "",
-                "usage_source": "bootstrap_metadata_only",
-                "process_status": "not_launched",
-                "launch_status": "not_requested",
-                "runtime_kind": "",
-                "process_mode": "",
-                "provider_runtime_kind": "",
-                "provider_status": "not_started",
-                "tool_sidecar_status": "not_started",
-                "interactive_status": "not_checked",
-                "interactive_ready": False,
-                "interactive_error": "",
-                "interactive_checked_at": "",
-                "interactive_evidence_source": "",
-                "interactive_startup_target": False,
-                "tmux_session": "",
-                "tmux_window": "",
-                "tmux_target": "",
-                "process_evidence_source": "",
-                "process_started_at": "",
-                "launch_error": "",
-                "active_for_task": "",
-                "last_reset_at": now,
-                "last_seen_at": now,
-                "notes": (
-                    "resident process not yet launched; provider and tool sidecars are not started; "
-                    "response_active requires runtime provider session/request/model/usage evidence"
-                ),
-            }
-        )
-
-    launch_summary: dict[str, Any] | None = None
-    if launch_agents:
-        launch_summary = ensure_agent_processes(
-            roster=roster,
-            cwd=cwd,
-            session_id=session_id,
-            organization_instance_id=org_id,
-            queue_root=session_queue_root,
-            now=now,
-        )
-        for row in roster:
-            if row.get("process_status") == "process_ready":
-                if row.get("process_mode") == "resident_shell":
-                    row["notes"] = (
-                        "lightweight resident shell process ready; provider and tool sidecars are deferred "
-                        "until ITB-directed activation"
-                    )
-                else:
-                    row["notes"] = (
-                        "provider tmux process ready; response_active still requires provider "
-                        "session/request/model/usage evidence after a valid Director activation"
-                    )
-            elif row.get("launch_status") in {
-                "interactive_codex_resident_disabled",
-                "skipped_by_filter",
-                "skipped_by_limit",
-                "skipped_by_startup_profile",
-            }:
-                row["notes"] = (
-                    "process launch skipped by guard/filter/limit/startup profile; response_active requires "
-                    "runtime provider session/request/model/usage evidence"
-                )
-
-    launch_failed = bool(launch_summary and launch_summary["failure_count"])
-    status = "failed" if unavailable or not roster or launch_failed else "ready"
-    spawn_mode = "logical"
-    readiness_scope = "metadata_only"
-    registered = len(roster) - len(unavailable)
-    response_ready = 0
-    process_ready = launch_summary["process_ready_count"] if launch_summary else 0
-    provider_ready = launch_summary["provider_ready_count"] if launch_summary else 0
-    interactive_startup_target_count = launch_summary.get("interactive_startup_target_count", 0) if launch_summary else 0
-    interactive_checked = launch_summary.get("interactive_checked_count", 0) if launch_summary else 0
-    interactive_ready = launch_summary.get("interactive_ready_count", 0) if launch_summary else 0
-    interactive_blocker_count = launch_summary.get("interactive_blocker_count", 0) if launch_summary else 0
-    interactive_blockers = launch_summary.get("interactive_blockers", []) if launch_summary else []
-    interactive_readiness_scope = "not_checked_metadata_only"
-    tool_sidecar_ready = launch_summary["tool_sidecar_ready_count"] if launch_summary else 0
-    launch_target_count = launch_summary["target_count"] if launch_summary else 0
-    lazy_count = launch_summary.get("lazy_count", 0) if launch_summary else 0
-    stale_cleanup = launch_summary.get("stale_cleanup", {}) if launch_summary else {}
-    launch_failures = [
-        {
-            "agent_id": result["agent_id"],
-            "launch_status": result.get("launch_status", ""),
-            "launch_error": result.get("launch_error", ""),
-        }
-        for result in (launch_summary["results"] if launch_summary else [])
-        if result.get("process_status") == "launch_failed"
-    ]
-
-    if launch_summary:
-        spawn_mode = "tmux_process"
-        if launch_summary.get("dry_run"):
-            interactive_readiness_scope = "not_checked_dry_run"
-        elif launch_summary.get("child_context"):
-            interactive_readiness_scope = "not_checked_child_context"
-        elif not interactive_startup_target_count:
-            interactive_readiness_scope = "not_checked_no_startup_targets"
-        elif interactive_blocker_count:
-            interactive_readiness_scope = "interactive_blocked"
-        elif interactive_checked and interactive_ready == interactive_startup_target_count:
-            interactive_readiness_scope = "interactive_ready"
-        elif interactive_checked:
-            interactive_readiness_scope = "interactive_partial"
-        else:
-            interactive_readiness_scope = "not_checked_startup_targets"
-        if launch_summary.get("child_context"):
-            spawn_mode = "child_hook_skipped"
-            readiness_scope = "metadata_only"
-        elif launch_failed:
-            readiness_scope = "process_launch_failed"
-        elif (
-            launch_summary.get("filter")
-            and launch_summary.get("limit") is None
-            and launch_target_count == registered
-            and process_ready == launch_target_count
-        ):
-            readiness_scope = "process_ready"
-        elif launch_summary.get("filter") or launch_summary.get("limit") is not None:
-            readiness_scope = "process_partial"
-        elif launch_target_count and process_ready == launch_target_count:
-            readiness_scope = "process_ready"
-        elif launch_target_count:
-            readiness_scope = "process_partial"
-
-    notes = [f"source={source}"]
-    if launch_summary:
-        if launch_summary.get("child_context"):
-            notes.append("ITB child agent context detected; hook-side process launch was skipped to avoid recursive organization startup.")
-        elif launch_failed:
-            notes.append("Hook attempted independent tmux process startup, but one or more resident agents failed to launch.")
-        elif readiness_scope == "process_ready":
-            notes.append("Hook ensured independent tmux processes for all resident agents.")
-        elif readiness_scope == "process_partial":
-            notes.append("Hook ensured independent tmux processes only for the filtered/limited verification target set.")
-        if launch_summary.get("process_mode") == "resident_shell":
-            notes.append("Resident processes are lightweight shell sentinels; provider clients and tool sidecars are deferred until ITB-directed activation.")
-        elif launch_summary.get("process_mode") == "provider_cli":
-            notes.append("Resident processes are provider CLI processes; tool sidecar readiness is not implied by process readiness.")
-        if interactive_readiness_scope == "interactive_ready":
-            notes.append("Startup interactive readiness spot-check passed for the gate-entry provider prompt.")
-        elif interactive_readiness_scope == "interactive_blocked":
-            blocker_summary = "; ".join(
-                f"{item.get('agent_id', '')}:{item.get('interactive_status', '')}"
-                for item in interactive_blockers[:3]
-            )
-            notes.append(
-                "Startup interactive readiness is blocked for the gate-entry provider prompt"
-                + (f": {blocker_summary}" if blocker_summary else ".")
-            )
-        if launch_summary.get("dry_run"):
-            notes.append("ITB_AGENT_LAUNCH_DRY_RUN=1; no tmux process was created.")
-        if stale_cleanup.get("enabled"):
-            killed_count = stale_cleanup.get("killed_count", 0)
-            failed_count = stale_cleanup.get("failed_count", 0)
-            if killed_count:
-                notes.append(f"Startup stale tmux cleanup stopped {killed_count} old ITB session(s).")
-            if failed_count:
-                notes.append(f"Startup stale tmux cleanup failed for {failed_count} old ITB session(s).")
-            if stale_cleanup.get("error"):
-                notes.append(f"Startup stale tmux cleanup skipped: {stale_cleanup['error']}")
-        notes.append("Process readiness does not mean provider response evidence; response_active remains blocked until Director activation records model/session/usage evidence.")
-    else:
-        notes.extend(
-            [
-                "Hook command built metadata-only readiness; LLM agent spawn remains disabled for this invocation.",
-                "`bootstrap_status=ready` means Gate preflight may proceed, not provider response readiness.",
-            ]
-        )
-    if state_dir_gc.get("enabled"):
-        if state_dir_gc.get("moved_count"):
-            notes.append(f"Archived state dir retention moved {state_dir_gc['moved_count']} old session dir(s).")
-        if state_dir_gc.get("failed_count"):
-            notes.append(f"Archived state dir retention failed for {state_dir_gc['failed_count']} session dir(s).")
-        if state_dir_gc.get("error"):
-            notes.append(f"Archived state dir retention skipped: {state_dir_gc['error']}")
-    if permission_mode == "plan":
-        notes.append("permission_mode=plan; no real task execution is authorized by this bootstrap.")
-    if policy_digest_status != "ready":
-        unresolved = ", ".join(
-            f"{entry['policy_id']}:{entry['status']}"
-            for entry in policy_digest
-            if entry["status"] != "ready"
-        )
-        notes.append(f"Policy digest is partial; full policy read may still be required for: {unresolved}")
-
-    state = {
-        "runtime": runtime,
-        "event": event,
+    pointer_path = session_dir / "active-execution-context.json"
+    metadata = {
         "session_id": session_id,
+        "runtime": runtime,
         "cwd": cwd,
-        "model": model,
-        "permission_mode": permission_mode,
-        "organization_instance_id": org_id,
-        "bootstrap_status": status,
-        "readiness_scope": readiness_scope,
-        "spawn_mode": spawn_mode,
-        "team_config_source": str(TEAM_CONFIG),
-        "model_registry_source": str(MODEL_REGISTRY),
-        "model_registry_sha1": registry_sha1,
-        "policy_digest_status": policy_digest_status,
-        "policy_digest_sha1": policy_digest_sha1(policy_digest),
-        "policy_digest": policy_digest,
-        "role_agent_registry_source": str(ROLE_AGENT_REGISTRY),
-        "role_agent_registry_sha1": role_agent_registry_sha1,
-        "session_start_guard_fingerprint": session_start_fingerprint,
-        "session_start_guard_check": compact_guard,
-        "session_start_compacted": False,
-        "queue_root": str(session_queue_root),
-        "next_allowed_entrypoint": "gate-prompt-formatter",
-        "resident_agents_registered": registered,
-        "resident_agents_process_ready": process_ready,
-        "resident_agents_provider_ready": provider_ready,
-        "resident_agents_interactive_ready": interactive_ready,
-        "interactive_readiness_scope": interactive_readiness_scope,
-        "resident_agents_prompt_ready": interactive_ready,
-        "prompt_readiness_scope": interactive_readiness_scope,
-        "interactive_startup_target_count": interactive_startup_target_count,
-        "interactive_checked_count": interactive_checked,
-        "interactive_blocker_count": interactive_blocker_count,
-        "startup_interactive_blockers": interactive_blockers,
-        "resident_agents_tool_sidecar_ready": tool_sidecar_ready,
-        "resident_agents_response_ready": response_ready,
-        "resident_agents_provider_response_ready": response_ready,
-        "provider_response_readiness_scope": provider_response_scope(response_ready),
-        "resident_agents_ready": registered,
-        "resident_agents_total": len(roster),
-        "process_launch_target_count": launch_target_count,
-        "lazy_activation_agents": lazy_count,
-        "process_launch_failure_count": len(launch_failures),
-        "process_launch_failures": launch_failures,
-        "resident_process_mode": launch_summary["process_mode"] if launch_summary else "",
-        "tmux_session": launch_summary["tmux_session"] if launch_summary else "",
-        "launch_filter": launch_summary["filter"] if launch_summary else [],
-        "launch_limit": launch_summary["limit"] if launch_summary else None,
-        "launch_dry_run": bool(launch_summary and launch_summary["dry_run"]),
-        "stale_tmux_cleanup": stale_cleanup,
-        "stale_tmux_killed_count": stale_cleanup.get("killed_count", 0),
-        "stale_tmux_failed_count": stale_cleanup.get("failed_count", 0),
-        "state_dir_gc": state_dir_gc,
-        "state_dir_gc_moved_count": state_dir_gc.get("moved_count", 0),
-        "state_dir_gc_failed_count": state_dir_gc.get("failed_count", 0),
-        "unavailable_agents": unavailable,
-        "created_at": now,
-        "notes": notes,
+        "started_at": current_timestamp(),
+        "harness_config_digest": session_start_config_digest(),
+        "active_execution_context": None,
+        "active_execution_context_pointer_path": str(pointer_path),
     }
-
-    write_json_yaml(session_dir / "hook-input.json", hook_input)
-    write_json_yaml_locked(session_dir / "bootstrap.json", state, lock_path=session_dir / "bootstrap.json.lock.d")
-    write_json_yaml_locked(session_dir / "roster.json", roster, lock_path=session_dir / "roster.json.lock.d")
-    atomic_write_text(session_dir / "bootstrap-report.md", render_report(state))
-    append_jsonl_atomic(
-        session_dir / "invocation-evidence.jsonl",
-        invocation_evidence_entry(
-            ts=now,
-            runtime=runtime,
-            event_type="session_start",
-            session_id=session_id,
-            organization_instance_id=org_id,
-            result=(
-                "process_ready"
-                if status == "ready" and readiness_scope == "process_ready"
-                else "process_partial"
-                if status == "ready" and readiness_scope == "process_partial"
-                else "metadata_ready_only"
-                if status == "ready"
-                else "bootstrap_failed"
-            ),
-            usage_source="bootstrap_metadata_only",
-            notes=(
-                "hook ensured independent resident processes; no provider response was invoked"
-                if launch_summary
-                else "hook built logical resident roster; no provider response was invoked"
-            ),
-            extra={
-                "spawn_mode": spawn_mode,
-                "readiness_scope": state["readiness_scope"],
-                "resident_agents_registered": registered,
-                "resident_agents_process_ready": process_ready,
-                "resident_agents_provider_ready": provider_ready,
-                "resident_agents_interactive_ready": interactive_ready,
-                "interactive_readiness_scope": interactive_readiness_scope,
-                "resident_agents_prompt_ready": interactive_ready,
-                "prompt_readiness_scope": interactive_readiness_scope,
-                "interactive_startup_target_count": interactive_startup_target_count,
-                "interactive_checked_count": interactive_checked,
-                "interactive_blocker_count": interactive_blocker_count,
-                "resident_agents_tool_sidecar_ready": tool_sidecar_ready,
-                "resident_agents_response_ready": response_ready,
-                "resident_agents_provider_response_ready": response_ready,
-                "provider_response_readiness_scope": provider_response_scope(response_ready),
-                "resident_agents_total": len(roster),
-                "process_launch_target_count": launch_target_count,
-                "lazy_activation_agents": lazy_count,
-                "process_launch_failure_count": len(launch_failures),
-                "resident_process_mode": state["resident_process_mode"],
-                "tmux_session": state["tmux_session"],
-                "stale_tmux_killed_count": state["stale_tmux_killed_count"],
-                "stale_tmux_failed_count": state["stale_tmux_failed_count"],
-                "unavailable_agents": unavailable,
-            },
-        ),
-    )
-    if launch_summary:
-        for result in launch_summary["results"]:
-            append_jsonl_atomic(
-                session_dir / "invocation-evidence.jsonl",
-                invocation_evidence_entry(
-                    ts=now,
-                    runtime=runtime,
-                    event_type="agent_process_launch",
-                    session_id=session_id,
-                    organization_instance_id=org_id,
-                    agent_id=result["agent_id"],
-                    result=result.get("process_status", "not_launched"),
-                    usage_source=result.get("process_evidence_source", "tmux"),
-                    effective_model="",
-                    notes=result.get("launch_status", ""),
-                    extra={
-                        "runtime_kind": result.get("runtime_kind", ""),
-                        "process_mode": result.get("process_mode", ""),
-                        "provider_runtime_kind": result.get("provider_runtime_kind", ""),
-                        "provider_status": result.get("provider_status", ""),
-                        "tool_sidecar_status": result.get("tool_sidecar_status", ""),
-                        "interactive_status": result.get("interactive_status", ""),
-                        "interactive_ready": result.get("interactive_ready", False),
-                        "interactive_error": result.get("interactive_error", ""),
-                        "interactive_checked_at": result.get("interactive_checked_at", ""),
-                        "interactive_evidence_source": result.get("interactive_evidence_source", ""),
-                        "interactive_startup_target": result.get("interactive_startup_target", False),
-                        "tmux_session": result.get("tmux_session", ""),
-                        "tmux_window": result.get("tmux_window", ""),
-                        "tmux_target": result.get("tmux_target", ""),
-                        "launch_status": result.get("launch_status", ""),
-                        "launch_error": result.get("launch_error", ""),
-                        "pane_current_command": result.get("pane_current_command", ""),
-                        "pane_pid": result.get("pane_pid", ""),
-                    },
-                ),
-            )
-    atomic_write_text(session_dir / "status", status + "\n")
-    atomic_write_text(session_dir / "last_event", f"{event} {now}\n")
+    write_json_yaml(pointer_path, metadata)
     atomic_write_text(state_root / "last-session", session_id + "\n")
-    daemon_autostart = start_queue_watch_daemon_if_needed(
-        runtime=runtime,
-        state_root=state_root,
-        session_dir=session_dir,
-        session_id=session_id,
-        launch_summary=launch_summary,
-    )
-    if daemon_autostart.get("result") not in {"disabled", "skipped_no_launch_summary"}:
-        append_jsonl_atomic(
-            session_dir / "queue-events.jsonl",
-            {
-                "ts": current_timestamp(),
-                "runtime": runtime,
-                "event_type": "queue_watch_daemon_autostart",
-                "session_id": session_id,
-                "organization_instance_id": org_id,
-                **daemon_autostart,
-            },
-        )
-    followup_autostart = start_interactive_readiness_followup_if_needed(
-        runtime=runtime,
-        state_root=state_root,
-        session_dir=session_dir,
-        session_id=session_id,
-        launch_summary=launch_summary,
-    )
-    if followup_autostart.get("result") not in {"disabled", "skipped_no_launch_summary"}:
-        append_jsonl_atomic(
-            session_dir / "invocation-evidence.jsonl",
-            invocation_evidence_entry(
-                ts=current_timestamp(),
-                runtime=runtime,
-                event_type="interactive_readiness_followup_autostart",
-                session_id=session_id,
-                organization_instance_id=org_id,
-                result=normalize_cell(followup_autostart.get("result")),
-                usage_source="bootstrap_metadata_only",
-                notes="session-start scheduled detached interactive readiness follow-up for non-gate-entry residents",
-                extra=followup_autostart,
-            ),
-        )
-    state = merge_json_object_locked(
-        session_dir / "bootstrap.json",
-        state,
-        {
-            "queue_watch_daemon_autostart": daemon_autostart,
-            "interactive_readiness_followup_autostart": followup_autostart,
-        },
-        lock_path=session_dir / "bootstrap.json.lock.d",
-    )
-    atomic_write_text(session_dir / "bootstrap-report.md", render_report(state))
-    return state | {
-        "outputs": {
-            "state_dir": str(session_dir),
-            "state_path": str(session_dir / "bootstrap.json"),
-            "roster_path": str(session_dir / "roster.json"),
-            "report_path": str(session_dir / "bootstrap-report.md"),
-        }
-    }
+    return metadata
 
 
-def render_report(state: dict[str, Any]) -> str:
-    unavailable = ", ".join(state["unavailable_agents"]) or ""
-    policy_rows = "\n".join(
-        "| {policy_id} | `{status}` | `{sha1}` | {byte_count} | `{path}` |".format(
-            policy_id=entry.get("policy_id", ""),
-            status=entry.get("status", ""),
-            sha1=entry.get("sha1", ""),
-            byte_count=entry.get("byte_count", 0),
-            path=entry.get("path", ""),
-        )
-        for entry in state.get("policy_digest", [])
-    )
-    return f"""# ITB Bootstrap Report
-
-| Field | Value |
-|---|---|
-| runtime | `{state['runtime']}` |
-| event | `{state['event']}` |
-| session_id | `{state['session_id']}` |
-| organization_instance_id | `{state['organization_instance_id']}` |
-| bootstrap_status | `{state['bootstrap_status']}` |
-| readiness_scope | `{state.get('readiness_scope', '')}` |
-| spawn_mode | `{state['spawn_mode']}` |
-| resident_process_mode | `{state.get('resident_process_mode', '')}` |
-| resident_agents_registered | {state.get('resident_agents_registered', state['resident_agents_ready'])} |
-| resident_agents_process_ready | {state.get('resident_agents_process_ready', 0)} |
-| resident_agents_provider_ready | {state.get('resident_agents_provider_ready', 0)} |
-| resident_agents_interactive_ready | {state.get('resident_agents_interactive_ready', 0)} |
-| interactive_readiness_scope | `{state.get('interactive_readiness_scope', '')}` |
-| resident_agents_prompt_ready | {state.get('resident_agents_prompt_ready', state.get('resident_agents_interactive_ready', 0))} |
-| prompt_readiness_scope | `{state.get('prompt_readiness_scope', state.get('interactive_readiness_scope', ''))}` |
-| interactive_startup_target_count | {state.get('interactive_startup_target_count', 0)} |
-| interactive_checked_count | {state.get('interactive_checked_count', 0)} |
-| interactive_blocker_count | {state.get('interactive_blocker_count', 0)} |
-| resident_agents_tool_sidecar_ready | {state.get('resident_agents_tool_sidecar_ready', 0)} |
-| resident_agents_response_ready | {state.get('resident_agents_response_ready', 0)} |
-| resident_agents_provider_response_ready | {state.get('resident_agents_provider_response_ready', state.get('resident_agents_response_ready', 0))} |
-| provider_response_readiness_scope | `{state.get('provider_response_readiness_scope', provider_response_scope(readiness_count(state.get('resident_agents_response_ready', 0))))}` |
-| resident_agents_ready | {state['resident_agents_ready']} |
-| resident_agents_total | {state['resident_agents_total']} |
-| process_launch_target_count | {state.get('process_launch_target_count', 0)} |
-| lazy_activation_agents | {state.get('lazy_activation_agents', 0)} |
-| process_launch_failure_count | {state.get('process_launch_failure_count', 0)} |
-| stale_tmux_killed_count | {state.get('stale_tmux_killed_count', 0)} |
-| stale_tmux_failed_count | {state.get('stale_tmux_failed_count', 0)} |
-| tmux_session | `{state.get('tmux_session', '')}` |
-| unavailable_agents | {unavailable} |
-| next_allowed_entrypoint | `{state['next_allowed_entrypoint']}` |
-| model_registry_source | `{state['model_registry_source']}` |
-| policy_digest_status | `{state.get('policy_digest_status', '')}` |
-| policy_digest_sha1 | `{state.get('policy_digest_sha1', '')}` |
-
-## Policy Digest
-
-| Policy | Status | SHA1 | Bytes | Source |
-|---|---|---:|---:|---|
-{policy_rows or "| none | `missing` | `` | 0 | `` |"}
-
-Notes:
-{chr(10).join(f"- {note}" for note in state["notes"])}
-"""
-
-
-def session_start_output(state: dict[str, Any]) -> dict[str, Any]:
-    if state["bootstrap_status"] == "ready":
-        if state.get("readiness_scope") == "process_ready":
-            if state.get("resident_process_mode") == "provider_cli":
-                readiness_note = (
-                    "Resident provider CLI tmux processes were ensured. Process readiness does not mean "
-                    "response evidence; roles must still read queue YAML and write provider-backed reports."
-                )
-            else:
-                readiness_note = (
-                    "Resident agent tmux processes were ensured. The fallback process mode is resident_shell; "
-                    "queue completion still requires provider-backed report evidence."
-                )
-        elif state.get("readiness_scope") == "process_partial":
-            readiness_note = (
-                "A filtered/limited resident process verification target set was ensured. "
-                "Production hook runs should target all resident agents."
-            )
-        else:
-            readiness_note = (
-                "This invocation built metadata-only Gate preflight readiness. It does not mean "
-                "resident agent processes or provider response evidence exist."
-            )
-        interactive_scope = state.get("interactive_readiness_scope", "")
-        if interactive_scope == "interactive_ready":
-            interactive_note = "Gate-entry provider prompt was confirmed interactive-ready by tmux capture."
-        elif interactive_scope == "interactive_blocked":
-            blockers = state.get("startup_interactive_blockers", [])
-            first_blocker = blockers[0] if blockers and isinstance(blockers[0], dict) else {}
-            blocker_status = normalize_cell(first_blocker.get("interactive_status"))
-            blocker_error = normalize_cell(first_blocker.get("interactive_error"))
-            interactive_note = (
-                "Gate-entry provider prompt is not interactive-ready. "
-                f"status={blocker_status or 'unknown'}"
-                + (f"; error={blocker_error}" if blocker_error else "")
-            )
-        else:
-            interactive_note = (
-                "Startup interactive readiness was not fully checked for all roles; "
-                "process_ready remains separate from provider prompt readiness."
-            )
-        context = f"""## ITB Bootstrap Ready
-
-Codex/Claude hook built Organization Instance readiness state.
-
-| Field | Value |
-|---|---|
-| runtime | `{state['runtime']}` |
-| session_id | `{state['session_id']}` |
-| organization_instance_id | `{state['organization_instance_id']}` |
-| bootstrap_status | `{state['bootstrap_status']}` |
-| readiness_scope | `{state.get('readiness_scope', '')}` |
-| spawn_mode | `{state['spawn_mode']}` |
-| resident_process_mode | `{state.get('resident_process_mode', '')}` |
-| resident_agents_registered | {state.get('resident_agents_registered', state['resident_agents_ready'])} / {state['resident_agents_total']} |
-| resident_agents_process_ready | {state.get('resident_agents_process_ready', 0)} |
-| resident_agents_provider_ready | {state.get('resident_agents_provider_ready', 0)} |
-| resident_agents_interactive_ready | {state.get('resident_agents_interactive_ready', 0)} |
-| interactive_readiness_scope | `{state.get('interactive_readiness_scope', '')}` |
-| resident_agents_prompt_ready | {state.get('resident_agents_prompt_ready', state.get('resident_agents_interactive_ready', 0))} |
-| prompt_readiness_scope | `{state.get('prompt_readiness_scope', state.get('interactive_readiness_scope', ''))}` |
-| interactive_startup_target_count | {state.get('interactive_startup_target_count', 0)} |
-| interactive_checked_count | {state.get('interactive_checked_count', 0)} |
-| interactive_blocker_count | {state.get('interactive_blocker_count', 0)} |
-| resident_agents_tool_sidecar_ready | {state.get('resident_agents_tool_sidecar_ready', 0)} |
-| resident_agents_response_ready | {state.get('resident_agents_response_ready', 0)} |
-| resident_agents_provider_response_ready | {state.get('resident_agents_provider_response_ready', state.get('resident_agents_response_ready', 0))} |
-| provider_response_readiness_scope | `{state.get('provider_response_readiness_scope', provider_response_scope(readiness_count(state.get('resident_agents_response_ready', 0))))}` |
-| process_launch_target_count | {state.get('process_launch_target_count', 0)} |
-| lazy_activation_agents | {state.get('lazy_activation_agents', 0)} |
-| process_launch_failure_count | {state.get('process_launch_failure_count', 0)} |
-| stale_tmux_killed_count | {state.get('stale_tmux_killed_count', 0)} |
-| stale_tmux_failed_count | {state.get('stale_tmux_failed_count', 0)} |
-| tmux_session | `{state.get('tmux_session', '')}` |
-| next_allowed_entrypoint | `gate-prompt-formatter` |
-
-{readiness_note}
-
-{interactive_note}
-
-Treat the user prompt as blocked from normal task work until it enters `gate-prompt-formatter`.
-"""
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": context,
-            }
-        }
-        if interactive_scope == "interactive_blocked":
-            output["systemMessage"] = "ITB startup degraded: gate-entry provider prompt is not interactive-ready; resolve the provider trust/onboarding/approval prompt before relying on queue nudges."
-        return output
-
-    reason = block_reason(state)
+def session_start_metadata_output(
+    *,
+    runtime: str,
+    state_root: Path,
+    hook_input: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = session_start_metadata_pointer(runtime=runtime, state_root=state_root, hook_input=hook_input)
     return {
-        "systemMessage": "ITB bootstrap failed; prompt flow must not enter Gate work.",
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": reason,
         },
+        "sessionStartMetadata": metadata,
     }
+
+
+
 
 
 def stable_preflight_queue_fingerprint(event: dict[str, Any]) -> dict[str, Any]:
@@ -14205,659 +11269,6 @@ def stable_preflight_dispatch_fingerprint(event: dict[str, Any]) -> dict[str, An
         "gate_task_creator_queue_result": normalize_cell(gtc_queue.get("result")),
         "gate_entry_auto_scaffold_result": normalize_cell(auto_scaffold.get("result")),
         "gate_entry_auto_scaffold_task_id": normalize_cell(auto_scaffold.get("command_task_id")),
-    }
-
-
-def preflight_output(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id, session_source = resolve_session_id(state_root, hook_input)
-    fallback_used = session_source == "last-session"
-    if not session_id:
-        session_id = "unknown-session"
-    session_dir = state_root / safe_id(session_id)
-    state_path = session_dir / "bootstrap.json"
-    status_path = session_dir / "status"
-    status = status_path.read_text(encoding="utf-8").strip() if status_path.exists() else "missing"
-    now = current_timestamp()
-
-    if status == "ready" and state_path.exists():
-        state = read_json(state_path)
-        organization_instance_id = normalize_cell(
-            state.get("organization_instance_id")
-            or hook_input.get("organization_instance_id")
-            or hook_input.get("organizationInstanceId")
-            or organization_id(session_id)
-        )
-        errors, warnings = validate_preflight_state(session_dir, state)
-        task_detail_path = hook_task_detail_path(hook_input)
-        flow_phase = hook_flow_phase(hook_input)
-        task_context_source = "hook_input" if task_detail_path else ""
-        active_task_recovery: dict[str, Any] | None = None
-        active_task, active_task_errors, active_task_warnings = load_active_task(session_dir)
-        errors.extend(active_task_errors)
-        warnings.extend(active_task_warnings)
-        if not task_detail_path and active_task:
-            task_detail_path = active_task_detail_path(active_task)
-            if task_detail_path:
-                if task_detail_is_complete(task_detail_path):
-                    try:
-                        completed_task_text = task_detail_path.read_text(encoding="utf-8")
-                    except OSError as exc:
-                        errors.append(f"completed active task detail unreadable: {exc}")
-                    else:
-                        completed_publication_errors = git_publication_gate_errors(completed_task_text)
-                        if completed_publication_errors:
-                            task_context_source = "active-task.json"
-                            errors.extend(
-                                "completed active task has incomplete Git publication gate: " + error
-                                for error in completed_publication_errors
-                            )
-                        else:
-                            active_task_recovery = clear_active_task_with_event(
-                                session_dir=session_dir,
-                                runtime=runtime,
-                                session_id=session_id,
-                                now=now,
-                                reason="task_detail_already_complete",
-                                active_task=active_task,
-                            )
-                            warnings.append(
-                                f"stale active-task.json cleared because task detail is already {task_detail_status(task_detail_path)}"
-                            )
-                            task_detail_path = None
-                else:
-                    task_context_source = "active-task.json"
-                    if hook_flow_phase_raw(hook_input) is None:
-                        flow_phase = active_task_flow_phase(active_task)
-            else:
-                errors.append("active-task.json missing task_detail_path")
-        if task_detail_path:
-            task_errors, task_warnings = validate_task_flow_artifact(task_detail_path, flow_phase)
-            errors.extend(task_errors)
-            warnings.extend(task_warnings)
-        else:
-            task_errors = []
-        provider_task_detail_path = (
-            str(task_detail_path)
-            if task_detail_path
-            else str(hook_input.get("task_detail_path") or os.environ.get("ITB_TASK_DETAIL_PATH", ""))
-        )
-        provider_errors: list[str] = []
-        provider_warnings: list[str] = []
-        if provider_task_detail_path and flow_phase == "pre_final_response":
-            provider_errors, provider_warnings = validate_task_detail_provider_evidence(
-                provider_task_detail_path,
-                session_dir / "invocation-evidence.jsonl",
-            )
-            errors.extend(provider_errors)
-            warnings.extend(provider_warnings)
-        elif provider_task_detail_path and flow_phase in {"pre_execution", "post_routing"}:
-            provider_errors, provider_warnings = validate_gate_role_transport_evidence(
-                provider_task_detail_path,
-                session_dir / "invocation-evidence.jsonl",
-            )
-            errors.extend(provider_errors)
-            warnings.extend(provider_warnings)
-        recoverable_errors = task_errors + provider_errors
-        if (
-            task_context_source == "active-task.json"
-            and active_task
-            and flow_phase == "pre_final_response"
-            and recoverable_errors
-            and errors == recoverable_errors
-        ):
-            active_task_recovery = clear_active_task_with_event(
-                session_dir=session_dir,
-                runtime=runtime,
-                session_id=session_id,
-                now=now,
-                reason="invalid_pre_final_response_fallback",
-                active_task=active_task,
-                validation_errors=recoverable_errors,
-            )
-            warnings.append(
-                "stale pre_final_response active-task.json cleared because final validation failed: "
-                + "; ".join(recoverable_errors)
-            )
-            errors = []
-            task_detail_path = None
-            provider_task_detail_path = ""
-            task_context_source = ""
-            flow_phase = hook_flow_phase(hook_input)
-        preflight_degraded_reasons: list[str] = []
-        gate_skill_contract_lint_event: dict[str, Any] = {"status": "skipped"}
-        if gate_skill_contract_lint_preflight_enabled(hook_input):
-            gate_skill_contract_lint = gate_skill_contract_lint_output(
-                runtime=runtime,
-                state_root=state_root,
-                hook_input=hook_input,
-            )
-            gate_skill_contract_lint_event = compact_gate_skill_contract_lint_summary(gate_skill_contract_lint)
-            if gate_skill_contract_lint.get("decision") == "block":
-                errors.append(
-                    "Gate skill contract lint failed: "
-                    + normalize_cell(gate_skill_contract_lint.get("reason") or "gate_skill_contract_lint_block")
-                )
-        pre_gpf_classifier = classify_gate_entry_prompt(hook_input)
-        micro_fast_path_event: dict[str, Any] = {}
-        micro_fast_path_pass = False
-        micro_fast_path_fallback_to_gate = False
-        if (
-            not errors
-            and not task_detail_path
-            and normalize_cell(pre_gpf_classifier.get("fast_path_candidate")) == "read_only_no_diff_single_team"
-            and not micro_fast_path_disabled(hook_input)
-        ):
-            micro_fast_path_event = micro_fast_path_verdict(
-                runtime=runtime,
-                session_dir=session_dir,
-                session_id=session_id,
-                organization_instance_id=normalize_cell(state.get("organization_instance_id")) or organization_id(session_id),
-                hook_input=hook_input,
-                classifier=pre_gpf_classifier,
-                now=now,
-            )
-            micro_fast_path_pass = normalize_cell(micro_fast_path_event.get("status")) == "pass"
-            micro_fast_path_fallback_to_gate = bool(micro_fast_path_event) and not micro_fast_path_pass
-
-        def record_gate_entry_queue_degradation(event: dict[str, Any]) -> None:
-            result = normalize_cell(event.get("result"))
-            nudge_result = normalize_cell(event.get("nudge_result"))
-            if result == "queued_nudge_unconfirmed" or nudge_result.startswith("nudge_deferred"):
-                reason = "gate_entry_queue:" + (nudge_result or result or "nudge_unconfirmed")
-                preflight_degraded_reasons.append(reason)
-                warnings.append(f"preflight degraded: {reason}")
-
-        gate_entry_queue_context = ""
-        gate_entry_queue_result = ""
-        gate_entry_queue_event: dict[str, Any] = {}
-        if not micro_fast_path_pass and not errors and (
-            gate_entry_queue_enabled(runtime=runtime, hook_input=hook_input) or micro_fast_path_fallback_to_gate
-        ):
-            queue_output = role_queue(
-                runtime=runtime,
-                state_root=state_root,
-                hook_input=hook_input
-                | {
-                    "session_id": session_id,
-                    "role_id": GATE_ENTRY_AGENT_ID,
-                    "from_role": f"{runtime}-user-prompt-submit",
-                    "task_id": gate_entry_task_id(session_id, hook_input),
-                    "message_id": gate_entry_message_id(hook_input),
-                    "report_id": gate_entry_report_id(hook_input),
-                    "instruction": hook_prompt_text(hook_input),
-                    "payload_type": "human_prompt",
-                    "payload": {"pre_gpf_classifier": pre_gpf_classifier},
-                    "expected_output": "gate_intake_envelope",
-                    "context_ref": str(hook_input.get("cwd") or state.get("cwd") or os.getcwd()),
-                },
-            )
-            gate_entry_queue_context, gate_entry_queue_result = format_gate_entry_queue_context(queue_output)
-            queue = queue_output.get("roleQueue", {})
-            gate_entry_queue_event = {
-                "role_id": queue.get("role_id", GATE_ENTRY_AGENT_ID),
-                "result": gate_entry_queue_result,
-                "task_id": queue.get("task_id", ""),
-                "message_id": queue.get("message_id", ""),
-                "queue_root": queue.get("queue_root", ""),
-                "inbox_path": queue.get("inbox_path", ""),
-                "nudge_result": (
-                    (queue.get("nudge") or {}).get("result", "")
-                    if isinstance(queue.get("nudge"), dict)
-                    else ""
-                ),
-            }
-            record_gate_entry_queue_degradation(gate_entry_queue_event)
-            if queue_output.get("decision") == "block":
-                errors.append(
-                    "Gate entry queue failed: "
-                    + normalize_cell(queue_output.get("reason") or gate_entry_queue_result or "unknown")
-                )
-
-        gate_entry_context = ""
-        gate_entry_result = ""
-        gate_entry_event: dict[str, Any] = {}
-        if not micro_fast_path_pass and not errors and gate_entry_dispatch_enabled(runtime=runtime, hook_input=hook_input):
-            dispatch_queue_output = role_queue(
-                runtime=runtime,
-                state_root=state_root,
-                hook_input=hook_input
-                | {
-                    "session_id": session_id,
-                    "role_id": GATE_ENTRY_AGENT_ID,
-                    "from_role": f"{runtime}-user-prompt-submit",
-                    "task_id": gate_entry_task_id(session_id, hook_input),
-                    "message_id": gate_entry_message_id(hook_input),
-                    "report_id": gate_entry_report_id(hook_input),
-                    "instruction": hook_prompt_text(hook_input),
-                    "payload_type": "human_prompt",
-                    "payload": {"pre_gpf_classifier": pre_gpf_classifier},
-                    "expected_output": "gate_intake_envelope",
-                    "context_ref": str(hook_input.get("cwd") or state.get("cwd") or os.getcwd()),
-                    "dry_run": True,
-                },
-            )
-            gate_entry_queue_context, gate_entry_queue_result = format_gate_entry_queue_context(dispatch_queue_output)
-            dispatch_queue = dispatch_queue_output.get("roleQueue", {})
-            gate_entry_queue_event = {
-                "role_id": dispatch_queue.get("role_id", GATE_ENTRY_AGENT_ID),
-                "result": gate_entry_queue_result,
-                "task_id": dispatch_queue.get("task_id", ""),
-                "message_id": dispatch_queue.get("message_id", ""),
-                "queue_root": dispatch_queue.get("queue_root", ""),
-                "inbox_path": dispatch_queue.get("inbox_path", ""),
-                "nudge_result": (
-                    (dispatch_queue.get("nudge") or {}).get("result", "")
-                    if isinstance(dispatch_queue.get("nudge"), dict)
-                    else ""
-                ),
-            }
-            record_gate_entry_queue_degradation(gate_entry_queue_event)
-            if dispatch_queue_output.get("decision") == "block":
-                errors.append(
-                    "Gate entry queue failed: "
-                    + normalize_cell(dispatch_queue_output.get("reason") or gate_entry_queue_result or "unknown")
-                )
-        if not micro_fast_path_pass and not errors and gate_entry_dispatch_enabled(runtime=runtime, hook_input=hook_input):
-            dispatch_prompt = build_gate_entry_dispatch_prompt(
-                user_prompt=hook_prompt_text(hook_input),
-                task_detail_path=provider_task_detail_path,
-                flow_phase=flow_phase if task_detail_path else hook_flow_phase(hook_input),
-                task_context_source=task_context_source,
-                classifier=pre_gpf_classifier,
-            )
-            dispatch_base_input = hook_input | {
-                "session_id": session_id,
-                "agent_id": GATE_ENTRY_AGENT_ID,
-                "source_agent": "codex-user-prompt-submit",
-                "cwd": hook_input.get("cwd") or state.get("cwd") or os.getcwd(),
-                "prompt": dispatch_prompt,
-            }
-            dispatch_row = gate_entry_roster_row(session_dir)
-            if gate_entry_codex_exec_enabled(dispatch_row, hook_input):
-                dispatch_output = codex_exec_agent_dispatch(
-                    runtime=runtime,
-                    state_root=state_root,
-                    hook_input=dispatch_base_input,
-                )
-            else:
-                dispatch_output = agent_dispatch(
-                    runtime=runtime,
-                    state_root=state_root,
-                    hook_input=dispatch_base_input
-                    | {
-                        "force_respawn": env_flag("ITB_GATE_ENTRY_FORCE_RESPAWN", default=True),
-                        "permission_mode": os.environ.get("ITB_GATE_ENTRY_PERMISSION_MODE", provider_permission_mode()),
-                        "tools": os.environ.get(
-                            "ITB_GATE_ENTRY_TOOLS",
-                            default_tools_argument_for_agent(GATE_ENTRY_AGENT_ID, session_dir=session_dir),
-                        ),
-                        "submit_enter_count": env_int_default("ITB_GATE_ENTRY_SUBMIT_ENTER_COUNT", 2),
-                        "timeout_seconds": env_int_default("ITB_GATE_ENTRY_TIMEOUT_SECONDS", 180),
-                        "prompt_ready_timeout_seconds": env_int_default("ITB_GATE_ENTRY_PROMPT_READY_TIMEOUT_SECONDS", 20),
-                        "history_lines": env_int_default("ITB_GATE_ENTRY_HISTORY_LINES", 6000),
-                    },
-                )
-            gate_entry_context, gate_entry_result = format_gate_entry_dispatch_context(dispatch_output)
-            dispatch = dispatch_output.get("agentDispatch", {})
-            gate_entry_event = {
-                "agent_id": GATE_ENTRY_AGENT_ID,
-                "result": gate_entry_result,
-                "request_id": dispatch.get("request_id", ""),
-                "effective_model": dispatch.get("effective_model", ""),
-                "usage_source": dispatch.get("usage_source", ""),
-                "dispatch_mode": "codex_exec_json" if dispatch.get("usage_source") == "codex_exec_json" else "tmux_interactive",
-            }
-            response_errors: list[str] = []
-            if gate_entry_result != "provider_response_ready":
-                errors.append(
-                    "Gate entry dispatch failed: "
-                    + normalize_cell(dispatch_output.get("reason") or dispatch.get("error") or gate_entry_result or "unknown")
-                )
-            else:
-                normalized_response, response_repaired, repair_errors = normalize_gate_entry_response(
-                    str(dispatch.get("response") or ""),
-                    hook_prompt_text(hook_input),
-                )
-                if response_repaired:
-                    dispatch["response"] = normalized_response
-                    gate_entry_event["response_repaired"] = True
-                response_errors = repair_errors or validate_gate_entry_response(normalized_response)
-                if response_errors:
-                    gate_entry_event["response_validation_errors"] = response_errors
-                    errors.extend(response_errors)
-            try:
-                finalize = finalize_gate_entry_dispatch_queue(
-                    runtime=runtime,
-                    session_dir=session_dir,
-                    queue_output=dispatch_queue_output,
-                    dispatch_output=dispatch_output,
-                    response_errors=response_errors,
-                )
-                gate_entry_event["queue_finalize"] = finalize
-                if (
-                    finalize.get("result") == "done"
-                    and gate_entry_auto_gtc_enabled(hook_input)
-                ):
-                    auto_handoff = maybe_enqueue_auto_queue_handoff(
-                        runtime=runtime,
-                        state_root=state_root,
-                        session_id=session_id,
-                        organization_instance_id=organization_instance_id,
-                        from_role=GATE_ENTRY_AGENT_ID,
-                        finalized=finalize,
-                        hook_input=hook_input,
-                    )
-                    gate_entry_event["gate_entry_auto_scaffold"] = json_event_safe(auto_handoff)
-                    if auto_handoff.get("result") in {
-                        "blocked_by_command",
-                        "blocked_by_condition",
-                        "blocked_by_precheck",
-                        "unsupported_command",
-                    } or normalize_cell(auto_handoff.get("result")) == "block":
-                        errors.append(
-                            "Gate task scaffold handoff failed: "
-                            + normalize_cell(
-                                auto_handoff.get("reason")
-                                or (auto_handoff.get("command") or {}).get("reason")
-                                or "unknown"
-                            )
-                        )
-            except Exception as exc:
-                gate_entry_event["queue_finalize"] = {"result": "failed", "error": str(exc)}
-                errors.append(f"Gate entry queue finalize failed: {exc}")
-        preflight_context_fingerprint = {
-            "status": status,
-            "readiness_scope": state.get("readiness_scope", "legacy_unknown"),
-            "spawn_mode": state.get("spawn_mode", ""),
-            "resident_process_mode": state.get("resident_process_mode", ""),
-            "resident_agents_registered": state.get("resident_agents_registered", state.get("resident_agents_ready", 0)),
-            "resident_agents_total": state.get("resident_agents_total", 0),
-            "resident_agents_process_ready": state.get("resident_agents_process_ready", 0),
-            "resident_agents_provider_ready": state.get("resident_agents_provider_ready", 0),
-            "resident_agents_interactive_ready": state.get("resident_agents_interactive_ready", 0),
-            "interactive_readiness_scope": state.get("interactive_readiness_scope", ""),
-            "resident_agents_prompt_ready": state.get(
-                "resident_agents_prompt_ready",
-                state.get("resident_agents_interactive_ready", 0),
-            ),
-            "prompt_readiness_scope": state.get(
-                "prompt_readiness_scope",
-                state.get("interactive_readiness_scope", ""),
-            ),
-            "interactive_startup_target_count": state.get("interactive_startup_target_count", 0),
-            "interactive_checked_count": state.get("interactive_checked_count", 0),
-            "interactive_blocker_count": state.get("interactive_blocker_count", 0),
-            "resident_agents_tool_sidecar_ready": state.get("resident_agents_tool_sidecar_ready", 0),
-            "resident_agents_response_ready": state.get("resident_agents_response_ready", 0),
-            "resident_agents_provider_response_ready": state.get(
-                "resident_agents_provider_response_ready",
-                state.get("resident_agents_response_ready", 0),
-            ),
-            "provider_response_readiness_scope": state.get(
-                "provider_response_readiness_scope",
-                provider_response_scope(readiness_count(state.get("resident_agents_response_ready", 0))),
-            ),
-            "process_launch_target_count": state.get("process_launch_target_count", 0),
-            "lazy_activation_agents": state.get("lazy_activation_agents", 0),
-            "process_launch_failure_count": state.get("process_launch_failure_count", 0),
-            "stale_tmux_killed_count": state.get("stale_tmux_killed_count", 0),
-            "stale_tmux_failed_count": state.get("stale_tmux_failed_count", 0),
-            "tmux_session": state.get("tmux_session", ""),
-            "warnings": warnings,
-            "gate_entry_queue": stable_preflight_queue_fingerprint(gate_entry_queue_event),
-            "gate_entry_dispatch": stable_preflight_dispatch_fingerprint(gate_entry_event),
-            "preflight_degraded_reasons": preflight_degraded_reasons,
-            "gate_skill_contract_lint": gate_skill_contract_lint_event,
-            "pre_gpf_classifier": {
-                "workflow_mode": normalize_cell(pre_gpf_classifier.get("workflow_mode")),
-                "risk_tier": normalize_cell(pre_gpf_classifier.get("risk_tier")),
-                "fast_path_candidate": normalize_cell(pre_gpf_classifier.get("fast_path_candidate")),
-                "approval_required": bool(pre_gpf_classifier.get("approval_required")),
-            },
-            "micro_fast_path": {
-                "status": normalize_cell(micro_fast_path_event.get("status")),
-                "result": normalize_cell(micro_fast_path_event.get("result")),
-                "git_diff_status": normalize_cell(micro_fast_path_event.get("git_diff_status")),
-                "role_provider_turns": micro_fast_path_event.get("role_provider_turns"),
-                "next_entrypoint": normalize_cell(micro_fast_path_event.get("next_entrypoint")),
-                "notification_class": normalize_cell(micro_fast_path_event.get("notification_class")),
-            },
-            "task_detail_path": provider_task_detail_path,
-            "flow_phase": flow_phase if task_detail_path else "",
-            "task_context_source": task_context_source,
-            "active_task_recovery": active_task_recovery or {},
-        }
-        preflight_context_hash = hashlib.sha256(
-            json.dumps(preflight_context_fingerprint, ensure_ascii=False, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        preflight_context_hash_path = session_dir / "preflight-context-hash.json"
-        previous_preflight_context_hash = ""
-        if preflight_context_hash_path.exists():
-            try:
-                previous_hash_data = read_json(preflight_context_hash_path)
-            except Exception:
-                previous_hash_data = {}
-            if isinstance(previous_hash_data, dict):
-                previous_preflight_context_hash = normalize_cell(previous_hash_data.get("hash"))
-        context_compacted = (
-            not errors
-            and env_flag("ITB_PREFLIGHT_COMPACT_UNCHANGED", default=True)
-            and previous_preflight_context_hash == preflight_context_hash
-        )
-        append_jsonl_atomic(
-            session_dir / "preflight-events.jsonl",
-            {
-                "ts": now,
-                "runtime": runtime,
-                "event_type": "prompt_preflight",
-                "session_id": session_id,
-                "organization_instance_id": state.get("organization_instance_id", ""),
-                "result": (
-                    "preflight_recovered"
-                    if active_task_recovery and not errors
-                    else "preflight_micro_fast_path"
-                    if micro_fast_path_pass
-                    else "preflight_blocked"
-                    if errors
-                    else "preflight_degraded"
-                    if preflight_degraded_reasons
-                    else "preflight_ready"
-                ),
-                "preflight_degraded": bool(preflight_degraded_reasons),
-                "preflight_degraded_reasons": preflight_degraded_reasons,
-                "fallback_session_used": fallback_used,
-                "validation_errors": errors,
-                "validation_warnings": warnings,
-                "gate_entry_queue": gate_entry_queue_event,
-                "gate_entry_dispatch": gate_entry_event,
-                "gate_skill_contract_lint": gate_skill_contract_lint_event,
-                "pre_gpf_classifier": pre_gpf_classifier,
-                "micro_fast_path": micro_fast_path_event,
-                "task_detail_path": provider_task_detail_path,
-                "flow_phase": flow_phase if task_detail_path else "",
-                "task_context_source": task_context_source,
-                "active_task_recovery": active_task_recovery or {},
-                "readiness_scope": state.get("readiness_scope", "legacy_unknown"),
-                "status": status,
-                "preflight_context_hash": preflight_context_hash,
-                "context_compacted": context_compacted,
-            },
-        )
-        write_json_yaml(
-            preflight_context_hash_path,
-            {
-                "hash": preflight_context_hash,
-                "updated_at": now,
-                "session_id": session_id,
-                "status": status,
-            },
-        )
-        atomic_write_text(session_dir / "last_event", f"UserPromptSubmit {now}\n")
-        if errors:
-            blocked_state = state | {
-                "runtime": runtime,
-                "session_id": session_id,
-                "bootstrap_status": "invalid",
-                "validation_errors": errors,
-                "outputs": {"state_dir": str(session_dir)},
-            }
-            reason = block_reason(blocked_state)
-            return {
-                "reason": reason,
-                "hookSpecificOutput": {
-                    "hookEventName": "UserPromptSubmit",
-                    "additionalContext": not_ready_context(reason)
-                    + (f"\n\n{gate_entry_queue_context}" if gate_entry_queue_context else "")
-                    + (f"\n\n{gate_entry_context}" if gate_entry_context else ""),
-                },
-            }
-        warnings_text = "\n".join(f"- {warning}" for warning in warnings) or "- none"
-        next_entrypoint = "main_transport_renderer" if micro_fast_path_pass else "gate-prompt-formatter"
-        micro_fast_path_context = ""
-        if micro_fast_path_pass:
-            micro_fast_path_context = f"""
-## Controlled Micro-Flow Fast Path
-
-This read-only/no-diff/single-team prompt is authorized for deterministic fast-path completion.
-Do not start role provider turns or create Task Detail / Task Index / Kanban artifacts for this prompt.
-The main transport may answer directly. If answering requires file edits, tool side effects, multi-team work, approval, commit, push, or publication, re-enter strict Gate flow.
-
-| Field | Value |
-|---|---|
-| micro_fast_path_status | `{normalize_cell(micro_fast_path_event.get('status'))}` |
-| role_provider_turns | `{micro_fast_path_event.get('role_provider_turns')}` |
-| git_diff_status | `{normalize_cell(micro_fast_path_event.get('git_diff_status'))}` |
-| notification_class | `{normalize_cell(micro_fast_path_event.get('notification_class'))}` |
-| completion_envelope | `{normalize_cell(micro_fast_path_event.get('artifact_path'))}` |
-| next_entrypoint | `{next_entrypoint}` |
-"""
-        if context_compacted:
-            context = f"""## Agent-Facing Routing Context
-
-Act on this context silently. Do not restate flow, queue, gate, or evidence plumbing to the user.
-Mention this context only as `[FLOW-ALERT]` when there is a blocker or approval wait.
-
-Readiness is unchanged for `{state['session_id']}`.
-
-| Field | Value |
-|---|---|
-| readiness_scope | `{state.get('readiness_scope', 'legacy_unknown')}` |
-| interactive_readiness_scope | `{state.get('interactive_readiness_scope', '')}` |
-| resident_agents_interactive_ready | {state.get('resident_agents_interactive_ready', 0)} |
-| prompt_readiness_scope | `{state.get('prompt_readiness_scope', state.get('interactive_readiness_scope', ''))}` |
-| resident_agents_prompt_ready | {state.get('resident_agents_prompt_ready', state.get('resident_agents_interactive_ready', 0))} |
-| provider_response_readiness_scope | `{state.get('provider_response_readiness_scope', provider_response_scope(readiness_count(state.get('resident_agents_response_ready', 0))))}` |
-| resident_agents_provider_response_ready | {state.get('resident_agents_provider_response_ready', state.get('resident_agents_response_ready', 0))} |
-| preflight_context_hash | `{preflight_context_hash[:16]}` |
-| classifier_workflow_mode | `{normalize_cell(pre_gpf_classifier.get('workflow_mode'))}` |
-| classifier_risk_tier | `{normalize_cell(pre_gpf_classifier.get('risk_tier'))}` |
-| classifier_fast_path_candidate | `{normalize_cell(pre_gpf_classifier.get('fast_path_candidate'))}` |
-| micro_fast_path_status | `{normalize_cell(micro_fast_path_event.get('status'))}` |
-| micro_fast_path_result | `{normalize_cell(micro_fast_path_event.get('result'))}` |
-| task_context_source | `{task_context_source or 'none'}` |
-| flow_phase | `{flow_phase if task_detail_path else ''}` |
-| next_entrypoint | `{next_entrypoint}` |
-
-{micro_fast_path_context}
-"""
-        else:
-            context = f"""## Agent-Facing Routing Context
-
-Act on this context silently. Do not restate flow, queue, gate, or evidence plumbing to the user.
-Mention this context only as `[FLOW-ALERT]` when there is a blocker or approval wait.
-
-Readiness state is `ready` for `{state['session_id']}`.
-
-| Field | Value |
-|---|---|
-| readiness_scope | `{state.get('readiness_scope', 'legacy_unknown')}` |
-| spawn_mode | `{state.get('spawn_mode', '')}` |
-| resident_process_mode | `{state.get('resident_process_mode', '')}` |
-| resident_agents_registered | {state.get('resident_agents_registered', state.get('resident_agents_ready', 0))} / {state.get('resident_agents_total', 0)} |
-| resident_agents_process_ready | {state.get('resident_agents_process_ready', 0)} |
-| resident_agents_provider_ready | {state.get('resident_agents_provider_ready', 0)} |
-| resident_agents_interactive_ready | {state.get('resident_agents_interactive_ready', 0)} |
-| interactive_readiness_scope | `{state.get('interactive_readiness_scope', '')}` |
-| resident_agents_prompt_ready | {state.get('resident_agents_prompt_ready', state.get('resident_agents_interactive_ready', 0))} |
-| prompt_readiness_scope | `{state.get('prompt_readiness_scope', state.get('interactive_readiness_scope', ''))}` |
-| interactive_startup_target_count | {state.get('interactive_startup_target_count', 0)} |
-| interactive_checked_count | {state.get('interactive_checked_count', 0)} |
-| interactive_blocker_count | {state.get('interactive_blocker_count', 0)} |
-| resident_agents_tool_sidecar_ready | {state.get('resident_agents_tool_sidecar_ready', 0)} |
-| resident_agents_response_ready | {state.get('resident_agents_response_ready', 0)} |
-| resident_agents_provider_response_ready | {state.get('resident_agents_provider_response_ready', state.get('resident_agents_response_ready', 0))} |
-| provider_response_readiness_scope | `{state.get('provider_response_readiness_scope', provider_response_scope(readiness_count(state.get('resident_agents_response_ready', 0))))}` |
-| process_launch_target_count | {state.get('process_launch_target_count', 0)} |
-| lazy_activation_agents | {state.get('lazy_activation_agents', 0)} |
-| process_launch_failure_count | {state.get('process_launch_failure_count', 0)} |
-| stale_tmux_killed_count | {state.get('stale_tmux_killed_count', 0)} |
-| stale_tmux_failed_count | {state.get('stale_tmux_failed_count', 0)} |
-| tmux_session | `{state.get('tmux_session', '')}` |
-| classifier_workflow_mode | `{normalize_cell(pre_gpf_classifier.get('workflow_mode'))}` |
-| classifier_risk_tier | `{normalize_cell(pre_gpf_classifier.get('risk_tier'))}` |
-| classifier_fast_path_candidate | `{normalize_cell(pre_gpf_classifier.get('fast_path_candidate'))}` |
-| micro_fast_path_status | `{normalize_cell(micro_fast_path_event.get('status'))}` |
-| micro_fast_path_result | `{normalize_cell(micro_fast_path_event.get('result'))}` |
-| task_context_source | `{task_context_source or 'none'}` |
-| task_detail_path | `{provider_task_detail_path}` |
-| flow_phase | `{flow_phase if task_detail_path else ''}` |
-| next_entrypoint | `{next_entrypoint}` |
-
-Warnings:
-{warnings_text}
-
-{micro_fast_path_context}
-
-{gate_entry_queue_context}
-
-{gate_entry_context}
-"""
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": context,
-            }
-        }
-
-    state = {
-        "runtime": runtime,
-        "session_id": session_id,
-        "bootstrap_status": status,
-        "spawn_mode": "unknown",
-        "readiness_scope": "missing",
-        "resident_agents_ready": 0,
-        "resident_agents_total": 0,
-        "unavailable_agents": [],
-        "next_allowed_entrypoint": "gate-prompt-formatter",
-        "outputs": {"state_dir": str(session_dir)},
-    }
-    session_dir.mkdir(parents=True, exist_ok=True)
-    validation_errors = [f"status={status}"]
-    if not state_path.exists():
-        validation_errors.append("bootstrap.json missing")
-    append_jsonl_atomic(
-        session_dir / "preflight-events.jsonl",
-        {
-            "ts": now,
-            "runtime": runtime,
-            "event_type": "prompt_preflight",
-            "session_id": session_id,
-            "organization_instance_id": "",
-            "result": "preflight_blocked",
-            "fallback_session_used": fallback_used,
-            "validation_errors": validation_errors,
-            "validation_warnings": [],
-            "readiness_scope": "missing",
-            "status": status,
-        },
-    )
-    atomic_write_text(session_dir / "last_event", f"UserPromptSubmit {now}\n")
-    reason = block_reason(state)
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": not_ready_context(reason),
-        },
     }
 
 
@@ -15577,35 +11988,6 @@ def evaluator_precheck_output(
     return output
 
 
-def pretooluse_command_text(hook_input: dict[str, Any]) -> str:
-    tool_input = hook_input.get("tool_input") if isinstance(hook_input.get("tool_input"), dict) else {}
-    return normalize_cell(
-        hook_input.get("command")
-        or hook_input.get("shell_command")
-        or hook_input.get("shellCommand")
-        or tool_input.get("command")
-        or tool_input.get("cmd")
-    )
-
-
-def tmux_itb_targets_from_command(command: str) -> list[str]:
-    if not command:
-        return []
-    try:
-        parts = shlex.split(command)
-    except ValueError:
-        parts = command.split()
-    lowered = [part.lower() for part in parts]
-    if "tmux" not in lowered or not {"send-keys", "paste-buffer"}.intersection(lowered):
-        return []
-    targets: list[str] = []
-    for index, part in enumerate(parts):
-        if part == "-t" and index + 1 < len(parts):
-            targets.append(parts[index + 1])
-        elif part.startswith("-t") and len(part) > 2:
-            targets.append(part[2:])
-    targets.extend(re.findall(r"\bitb-org-[A-Za-z0-9_.:-]+", command))
-    return sorted({target for target in targets if target.startswith("itb-org-")})
 
 
 def hook_install_path_value(hook_input: dict[str, Any], *keys: str) -> Path | None:
@@ -15686,47 +12068,21 @@ def hook_event_specs(runtime: str, hooks_dir: Path, builder_path: Path | None = 
             "timeout": 10,
         },
         {
-            "event": "UserPromptSubmit",
-            "script": "itb-prompt-preflight.sh",
-            "matcher": None,
-            "timeout": 10,
-        },
-        {
-            "event": "PreToolUse",
-            "script": "itb-pretooluse-guard.sh",
-            "matcher": ".*" if runtime == "codex" else "Bash",
-            "timeout": 5,
-        },
-        {
             "event": "Stop",
             "script": "itb-final-response-guard.sh",
             "matcher": None,
             "timeout": 10,
         },
     ]
-    if runtime == "claude":
-        specs.append(
-            {
-                "event": "SubagentStop",
-                "script": "itb-final-response-guard.sh",
-                "matcher": None,
-                "timeout": 10,
-            }
-        )
     return [spec | {"command": hook_command_for_builder(runtime, hooks_dir, str(spec["script"]), builder_path)} for spec in specs]
 
 
 def hook_existing_only_event_specs(runtime: str, hooks_dir: Path, builder_path: Path | None = None) -> list[dict[str, Any]]:
-    builder_path = builder_path or ITB_ROOT / "scripts" / "itb_bootstrap_builder.py"
-    specs = [
-        {
-            "event": "SessionEnd",
-            "script": "itb-session-end.sh",
-            "matcher": None,
-            "timeout": 10,
-        }
-    ]
-    return [spec | {"command": hook_command_for_builder(runtime, hooks_dir, str(spec["script"]), builder_path)} for spec in specs]
+    return []
+
+
+def hook_retired_event_specs(runtime: str, hooks_dir: Path, builder_path: Path | None = None) -> list[dict[str, Any]]:
+    return []
 
 
 def simple_pipe_matcher_tokens(value: str) -> list[str]:
@@ -15819,6 +12175,54 @@ def canonicalize_matching_hook_entries(
     return matched
 
 
+def prune_retired_hook_entries(
+    *,
+    hooks: dict[str, Any],
+    retired_specs: list[dict[str, Any]],
+    changes: list[dict[str, Any]],
+) -> None:
+    for spec in retired_specs:
+        event = str(spec["event"])
+        script = str(spec["script"])
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            continue
+        pruned_entries: list[Any] = []
+        removed_count = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                pruned_entries.append(entry)
+                continue
+            entry_hooks = entry.get("hooks")
+            if not isinstance(entry_hooks, list):
+                pruned_entries.append(entry)
+                continue
+            kept_hooks = []
+            for hook in entry_hooks:
+                if isinstance(hook, dict) and script in normalize_cell(hook.get("command")):
+                    removed_count += 1
+                    continue
+                kept_hooks.append(hook)
+            if kept_hooks:
+                updated_entry = dict(entry)
+                updated_entry["hooks"] = kept_hooks
+                pruned_entries.append(updated_entry)
+        if not removed_count:
+            continue
+        if pruned_entries:
+            hooks[event] = pruned_entries
+        else:
+            hooks.pop(event, None)
+        changes.append(
+            {
+                "action": "remove_retired_itb_hook",
+                "event": event,
+                "script": script,
+                "removed_count": removed_count,
+            }
+        )
+
+
 def merge_hook_settings(data: Any, runtime: str, hooks_dir: Path, builder_path: Path | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     merged: dict[str, Any]
     if isinstance(data, dict):
@@ -15849,6 +12253,11 @@ def merge_hook_settings(data: Any, runtime: str, hooks_dir: Path, builder_path: 
         entries = hooks.get(str(spec["event"]))
         if isinstance(entries, list):
             canonicalize_matching_hook_entries(entries=entries, spec=spec, changes=changes)
+    prune_retired_hook_entries(
+        hooks=hooks,
+        retired_specs=hook_retired_event_specs(runtime, hooks_dir, builder_path),
+        changes=changes,
+    )
     return merged, changes
 
 
@@ -15948,8 +12357,6 @@ def hook_settings_command_entries(settings: Any, event: str) -> list[dict[str, A
 
 CODEX_HOOK_STATE_EVENT_NAMES = {
     "SessionStart": "session_start",
-    "UserPromptSubmit": "user_prompt_submit",
-    "PreToolUse": "pre_tool_use",
     "Stop": "stopped",
 }
 
@@ -16199,64 +12606,36 @@ def validate_hook_command_entry(
 
 HOOK_HEALTH_DEFAULT_SMOKE_SCRIPTS = [
     "itb-final-response-guard.sh",
-    "itb-pretooluse-guard.sh",
 ]
-HOOK_HEALTH_STARTUP_PREFLIGHT_SMOKE_SCRIPTS = [
+HOOK_HEALTH_INITIAL_HOOK_SMOKE_SCRIPTS = [
     "itb-session-start.sh",
-    "itb-prompt-preflight.sh",
+    "itb-final-response-guard.sh",
 ]
 HOOK_HEALTH_ALL_SMOKE_SCRIPTS = [
     "itb-session-start.sh",
-    "itb-prompt-preflight.sh",
     "itb-final-response-guard.sh",
-    "itb-pretooluse-guard.sh",
 ]
 HOOK_HEALTH_SMOKE_ALIASES = {
     "sessionstart": ["itb-session-start.sh"],
     "session_start": ["itb-session-start.sh"],
     "itb-session-start.sh": ["itb-session-start.sh"],
-    "userpromptsubmit": ["itb-prompt-preflight.sh"],
-    "user_prompt_submit": ["itb-prompt-preflight.sh"],
-    "prompt-preflight": ["itb-prompt-preflight.sh"],
-    "prompt_preflight": ["itb-prompt-preflight.sh"],
-    "itb-prompt-preflight.sh": ["itb-prompt-preflight.sh"],
-    "pretooluse": ["itb-pretooluse-guard.sh"],
-    "pre_tool_use": ["itb-pretooluse-guard.sh"],
-    "itb-pretooluse-guard.sh": ["itb-pretooluse-guard.sh"],
     "stop": ["itb-final-response-guard.sh"],
-    "subagentstop": ["itb-final-response-guard.sh"],
-    "subagent_stop": ["itb-final-response-guard.sh"],
     "final-response-guard": ["itb-final-response-guard.sh"],
     "final_response_guard": ["itb-final-response-guard.sh"],
     "itb-final-response-guard.sh": ["itb-final-response-guard.sh"],
     "default": HOOK_HEALTH_DEFAULT_SMOKE_SCRIPTS,
     "safe": HOOK_HEALTH_DEFAULT_SMOKE_SCRIPTS,
-    "startup-preflight": HOOK_HEALTH_STARTUP_PREFLIGHT_SMOKE_SCRIPTS,
-    "startup_preflight": HOOK_HEALTH_STARTUP_PREFLIGHT_SMOKE_SCRIPTS,
-    "lifecycle": HOOK_HEALTH_STARTUP_PREFLIGHT_SMOKE_SCRIPTS,
+    "initial": HOOK_HEALTH_INITIAL_HOOK_SMOKE_SCRIPTS,
+    "initial_hook_set": HOOK_HEALTH_INITIAL_HOOK_SMOKE_SCRIPTS,
     "all": HOOK_HEALTH_ALL_SMOKE_SCRIPTS,
 }
-HOOK_HEALTH_DEFAULT_LIVE_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"]
-HOOK_HEALTH_DEFAULT_REQUIRED_LIVE_EVENTS = ["SessionStart", "UserPromptSubmit"]
+HOOK_HEALTH_DEFAULT_LIVE_EVENTS = ["SessionStart", "Stop"]
+HOOK_HEALTH_DEFAULT_REQUIRED_LIVE_EVENTS = ["SessionStart", "Stop"]
 HOOK_HEALTH_LIVE_EVENT_ALIASES = {
     "sessionstart": "SessionStart",
     "session_start": "SessionStart",
     "session-start": "SessionStart",
-    "session_start_compacted": "SessionStart",
-    "userpromptsubmit": "UserPromptSubmit",
-    "user_prompt_submit": "UserPromptSubmit",
-    "user-prompt-submit": "UserPromptSubmit",
-    "prompt_preflight": "UserPromptSubmit",
-    "prompt-preflight": "UserPromptSubmit",
-    "pretooluse": "PreToolUse",
-    "pre_tool_use": "PreToolUse",
-    "pre-tool-use": "PreToolUse",
-    "pretooluse_guard": "PreToolUse",
-    "pretooluse-guard": "PreToolUse",
     "stop": "Stop",
-    "subagentstop": "Stop",
-    "subagent_stop": "Stop",
-    "subagent-stop": "Stop",
     "final_response_guard": "Stop",
     "final-response-guard": "Stop",
 }
@@ -16288,11 +12667,6 @@ def hook_health_smoke_payload(script_name: str, smoke_state_root: Path | None = 
     smoke_session_id = "hook-health-check-startup-preflight"
     if script_name == "itb-final-response-guard.sh":
         return {"session_id": "hook-health-check-final-guard"}
-    if script_name == "itb-pretooluse-guard.sh":
-        return {
-            "session_id": "hook-health-check-pretooluse",
-            "tool_input": {"command": "echo hook-health-check"},
-        }
     if script_name == "itb-session-start.sh":
         smoke_cwd = (smoke_state_root / "_cwd") if smoke_state_root else Path("/tmp")
         return {
@@ -16300,16 +12674,6 @@ def hook_health_smoke_payload(script_name: str, smoke_state_root: Path | None = 
             "cwd": str(smoke_cwd),
             "source": "SessionStart",
             "force_session_start_rebuild": True,
-        }
-    if script_name == "itb-prompt-preflight.sh":
-        smoke_cwd = (smoke_state_root / "_cwd") if smoke_state_root else Path("/tmp")
-        return {
-            "session_id": smoke_session_id,
-            "cwd": str(smoke_cwd),
-            "prompt": "今の状態を教えて？",
-            "git_diff_status": "no_diff",
-            "skip_gate_entry_queue": True,
-            "skip_gate_entry_dispatch": True,
         }
     return {}
 
@@ -16321,7 +12685,7 @@ def run_hook_health_smoke(
     smoke_state_root: Path | None = None,
 ) -> dict[str, Any]:
     script_name = normalize_cell(check.get("script"))
-    if script_name in HOOK_HEALTH_STARTUP_PREFLIGHT_SMOKE_SCRIPTS and smoke_state_root is None:
+    if script_name == "itb-session-start.sh" and smoke_state_root is None:
         return {
             "script": script_name,
             "result": "block",
@@ -16340,25 +12704,6 @@ def run_hook_health_smoke(
     payload = hook_health_smoke_payload(script_name, smoke_state_root=smoke_state_root)
     if not payload:
         return {"script": script_name, "result": "skipped_unsupported_script"}
-    session_dir = Path(str(smoke_state_root or "")) / safe_id(normalize_cell(payload.get("session_id")))
-    if script_name == "itb-prompt-preflight.sh":
-        try:
-            smoke_status = (session_dir / "status").read_text(encoding="utf-8").strip()
-        except OSError:
-            smoke_status = ""
-        if smoke_status != "ready":
-            return {
-                "script": script_name,
-                "result": "block",
-                "issues": ["session_start_smoke_required"],
-                "returncode": None,
-                "state_root": str(smoke_state_root or ""),
-                "session_id": payload.get("session_id", ""),
-                "preflight_result": "",
-                "micro_fast_path_status": "",
-                "stdout": {},
-                "stderr": "",
-            }
     script_path = Path(normalize_cell(check.get("script_path")))
     command = normalize_cell(check.get("command"))
     env_values, _, _, parse_issues = parse_hook_command(command, home_dir)
@@ -16369,12 +12714,6 @@ def run_hook_health_smoke(
     env.update(env_values)
     if smoke_state_root is not None:
         env["ITB_STATE_ROOT"] = str(smoke_state_root)
-    if script_name == "itb-session-start.sh":
-        env["ITB_AGENT_LAUNCH_DRY_RUN"] = "1"
-        env["ITB_SESSION_START_COMPACT_UNCHANGED"] = "0"
-    if script_name == "itb-prompt-preflight.sh":
-        env["ITB_GATE_ENTRY_QUEUE"] = "0"
-        env["ITB_GATE_ENTRY_DISPATCH"] = "0"
     try:
         completed = subprocess.run(
             ["bash", str(script_path)],
@@ -16402,46 +12741,36 @@ def run_hook_health_smoke(
         if not isinstance(hook_output, dict) or hook_output.get("hookEventName") != "SessionStart":
             issues.append("session_start_hook_output_missing")
         try:
-            bootstrap = read_json(session_dir / "bootstrap.json")
+            pointer = read_json(session_dir / "active-execution-context.json")
         except Exception as exc:
-            issues.append(f"bootstrap_read_failed:{type(exc).__name__}:{exc}")
-        else:
-            if normalize_cell(bootstrap.get("bootstrap_status")) != "ready":
-                issues.append("bootstrap_not_ready")
-            if not truthy_input(bootstrap.get("launch_dry_run")):
-                issues.append("session_start_not_dry_run")
-            daemon_result = normalize_cell((bootstrap.get("queue_watch_daemon_autostart") or {}).get("result"))
-            followup_result = normalize_cell((bootstrap.get("interactive_readiness_followup_autostart") or {}).get("result"))
-            if daemon_result == "started":
-                issues.append("queue_watch_daemon_started_during_smoke")
-            if followup_result == "started":
-                issues.append("interactive_followup_started_during_smoke")
-    if script_name == "itb-prompt-preflight.sh":
-        hook_output = output.get("hookSpecificOutput") if isinstance(output, dict) else {}
-        if not isinstance(hook_output, dict) or hook_output.get("hookEventName") != "UserPromptSubmit":
-            issues.append("prompt_preflight_hook_output_missing")
-        preflight_event: dict[str, Any] = {}
-        preflight_path = session_dir / "preflight-events.jsonl"
-        try:
-            lines = [line for line in preflight_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-            preflight_event = json.loads(lines[-1]) if lines else {}
-        except Exception as exc:
-            issues.append(f"preflight_event_read_failed:{type(exc).__name__}:{exc}")
-        if preflight_event:
-            if normalize_cell(preflight_event.get("result")) != "preflight_micro_fast_path":
-                issues.append("prompt_preflight_not_micro_fast_path")
-            micro = preflight_event.get("micro_fast_path") if isinstance(preflight_event.get("micro_fast_path"), dict) else {}
-            if normalize_cell(micro.get("status")) != "pass":
-                issues.append("prompt_preflight_micro_fast_path_not_pass")
-            if (session_dir / "queue" / "inbox" / "gate-prompt-formatter.yaml").exists():
-                issues.append("prompt_preflight_smoke_enqueued_gate_entry")
+            issues.append(f"active_execution_context_pointer_read_failed:{type(exc).__name__}:{exc}")
+            pointer = {}
+        if isinstance(pointer, dict):
+            allowed_keys = {
+                "session_id",
+                "runtime",
+                "cwd",
+                "started_at",
+                "harness_config_digest",
+                "active_execution_context",
+                "active_execution_context_pointer_path",
+            }
+            extra_keys = sorted(set(pointer) - allowed_keys)
+            if extra_keys:
+                issues.append("session_start_pointer_extra_keys:" + ",".join(extra_keys))
+            if pointer.get("active_execution_context") is not None:
+                issues.append("session_start_active_context_not_null")
+            if normalize_cell(pointer.get("active_execution_context_pointer_path")) != str(session_dir / "active-execution-context.json"):
+                issues.append("session_start_pointer_path_mismatch")
+        if (session_dir / "bootstrap.json").exists():
+            issues.append("session_start_wrote_legacy_bootstrap")
+        if (session_dir / "roster.json").exists():
+            issues.append("session_start_wrote_legacy_roster")
+        if (session_dir / "queue").exists():
+            issues.append("session_start_created_queue_state")
     if script_name == "itb-final-response-guard.sh":
         if not isinstance(output, dict) or output.get("permissionDecision") != "allow":
             issues.append("final_guard_not_allowed")
-    if script_name == "itb-pretooluse-guard.sh":
-        guard = output.get("pretooluseGuard") if isinstance(output, dict) else {}
-        if not isinstance(guard, dict) or guard.get("result") != "allowed":
-            issues.append("pretooluse_guard_not_allowed")
     return {
         "script": script_name,
         "result": "pass" if not issues else "block",
@@ -16449,12 +12778,6 @@ def run_hook_health_smoke(
         "returncode": completed.returncode,
         "state_root": env.get("ITB_STATE_ROOT", ""),
         "session_id": payload.get("session_id", ""),
-        "preflight_result": normalize_cell(preflight_event.get("result")) if script_name == "itb-prompt-preflight.sh" else "",
-        "micro_fast_path_status": (
-            normalize_cell((preflight_event.get("micro_fast_path") or {}).get("status"))
-            if script_name == "itb-prompt-preflight.sh" and isinstance(preflight_event.get("micro_fast_path"), dict)
-            else ""
-        ),
         "stdout": output if isinstance(output, dict) else {},
         "stderr": completed.stderr[-1000:],
     }
@@ -16582,52 +12905,29 @@ def hook_health_live_event_evidence(event_name: str, session_dir: Path, session_
         return evidence
 
     if event_name == "SessionStart":
-        bootstrap_path = session_dir / "bootstrap.json"
-        status_path = session_dir / "status"
-        invocation_path = session_dir / "invocation-evidence.jsonl"
-        last_event_path = session_dir / "last_event"
-        bootstrap, bootstrap_issue = hook_health_read_json_object_if_exists(bootstrap_path)
-        status_text, status_issue = hook_health_read_text_if_exists(status_path)
-        last_event, last_event_issue = hook_health_read_text_if_exists(last_event_path)
-        invocation, invocation_issue = hook_health_latest_jsonl_event(
-            invocation_path,
-            {"session_start", "session_start_compacted"},
-        )
-        issues = [issue for issue in (bootstrap_issue, status_issue, last_event_issue, invocation_issue) if issue]
-        bootstrap_ready = normalize_cell(bootstrap.get("bootstrap_status")) == "ready" or status_text == "ready"
-        session_start_seen = bool(invocation) or last_event.startswith("SessionStart")
-        if not bootstrap_ready:
-            issues.append("bootstrap_not_ready")
-        if not session_start_seen:
-            issues.append("session_start_event_missing")
+        pointer_path = session_dir / "active-execution-context.json"
+        pointer, pointer_issue = hook_health_read_json_object_if_exists(pointer_path)
+        issues = [pointer_issue] if pointer_issue else []
+        pointer_ready = bool(pointer) and normalize_cell(pointer.get("session_id")) == session_id
+        if not pointer_ready:
+            issues.append("active_execution_context_pointer_missing")
+        if pointer.get("active_execution_context") is not None:
+            issues.append("active_execution_context_not_null")
         evidence.update(
             {
-                "observed": bootstrap_ready and session_start_seen,
-                "result": "observed" if bootstrap_ready and session_start_seen else "missing",
-                "source": "invocation-evidence" if invocation else ("last_event" if last_event.startswith("SessionStart") else ""),
-                "evidence_path": str(invocation_path if invocation else last_event_path if last_event.startswith("SessionStart") else bootstrap_path),
-                "ts": normalize_cell(invocation.get("ts")),
-                "bootstrap_status": normalize_cell(bootstrap.get("bootstrap_status")),
-                "status": status_text,
-                "last_event": last_event,
+                "observed": pointer_ready,
+                "result": "observed" if pointer_ready else "missing",
+                "source": "active-execution-context",
+                "evidence_path": str(pointer_path),
+                "ts": normalize_cell(pointer.get("started_at")),
+                "active_execution_context": pointer.get("active_execution_context"),
+                "harness_config_digest": normalize_cell(pointer.get("harness_config_digest")),
                 "issues": issues,
             }
         )
         return evidence
 
     event_specs = {
-        "UserPromptSubmit": {
-            "path": session_dir / "preflight-events.jsonl",
-            "event_types": {"prompt_preflight"},
-            "source": "preflight-events",
-            "missing_issue": "prompt_preflight_event_missing",
-        },
-        "PreToolUse": {
-            "path": session_dir / "pretooluse-guard-events.jsonl",
-            "event_types": {"pretooluse_guard"},
-            "source": "pretooluse-guard-events",
-            "missing_issue": "pretooluse_guard_event_missing",
-        },
         "Stop": {
             "path": session_dir / "final-response-guard-events.jsonl",
             "event_types": {"final_response_guard"},
@@ -17045,6 +13345,23 @@ def hook_health_check_output(*, runtime: str, state_root: Path, hook_input: dict
                         require_script_path_match=hooks_dir_explicit,
                     )
                 )
+        for spec in hook_retired_event_specs(runtime, hooks_dir, builder_path):
+            event = str(spec["event"])
+            script_name = str(spec["script"])
+            entries = [entry for entry in hook_settings_command_entries(settings, event) if script_name in normalize_cell(entry.get("command"))]
+            for entry in entries:
+                checks.append(
+                    {
+                        "event": event,
+                        "script": script_name,
+                        "command": normalize_cell(entry.get("command")),
+                        "entry_index": entry.get("entry_index"),
+                        "hook_index": entry.get("hook_index"),
+                        "matcher": normalize_cell(entry.get("matcher")),
+                        "issues": ["retired_itb_hook_registered"],
+                        "result": "block",
+                    }
+                )
         if runtime == "codex":
             hook_trust_state = apply_codex_hook_trust_state(
                 config_path=paths.get("config_path"),
@@ -17270,45 +13587,427 @@ def hook_install_output(*, runtime: str, state_root: Path, hook_input: dict[str,
     return output
 
 
-def pretooluse_guard_output(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
+
+def final_gate_loop_policy() -> dict[str, Any]:
+    return {
+        "total_recovery_cycle_budget": FINAL_GATE_DEFAULT_RECOVERY_CYCLE_BUDGET,
+        "tuning_range": list(FINAL_GATE_RECOVERY_CYCLE_TUNING_RANGE),
+        "same_blocker_consecutive_cap": FINAL_GATE_SAME_BLOCKER_CONSECUTIVE_CAP,
+        "budget_unit": FINAL_GATE_BUDGET_UNIT,
+    }
+
+
+def final_gate_pointer_path(session_dir: Path, hook_input: dict[str, Any]) -> Path:
+    raw = normalize_cell(
+        hook_input.get("active_execution_context_pointer_path")
+        or hook_input.get("activeExecutionContextPointerPath")
+        or hook_input.get("pointer_path")
+        or hook_input.get("pointerPath")
+        or os.environ.get("ITB_ACTIVE_EXECUTION_CONTEXT_POINTER")
+    )
+    return Path(raw).expanduser() if raw else session_dir / "active-execution-context.json"
+
+
+def final_gate_legacy_gate_command_path(hook_input: dict[str, Any]) -> Path | None:
+    raw = normalize_cell(
+        hook_input.get("legacy_gate_command_artifact_path")
+        or hook_input.get("legacyGateCommandArtifactPath")
+        or hook_input.get("gate_command_artifact_path")
+        or hook_input.get("gateCommandArtifactPath")
+    )
+    return Path(raw).expanduser() if raw else None
+
+
+def final_gate_read_json_object(path: Path) -> tuple[dict[str, Any], str]:
+    try:
+        data = read_json(path)
+    except FileNotFoundError:
+        return {}, "missing"
+    except Exception as exc:
+        return {}, f"read_error:{type(exc).__name__}:{exc}"
+    if not isinstance(data, dict):
+        return {}, "not_object"
+    return data, ""
+
+
+def final_gate_blocker(
+    blocker_id: str,
+    detail: str,
+    *,
+    owner: str = "coordinator",
+    next_action: str = "fix",
+) -> dict[str, Any]:
+    if next_action not in FINAL_GATE_NEXT_ACTIONS:
+        next_action = "mark_blocked"
+    return {
+        "id": blocker_id,
+        "severity": "blocking",
+        "owner": owner,
+        "next_action": next_action,
+        "detail": detail,
+    }
+
+
+def final_gate_schema(
+    *,
+    verdict: str,
+    context_type: str,
+    context_id: str,
+    reason_code: str,
+    blockers: list[dict[str, Any]] | None = None,
+    allowed_next_actions: list[str] | None = None,
+) -> dict[str, Any]:
+    blockers = blockers or []
+    allowed = [item for item in (allowed_next_actions or []) if item in FINAL_GATE_NEXT_ACTIONS]
+    if verdict == "allow":
+        blockers = []
+        allowed = []
+    if context_type not in EXECUTION_CONTEXT_TYPES:
+        context_type = "execution"
+    if reason_code not in FINAL_GATE_REASON_CODES:
+        reason_code = "blocked" if verdict == "block" else "complete"
+    return {
+        "verdict": "block" if verdict == "block" else "allow",
+        "context_type": context_type,
+        "context_id": context_id or "null",
+        "reason_code": reason_code,
+        "blockers": blockers,
+        "allowed_next_actions": allowed,
+    }
+
+
+def final_gate_complete_status(value: Any) -> bool:
+    normalized = normalized_publication_value(value)
+    return normalized in {"pass", "passed", "complete", "completed", "done", "closed", "approved", "satisfied", "ok", "true"}
+
+
+def final_gate_required_item(item: dict[str, Any]) -> bool:
+    for key in ("required", "is_required", "isRequired"):
+        if key in item:
+            return truthy_input(item.get(key), default=True)
+    return True
+
+
+def final_gate_context_path_from_pointer(pointer: dict[str, Any]) -> str:
+    active = pointer.get("active_execution_context")
+    if isinstance(active, dict):
+        for key in ("path", "context_path", "contextPath", "execution_context_path", "executionContextPath"):
+            value = normalize_cell(active.get(key))
+            if value:
+                return value
+    for key in (
+        "active_execution_context_path",
+        "activeExecutionContextPath",
+        "execution_context_path",
+        "executionContextPath",
+        "context_path",
+        "contextPath",
+    ):
+        value = normalize_cell(pointer.get(key))
+        if value:
+            return value
+    if isinstance(active, str) and ("/" in active or active.endswith(".json")):
+        return active
+    return ""
+
+
+def final_gate_context_id_from_context(context: dict[str, Any], pointer: dict[str, Any]) -> str:
+    for source in (context, pointer):
+        for key in ("context_id", "contextId", "task_id", "taskId", "id"):
+            value = normalize_cell(source.get(key))
+            if value:
+                return value
+    active = pointer.get("active_execution_context")
+    if isinstance(active, dict):
+        for key in ("context_id", "contextId", "task_id", "taskId", "id"):
+            value = normalize_cell(active.get(key))
+            if value:
+                return value
+    elif isinstance(active, str) and active and "/" not in active and not active.endswith(".json"):
+        return active
+    return ""
+
+
+def final_gate_blocking_level(context: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    raw = normalize_cell(context.get("blocking_level") or context.get("blockingLevel"))
+    if raw == "none":
+        return "none", []
+    if raw == "non_blocking":
+        return "blocking", [
+            final_gate_blocker(
+                "unsupported_blocking_level",
+                "`non_blocking` is not a valid blocking level; use `none` or `blocking`.",
+                next_action="mark_blocked",
+            )
+        ]
+    return "blocking", []
+
+
+def final_gate_artifact_blockers(context: dict[str, Any]) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    artifacts = context.get("required_artifacts") or context.get("requiredArtifacts") or []
+    if not isinstance(artifacts, list):
+        return [final_gate_blocker("invalid_required_artifacts", "required_artifacts must be a list.", next_action="mark_blocked")]
+    for index, artifact in enumerate(artifacts):
+        if not isinstance(artifact, dict):
+            blockers.append(final_gate_blocker("invalid_required_artifact", f"required_artifacts[{index}] must be an object.", next_action="mark_blocked"))
+            continue
+        if not final_gate_required_item(artifact):
+            continue
+        artifact_id = normalize_cell(artifact.get("id") or artifact.get("name") or f"artifact_{index}")
+        status = artifact.get("status")
+        if status is not None and not final_gate_complete_status(status):
+            blockers.append(final_gate_blocker("missing_required_artifact", f"{artifact_id} status is not complete.", next_action="fix"))
+            continue
+        path_value = normalize_cell(artifact.get("path") or artifact.get("artifact_path") or artifact.get("artifactPath"))
+        if path_value:
+            path = Path(path_value).expanduser()
+            if not path.exists():
+                blockers.append(final_gate_blocker("missing_required_artifact", f"{artifact_id} does not exist: {path}", next_action="fix"))
+                continue
+            expected_sha = normalize_cell(artifact.get("sha256") or artifact.get("expected_sha256") or artifact.get("expectedSha256"))
+            if expected_sha:
+                actual_sha = file_sha256_if_exists(path)
+                if actual_sha != expected_sha:
+                    blockers.append(final_gate_blocker("artifact_hash_mismatch", f"{artifact_id} sha256 does not match: {path}", next_action="fix"))
+    return blockers
+
+
+def final_gate_required_check_blockers(context: dict[str, Any]) -> list[dict[str, Any]]:
+    checks = context.get("required_checks") or context.get("requiredChecks") or []
+    if not isinstance(checks, list):
+        return [final_gate_blocker("invalid_required_checks", "required_checks must be a list.", next_action="mark_blocked")]
+    blockers: list[dict[str, Any]] = []
+    for index, check in enumerate(checks):
+        if not isinstance(check, dict):
+            blockers.append(final_gate_blocker("invalid_required_check", f"required_checks[{index}] must be an object.", next_action="mark_blocked"))
+            continue
+        if not final_gate_required_item(check):
+            continue
+        if not final_gate_complete_status(check.get("status")):
+            check_id = normalize_cell(check.get("id") or check.get("name") or f"check_{index}")
+            blockers.append(final_gate_blocker("missing_required_check", f"{check_id} is not complete.", next_action="fix"))
+    return blockers
+
+
+def final_gate_open_finding_blockers(context: dict[str, Any]) -> list[dict[str, Any]]:
+    findings = context.get("open_blocking_findings") or context.get("openBlockingFindings") or []
+    if isinstance(findings, int):
+        return [final_gate_blocker("open_blocking_finding", f"{findings} blocking finding(s) remain open.", next_action="fix")] if findings > 0 else []
+    if not isinstance(findings, list):
+        return [final_gate_blocker("invalid_open_blocking_findings", "open_blocking_findings must be a list or count.", next_action="mark_blocked")]
+    blockers: list[dict[str, Any]] = []
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            blockers.append(final_gate_blocker("invalid_open_blocking_finding", f"open_blocking_findings[{index}] must be an object.", next_action="mark_blocked"))
+            continue
+        status = normalized_publication_value(finding.get("status"))
+        if status not in {"closed", "resolved", "done", "complete"}:
+            finding_id = normalize_cell(finding.get("id") or f"finding_{index}")
+            blockers.append(final_gate_blocker("open_blocking_finding", f"{finding_id} remains open.", next_action="fix"))
+    return blockers
+
+
+def final_gate_pending_work_blockers(context: dict[str, Any]) -> list[dict[str, Any]]:
+    pending = context.get("pending_work_units") or context.get("pendingWorkUnits") or []
+    if isinstance(pending, int):
+        return [final_gate_blocker("pending_work_unit", f"{pending} required work unit(s) remain pending.", next_action="fix")] if pending > 0 else []
+    if not isinstance(pending, list):
+        return [final_gate_blocker("invalid_pending_work_units", "pending_work_units must be a list or count.", next_action="mark_blocked")]
+    blockers: list[dict[str, Any]] = []
+    for index, work in enumerate(pending):
+        if not isinstance(work, dict):
+            blockers.append(final_gate_blocker("invalid_pending_work_unit", f"pending_work_units[{index}] must be an object.", next_action="mark_blocked"))
+            continue
+        if not final_gate_complete_status(work.get("status")):
+            work_id = normalize_cell(work.get("id") or work.get("name") or f"work_{index}")
+            blockers.append(final_gate_blocker("pending_work_unit", f"{work_id} is not complete.", next_action="fix"))
+    return blockers
+
+
+def final_gate_from_execution_context(context: dict[str, Any], pointer: dict[str, Any]) -> dict[str, Any]:
+    context_type = normalize_cell(context.get("context_type") or context.get("contextType") or pointer.get("context_type") or pointer.get("contextType") or "execution")
+    context_id = final_gate_context_id_from_context(context, pointer)
+    if context_type not in EXECUTION_CONTEXT_TYPES:
+        return final_gate_schema(
+            verdict="block",
+            context_type="execution",
+            context_id=context_id,
+            reason_code="blocked",
+            blockers=[final_gate_blocker("invalid_context_type", f"context_type is not supported: {context_type}", next_action="mark_blocked")],
+            allowed_next_actions=["mark_blocked"],
+        )
+    blocking_level, blockers = final_gate_blocking_level(context)
+    if blocking_level == "none":
+        return final_gate_schema(verdict="allow", context_type=context_type, context_id=context_id, reason_code="no_active_context")
+    goal_status = normalized_publication_value(context.get("goal_status") or context.get("goalStatus"))
+    human_approval_required = truthy_input(context.get("human_approval_required") or context.get("humanApprovalRequired"))
+    if human_approval_required:
+        blockers.append(final_gate_blocker("required_human_approval", "Human approval is required before final response.", next_action="ask_human"))
+    if goal_status == "blocked":
+        blockers.append(final_gate_blocker("execution_context_blocked", "Execution context is marked blocked.", next_action="mark_blocked"))
+    blockers.extend(final_gate_required_check_blockers(context))
+    blockers.extend(final_gate_artifact_blockers(context))
+    blockers.extend(final_gate_open_finding_blockers(context))
+    blockers.extend(final_gate_pending_work_blockers(context))
+    final_response_allowed = context.get("final_response_allowed")
+    if final_response_allowed is False:
+        blockers.append(final_gate_blocker("final_response_not_allowed", "execution_context.final_response_allowed is false.", next_action="fix"))
+    if blockers:
+        next_actions: list[str] = []
+        for blocker in blockers:
+            action = normalize_cell(blocker.get("next_action"))
+            if action in FINAL_GATE_NEXT_ACTIONS and action not in next_actions:
+                next_actions.append(action)
+        reason_code = "required_approval" if any(item.get("next_action") == "ask_human" for item in blockers) else ("blocked" if any(item.get("next_action") == "mark_blocked" for item in blockers) else "incomplete")
+        return final_gate_schema(
+            verdict="block",
+            context_type=context_type,
+            context_id=context_id,
+            reason_code=reason_code,
+            blockers=blockers,
+            allowed_next_actions=next_actions or ["fix"],
+        )
+    if goal_status in {"complete", "completed", "done"} or final_response_allowed is True:
+        return final_gate_schema(verdict="allow", context_type=context_type, context_id=context_id, reason_code="complete")
+    return final_gate_schema(
+        verdict="block",
+        context_type=context_type,
+        context_id=context_id,
+        reason_code="incomplete",
+        blockers=[final_gate_blocker("goal_not_complete", f"goal_status is not complete: {goal_status or 'missing'}", next_action="fix")],
+        allowed_next_actions=["fix"],
+    )
+
+
+def final_gate_from_legacy_gate_command(path: Path) -> dict[str, Any]:
+    payload, issue = final_gate_read_json_object(path)
+    if issue:
+        return final_gate_schema(
+            verdict="block",
+            context_type="execution",
+            context_id="null",
+            reason_code="blocked",
+            blockers=[final_gate_blocker("legacy_gate_command_unreadable", f"{path}: {issue}", next_action="mark_blocked")],
+            allowed_next_actions=["mark_blocked"],
+        )
+    status = normalize_cell(payload.get("status"))
+    context_id = normalize_cell(payload.get("task_id") or payload.get("context_id"))
+    if status in {"pass", "complete"} and truthy_input(payload.get("next_phase_allowed"), default=True):
+        return final_gate_schema(verdict="allow", context_type="execution", context_id=context_id, reason_code="complete")
+    blockers = []
+    for index, detail in enumerate(normalize_string_list(payload.get("missing_evidence") or payload.get("validation_errors") or payload.get("blockers"))):
+        blockers.append(final_gate_blocker("legacy_gate_command_blocker", detail or f"legacy blocker {index}", next_action="fix"))
+    if not blockers:
+        blockers.append(final_gate_blocker("legacy_gate_command_blocker", "Legacy gateCommand status is not pass.", next_action="fix"))
+    return final_gate_schema(
+        verdict="block",
+        context_type="execution",
+        context_id=context_id,
+        reason_code="incomplete",
+        blockers=blockers,
+        allowed_next_actions=["fix"],
+    )
+
+
+def execution_context_final_response_guard_output(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
     session_id, session_source = resolve_session_id(state_root, hook_input)
     if not session_id:
-        session_id = "pretooluse-guard"
+        session_id = "final-response-guard"
     session_dir = state_root / safe_id(session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
     now = current_timestamp()
-    command = pretooluse_command_text(hook_input)
-    allow_override = truthy_input(hook_input.get("allow_itb_tmux_send") or hook_input.get("allowItbTmuxSend"))
-    targets = tmux_itb_targets_from_command(command)
-    blocked = bool(targets) and not allow_override
+    pointer_path = final_gate_pointer_path(session_dir, hook_input)
+    legacy_path = final_gate_legacy_gate_command_path(hook_input)
+    pointer, pointer_issue = final_gate_read_json_object(pointer_path)
+    context_path = final_gate_context_path_from_pointer(pointer) if pointer else ""
+    context: dict[str, Any] = {}
+    context_issue = ""
+    if pointer_issue == "missing" and legacy_path is not None:
+        gate = final_gate_from_legacy_gate_command(legacy_path)
+        source = "legacy_gate_command_adapter"
+    elif pointer_issue == "missing":
+        gate = final_gate_schema(verdict="allow", context_type="none", context_id="null", reason_code="no_active_context")
+        source = "no_active_pointer"
+    elif pointer_issue:
+        gate = final_gate_schema(
+            verdict="block",
+            context_type="execution",
+            context_id="null",
+            reason_code="blocked",
+            blockers=[final_gate_blocker("invalid_session_pointer", f"{pointer_path}: {pointer_issue}", next_action="mark_blocked")],
+            allowed_next_actions=["mark_blocked"],
+        )
+        source = "session_pointer"
+    elif not pointer.get("active_execution_context") and not context_path:
+        gate = final_gate_schema(verdict="allow", context_type="none", context_id="null", reason_code="no_active_context")
+        source = "session_pointer"
+    elif not context_path:
+        gate = final_gate_schema(
+            verdict="block",
+            context_type="execution",
+            context_id=final_gate_context_id_from_context({}, pointer),
+            reason_code="blocked",
+            blockers=[final_gate_blocker("execution_context_path_missing", "Session pointer references an active context without a context path.", next_action="mark_blocked")],
+            allowed_next_actions=["mark_blocked"],
+        )
+        source = "session_pointer"
+    else:
+        context, context_issue = final_gate_read_json_object(Path(context_path).expanduser())
+        if context_issue:
+            gate = final_gate_schema(
+                verdict="block",
+                context_type="execution",
+                context_id=final_gate_context_id_from_context({}, pointer),
+                reason_code="blocked",
+                blockers=[final_gate_blocker("execution_context_unreadable", f"{context_path}: {context_issue}", next_action="mark_blocked")],
+                allowed_next_actions=["mark_blocked"],
+            )
+        else:
+            gate = final_gate_from_execution_context(context, pointer)
+        source = "execution_context"
+
+    enforce = truthy_input(
+        hook_input.get("enforce_final_gate")
+        or hook_input.get("enforceFinalGate")
+        or hook_input.get("hard_block")
+        or hook_input.get("hardBlock")
+        or os.environ.get("ITB_FINAL_GATE_HARD_BLOCK"),
+        default=False,
+    )
     event = {
         "ts": now,
         "runtime": runtime,
-        "event_type": "pretooluse_guard",
+        "event_type": "final_response_guard",
         "session_id": session_id,
         "session_source": session_source,
-        "tool_name": normalize_cell(hook_input.get("tool_name") or hook_input.get("toolName") or "Bash"),
-        "result": "blocked_raw_itb_tmux_send" if blocked else "allowed",
-        "command": command,
-        "itb_tmux_targets": targets,
-        "allow_override": allow_override,
+        "result": "final_gate_allowed" if gate["verdict"] == "allow" else ("blocked_execution_context" if enforce else "advisory_block_execution_context"),
+        "notification_class": "silent" if gate["verdict"] == "allow" else "flow_alert",
+        "source": source,
+        "active_execution_context_pointer_path": str(pointer_path),
+        "execution_context_path": context_path,
+        "execution_context_read_issue": context_issue,
+        "legacy_gate_command_artifact_path": str(legacy_path) if legacy_path else "",
+        "hard_block_enforced": enforce,
+        "loop_policy": final_gate_loop_policy(),
+        "final_gate": gate,
     }
-    append_jsonl_atomic(session_dir / "pretooluse-guard-events.jsonl", event)
-    if blocked:
-        reason = (
-            "raw tmux send-keys/paste-buffer to ITB-owned provider targets is forbidden; "
-            "route through ITB builder nudge/queue commands"
-        )
-        return {
-            "decision": "block",
-            "permissionDecision": "deny",
-            "reason": reason,
-            "pretooluseGuard": event,
-        }
-    return {"pretooluseGuard": event}
+    append_jsonl_atomic(session_dir / "final-response-guard-events.jsonl", event)
+    output = {
+        "permissionDecision": "allow",
+        "finalResponseGuard": event,
+        "finalGate": gate,
+    }
+    if gate["verdict"] == "block" and enforce:
+        output["decision"] = "block"
+        output["permissionDecision"] = "deny"
+        output["reason"] = "; ".join(normalize_cell(item.get("detail")) for item in gate["blockers"]) or "final response blocked by execution context"
+    return output
 
 
 def final_response_guard_output(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
+    if not truthy_input(hook_input.get("legacy_final_response_guard") or hook_input.get("legacyFinalResponseGuard")):
+        return execution_context_final_response_guard_output(runtime=runtime, state_root=state_root, hook_input=hook_input)
     session_id, session_source = resolve_session_id(state_root, hook_input)
     if not session_id:
         session_id = "final-response-guard"
@@ -17590,2632 +14289,45 @@ def notification_dispatch_output(*, runtime: str, state_root: Path, hook_input: 
     return output
 
 
-def tmux_capture_pane(target: str, history_lines: int) -> tuple[str, str]:
-    completed = run_tmux(
-        ["capture-pane", "-p", "-S", f"-{history_lines}", "-t", target],
-        timeout=5.0,
-    )
-    if completed.returncode != 0:
-        return "", completed.stderr.strip() or completed.stdout.strip()
-    return completed.stdout, ""
 
 
-def tmux_pane_in_mode(target: str) -> tuple[bool, str]:
-    completed = run_tmux(["display-message", "-p", "-t", target, "#{pane_in_mode}"], timeout=2.0)
-    if completed.returncode != 0:
-        return False, completed.stderr.strip() or completed.stdout.strip()
-    return completed.stdout.strip() == "1", ""
 
 
-def tmux_send_payload(target: str, payload: str, submit_enter_count: int = 2) -> tuple[bool, str]:
-    in_mode, mode_error = tmux_pane_in_mode(target)
-    if mode_error:
-        return False, mode_error
-    if in_mode:
-        return False, "target pane is in tmux copy-mode; refusing to paste payload"
-    dismiss_overlay = run_tmux(["send-keys", "-t", target, "Escape"], timeout=5.0)
-    if dismiss_overlay.returncode != 0:
-        return False, dismiss_overlay.stderr.strip() or dismiss_overlay.stdout.strip()
-    clear_input = run_tmux(["send-keys", "-t", target, "C-u"], timeout=5.0)
-    if clear_input.returncode != 0:
-        return False, clear_input.stderr.strip() or clear_input.stdout.strip()
-    buffer_name = f"itb-agent-{uuid.uuid4().hex[:12]}"
-    load_buffer = run_tmux_with_input(["load-buffer", "-b", buffer_name, "-"], payload, timeout=5.0)
-    if load_buffer.returncode != 0:
-        return False, load_buffer.stderr.strip() or load_buffer.stdout.strip()
-    try:
-        paste = run_tmux(["paste-buffer", "-p", "-b", buffer_name, "-t", target], timeout=5.0)
-        if paste.returncode != 0:
-            return False, paste.stderr.strip() or paste.stdout.strip()
-        for index in range(max(1, submit_enter_count)):
-            if index:
-                time.sleep(0.5)
-            enter = run_tmux(["send-keys", "-t", target, "Enter"], timeout=5.0)
-            if enter.returncode != 0:
-                return False, enter.stderr.strip() or enter.stdout.strip()
-    finally:
-        run_tmux(["delete-buffer", "-b", buffer_name], timeout=2.0)
-    return True, ""
 
 
-def line_has_composer_prompt_before_marker(line: str, marker_index: int) -> bool:
-    prefix = line[: marker_index + 1]
-    return "❯" in prefix or "›" in prefix
 
 
-def captured_marker_is_submitted(captured: str, marker: str) -> bool:
-    if not marker:
-        return False
-    for line in captured.splitlines():
-        marker_index = line.find(marker)
-        if marker_index < 0:
-            continue
-        if line_has_composer_prompt_before_marker(line, marker_index):
-            continue
-        return True
-    return False
 
 
-def captured_any_marker_is_submitted(captured: str, markers: list[str]) -> bool:
-    return any(captured_marker_is_submitted(captured, marker) for marker in markers if marker)
 
 
-def captured_placeholder_is_submitted(captured: str) -> bool:
-    placeholder_pattern = re.compile(r"\[Pasted text #\d+ \+\d+ lines\]")
-    for line in captured.splitlines()[-24:]:
-        match = placeholder_pattern.search(line)
-        if not match:
-            continue
-        if line_has_composer_prompt_before_marker(line, match.start()):
-            continue
-        return True
-    return False
 
 
-def captured_tail_has_unsubmitted_payload(captured: str, markers: list[str]) -> bool:
-    tail_lines = [line for line in captured.splitlines()[-24:] if line.strip()]
-    for line in tail_lines:
-        for marker in markers:
-            if not marker:
-                continue
-            marker_index = line.find(marker)
-            if marker_index >= 0 and line_has_composer_prompt_before_marker(line, marker_index):
-                return True
-    return False
 
 
-def wait_for_tmux_payload_ack(
-    *,
-    target: str,
-    markers: list[str],
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-    history_lines: int = 240,
-) -> tuple[bool, str]:
-    if timeout_seconds <= 0:
-        return True, "ack disabled"
-    deadline = time.monotonic() + timeout_seconds
-    last_error = ""
-    normalized_markers = [marker for marker in markers if marker]
-    while time.monotonic() < deadline:
-        captured, error = tmux_capture_pane(target, history_lines)
-        if error:
-            last_error = error
-        elif captured_any_marker_is_submitted(captured, normalized_markers):
-            return True, ""
-        elif normalized_markers and captured_placeholder_is_submitted(captured):
-            return True, ""
-        time.sleep(poll_interval_seconds)
-    expected = ", ".join(normalized_markers) if normalized_markers else "payload marker"
-    return False, last_error or f"timed out waiting for submitted payload marker: {expected}"
 
 
-def recover_unconfirmed_tmux_payload_send(
-    *,
-    target: str,
-    payload: str,
-    markers: list[str],
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-    history_lines: int,
-    submit_enter_count: int,
-) -> tuple[bool, str, list[dict[str, Any]]]:
-    attempts: list[dict[str, Any]] = []
-    captured, capture_error = tmux_capture_pane(target, history_lines)
-    if not capture_error and captured_any_marker_is_submitted(captured, markers):
-        attempts.append({"action": "submitted_marker_pre_recovery_check", "result": "already_submitted", "error": ""})
-        return True, "", attempts
-    extra_enter = run_tmux(["send-keys", "-t", target, "Enter"], timeout=5.0)
-    enter_result = "sent" if extra_enter.returncode == 0 else "failed"
-    enter_error = extra_enter.stderr.strip() or extra_enter.stdout.strip()
-    attempts.append({"action": "extra_enter", "result": enter_result, "error": enter_error})
-    if extra_enter.returncode == 0:
-        ack_ok, ack_error = wait_for_tmux_payload_ack(
-            target=target,
-            markers=markers,
-            timeout_seconds=timeout_seconds,
-            poll_interval_seconds=poll_interval_seconds,
-            history_lines=history_lines,
-        )
-        attempts.append({"action": "ack_after_extra_enter", "result": "acknowledged" if ack_ok else "unconfirmed", "error": ack_error})
-        if ack_ok:
-            return True, "", attempts
-    else:
-        ack_error = enter_error
 
-    captured, capture_error = tmux_capture_pane(target, history_lines)
-    if not capture_error and captured_any_marker_is_submitted(captured, markers):
-        attempts.append({"action": "submitted_marker_before_repaste_check", "result": "already_submitted", "error": ""})
-        return True, "", attempts
-    residual = captured_tail_has_unsubmitted_payload(captured, markers) if not capture_error else False
-    attempts.append(
-        {
-            "action": "residual_payload_check",
-            "result": "residual_detected" if residual else "not_detected",
-            "error": capture_error,
-        }
-    )
-    if not residual:
-        return False, ack_error or capture_error or "send ack unconfirmed and residual payload was not detected", attempts
 
-    resent, resend_error = tmux_send_payload(target, payload, submit_enter_count=submit_enter_count)
-    attempts.append({"action": "clear_and_repaste", "result": "resent" if resent else "failed", "error": resend_error})
-    if not resent:
-        return False, resend_error, attempts
-    ack_ok, ack_error = wait_for_tmux_payload_ack(
-        target=target,
-        markers=markers,
-        timeout_seconds=timeout_seconds,
-        poll_interval_seconds=poll_interval_seconds,
-        history_lines=history_lines,
-    )
-    attempts.append({"action": "ack_after_repaste", "result": "acknowledged" if ack_ok else "unconfirmed", "error": ack_error})
-    return ack_ok, "" if ack_ok else ack_error, attempts
 
 
-def agent_dispatch_report_ref(agent_id: str, request_id: str) -> str:
-    return str(Path("reports") / "agent-dispatch" / safe_id(agent_id) / f"{safe_id(request_id)}.yaml")
 
 
-def write_agent_dispatch_transport_refs(
-    *,
-    queue_root: Path,
-    agent_id: str,
-    request_id: str,
-    runtime: str,
-    session_id: str,
-    organization_instance_id: str,
-    source_agent: str,
-    cwd: str,
-    prompt: str,
-    created_at: str,
-    report_ref: str,
-) -> tuple[Path, str, Path, str, str]:
-    base_ref = Path("dispatch") / "agent-dispatch" / safe_id(agent_id) / safe_id(request_id)
-    instruction_ref = str(base_ref / "instruction.yaml")
-    manifest_ref = str(base_ref / "manifest.yaml")
-    instruction_path = safe_queue_relative_path(queue_root, instruction_ref, "agent_dispatch_instruction_path")
-    manifest_path = safe_queue_relative_path(queue_root, manifest_ref, "agent_dispatch_manifest_path")
-    session_dir = queue_root.parent
-    state_root = session_dir.parent
-    writer_command = agent_dispatch_report_writer_command(runtime, state_root, session_id)
-    instruction = {
-        "dispatch_instruction_version": "1",
-        "request_id": request_id,
-        "agent_id": agent_id,
-        "source_agent": source_agent,
-        "runtime": runtime,
-        "session_id": session_id,
-        "organization_instance_id": organization_instance_id,
-        "cwd": cwd,
-        "created_at": created_at,
-        "instruction": prompt,
-    }
-    manifest = {
-        "dispatch_manifest_version": "1",
-        "request_id": request_id,
-        "agent_id": agent_id,
-        "source_agent": source_agent,
-        "runtime": runtime,
-        "session_id": session_id,
-        "organization_instance_id": organization_instance_id,
-        "created_at": created_at,
-        "instruction_ref": instruction_ref,
-        "instruction_path": str(instruction_path),
-        "report_ref": report_ref,
-        "required_report_path": str(queue_root / report_ref),
-        "atomic_report_writer": writer_command,
-        "transport_finalizer": "agent-dispatch-report",
-        "required_report_fields": [
-            "agent_id",
-            "request_id",
-            "result",
-            "response",
-            "provider_evidence",
-        ],
-        "provider_evidence_fields": [
-            "provider_session_id",
-            "request_id",
-            "effective_model",
-            "usage_source",
-            "transcript_path",
-            "started_at",
-            "completed_at",
-            "duration_sec",
-        ],
-        "allowed_results": [
-            "provider_response_ready",
-            "provider_response_timeout",
-            "provider_send_unconfirmed",
-            "provider_request_sent",
-        ],
-        "notes": [
-            "Do not answer the human directly.",
-            "Do not write queue report or inbox status directly.",
-            "Run atomic_report_writer as the first command token with --report-json containing one JSON object when done or blocked.",
-            "Do not use stdin, heredoc, echo, printf, cat, or a pipe for the finalizer.",
-            "Use the bracketed response marker only after the file report has been written.",
-        ],
-    }
-    write_json_yaml(instruction_path, instruction)
-    write_json_yaml(manifest_path, manifest)
-    return instruction_path, instruction_ref, manifest_path, manifest_ref, writer_command
 
 
-def build_agent_dispatch_payload(
-    *,
-    runtime: str,
-    request_id: str,
-    agent_id: str,
-    source_agent: str,
-    cwd: str,
-    dispatch_manifest_ref: str = "",
-    dispatch_manifest_path: str = "",
-    instruction_ref: str = "",
-    instruction_path: str = "",
-    report_ref: str = "",
-    atomic_report_writer: str = "",
-) -> str:
-    skill_path = role_definition_path(agent_id)
-    runtime_label = "Codex" if runtime == "codex" else "Claude" if runtime == "claude" else runtime
-    return f"""[ITB_AGENT_REQUEST id={request_id} agent={agent_id} from={source_agent}]
-You are `{agent_id}` running as an activated resident organization agent.
-This request was routed from {runtime_label} as transport/coordinator; do not treat {runtime_label}'s main model as the role executor.
-Read and follow your SKILL.md before producing the role output.
-SKILL.md: {skill_path}
-Workspace: {cwd}
-dispatch_manifest_ref: {dispatch_manifest_ref}
-dispatch_manifest_path: {dispatch_manifest_path}
-instruction_ref: {instruction_ref}
-instruction_path: {instruction_path}
-report_ref: {report_ref}
-atomic_report_writer: {atomic_report_writer}
 
-Read dispatch_manifest_path and instruction_path. The delegated task body is in the instruction file, not in this transport prompt.
-Use Bash only as the transport finalizer tool for atomic_report_writer. Do not use Bash for role work unless your SKILL.md allows it.
-Finalize by running atomic_report_writer as the first command token with --report-json containing one JSON object. Include agent_id, request_id, result, response, provider_evidence, instruction_ref, and dispatch_manifest_ref.
-Example:
-{atomic_report_writer} --report-json '{{"agent_id":"{agent_id}","request_id":"{request_id}","result":"provider_response_ready","response":"...","provider_evidence":{{}},"instruction_ref":"{instruction_ref}","dispatch_manifest_ref":"{dispatch_manifest_ref}"}}'
-For success use result: provider_response_ready. If blocked, use result: provider_response_timeout or provider_send_unconfirmed with error/blockers. Prefer the file report over pane-only completion.
 
-Stay inside your role boundary. Do not create plan files, do not perform downstream task work, and do not wait for additional coordinator input unless the prompt is truly impossible.
-Output discipline: report work content only; do not narrate routing, queue, gate, or evidence plumbing. Use [FLOW-ALERT] once only for blockers or approval waits.
-When finished, end your response with one bracketed marker line.
-Marker name: ITB_AGENT_RESPONSE_DONE
-Marker id: {request_id}
-Marker format: [MARKER_NAME id=MARKER_ID]
-"""
 
 
-def extract_agent_dispatch_response(captured: str, request_id: str) -> str:
-    request_marker = f"[ITB_AGENT_REQUEST id={request_id}"
-    done_marker = f"[ITB_AGENT_RESPONSE_DONE id={request_id}]"
-    start_index = captured.find(request_marker)
-    if start_index == -1:
-        start_index = 0
-    end_index = captured.find(done_marker, start_index)
-    if end_index == -1:
-        segment = captured[start_index:]
-    else:
-        segment = captured[start_index:end_index]
 
-    if request_marker in segment:
-        first_newline = segment.find("\n")
-        if first_newline != -1:
-            segment = segment[first_newline + 1 :]
-    marker_format = "Marker format: [MARKER_NAME id=MARKER_ID]"
-    marker_format_index = segment.rfind(marker_format)
-    if marker_format_index != -1:
-        segment = segment[marker_format_index + len(marker_format) :]
-    # Claude marks assistant turns with ⏺; Codex marks them with •. Trim to the
-    # first such marker when present so we drop the echoed request payload.
-    assistant_index = min(
-        (idx for idx in (segment.find("⏺"), segment.find("•")) if idx != -1),
-        default=-1,
-    )
-    if assistant_index != -1:
-        segment = segment[assistant_index:]
 
-    cleaned_lines: list[str] = []
-    for line in segment.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        for bullet in ("⏺", "•"):
-            if stripped.startswith(bullet):
-                stripped = stripped.removeprefix(bullet).strip()
-                break
-        if not stripped:
-            continue
-        cleaned_lines.append(stripped)
-    return "\n".join(cleaned_lines).strip()
 
 
-def captured_tail_provider_busy(captured: str) -> bool:
-    visible_tail = "\n".join(line for line in captured.splitlines()[-12:] if line.strip())
-    busy_markers = (
-        "Esc to interrupt",
-        "Thinking",
-        "Working",
-        "Proofing",
-        "Waddling",
-        "Baked",
-    )
-    return any(marker in visible_tail for marker in busy_markers)
 
 
-def captured_tail_provider_approval(captured: str) -> bool:
-    visible_tail = "\n".join(line for line in captured.splitlines()[-16:] if line.strip()).lower()
-    approval_markers = (
-        "allow codex to",
-        "do you want to allow",
-        "the command to approve is",
-        "allow the bash command and retry",
-        "bash permission",
-        "auto-mode classifier flagged",
-        "approval prompt",
-    )
-    return any(marker in visible_tail for marker in approval_markers)
 
 
-def captured_tail_has_idle_composer(captured: str) -> bool:
-    visible_tail = "\n".join(line for line in captured.splitlines()[-12:] if line.strip())
-    if not ("❯" in visible_tail or "›" in visible_tail):
-        return False
-    if captured_tail_provider_approval(captured):
-        return False
-    if captured_tail_provider_busy(captured):
-        return False
-    return True
 
-
-def wait_for_agent_marker(
-    *,
-    target: str,
-    request_id: str,
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-    history_lines: int,
-    idle_fast_fail_seconds: float | None = None,
-    idle_fast_fail_polls: int | None = None,
-) -> tuple[bool, str, str]:
-    marker = f"[ITB_AGENT_RESPONSE_DONE id={request_id}]"
-    idle_seconds = (
-        bounded_float_input(
-            os.environ.get("ITB_AGENT_DISPATCH_IDLE_FAST_FAIL_SECONDS"),
-            default=30.0,
-            minimum=0.0,
-            maximum=600.0,
-        )
-        if idle_fast_fail_seconds is None
-        else max(0.0, float(idle_fast_fail_seconds))
-    )
-    idle_poll_threshold = (
-        bounded_int_input(
-            os.environ.get("ITB_AGENT_DISPATCH_IDLE_FAST_FAIL_POLLS"),
-            default=2,
-            minimum=1,
-            maximum=100,
-        )
-        if idle_fast_fail_polls is None
-        else max(1, int(idle_fast_fail_polls))
-    )
-    deadline = time.monotonic() + timeout_seconds
-    started = time.monotonic()
-    idle_prompt_polls = 0
-    last_capture = ""
-    while time.monotonic() < deadline:
-        last_capture, error = tmux_capture_pane(target, history_lines)
-        if error:
-            return False, last_capture, error
-        if marker in last_capture:
-            return True, last_capture, ""
-        if captured_tail_has_idle_composer(last_capture):
-            idle_prompt_polls += 1
-            if idle_prompt_polls >= idle_poll_threshold and time.monotonic() - started >= idle_seconds:
-                return (
-                    False,
-                    last_capture,
-                    f"provider returned to idle prompt before response marker: {marker}",
-                )
-        else:
-            idle_prompt_polls = 0
-        time.sleep(poll_interval_seconds)
-    return False, last_capture, f"timed out waiting for {marker}"
-
-
-def wait_for_agent_completion(
-    *,
-    target: str,
-    request_id: str,
-    report_path: Path,
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-    history_lines: int,
-) -> tuple[bool, str, str, str]:
-    marker = f"[ITB_AGENT_RESPONSE_DONE id={request_id}]"
-    idle_seconds = bounded_float_input(
-        os.environ.get("ITB_AGENT_DISPATCH_IDLE_FAST_FAIL_SECONDS"),
-        default=30.0,
-        minimum=0.0,
-        maximum=600.0,
-    )
-    idle_poll_threshold = bounded_int_input(
-        os.environ.get("ITB_AGENT_DISPATCH_IDLE_FAST_FAIL_POLLS"),
-        default=2,
-        minimum=1,
-        maximum=100,
-    )
-    deadline = time.monotonic() + timeout_seconds
-    started = time.monotonic()
-    idle_prompt_polls = 0
-    last_capture = ""
-    while time.monotonic() < deadline:
-        if report_path.exists():
-            return True, last_capture, "", "dispatch_report_file"
-        last_capture, error = tmux_capture_pane(target, history_lines)
-        if error:
-            return False, last_capture, error, "pane_capture"
-        if marker in last_capture:
-            return True, last_capture, "", "pane_marker"
-        if captured_tail_has_idle_composer(last_capture):
-            idle_prompt_polls += 1
-            if idle_prompt_polls >= idle_poll_threshold and time.monotonic() - started >= idle_seconds:
-                return (
-                    False,
-                    last_capture,
-                    f"provider returned to idle prompt before response marker or report file: {marker}",
-                    "idle_fast_fail",
-                )
-        else:
-            idle_prompt_polls = 0
-        time.sleep(poll_interval_seconds)
-    return False, last_capture, f"timed out waiting for {marker} or {report_path}", "timeout"
-
-
-def agent_dispatch_default_timeout_seconds(hook_input: dict[str, Any]) -> float:
-    workflow_mode = normalized_publication_value(
-        hook_input.get("workflow_mode")
-        or hook_input.get("workflowMode")
-        or hook_input.get("flow_mode")
-        or hook_input.get("flowMode")
-    )
-    risk_tier = normalized_publication_value(hook_input.get("risk_tier") or hook_input.get("riskTier"))
-    if workflow_mode in {"micro", "micro_flow", "controlled_micro_flow"} or risk_tier == "low":
-        return 120.0
-    return 600.0
-
-
-def write_agent_dispatch_report(
-    *,
-    queue_root: Path,
-    agent_id: str,
-    request_id: str,
-    runtime: str,
-    session_id: str,
-    organization_instance_id: str,
-    source_agent: str,
-    target: str,
-    result: str,
-    usage_source: str,
-    effective_model: str,
-    started_at: str,
-    completed_at: str,
-    duration_seconds: float,
-    response: str,
-    wait_error: str,
-    captured: str,
-    launch_result: dict[str, Any],
-    wait_enabled: bool,
-    instruction_ref: str = "",
-    dispatch_manifest_ref: str = "",
-    transcript_path: str = "",
-    input_tokens: int | None = None,
-    output_tokens: int | None = None,
-    duration_api_ms: int | None = None,
-    turn_duration_ms: int | None = None,
-    num_turns: int | None = None,
-) -> tuple[Path, str]:
-    report_ref = agent_dispatch_report_ref(agent_id, request_id)
-    report_path = safe_queue_relative_path(queue_root, report_ref, "agent_dispatch_report_path")
-    captured_tail = "\n".join(captured.splitlines()[-80:]) if captured else ""
-    report = {
-        "report_version": "1",
-        "report_id": report_path.stem,
-        "report_type": "agent_dispatch_transport_result",
-        "from_role": agent_id,
-        "request_id": request_id,
-        "created_at": completed_at,
-        "runtime": runtime,
-        "session_id": session_id,
-        "organization_instance_id": organization_instance_id,
-        "source_agent": source_agent,
-        "result": result,
-        "status": "done" if result == "provider_response_ready" else "pending" if result == "provider_request_sent" else "failed",
-        "summary": response or wait_error or "agent-dispatch transport request recorded",
-        "response": response,
-        "error": wait_error,
-        "completion_signal": "pane_marker" if result == "provider_response_ready" else "transport_state",
-        "wait_enabled": wait_enabled,
-        "provider_evidence": {
-            "usage_source": usage_source,
-            "effective_model": effective_model,
-            "provider_session_id": target,
-            "tmux_target": target,
-            "started_at": started_at,
-            "completed_at": completed_at,
-            "duration_sec": round(max(0.0, duration_seconds), 3),
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "duration_api_ms": duration_api_ms,
-            "turn_duration_ms": turn_duration_ms,
-            "num_turns": num_turns,
-            "transcript_path": transcript_path,
-            "launch_status": launch_result.get("launch_status", ""),
-            "pane_current_command": launch_result.get("pane_current_command", ""),
-        },
-        "captured_tail": captured_tail,
-        "queue": {
-            "queue_root": str(queue_root),
-            "report_path": report_ref,
-            "instruction_ref": instruction_ref,
-            "dispatch_manifest_ref": dispatch_manifest_ref,
-        },
-    }
-    write_json_yaml(report_path, report)
-    return report_path, report_ref
-
-
-def validate_agent_dispatch_transport_report(report: dict[str, Any], *, agent_id: str, request_id: str) -> list[str]:
-    errors: list[str] = []
-    for key in ("report_version", "report_type", "from_role", "request_id", "created_at", "result", "status", "summary"):
-        if not normalize_cell(report.get(key)):
-            errors.append(f"agent-dispatch report missing {key}")
-    report_version = normalize_cell(report.get("report_version"))
-    if report_version and report_version != "1":
-        errors.append(f"agent-dispatch report_version must be 1: {report_version}")
-    report_type = normalize_cell(report.get("report_type"))
-    if report_type and report_type != "agent_dispatch_transport_result":
-        errors.append(f"agent-dispatch report_type mismatch: {report_type}")
-    report_role = normalize_cell(report.get("from_role"))
-    if report_role and report_role != agent_id:
-        errors.append(f"agent-dispatch report from_role mismatch: expected {agent_id}, got {report_role}")
-    report_request_id = normalize_cell(report.get("request_id"))
-    if report_request_id and report_request_id != request_id:
-        errors.append(f"agent-dispatch report request_id mismatch: expected {request_id}, got {report_request_id}")
-    report_result = normalize_cell(report.get("result"))
-    report_status = normalize_cell(report.get("status")).lower()
-    if report_status and report_status not in {"done", "pending", "failed"}:
-        errors.append(f"agent-dispatch report status must be done, pending, or failed: {report_status}")
-    expected_status = "done" if report_result == "provider_response_ready" else "pending" if report_result == "provider_request_sent" else "failed"
-    if report_result and report_status and report_status != expected_status:
-        errors.append(
-            f"agent-dispatch report status/result mismatch: result={report_result}, status={report_status}, expected={expected_status}"
-        )
-    evidence = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
-    if report_status == "done":
-        usage_source = normalized_publication_value(evidence.get("usage_source") if isinstance(evidence, dict) else "")
-        if usage_source in INVALID_PUBLICATION_USAGE_SOURCES:
-            errors.append("agent-dispatch done report provider evidence usage_source is missing or not provider-backed")
-        for key in ("provider_session_id", "duration_sec", "started_at", "completed_at"):
-            if not value_present(evidence.get(key)):
-                errors.append(f"agent-dispatch done report provider evidence missing {key}")
-    return errors
-
-
-def record_invalid_agent_dispatch_report(
-    *,
-    runtime: str,
-    session_dir: Path,
-    session_id: str,
-    organization_instance_id: str,
-    queue_root: Path,
-    agent_id: str,
-    request_id: str,
-    report_path: Path,
-    report_ref: str,
-    errors: list[str],
-    now: str,
-) -> None:
-    event = {
-        "ts": now,
-        "runtime": runtime,
-        "event_type": "agent_dispatch_report_invalid",
-        "session_id": session_id,
-        "organization_instance_id": organization_instance_id,
-        "agent_id": agent_id,
-        "request_id": request_id,
-        "result": "invalid_report",
-        "report_path": str(report_path),
-        "report_ref": report_ref,
-        "errors": errors,
-    }
-    append_jsonl_atomic(session_dir / "queue-events.jsonl", event)
-    append_agent_dispatch_metric(
-        session_dir=session_dir,
-        queue_root=queue_root,
-        runtime=runtime,
-        session_id=session_id,
-        organization_instance_id=organization_instance_id,
-        agent_id=agent_id,
-        request_id=request_id,
-        source_agent="agent-dispatch",
-        usage_source="report_invalid",
-        effective_model="unavailable",
-        result="invalid_report",
-        started_at=now,
-        completed_at=now,
-        duration_seconds=0.0,
-    )
-
-
-def agent_dispatch_report_command(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    if hook_input.get("_cli_report_json_error"):
-        return {
-            "decision": "block",
-            "reason": f"agent-dispatch-report invalid report-json: {hook_input.get('_cli_report_json_error')}",
-        }
-    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
-    session_dir = state_root / safe_id(session_id)
-    state_path = session_dir / "bootstrap.json"
-    state = read_json(state_path) if state_path.exists() else {}
-    organization_instance_id = str(
-        state.get("organization_instance_id")
-        or hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or organization_id(session_id)
-    )
-    queue_root = queue_root_for(session_dir, hook_input)
-    agent_id = normalize_cell(hook_input.get("agent_id") or hook_input.get("agentId") or hook_input.get("role_id") or hook_input.get("roleId"))
-    request_id = normalize_cell(hook_input.get("request_id") or hook_input.get("requestId"))
-    if not agent_id:
-        return {"decision": "block", "reason": "agent-dispatch-report requires agent_id"}
-    if not request_id:
-        return {"decision": "block", "reason": "agent-dispatch-report requires request_id"}
-    now = current_timestamp()
-    started_at = normalize_cell(hook_input.get("started_at") or hook_input.get("startedAt") or now)
-    completed_at = normalize_cell(hook_input.get("completed_at") or hook_input.get("completedAt") or now)
-    duration_seconds = bounded_float_input(
-        hook_input.get("duration_sec") or hook_input.get("durationSec") or iso_seconds_delta(completed_at, started_at),
-        default=0.0,
-        minimum=0.0,
-        maximum=86400.0,
-    )
-    provider_evidence = hook_input.get("provider_evidence") if isinstance(hook_input.get("provider_evidence"), dict) else {}
-    provider_evidence = dict(provider_evidence)
-    provider_evidence.setdefault("transcript_path", normalize_cell(hook_input.get("transcript_path") or hook_input.get("transcriptPath")))
-    provider_evidence.setdefault("input_tokens", hook_input.get("input_tokens") or hook_input.get("inputTokens") or "")
-    provider_evidence.setdefault("output_tokens", hook_input.get("output_tokens") or hook_input.get("outputTokens") or "")
-    provider_evidence.setdefault("duration_api_ms", hook_input.get("duration_api_ms") or hook_input.get("durationApiMs") or "")
-    provider_evidence.setdefault("turn_duration_ms", hook_input.get("turn_duration_ms") or hook_input.get("turnDurationMs") or "")
-    provider_evidence.setdefault("num_turns", hook_input.get("num_turns") or hook_input.get("numTurns") or "")
-    provider_usage_fields = provider_usage_metric_fields(provider_evidence)
-    usage_source = normalize_cell(
-        provider_evidence.get("usage_source")
-        or hook_input.get("usage_source")
-        or hook_input.get("usageSource")
-        or "provider_authored_agent_dispatch_report"
-    )
-    effective_model = normalize_cell(
-        provider_evidence.get("effective_model")
-        or hook_input.get("effective_model")
-        or hook_input.get("effectiveModel")
-    )
-    target = normalize_cell(
-        provider_evidence.get("provider_session_id")
-        or hook_input.get("provider_session_id")
-        or hook_input.get("providerSessionId")
-        or hook_input.get("target")
-        or hook_input.get("tmux_target")
-        or hook_input.get("tmuxTarget")
-    )
-    if not target:
-        tmux_session = normalize_cell(state.get("tmux_session")) or safe_tmux_name(f"itb-{organization_instance_id}", max_length=60)
-        target = f"{tmux_session}:{safe_tmux_name(agent_id)}.0"
-    result = normalize_cell(hook_input.get("result") or "provider_response_ready")
-    response = str(hook_input.get("response") or hook_input.get("summary") or "")
-    wait_error = normalize_cell(hook_input.get("error") or hook_input.get("wait_error") or hook_input.get("waitError"))
-    instruction_ref = normalize_cell(hook_input.get("instruction_ref") or hook_input.get("instructionRef"))
-    dispatch_manifest_ref = normalize_cell(hook_input.get("dispatch_manifest_ref") or hook_input.get("dispatchManifestRef"))
-    report_path, report_ref = write_agent_dispatch_report(
-        queue_root=queue_root,
-        agent_id=agent_id,
-        request_id=request_id,
-        runtime=runtime,
-        session_id=session_id,
-        organization_instance_id=organization_instance_id,
-        source_agent=normalize_cell(hook_input.get("source_agent") or hook_input.get("sourceAgent") or "agent-dispatch-report"),
-        target=target,
-        result=result,
-        usage_source=usage_source,
-        effective_model=effective_model,
-        started_at=started_at,
-        completed_at=completed_at,
-        duration_seconds=duration_seconds,
-        response=response,
-        wait_error=wait_error,
-        captured=str(hook_input.get("captured") or ""),
-        launch_result={},
-        wait_enabled=False,
-        instruction_ref=instruction_ref,
-        dispatch_manifest_ref=dispatch_manifest_ref,
-        transcript_path=normalize_cell(provider_evidence.get("transcript_path") or provider_evidence.get("transcriptPath")),
-        input_tokens=provider_usage_fields.get("input_tokens"),
-        output_tokens=provider_usage_fields.get("output_tokens"),
-        duration_api_ms=provider_usage_fields.get("duration_api_ms"),
-        turn_duration_ms=provider_usage_fields.get("turn_duration_ms"),
-        num_turns=provider_usage_fields.get("num_turns"),
-    )
-    report = read_json_yaml(report_path)
-    errors = validate_agent_dispatch_transport_report(
-        report if isinstance(report, dict) else {},
-        agent_id=agent_id,
-        request_id=request_id,
-    )
-    integrity = report_file_integrity(report_path)
-    output = {
-        "agentDispatchReport": {
-            "result": "written" if not errors else "invalid_report",
-            "agent_id": agent_id,
-            "request_id": request_id,
-            "report_path": str(report_path),
-            "report_ref": report_ref,
-            "report_integrity": integrity,
-            "schema_errors": errors,
-        }
-    }
-    if errors:
-        output["decision"] = "block"
-        output["reason"] = "agent-dispatch report failed schema validation: " + "; ".join(errors)
-    return output
-
-
-def diagnose_agent_dispatch_timeout(captured: str, request_id: str) -> str:
-    if not captured.strip():
-        return "tmux capture was empty at timeout"
-
-    diagnostics: list[str] = []
-    request_marker = f"[ITB_AGENT_REQUEST id={request_id}"
-    done_marker = f"[ITB_AGENT_RESPONSE_DONE id={request_id}]"
-    tail = "\n".join(line for line in captured.splitlines()[-24:] if line.strip())
-    if request_marker in captured and done_marker not in captured:
-        diagnostics.append("request marker was visible but response marker was absent")
-    if "Do you want to" in tail or "Run shell command" in tail or "Bash command" in tail or "Allow Codex to" in tail:
-        diagnostics.append("provider approval prompt appears to be waiting")
-    if ("❯" in tail or "›" in tail) and done_marker not in captured:
-        diagnostics.append("provider input prompt is visible without the response marker")
-    if any(word in tail for word in ("Proofing", "Waddling", "Thinking", "Baked", "Working", "Esc to interrupt")) and done_marker not in captured:
-        diagnostics.append("provider appears to have been processing near timeout")
-    return "; ".join(dict.fromkeys(diagnostics))
-
-
-def wait_for_interactive_prompt(
-    *,
-    target: str,
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-) -> tuple[bool, str]:
-    deadline = time.monotonic() + timeout_seconds
-    last_error = ""
-    while time.monotonic() < deadline:
-        captured, error = tmux_capture_pane(target, 160)
-        visible_tail = "\n".join(line for line in captured.splitlines()[-12:] if line.strip())
-        if error:
-            last_error = error
-        elif "Choose the text style" in visible_tail or "Let's get started." in visible_tail:
-            return False, "provider_onboarding_blocked: Claude theme/onboarding prompt is waiting"
-        elif (
-            "Select login method:" in visible_tail
-            or "Paste code here if prompted" in visible_tail
-            or "Browser didn't open? Use the url below to sign in" in visible_tail
-        ):
-            return False, "provider_onboarding_blocked: Claude login prompt is waiting"
-        elif "Quick safety check:" in visible_tail:
-            return False, "Claude workspace trust prompt is waiting for human approval"
-        elif captured_tail_provider_approval(captured):
-            return False, "provider approval prompt is waiting for human approval"
-        elif "copy mode" in visible_tail.lower():
-            return False, "tmux copy-mode is active"
-        elif any(marker in visible_tail for marker in ("Esc to interrupt", "Thinking", "Working")):
-            last_error = "provider appears busy"
-        # Claude composer uses ❯ (U+276F); Codex composer uses › (U+203A).
-        elif "❯" in visible_tail or "›" in visible_tail:
-            return True, ""
-        time.sleep(poll_interval_seconds)
-    return False, last_error or "timed out waiting for provider interactive prompt"
-
-
-def ensure_provider_cli_for_agent(
-    *,
-    row: dict[str, Any],
-    state: dict[str, Any],
-    cwd: str,
-    now: str,
-    force_respawn: bool = False,
-    permission_mode: str = "",
-    tools: str = "default",
-) -> tuple[dict[str, Any] | None, str]:
-    provider_runtime = agent_runtime(row)
-    if provider_runtime is None:
-        return None, f"unsupported provider/execution mode for {row.get('agent_id', '<unknown>')}"
-    if provider_runtime[0] not in {"claude_tmux", "codex_tmux"}:
-        return None, f"agent-dispatch supports Claude/Codex tmux providers only: {row.get('agent_id', '<unknown>')}"
-    if interactive_codex_resident_disabled(row, "provider_cli"):
-        return None, interactive_codex_resident_disabled_reason(row)
-    if shutil.which("tmux") is None:
-        return None, "tmux command not found"
-    command = provider_runtime[1]
-    if shutil.which(command) is None:
-        return None, f"{command} command not found"
-
-    organization_instance_id = state.get("organization_instance_id") or row.get("organization_instance_id") or ""
-    session_name = state.get("tmux_session") or safe_tmux_name(f"itb-{organization_instance_id}", max_length=60)
-    window_name = safe_tmux_name(row["agent_id"])
-    target = f"{session_name}:{window_name}.0"
-    queue_root = normalize_cell(state.get("queue_root"))
-    if queue_root:
-        Path(queue_root).expanduser().mkdir(parents=True, exist_ok=True)
-    launch_command, runtime_kind = build_agent_command(
-        row,
-        cwd,
-        "provider_cli",
-        permission_mode=permission_mode,
-        tools=tools,
-        extra_add_dirs=[queue_root] if queue_root else None,
-    )
-    base_result: dict[str, Any] = {
-        "agent_id": row["agent_id"],
-        "process_status": "not_launched",
-        "launch_status": "not_attempted",
-        "runtime_kind": runtime_kind,
-        "process_mode": "provider_cli",
-        "provider_runtime_kind": provider_runtime[0],
-        "provider_status": "not_started",
-        "tool_sidecar_status": "not_verified",
-        "tmux_session": session_name,
-        "tmux_window": window_name,
-        "tmux_target": target,
-        "process_evidence_source": "tmux",
-        "process_started_at": "",
-        "launch_error": "",
-        "tools": tools,
-    }
-
-    session_exists = tmux_session_exists(session_name)
-    window_exists = session_exists and tmux_window_exists(session_name, window_name)
-    tmux_config: dict[str, Any] = {}
-    if window_exists:
-        info = tmux_pane_info(session_name, window_name)
-        if info and info.get("pane_dead") == "0":
-            if not force_respawn and pane_matches_agent(info, row, command, "provider_cli"):
-                tmux_config = configure_tmux_capture_settings(session_name)
-                result = base_result | {
-                    "process_status": "process_ready",
-                    "launch_status": "already_running",
-                    "provider_status": "provider_process_ready",
-                    "process_started_at": now,
-                    "pane_current_command": info.get("pane_current_command", ""),
-                    "pane_pid": info.get("pane_pid", ""),
-                } | tmux_config
-                mark_launch_result(row, result)
-                return result, ""
-            if force_respawn and (
-                pane_matches_agent(info, row, command, "provider_cli")
-                or pane_is_provider_cli_for_agent(info, row)
-                or pane_is_resident_shell_for_agent(info, row)
-            ):
-                completed = run_tmux(["respawn-pane", "-k", "-t", target, launch_command], timeout=5.0)
-                action = "force_respawned"
-            elif pane_is_resident_shell_for_agent(info, row):
-                completed = run_tmux(["respawn-pane", "-k", "-t", target, launch_command], timeout=5.0)
-                action = "upgraded_resident_shell"
-            elif should_respawn_conflicting_itb_pane(
-                session_name=session_name,
-                window_name=window_name,
-                row=row,
-            ):
-                completed = run_tmux(["respawn-pane", "-k", "-t", target, launch_command], timeout=5.0)
-                action = "replaced_conflicting_itb_pane"
-            else:
-                error = f"existing pane command={info.get('pane_current_command', '')}"
-                result = base_result | {
-                    "process_status": "launch_failed",
-                    "launch_status": "window_conflict",
-                    "launch_error": error,
-                }
-                mark_launch_result(row, result)
-                return result, error
-        else:
-            completed = run_tmux(["respawn-pane", "-k", "-t", target, launch_command], timeout=5.0)
-            action = "respawned_window"
-    elif session_exists:
-        completed = run_tmux(["new-window", "-d", "-t", session_name, "-n", window_name, launch_command], timeout=5.0)
-        action = "created_window"
-    else:
-        completed = run_tmux(["new-session", "-d", "-s", session_name, "-n", window_name, launch_command], timeout=5.0)
-        action = "created_session"
-
-    if completed.returncode != 0:
-        error = completed.stderr.strip() or completed.stdout.strip()
-        result = base_result | {
-            "process_status": "launch_failed",
-            "launch_status": action,
-            "launch_error": error,
-        }
-        mark_launch_result(row, result)
-        return result, error
-
-    tmux_config = configure_tmux_capture_settings(session_name)
-    info = None
-    for _ in range(20):
-        time.sleep(0.2)
-        info = tmux_pane_info(session_name, window_name)
-        if info and info.get("pane_dead") == "0":
-            break
-
-    if info and info.get("pane_dead") == "0":
-        result = base_result | {
-            "process_status": "process_ready",
-            "launch_status": action,
-            "provider_status": "provider_process_ready",
-            "process_started_at": now,
-            "pane_current_command": info.get("pane_current_command", ""),
-            "pane_pid": info.get("pane_pid", ""),
-        } | tmux_config
-        mark_launch_result(row, result)
-        return result, ""
-
-    result = base_result | {
-        "process_status": "launch_failed",
-        "launch_status": f"{action}_exited",
-        "launch_error": "tmux pane did not remain live after launch",
-    }
-    mark_launch_result(row, result)
-    return result, result["launch_error"]
-
-
-def agent_dispatch_context_reset_decision(row: dict[str, Any], hook_input: dict[str, Any]) -> dict[str, Any]:
-    reset_every = bounded_int_input(
-        hook_input.get("context_reset_every")
-        or hook_input.get("contextResetEvery")
-        or os.environ.get("ITB_AGENT_DISPATCH_CONTEXT_RESET_EVERY")
-        or 8,
-        default=8,
-        minimum=0,
-        maximum=1000,
-    )
-    prior_turns = bounded_int_input(
-        row.get("dispatch_context_turns"),
-        default=0,
-        minimum=0,
-        maximum=100000,
-    )
-    task_id = normalize_cell(hook_input.get("task_id") or hook_input.get("taskId"))
-    previous_task_id = normalize_cell(row.get("last_dispatch_task_id") or row.get("last_task_id"))
-    explicit_force = truthy_input(hook_input.get("force_respawn") or hook_input.get("forceRespawn"))
-    reasons: list[str] = []
-    if explicit_force:
-        reasons.append("force_respawn_requested")
-    if previous_task_id and task_id and previous_task_id != task_id:
-        reasons.append("task_boundary")
-    if reset_every > 0 and prior_turns >= reset_every:
-        reasons.append("dispatch_context_turn_limit")
-    return {
-        "force_respawn": bool(reasons),
-        "reasons": reasons,
-        "task_id": task_id,
-        "previous_task_id": previous_task_id,
-        "prior_turns": prior_turns,
-        "reset_every": reset_every,
-    }
-
-
-def agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(
-        current_session_id(state_root, hook_input)
-        or "unknown-session"
-    )
-    session_dir = state_root / safe_id(session_id)
-    state_path = session_dir / "bootstrap.json"
-    roster_path = session_dir / "roster.json"
-    started_at = current_timestamp()
-    started_monotonic = time.monotonic()
-
-    if not state_path.exists() or not roster_path.exists():
-        return {"decision": "block", "reason": "bootstrap.json or roster.json missing"}
-
-    state = read_json(state_path)
-    roster = read_json(roster_path)
-    if not isinstance(state, dict) or not isinstance(roster, list):
-        return {"decision": "block", "reason": "bootstrap state or roster is invalid"}
-
-    agent_id = normalize_cell(hook_input.get("agent_id") or hook_input.get("agentId") or "gate-prompt-formatter")
-    source_agent = normalize_cell(hook_input.get("source_agent") or hook_input.get("sourceAgent") or "codex-main")
-    prompt = str(hook_input.get("prompt") or "")
-    if not prompt.strip():
-        return {"decision": "block", "reason": "agent-dispatch requires prompt"}
-
-    row = next((item for item in roster if item.get("agent_id") == agent_id), None)
-    if row is None:
-        return {"decision": "block", "reason": f"agent not found in roster: {agent_id}"}
-    transport_row = dict(row)
-    transport_row["transport_finalizer"] = "agent-dispatch-report"
-
-    dispatch_runtime = agent_runtime(transport_row)
-    dispatch_runtime_kind = dispatch_runtime[0] if dispatch_runtime else ""
-    is_codex_target = dispatch_runtime_kind == "codex_tmux"
-    usage_source = "codex_tmux_interactive" if is_codex_target else "claude_tmux_interactive"
-    provider_label = "Codex" if is_codex_target else "Claude"
-    organization_instance_id = state.get("organization_instance_id", organization_id(session_id))
-    queue_root = queue_root_for(session_dir, hook_input)
-
-    cwd = str(hook_input.get("cwd") or state.get("cwd") or os.getcwd())
-    permission_mode = provider_permission_mode_for_model(
-        row.get("intended_model", ""),
-        hook_input.get("permission_mode") or hook_input.get("permissionMode"),
-    )
-    tools = normalize_cell(hook_input.get("tools") or "default")
-    if permission_mode not in AGENT_DISPATCH_ALLOWED_PERMISSION_MODES:
-        allowed = ", ".join(sorted(AGENT_DISPATCH_ALLOWED_PERMISSION_MODES))
-        return {"decision": "block", "reason": f"unsupported agent-dispatch permission_mode: {permission_mode}; allowed={allowed}"}
-    if tools == "default":
-        tools = transport_tools_argument_for_role(transport_row)
-    else:
-        tools_validation_error = validate_tools_argument_for_role(row, tools)
-        if tools_validation_error:
-            return {"decision": "block", "reason": tools_validation_error}
-        requested_tools = normalize_allowed_tools(tools)
-        for tool in normalize_allowed_tools(transport_tools_argument_for_role(transport_row)):
-            if tool in QUEUE_FINALIZER_TRANSPORT_TOOLS and tool not in requested_tools:
-                requested_tools.append(tool)
-        tools = allowed_tools_argument(requested_tools)
-    tools_validation_error = validate_tools_argument_for_role(transport_row, tools)
-    if tools_validation_error:
-        return {"decision": "block", "reason": tools_validation_error}
-    git_validation_error = validate_git_operation_for_role(transport_row, prompt)
-    if git_validation_error:
-        return {"decision": "block", "reason": git_validation_error}
-
-    context_reset = agent_dispatch_context_reset_decision(transport_row, hook_input)
-    launch_result, launch_error = ensure_provider_cli_for_agent(
-        row=transport_row,
-        state=state,
-        cwd=cwd,
-        now=started_at,
-        force_respawn=bool(context_reset["force_respawn"]),
-        permission_mode=permission_mode,
-        tools=tools,
-    )
-    if launch_error:
-        completed_at = current_timestamp()
-        duration_seconds = time.monotonic() - started_monotonic
-        append_jsonl_atomic(
-            session_dir / "invocation-evidence.jsonl",
-            invocation_evidence_entry(
-                ts=completed_at,
-                runtime=runtime,
-                event_type="agent_dispatch",
-                session_id=session_id,
-                organization_instance_id=organization_instance_id,
-                agent_id=agent_id,
-                result="provider_process_failed",
-                usage_source=usage_source,
-                effective_model=row.get("intended_model", ""),
-                notes=launch_error,
-                extra=(launch_result or {})
-                | {
-                    "started_at": started_at,
-                    "completed_at": completed_at,
-                    "duration_sec": round(max(0.0, duration_seconds), 3),
-                    "context_reset": context_reset,
-                },
-            ),
-        )
-        append_agent_dispatch_metric(
-            session_dir=session_dir,
-            queue_root=queue_root,
-            runtime=runtime,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            agent_id=agent_id,
-            request_id="",
-            source_agent=source_agent,
-            usage_source=usage_source,
-            effective_model=row.get("intended_model", ""),
-            result="provider_process_failed",
-            started_at=started_at,
-            completed_at=completed_at,
-            duration_seconds=duration_seconds,
-        )
-        roster = merge_roster_agent_row_locked(roster_path, roster, agent_id, row)
-        return {
-            "decision": "block",
-            "reason": launch_error,
-            "agentDispatch": {
-                "launch": launch_result,
-                "context_reset": context_reset,
-                "started_at": started_at,
-                "completed_at": completed_at,
-                "duration_sec": round(max(0.0, duration_seconds), 3),
-            },
-        }
-
-    assert launch_result is not None
-    target = launch_result["tmux_target"]
-    request_id = uuid.uuid4().hex[:12]
-    if launch_result.get("launch_status") != "already_running":
-        run_tmux(["clear-history", "-t", target], timeout=2.0)
-    prompt_ready_timeout_seconds = bounded_float_input(
-        hook_input.get("prompt_ready_timeout_seconds")
-        or hook_input.get("promptReadyTimeoutSeconds")
-        or 20,
-        default=20,
-        minimum=1,
-        maximum=120,
-    )
-    prompt_ready, prompt_ready_error = wait_for_interactive_prompt(
-        target=target,
-        timeout_seconds=prompt_ready_timeout_seconds,
-        poll_interval_seconds=0.5,
-    )
-    if not prompt_ready:
-        completed_at = current_timestamp()
-        duration_seconds = time.monotonic() - started_monotonic
-        append_agent_dispatch_metric(
-            session_dir=session_dir,
-            queue_root=queue_root,
-            runtime=runtime,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            agent_id=agent_id,
-            request_id=request_id,
-            source_agent=source_agent,
-            usage_source=usage_source,
-            effective_model=row.get("intended_model", ""),
-            result="provider_prompt_not_ready",
-            started_at=started_at,
-            completed_at=completed_at,
-            duration_seconds=duration_seconds,
-        )
-        return {
-            "decision": "block",
-            "reason": prompt_ready_error,
-            "agentDispatch": {
-                "target": target,
-                "request_id": request_id,
-                "started_at": started_at,
-                "completed_at": completed_at,
-                "duration_sec": round(max(0.0, duration_seconds), 3),
-            },
-        }
-    expected_report_ref = agent_dispatch_report_ref(agent_id, request_id)
-    instruction_path, instruction_ref, dispatch_manifest_path, dispatch_manifest_ref, atomic_report_writer = write_agent_dispatch_transport_refs(
-        queue_root=queue_root,
-        agent_id=agent_id,
-        request_id=request_id,
-        runtime=runtime,
-        session_id=session_id,
-        organization_instance_id=organization_instance_id,
-        source_agent=source_agent,
-        cwd=cwd,
-        prompt=prompt,
-        created_at=started_at,
-        report_ref=expected_report_ref,
-    )
-    payload = build_agent_dispatch_payload(
-        runtime=runtime,
-        request_id=request_id,
-        agent_id=agent_id,
-        source_agent=source_agent,
-        cwd=cwd,
-        dispatch_manifest_ref=dispatch_manifest_ref,
-        dispatch_manifest_path=str(dispatch_manifest_path),
-        instruction_ref=instruction_ref,
-        instruction_path=str(instruction_path),
-        report_ref=expected_report_ref,
-        atomic_report_writer=atomic_report_writer,
-    )
-    submit_enter_count = bounded_int_input(
-        hook_input.get("submit_enter_count") or hook_input.get("submitEnterCount") or 2,
-        default=2,
-        minimum=1,
-        maximum=3,
-    )
-    sent, send_error = tmux_send_payload(target, payload, submit_enter_count=submit_enter_count)
-    if not sent:
-        completed_at = current_timestamp()
-        duration_seconds = time.monotonic() - started_monotonic
-        append_agent_dispatch_metric(
-            session_dir=session_dir,
-            queue_root=queue_root,
-            runtime=runtime,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            agent_id=agent_id,
-            request_id=request_id,
-            source_agent=source_agent,
-            usage_source=usage_source,
-            effective_model=row.get("intended_model", ""),
-            result="provider_send_failed",
-            started_at=started_at,
-            completed_at=completed_at,
-            duration_seconds=duration_seconds,
-        )
-        return {
-            "decision": "block",
-            "reason": send_error,
-            "agentDispatch": {
-                "target": target,
-                "request_id": request_id,
-                "started_at": started_at,
-                "completed_at": completed_at,
-                "duration_sec": round(max(0.0, duration_seconds), 3),
-            },
-        }
-    send_ack_timeout_seconds = bounded_float_input(
-        hook_input.get("send_ack_timeout_seconds") or hook_input.get("sendAckTimeoutSeconds") or 3,
-        default=3,
-        minimum=0,
-        maximum=30,
-    )
-    send_ack_poll_seconds = bounded_float_input(
-        hook_input.get("send_ack_poll_seconds") or hook_input.get("sendAckPollSeconds") or 0.2,
-        default=0.2,
-        minimum=0.05,
-        maximum=5,
-    )
-    send_ack_history_lines = bounded_int_input(
-        hook_input.get("send_ack_history_lines") or hook_input.get("sendAckHistoryLines") or 600,
-        default=600,
-        minimum=80,
-        maximum=12000,
-    )
-    ack_ok, ack_error = wait_for_tmux_payload_ack(
-        target=target,
-        markers=[f"[ITB_AGENT_REQUEST id={request_id}", f"Marker id: {request_id}"],
-        timeout_seconds=send_ack_timeout_seconds,
-        poll_interval_seconds=send_ack_poll_seconds,
-        history_lines=send_ack_history_lines,
-    )
-    send_recovery: list[dict[str, Any]] = []
-    if not ack_ok:
-        ack_markers = [f"[ITB_AGENT_REQUEST id={request_id}", f"Marker id: {request_id}"]
-        ack_ok, ack_error, send_recovery = recover_unconfirmed_tmux_payload_send(
-            target=target,
-            payload=payload,
-            markers=ack_markers,
-            timeout_seconds=send_ack_timeout_seconds,
-            poll_interval_seconds=send_ack_poll_seconds,
-            history_lines=send_ack_history_lines,
-            submit_enter_count=submit_enter_count,
-        )
-    if not ack_ok:
-        completed_at = current_timestamp()
-        duration_seconds = time.monotonic() - started_monotonic
-        append_jsonl_atomic(
-            session_dir / "invocation-evidence.jsonl",
-            invocation_evidence_entry(
-                ts=completed_at,
-                runtime=runtime,
-                event_type="agent_dispatch",
-                session_id=session_id,
-                organization_instance_id=organization_instance_id,
-                agent_id=agent_id,
-                result="provider_send_unconfirmed",
-                usage_source=usage_source,
-                effective_model=row.get("intended_model", ""),
-                request_id=request_id,
-                notes=ack_error,
-                extra={
-                    "provider_session_id": target,
-                    "started_at": started_at,
-                    "completed_at": completed_at,
-                    "duration_sec": round(max(0.0, duration_seconds), 3),
-                    "send_ack_timeout_seconds": send_ack_timeout_seconds,
-                    "send_ack_history_lines": send_ack_history_lines,
-                    "send_recovery": send_recovery,
-                },
-            ),
-        )
-        append_agent_dispatch_metric(
-            session_dir=session_dir,
-            queue_root=queue_root,
-            runtime=runtime,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            agent_id=agent_id,
-            request_id=request_id,
-            source_agent=source_agent,
-            usage_source=usage_source,
-            effective_model=row.get("intended_model", ""),
-            result="provider_send_unconfirmed",
-            started_at=started_at,
-            completed_at=completed_at,
-            duration_seconds=duration_seconds,
-        )
-        return {
-            "decision": "block",
-            "reason": ack_error,
-            "agentDispatch": {
-                "target": target,
-                "request_id": request_id,
-                "result": "provider_send_unconfirmed",
-                "started_at": started_at,
-                "completed_at": completed_at,
-                "duration_sec": round(max(0.0, duration_seconds), 3),
-                "send_recovery": send_recovery,
-            },
-        }
-
-    wait = truthy_input(hook_input.get("wait"), default=True)
-    timeout_input = hook_input.get("timeout_seconds") or hook_input.get("timeoutSeconds")
-    default_timeout_seconds = agent_dispatch_default_timeout_seconds(hook_input)
-    timeout_seconds = bounded_float_input(
-        timeout_input if timeout_input is not None else default_timeout_seconds,
-        default=default_timeout_seconds,
-        minimum=1,
-        maximum=900,
-    )
-    poll_interval_seconds = bounded_float_input(
-        hook_input.get("poll_interval_seconds") or hook_input.get("pollIntervalSeconds") or 2,
-        default=2,
-        minimum=0.25,
-        maximum=10,
-    )
-    history_lines = bounded_int_input(
-        hook_input.get("history_lines") or hook_input.get("historyLines") or 6000,
-        default=6000,
-        minimum=200,
-        maximum=12000,
-    )
-    captured = ""
-    response = ""
-    result_name = "provider_request_sent"
-    wait_error = ""
-    completion_source = "wait_disabled"
-    expected_report_path = safe_queue_relative_path(queue_root, expected_report_ref, "agent_dispatch_report_path")
-    if wait:
-        completed, captured, wait_error, completion_source = wait_for_agent_completion(
-            target=target,
-            request_id=request_id,
-            report_path=expected_report_path,
-            timeout_seconds=timeout_seconds,
-            poll_interval_seconds=poll_interval_seconds,
-            history_lines=history_lines,
-        )
-        if not completed:
-            result_name = "provider_response_timeout"
-            timeout_diagnosis = diagnose_agent_dispatch_timeout(captured, request_id)
-            if timeout_diagnosis:
-                wait_error = f"{wait_error}; {timeout_diagnosis}"
-        else:
-            result_name = "provider_response_ready"
-            if completion_source == "pane_marker":
-                response = extract_agent_dispatch_response(captured, request_id)
-    completed_at = current_timestamp()
-    duration_seconds = time.monotonic() - started_monotonic
-    existing_dispatch_report = read_json_yaml(expected_report_path) if expected_report_path.exists() else {}
-    if isinstance(existing_dispatch_report, dict) and terminal_agent_dispatch_report(existing_dispatch_report):
-        dispatch_report_path = expected_report_path
-        dispatch_report_ref = expected_report_ref
-        completion_source = "dispatch_report_file"
-    elif completion_source == "dispatch_report_file" and expected_report_path.exists():
-        dispatch_report_path = expected_report_path
-        dispatch_report_ref = expected_report_ref
-    else:
-        dispatch_report_path, dispatch_report_ref = write_agent_dispatch_report(
-            queue_root=queue_root,
-            agent_id=agent_id,
-            request_id=request_id,
-            runtime=runtime,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            source_agent=source_agent,
-            target=target,
-            result=result_name,
-            usage_source=usage_source,
-            effective_model=row.get("intended_model", ""),
-            started_at=started_at,
-            completed_at=completed_at,
-            duration_seconds=duration_seconds,
-            response=response,
-            wait_error=wait_error,
-            captured=captured,
-            launch_result=launch_result,
-            wait_enabled=wait,
-            instruction_ref=instruction_ref,
-            dispatch_manifest_ref=dispatch_manifest_ref,
-        )
-    dispatch_report = read_json_yaml(dispatch_report_path)
-    if not isinstance(dispatch_report, dict):
-        dispatch_report = {}
-    dispatch_report_errors = validate_agent_dispatch_transport_report(
-        dispatch_report,
-        agent_id=agent_id,
-        request_id=request_id,
-    )
-    dispatch_report_integrity = report_file_integrity(dispatch_report_path)
-    if dispatch_report_errors:
-        record_invalid_agent_dispatch_report(
-            runtime=runtime,
-            session_dir=session_dir,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            queue_root=queue_root,
-            agent_id=agent_id,
-            request_id=request_id,
-            report_path=dispatch_report_path,
-            report_ref=dispatch_report_ref,
-            errors=dispatch_report_errors,
-            now=completed_at,
-        )
-        return {
-            "decision": "block",
-            "reason": "agent-dispatch report failed schema validation: " + "; ".join(dispatch_report_errors),
-            "agentDispatch": {
-                "agent_id": agent_id,
-                "target": target,
-                "request_id": request_id,
-                "result": "invalid_report",
-                "usage_source": usage_source,
-                "effective_model": row.get("intended_model", ""),
-                "session_id": session_id,
-                "organization_instance_id": organization_instance_id,
-                "dispatch_report_path": str(dispatch_report_path),
-                "dispatch_report_ref": dispatch_report_ref,
-                "dispatch_report_integrity": dispatch_report_integrity,
-                "report_schema_status": "invalid",
-                "report_schema_errors": dispatch_report_errors,
-            },
-        }
-    report_result = normalize_cell(dispatch_report.get("result")) or result_name
-    report_response = str(dispatch_report.get("response") or "")
-    report_error = normalize_cell(dispatch_report.get("error"))
-    report_provider_evidence = (
-        dispatch_report.get("provider_evidence")
-        if isinstance(dispatch_report.get("provider_evidence"), dict)
-        else {}
-    )
-    report_usage_fields = provider_usage_metric_fields(report_provider_evidence)
-
-    if report_result == "provider_response_ready":
-        row["activation_status"] = "response_active"
-        row["response_status"] = "invoked"
-        row["provider_status"] = "provider_response_ready"
-        row["effective_model"] = row.get("intended_model", "")
-        row["session_id"] = target
-        row["last_request_id"] = request_id
-        row["usage_source"] = usage_source
-        row["last_seen_at"] = completed_at
-        row["notes"] = f"{provider_label} tmux interactive agent-dispatch completed via {completion_source}."
-    elif report_result in {"provider_response_timeout", "provider_send_unconfirmed", "provider_request_sent"}:
-        row["activation_status"] = "response_pending" if report_result == "provider_request_sent" else "response_unconfirmed"
-        row["response_status"] = "pending" if report_result == "provider_request_sent" else "timeout"
-        row["provider_status"] = report_result
-        row["session_id"] = target
-        row["last_request_id"] = request_id
-        row["usage_source"] = usage_source
-        row["last_seen_at"] = completed_at
-        row["last_timeout_at"] = completed_at if report_result == "provider_response_timeout" else row.get("last_timeout_at", "")
-        row["last_dispatch_duration_sec"] = round(max(0.0, duration_seconds), 3)
-        row["notes"] = wait_error or f"{provider_label} tmux interactive agent-dispatch ended as {report_result}."
-
-    launch_status = normalize_cell(launch_result.get("launch_status"))
-    context_was_reset = bool(context_reset["force_respawn"]) or launch_status not in {"already_running", ""}
-    row["dispatch_context_turns"] = 1 if context_was_reset else int(context_reset["prior_turns"]) + 1
-    row["context_reset_every"] = context_reset["reset_every"]
-    row["last_dispatch_task_id"] = context_reset["task_id"]
-    if context_was_reset:
-        row["last_context_reset_at"] = started_at
-        row["last_context_reset_reason"] = ",".join(context_reset["reasons"]) or launch_status or "new_provider_process"
-
-    roster = merge_roster_agent_row_locked(roster_path, roster, agent_id, row)
-    try:
-        latest_state = read_json(state_path) if state_path.exists() else state
-    except (OSError, json.JSONDecodeError):
-        latest_state = state
-    if isinstance(latest_state, dict):
-        state = latest_state
-    sync_state_readiness_counts_from_roster(state, roster)
-    state["last_agent_dispatch_agent"] = agent_id
-    state["last_agent_dispatch_at"] = completed_at
-    state["last_agent_dispatch_usage_source"] = usage_source
-    if report_result == "provider_response_ready":
-        state["readiness_scope"] = "response_evidence"
-
-    write_json_yaml_locked(state_path, state, lock_path=state_path.with_name("bootstrap-state.lock.d"))
-    append_jsonl_atomic(
-        session_dir / "invocation-evidence.jsonl",
-        invocation_evidence_entry(
-            ts=completed_at,
-            runtime=runtime,
-            event_type="agent_dispatch",
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            agent_id=agent_id,
-            result=report_result,
-            usage_source=usage_source,
-            effective_model=row.get("intended_model", ""),
-            request_id=request_id,
-            notes=wait_error or f"{provider_label} tmux interactive agent-dispatch request was routed to the resident pane.",
-            extra={
-                "provider_session_id": target,
-                "tmux_target": target,
-                "source_agent": source_agent,
-                "launch_status": launch_result.get("launch_status", ""),
-                "pane_current_command": launch_result.get("pane_current_command", ""),
-                "started_at": started_at,
-                "completed_at": completed_at,
-                "duration_sec": round(max(0.0, duration_seconds), 3),
-                "dispatch_report_path": str(dispatch_report_path),
-                "dispatch_report_ref": dispatch_report_ref,
-                "dispatch_report_integrity": dispatch_report_integrity,
-                "dispatch_manifest_path": str(dispatch_manifest_path),
-                "dispatch_manifest_ref": dispatch_manifest_ref,
-                "instruction_path": str(instruction_path),
-                "instruction_ref": instruction_ref,
-                "context_reset": context_reset,
-                "dispatch_context_turns": row.get("dispatch_context_turns"),
-                "send_recovery": send_recovery,
-                "completion_source": completion_source,
-            },
-        ),
-    )
-    append_agent_dispatch_metric(
-        session_dir=session_dir,
-        queue_root=queue_root,
-        runtime=runtime,
-        session_id=session_id,
-        organization_instance_id=organization_instance_id,
-        agent_id=agent_id,
-        request_id=request_id,
-        source_agent=source_agent,
-        usage_source=usage_source,
-        effective_model=row.get("intended_model", ""),
-        result=report_result,
-        started_at=started_at,
-        completed_at=completed_at,
-        duration_seconds=duration_seconds,
-        input_tokens=report_usage_fields.get("input_tokens"),
-        output_tokens=report_usage_fields.get("output_tokens"),
-        duration_api_ms=report_usage_fields.get("duration_api_ms"),
-        turn_duration_ms=report_usage_fields.get("turn_duration_ms"),
-        num_turns=report_usage_fields.get("num_turns"),
-        completion_source=completion_source,
-    )
-
-    dispatch_summary = {
-        "agent_id": agent_id,
-        "target": target,
-        "request_id": request_id,
-        "result": report_result,
-        "usage_source": usage_source,
-        "effective_model": row.get("intended_model", ""),
-        "session_id": session_id,
-        "organization_instance_id": organization_instance_id,
-        "launch": launch_result,
-        "started_at": started_at,
-        "completed_at": completed_at,
-        "duration_sec": round(max(0.0, duration_seconds), 3),
-        "dispatch_report_path": str(dispatch_report_path),
-        "dispatch_report_ref": dispatch_report_ref,
-        "dispatch_report_integrity": dispatch_report_integrity,
-        "report_schema_status": "valid",
-        "completion_source": completion_source if completion_source != "wait_disabled" else "dispatch_report_file",
-        "dispatch_manifest_path": str(dispatch_manifest_path),
-        "dispatch_manifest_ref": dispatch_manifest_ref,
-        "instruction_path": str(instruction_path),
-        "instruction_ref": instruction_ref,
-        "context_reset": context_reset,
-        "dispatch_context_turns": row.get("dispatch_context_turns"),
-        "send_recovery": send_recovery,
-    }
-    dispatch_summary.update(report_usage_fields)
-    if report_response:
-        dispatch_summary["response"] = report_response
-        dispatch_summary["response_source"] = "dispatch_report_file"
-    if report_error:
-        dispatch_summary["error"] = report_error
-        dispatch_summary["error_source"] = "dispatch_report_file"
-    return {"agentDispatch": dispatch_summary}
-
-
-def agent_dispatch_batch_items(hook_input: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
-    raw_items = hook_input.get("dispatches")
-    if raw_items is None:
-        raw_items = hook_input.get("items")
-    if not isinstance(raw_items, list) or not raw_items:
-        return [], ["agent-dispatch-batch requires non-empty dispatches"]
-    errors: list[str] = []
-    items: list[dict[str, Any]] = []
-    seen_agents: set[str] = set()
-    for index, raw_item in enumerate(raw_items):
-        if not isinstance(raw_item, dict):
-            errors.append(f"dispatches[{index}] must be an object")
-            continue
-        item = dict(raw_item)
-        agent_id = normalize_cell(item.get("agent_id") or item.get("agentId") or item.get("role_id") or item.get("roleId"))
-        prompt = str(item.get("prompt") or "")
-        independent = truthy_input(item.get("independent") or item.get("independent_task") or item.get("independentTask"))
-        dependency = normalized_publication_value(
-            item.get("dependency") or item.get("inter_dependency") or item.get("interDependency")
-        )
-        if not agent_id:
-            errors.append(f"dispatches[{index}] missing agent_id")
-        if not prompt.strip():
-            errors.append(f"dispatches[{index}] missing prompt")
-        if agent_id and agent_id in seen_agents:
-            errors.append(f"dispatches[{index}] duplicates agent_id {agent_id}; one live pane accepts one concurrent dispatch")
-        if agent_id:
-            seen_agents.add(agent_id)
-        if not independent and dependency not in {"none", "independent", "no_dependency", "no-dependency"}:
-            errors.append(f"dispatches[{index}] must declare independent: true or dependency: none")
-        item["agent_id"] = agent_id
-        item["prompt"] = prompt
-        items.append(item)
-    return items, errors
-
-
-def terminal_agent_dispatch_report(report: dict[str, Any]) -> bool:
-    status = normalize_cell(report.get("status")).lower()
-    result = normalize_cell(report.get("result"))
-    if status == "done" and result == "provider_response_ready":
-        return True
-    if status == "failed":
-        return True
-    return result in {"provider_response_timeout", "provider_send_unconfirmed"}
-
-
-def wait_for_agent_dispatch_report_barrier(
-    *,
-    dispatches: list[dict[str, Any]],
-    timeout_seconds: float,
-    poll_interval_seconds: float,
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    deadline = time.monotonic() + timeout_seconds
-    reports: dict[str, dict[str, Any]] = {}
-    errors: list[str] = []
-    pending = {
-        normalize_cell(item.get("request_id")): item
-        for item in dispatches
-        if normalize_cell(item.get("request_id")) and normalize_cell(item.get("dispatch_report_path"))
-    }
-    while time.monotonic() < deadline and pending:
-        for request_id, item in list(pending.items()):
-            report_path = Path(str(item["dispatch_report_path"]))
-            if not report_path.exists():
-                continue
-            report = read_json_yaml(report_path)
-            if not isinstance(report, dict):
-                errors.append(f"{request_id}: report is not an object")
-                pending.pop(request_id, None)
-                continue
-            if terminal_agent_dispatch_report(report):
-                reports[request_id] = report
-                pending.pop(request_id, None)
-        if pending:
-            time.sleep(poll_interval_seconds)
-    for request_id, item in pending.items():
-        report_path = Path(str(item["dispatch_report_path"]))
-        error = f"{request_id}: timed out waiting for terminal agent-dispatch report"
-        errors.append(error)
-        now = current_timestamp()
-        timeout_report = {
-            "report_version": "1",
-            "report_id": report_path.stem,
-            "report_type": "agent_dispatch_transport_result",
-            "from_role": normalize_cell(item.get("agent_id")),
-            "request_id": request_id,
-            "created_at": now,
-            "runtime": normalize_cell(item.get("runtime")),
-            "session_id": normalize_cell(item.get("session_id")),
-            "organization_instance_id": normalize_cell(item.get("organization_instance_id")),
-            "source_agent": normalize_cell(item.get("source_agent") or "agent-dispatch-batch"),
-            "result": "provider_response_timeout",
-            "status": "failed",
-            "summary": error,
-            "response": "",
-            "error": error,
-            "completion_signal": "batch_barrier_timeout",
-            "wait_enabled": True,
-            "provider_evidence": {
-                "usage_source": "agent_dispatch_batch_barrier_timeout",
-                "effective_model": normalize_cell(item.get("effective_model")),
-                "provider_session_id": normalize_cell(item.get("target")),
-                "tmux_target": normalize_cell(item.get("target")),
-                "started_at": normalize_cell(item.get("started_at") or now),
-                "completed_at": now,
-                "duration_sec": bounded_float_input(item.get("duration_sec"), default=0.0, minimum=0.0, maximum=86400.0),
-            },
-            "queue": {
-                "report_path": normalize_cell(item.get("dispatch_report_ref")),
-                "instruction_ref": normalize_cell(item.get("instruction_ref")),
-                "dispatch_manifest_ref": normalize_cell(item.get("dispatch_manifest_ref")),
-            },
-        }
-        try:
-            write_json_yaml(report_path, timeout_report)
-        except OSError:
-            pass
-        reports[request_id] = timeout_report
-    return reports, errors
-
-
-def record_agent_dispatch_batch_completion(
-    *,
-    runtime: str,
-    session_dir: Path,
-    session_id: str,
-    organization_instance_id: str,
-    queue_root: Path,
-    roster_path: Path,
-    state_path: Path,
-    roster: list[dict[str, Any]],
-    dispatch: dict[str, Any],
-    report: dict[str, Any],
-    batch_id: str,
-    completed_at: str,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    agent_id = normalize_cell(dispatch.get("agent_id") or report.get("from_role"))
-    request_id = normalize_cell(dispatch.get("request_id") or report.get("request_id"))
-    report_errors = validate_agent_dispatch_transport_report(report, agent_id=agent_id, request_id=request_id)
-    report_path = Path(str(dispatch.get("dispatch_report_path") or ""))
-    report_ref = normalize_cell(dispatch.get("dispatch_report_ref")) or agent_dispatch_report_ref(agent_id, request_id)
-    report_integrity = report_file_integrity(report_path) if report_path.exists() else {}
-    result = normalize_cell(report.get("result")) or "missing_report"
-    status = normalize_cell(report.get("status"))
-    provider_evidence = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
-    usage_fields = provider_usage_metric_fields(provider_evidence)
-    usage_source = normalize_cell(provider_evidence.get("usage_source") or report.get("usage_source") or "agent_dispatch_batch_report")
-    effective_model = normalize_cell(provider_evidence.get("effective_model"))
-    target = normalize_cell(provider_evidence.get("provider_session_id") or provider_evidence.get("tmux_target"))
-    started_at = normalize_cell(provider_evidence.get("started_at") or dispatch.get("started_at") or completed_at)
-    report_completed_at = normalize_cell(provider_evidence.get("completed_at") or report.get("created_at") or completed_at)
-    duration_seconds = bounded_float_input(
-        provider_evidence.get("duration_sec") or iso_seconds_delta(report_completed_at, started_at),
-        default=0.0,
-        minimum=0.0,
-        maximum=86400.0,
-    )
-    completion_source = "batch_barrier_timeout" if result == "provider_response_timeout" else "dispatch_report_file_batch_barrier"
-
-    if report_errors:
-        record_invalid_agent_dispatch_report(
-            runtime=runtime,
-            session_dir=session_dir,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            queue_root=queue_root,
-            agent_id=agent_id,
-            request_id=request_id,
-            report_path=report_path,
-            report_ref=report_ref,
-            errors=report_errors,
-            now=completed_at,
-        )
-    else:
-        append_jsonl_atomic(
-            session_dir / "invocation-evidence.jsonl",
-            invocation_evidence_entry(
-                ts=report_completed_at,
-                runtime=runtime,
-                event_type="agent_dispatch",
-                session_id=session_id,
-                organization_instance_id=organization_instance_id,
-                agent_id=agent_id,
-                result=result,
-                usage_source=usage_source,
-                effective_model=effective_model,
-                request_id=request_id,
-                notes=f"agent-dispatch-batch barrier finalized via report file: {batch_id}",
-                extra={
-                    "batch_id": batch_id,
-                    "provider_session_id": target,
-                    "tmux_target": target,
-                    "source_agent": normalize_cell(report.get("source_agent") or dispatch.get("source_agent")),
-                    "started_at": started_at,
-                    "completed_at": report_completed_at,
-                    "duration_sec": round(max(0.0, duration_seconds), 3),
-                    "dispatch_report_path": str(report_path),
-                    "dispatch_report_ref": report_ref,
-                    "dispatch_report_integrity": report_integrity,
-                    "completion_source": completion_source,
-                },
-            ),
-        )
-        append_agent_dispatch_metric(
-            session_dir=session_dir,
-            queue_root=queue_root,
-            runtime=runtime,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            agent_id=agent_id,
-            request_id=request_id,
-            source_agent=normalize_cell(report.get("source_agent") or dispatch.get("source_agent") or "agent-dispatch-batch"),
-            usage_source=usage_source,
-            effective_model=effective_model,
-            result=result,
-            started_at=started_at,
-            completed_at=report_completed_at,
-            duration_seconds=duration_seconds,
-            input_tokens=usage_fields.get("input_tokens"),
-            output_tokens=usage_fields.get("output_tokens"),
-            duration_api_ms=usage_fields.get("duration_api_ms"),
-            turn_duration_ms=usage_fields.get("turn_duration_ms"),
-            num_turns=usage_fields.get("num_turns"),
-            completion_source=completion_source,
-        )
-
-    row = next((item for item in roster if isinstance(item, dict) and item.get("agent_id") == agent_id), None)
-    if row is not None and not report_errors:
-        if result == "provider_response_ready":
-            row["activation_status"] = "response_active"
-            row["response_status"] = "invoked"
-            row["provider_status"] = "provider_response_ready"
-        else:
-            row["activation_status"] = "response_unconfirmed"
-            row["response_status"] = "timeout"
-            row["provider_status"] = result
-        row["effective_model"] = effective_model or row.get("intended_model", "")
-        row["session_id"] = target
-        row["last_request_id"] = request_id
-        row["usage_source"] = usage_source
-        row["last_seen_at"] = report_completed_at
-        row["last_dispatch_batch_id"] = batch_id
-        row["notes"] = f"agent-dispatch-batch finalized via dispatch report: {result}"
-        roster = merge_roster_agent_row_locked(roster_path, roster, agent_id, row)
-
-    summary = {
-        "agent_id": agent_id,
-        "request_id": request_id,
-        "result": "invalid_report" if report_errors else result,
-        "status": status,
-        "dispatch_report_path": str(report_path),
-        "dispatch_report_ref": report_ref,
-        "dispatch_report_integrity": report_integrity,
-        "report_schema_status": "invalid" if report_errors else "valid",
-        "report_schema_errors": report_errors,
-        "response": str(report.get("response") or ""),
-        "usage_source": usage_source,
-        "effective_model": effective_model,
-        "completion_source": completion_source,
-    }
-    return roster, summary
-
-
-def agent_dispatch_batch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
-    session_dir = state_root / safe_id(session_id)
-    state_path = session_dir / "bootstrap.json"
-    roster_path = session_dir / "roster.json"
-    started_at = current_timestamp()
-    started_monotonic = time.monotonic()
-    if not state_path.exists() or not roster_path.exists():
-        return {"decision": "block", "reason": "bootstrap.json or roster.json missing"}
-    state = read_json(state_path)
-    roster = read_json(roster_path)
-    if not isinstance(state, dict) or not isinstance(roster, list):
-        return {"decision": "block", "reason": "bootstrap state or roster is invalid"}
-
-    items, item_errors = agent_dispatch_batch_items(hook_input)
-    if item_errors:
-        return {"decision": "block", "reason": "; ".join(item_errors), "agentDispatchBatch": {"items": len(items), "errors": item_errors}}
-
-    batch_id = normalize_cell(hook_input.get("batch_id") or hook_input.get("batchId") or uuid.uuid4().hex[:12])
-    source_agent = normalize_cell(hook_input.get("source_agent") or hook_input.get("sourceAgent") or "agent-dispatch-batch")
-    queue_root = queue_root_for(session_dir, hook_input)
-    base_input = {
-        key: value
-        for key, value in hook_input.items()
-        if key not in {"dispatches", "items", "wait", "batch_id", "batchId"}
-    }
-    dispatched: list[dict[str, Any]] = []
-    errors: list[str] = []
-    for index, item in enumerate(items):
-        dispatch_input = base_input | item | {
-            "session_id": session_id,
-            "source_agent": normalize_cell(item.get("source_agent") or item.get("sourceAgent") or source_agent),
-            "wait": False,
-            "batch_id": batch_id,
-        }
-        output = agent_dispatch(runtime=runtime, state_root=state_root, hook_input=dispatch_input)
-        dispatch = output.get("agentDispatch") if isinstance(output.get("agentDispatch"), dict) else {}
-        if output.get("decision") == "block" or not dispatch:
-            errors.append(f"dispatches[{index}] {item['agent_id']} failed to send: {normalize_cell(output.get('reason'))}")
-            dispatched.append({"agent_id": item["agent_id"], "result": "send_failed", "output": output})
-            continue
-        dispatch = dict(dispatch)
-        dispatch["source_agent"] = dispatch_input["source_agent"]
-        dispatched.append(dispatch)
-        if normalize_cell(dispatch.get("result")) not in {"provider_request_sent", "provider_response_ready"}:
-            errors.append(f"dispatches[{index}] {item['agent_id']} result={normalize_cell(dispatch.get('result'))}")
-
-    dispatchable = [
-        item
-        for item in dispatched
-        if normalize_cell(item.get("request_id")) and normalize_cell(item.get("dispatch_report_path"))
-    ]
-    if errors and not dispatchable:
-        completed_at = current_timestamp()
-        return {
-            "decision": "block",
-            "reason": "; ".join(errors),
-            "agentDispatchBatch": {
-                "batch_id": batch_id,
-                "result": "dispatch_failed",
-                "started_at": started_at,
-                "completed_at": completed_at,
-                "duration_sec": round(max(0.0, time.monotonic() - started_monotonic), 3),
-                "dispatches": dispatched,
-                "errors": errors,
-            },
-        }
-
-    timeout_seconds = bounded_float_input(
-        hook_input.get("timeout_seconds") or hook_input.get("timeoutSeconds") or agent_dispatch_default_timeout_seconds(hook_input),
-        default=agent_dispatch_default_timeout_seconds(hook_input),
-        minimum=1,
-        maximum=900,
-    )
-    poll_interval_seconds = bounded_float_input(
-        hook_input.get("poll_interval_seconds") or hook_input.get("pollIntervalSeconds") or 2,
-        default=2,
-        minimum=0.1,
-        maximum=10,
-    )
-    reports, barrier_errors = wait_for_agent_dispatch_report_barrier(
-        dispatches=dispatchable,
-        timeout_seconds=timeout_seconds,
-        poll_interval_seconds=poll_interval_seconds,
-    )
-    completed_at = current_timestamp()
-    summaries: list[dict[str, Any]] = []
-    for dispatch in dispatched:
-        request_id = normalize_cell(dispatch.get("request_id"))
-        report = reports.get(request_id) if request_id else {}
-        if not isinstance(report, dict) or not report:
-            summaries.append(
-                {
-                    "agent_id": normalize_cell(dispatch.get("agent_id")),
-                    "request_id": request_id,
-                    "result": "missing_report",
-                    "dispatch_report_path": normalize_cell(dispatch.get("dispatch_report_path")),
-                    "report_schema_status": "missing",
-                }
-            )
-            continue
-        roster, summary = record_agent_dispatch_batch_completion(
-            runtime=runtime,
-            session_dir=session_dir,
-            session_id=session_id,
-            organization_instance_id=str(state.get("organization_instance_id", organization_id(session_id))),
-            queue_root=queue_root,
-            roster_path=roster_path,
-            state_path=state_path,
-            roster=roster,
-            dispatch=dispatch,
-            report=report,
-            batch_id=batch_id,
-            completed_at=completed_at,
-        )
-        summaries.append(summary)
-    try:
-        latest_state = read_json(state_path) if state_path.exists() else state
-    except (OSError, json.JSONDecodeError):
-        latest_state = state
-    if isinstance(latest_state, dict):
-        state = latest_state
-    sync_state_readiness_counts_from_roster(state, roster)
-    state["last_agent_dispatch_batch_id"] = batch_id
-    state["last_agent_dispatch_batch_at"] = completed_at
-    write_json_yaml_locked(state_path, state, lock_path=state_path.with_name("bootstrap-state.lock.d"))
-
-    failed = [item for item in summaries if normalize_cell(item.get("result")) != "provider_response_ready"]
-    report_schema_errors: list[str] = []
-    for summary in summaries:
-        agent_label = normalize_cell(summary.get("agent_id")) or "unknown-agent"
-        request_label = normalize_cell(summary.get("request_id"))
-        for error in normalize_string_list(summary.get("report_schema_errors")):
-            prefix = f"{agent_label}/{request_label}" if request_label else agent_label
-            report_schema_errors.append(f"{prefix}: {error}")
-    all_errors = [*errors, *barrier_errors, *report_schema_errors]
-    result = "provider_responses_ready" if not failed and not all_errors else "dispatch_failed" if errors else "provider_batch_incomplete"
-    event = {
-        "ts": completed_at,
-        "runtime": runtime,
-        "event_type": "agent_dispatch_batch",
-        "session_id": session_id,
-        "organization_instance_id": state.get("organization_instance_id", organization_id(session_id)),
-        "batch_id": batch_id,
-        "source_agent": source_agent,
-        "result": result,
-        "dispatch_count": len(dispatched),
-        "completed_count": len([item for item in summaries if normalize_cell(item.get("result")) == "provider_response_ready"]),
-        "failed_count": len(failed),
-        "errors": all_errors,
-        "started_at": started_at,
-        "completed_at": completed_at,
-        "duration_sec": round(max(0.0, time.monotonic() - started_monotonic), 3),
-        "dispatches": summaries,
-    }
-    append_jsonl_atomic(session_dir / "invocation-evidence.jsonl", event)
-    output = {
-        "agentDispatchBatch": {
-            "batch_id": batch_id,
-            "result": result,
-            "started_at": started_at,
-            "completed_at": completed_at,
-            "duration_sec": event["duration_sec"],
-            "dispatch_count": len(dispatched),
-            "completed_count": event["completed_count"],
-            "failed_count": event["failed_count"],
-            "errors": all_errors,
-            "dispatches": summaries,
-        }
-    }
-    if result != "provider_responses_ready":
-        output["decision"] = "block"
-        output["reason"] = "; ".join(all_errors or [f"{len(failed)} dispatches did not return provider_response_ready"])
-    return output
-
-
-def build_role_queue_nudge_prompt(
-    *,
-    runtime: str,
-    role_row: dict[str, Any],
-    message: dict[str, Any],
-    queue_root: Path,
-    inbox_path: Path,
-    nudge_manifest_ref: str,
-    nudge_manifest_path: Path,
-    writer_command: str,
-) -> str:
-    payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
-    instruction_ref = normalize_cell(payload.get("instruction_ref"))
-    report_ref = normalize_cell(payload.get("report_path"))
-    task_id = normalize_cell(message.get("task_id"))
-    message_id = normalize_cell(message.get("message_id"))
-    role_id = normalize_cell(role_row.get("role_id") or role_row.get("agent_id"))
-    return f"""[ITB_QUEUE_MESSAGE_READY]
-role_id: {role_id}
-task_id: {task_id}
-message_id: {message_id}
-queue_root: {queue_root}
-inbox_path: {inbox_path}
-nudge_manifest_ref: {nudge_manifest_ref}
-nudge_manifest_path: {nudge_manifest_path}
-instruction_ref: {instruction_ref}
-report_ref: {report_ref}
-atomic_report_writer: {writer_command}
-
-You are the role above. Do not answer the human directly.
-Read nudge_manifest_path, the referenced instruction YAML, your SKILL.md, and the inbox message.
-Execute only the work assigned to this role.
-Output discipline: act on queue instructions silently; do not narrate routing, queue, gate, or evidence plumbing to the human.
-Use Bash only as the transport finalizer tool for atomic_report_writer. Do not use Bash for role work unless your SKILL.md allows it.
-Finalize only by running atomic_report_writer as the first command token with --report-json containing exactly one JSON object, for example:
-{writer_command} --report-json '{{"status":"done","result":"completed","summary":"..."}}'
-Do not use stdin, heredoc, echo, printf, cat, or a pipe for the finalizer. If blocked, finalize with status failed and blockers through the same writer.
-"""
-
-
-def write_role_queue_nudge_manifest(
-    *,
-    runtime: str,
-    role_row: dict[str, Any],
-    message: dict[str, Any],
-    queue_root: Path,
-    inbox_path: Path,
-    persist: bool = True,
-) -> tuple[Path, str, str]:
-    payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
-    role_id = normalize_cell(role_row.get("role_id") or role_row.get("agent_id"))
-    message_id = normalize_cell(message.get("message_id"))
-    instruction_ref = normalize_cell(payload.get("instruction_ref"))
-    report_ref = normalize_cell(payload.get("report_path"))
-    session_dir = queue_root.parent
-    state_root = session_dir.parent
-    session_id = session_dir.name
-    writer_command = role_report_writer_command(
-        runtime,
-        state_root,
-        session_id,
-        role_id=role_id,
-        message_id=message_id,
-    )
-    manifest_ref = str(Path("nudges") / safe_id(role_id) / f"{safe_id(message_id)}.yaml")
-    manifest_path = safe_queue_relative_path(queue_root, manifest_ref, "nudge_manifest_path")
-    manifest = {
-        "nudge_manifest_version": "1",
-        "role_id": role_id,
-        "task_id": normalize_cell(message.get("task_id")),
-        "message_id": message_id,
-        "queue_root": str(queue_root),
-        "inbox_path": str(inbox_path),
-        "instruction_ref": instruction_ref,
-        "instruction_path": str(queue_root / instruction_ref) if instruction_ref else "",
-        "report_ref": report_ref,
-        "required_report_path": str(queue_root / report_ref) if report_ref else "",
-        "atomic_report_writer": writer_command,
-        "queue_finalizer": normalize_cell(role_row.get("queue_finalizer")),
-        "report_write_mode": normalize_cell(role_row.get("report_write_mode")),
-        "skip_auto_queue_handoff": bool(payload.get("skip_auto_queue_handoff")),
-        "allowed_tools": role_row.get("allowed_tools", []),
-        "required_report_fields": [
-            "status",
-            "result",
-            "summary",
-            "files_changed",
-            "validation",
-            "blockers",
-            "provider_evidence",
-        ],
-        "provider_evidence_fields": [
-            "provider_session_id",
-            "request_id",
-            "effective_model",
-            "usage_source",
-            "transcript_path",
-        ],
-        "notes": [
-            "Do not answer the human directly.",
-            "Do not write queue report or inbox status directly.",
-            "Use atomic_report_writer for done or failed finalization.",
-            "Pass exactly one JSON object through atomic_report_writer --report-json with the writer command as the first command token.",
-        ],
-    }
-    if persist:
-        write_json_yaml(manifest_path, manifest)
-    return manifest_path, manifest_ref, writer_command
-
-
-def queue_activation_launch_state(
-    *,
-    role_row: dict[str, Any],
-    state: dict[str, Any] | None,
-    session_id: str,
-    organization_instance_id: str,
-    queue_root: Path,
-) -> dict[str, Any]:
-    launch_state = dict(state or {})
-    launch_state["organization_instance_id"] = (
-        normalize_cell(launch_state.get("organization_instance_id"))
-        or organization_instance_id
-        or normalize_cell(role_row.get("organization_instance_id"))
-    )
-    launch_state["queue_root"] = str(queue_root)
-    launch_state["tmux_session"] = (
-        normalize_cell(launch_state.get("tmux_session"))
-        or normalize_cell(role_row.get("tmux_session"))
-        or safe_tmux_name(f"itb-{launch_state['organization_instance_id']}", max_length=60)
-    )
-    if session_id:
-        launch_state.setdefault("session_id", session_id)
-    return launch_state
-
-
-def persist_queue_activation_launch_result(
-    *,
-    session_dir: Path,
-    role_id: str,
-    session_id: str,
-    organization_instance_id: str,
-    now: str,
-    message: dict[str, Any],
-    launch_result: dict[str, Any],
-) -> dict[str, Any]:
-    row_update = {
-        "agent_id": role_id,
-        "organization_instance_id": organization_instance_id,
-        "parent_session_id": session_id,
-        "last_queue_activation_at": now,
-        "last_queue_activation_message_id": normalize_cell(message.get("message_id")),
-        "last_seen_at": now,
-        "notes": normalize_cell(launch_result.get("launch_status")),
-    }
-    for key in (
-        "process_status",
-        "launch_status",
-        "runtime_kind",
-        "process_mode",
-        "provider_runtime_kind",
-        "provider_status",
-        "tool_sidecar_status",
-        "interactive_status",
-        "interactive_ready",
-        "interactive_error",
-        "interactive_checked_at",
-        "interactive_evidence_source",
-        "interactive_startup_target",
-        "tmux_session",
-        "tmux_window",
-        "tmux_target",
-        "process_evidence_source",
-        "process_started_at",
-        "launch_error",
-        "pane_current_command",
-        "pane_pid",
-        "tools",
-    ):
-        if key in launch_result:
-            row_update[key] = launch_result.get(key, "")
-    roster_path = session_dir / "roster.json"
-    try:
-        fallback_roster = read_json(roster_path) if roster_path.exists() else []
-    except (OSError, json.JSONDecodeError):
-        fallback_roster = []
-    merge_roster_agent_row_locked(roster_path, fallback_roster, role_id, row_update)
-    return row_update
-
-
-def persist_queue_activation_prompt_readiness(
-    *,
-    session_dir: Path,
-    role_id: str,
-    session_id: str,
-    organization_instance_id: str,
-    message: dict[str, Any],
-    now: str,
-    prompt_ready: bool,
-    prompt_error: str,
-) -> dict[str, Any]:
-    row_update = {
-        "agent_id": role_id,
-        "organization_instance_id": organization_instance_id,
-        "parent_session_id": session_id,
-        "interactive_ready": prompt_ready,
-        "interactive_status": "interactive_ready" if prompt_ready else classify_interactive_prompt_error(prompt_error),
-        "interactive_error": "" if prompt_ready else normalize_cell(prompt_error),
-        "interactive_checked_at": now,
-        "interactive_evidence_source": "queue_activation_prompt_probe",
-        "last_queue_activation_prompt_check_message_id": normalize_cell(message.get("message_id")),
-        "last_seen_at": now,
-    }
-    roster_path = session_dir / "roster.json"
-    state_path = session_dir / "bootstrap.json"
-    try:
-        fallback_roster = read_json(roster_path) if roster_path.exists() else []
-    except (OSError, json.JSONDecodeError):
-        fallback_roster = []
-    roster = merge_roster_agent_row_locked(roster_path, fallback_roster, role_id, row_update)
-    try:
-        latest_state = read_json(state_path) if state_path.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        latest_state = {}
-    state_update: dict[str, Any] = {}
-    if isinstance(latest_state, dict):
-        sync_state_readiness_counts_from_roster(latest_state, roster)
-        latest_state["last_queue_activation_prompt_check_role"] = role_id
-        latest_state["last_queue_activation_prompt_check_message_id"] = normalize_cell(message.get("message_id"))
-        latest_state["last_queue_activation_prompt_check_at"] = now
-        write_json_yaml_locked(state_path, latest_state, lock_path=state_path.with_name("bootstrap-state.lock.d"))
-        state_update = {
-            "resident_agents_interactive_ready": latest_state.get("resident_agents_interactive_ready", 0),
-            "resident_agents_prompt_ready": latest_state.get("resident_agents_prompt_ready", 0),
-            "prompt_readiness_scope": latest_state.get("prompt_readiness_scope", ""),
-            "interactive_readiness_scope": latest_state.get("interactive_readiness_scope", ""),
-        }
-    return {"roster_update": row_update, "state_update": state_update}
-
-
-def activate_queue_consumer_provider(
-    role_row: dict[str, Any],
-    *,
-    runtime: str,
-    message: dict[str, Any],
-    queue_root: Path,
-    dry_run: bool,
-    state: dict[str, Any] | None,
-    session_dir: Path | None,
-    session_id: str,
-    organization_instance_id: str,
-    now: str,
-) -> dict[str, Any]:
-    role_id = normalize_cell(role_row.get("agent_id") or role_row.get("role_id"))
-    if dry_run:
-        return {"result": "skipped_dry_run", "role_id": role_id}
-    if not env_flag("ITB_ROLE_QUEUE_ACTIVATE_PROVIDER", default=True):
-        return {"result": "disabled", "role_id": role_id}
-    if not truthy_input(role_row.get("queue_consumer")):
-        return {"result": "skipped_not_queue_consumer", "role_id": role_id}
-    if session_dir is None:
-        return {"result": "skipped_missing_session_context", "role_id": role_id}
-    if agent_runtime(role_row) is None:
-        return {"result": "skipped_unsupported_runtime", "role_id": role_id}
-
-    launch_state = queue_activation_launch_state(
-        role_row=role_row,
-        state=state,
-        session_id=session_id,
-        organization_instance_id=organization_instance_id,
-        queue_root=queue_root,
-    )
-    launch_role_row = dict(role_row)
-    launch_role_row["organization_instance_id"] = launch_state["organization_instance_id"]
-    launch_role_row["parent_session_id"] = session_id
-    launch_role_row["agent_instance_id"] = (
-        normalize_cell(launch_role_row.get("agent_instance_id"))
-        or f"{role_id}@{safe_id(session_id)}"
-    )
-    launch_role_row["queue_root"] = str(queue_root)
-    launch_role_row["activation_status"] = normalize_cell(launch_role_row.get("activation_status")) or "metadata_ready"
-    launch_role_row["runtime"] = normalize_cell(launch_role_row.get("runtime")) or runtime
-    launch_role_row["state_root"] = str(session_dir.parent if session_dir else queue_root.parent.parent)
-    launch_role_row.setdefault("tmux_session", launch_state["tmux_session"])
-    cwd = normalize_cell(launch_state.get("cwd")) or os.getcwd()
-    tools = transport_tools_argument_for_role(launch_role_row)
-    launch_result, launch_error = ensure_provider_cli_for_agent(
-        row=launch_role_row,
-        state=launch_state,
-        cwd=cwd,
-        now=now,
-        tools=tools,
-    )
-    activation: dict[str, Any] = {
-        "result": "provider_ready" if launch_result and launch_result.get("process_status") == "process_ready" and not launch_error else "activation_failed",
-        "role_id": role_id,
-        "runtime": runtime,
-        "message_id": normalize_cell(message.get("message_id")),
-        "launch_error": launch_error,
-        "launch_result": launch_result or {},
-    }
-    if launch_result:
-        activation["roster_update"] = persist_queue_activation_launch_result(
-            session_dir=session_dir,
-            role_id=role_id,
-            session_id=session_id,
-            organization_instance_id=launch_state.get("organization_instance_id") or organization_instance_id,
-            now=now,
-            message=message,
-            launch_result=launch_result,
-        )
-        roster_path = session_dir / "roster.json"
-        state_path = session_dir / "bootstrap.json"
-        try:
-            latest_roster = read_json(roster_path) if roster_path.exists() else []
-        except (OSError, json.JSONDecodeError):
-            latest_roster = []
-        try:
-            latest_state = read_json(state_path) if state_path.exists() else dict(state or {})
-        except (OSError, json.JSONDecodeError):
-            latest_state = dict(state or {})
-        if isinstance(latest_roster, list) and isinstance(latest_state, dict):
-            sync_state_readiness_counts_from_roster(latest_state, latest_roster)
-            latest_state["last_queue_activation_role"] = role_id
-            latest_state["last_queue_activation_message_id"] = normalize_cell(message.get("message_id"))
-            latest_state["last_queue_activation_at"] = now
-            write_json_yaml_locked(state_path, latest_state, lock_path=state_path.with_name("bootstrap-state.lock.d"))
-            activation["state_update"] = {
-                "resident_agents_process_ready": latest_state.get("resident_agents_process_ready", 0),
-                "resident_agents_provider_ready": latest_state.get("resident_agents_provider_ready", 0),
-                "resident_agents_response_ready": latest_state.get("resident_agents_response_ready", 0),
-            }
-    return activation
-
-
-def nudge_role_agent(
-    role_row: dict[str, Any],
-    *,
-    runtime: str,
-    message: dict[str, Any],
-    queue_root: Path,
-    inbox_path: Path,
-    dry_run: bool,
-    ack_mode: str = "defer",
-    state: dict[str, Any] | None = None,
-    session_dir: Path | None = None,
-    session_id: str = "",
-    organization_instance_id: str = "",
-    now: str = "",
-    persist_dry_run_manifest: bool = True,
-) -> dict[str, Any]:
-    target = str(role_row.get("tmux_target") or "")
-    activation: dict[str, Any] = {"result": "not_attempted"}
-    persist_manifest = not dry_run or persist_dry_run_manifest
-    nudge_manifest_path, nudge_manifest_ref, writer_command = write_role_queue_nudge_manifest(
-        runtime=runtime,
-        role_row=role_row,
-        message=message,
-        queue_root=queue_root,
-        inbox_path=inbox_path,
-        persist=persist_manifest,
-    )
-    prompt = build_role_queue_nudge_prompt(
-        runtime=runtime,
-        role_row=role_row,
-        message=message,
-        queue_root=queue_root,
-        inbox_path=inbox_path,
-        nudge_manifest_ref=nudge_manifest_ref,
-        nudge_manifest_path=nudge_manifest_path,
-        writer_command=writer_command,
-    )
-    preview = prompt[:1200]
-    if dry_run:
-        return {
-            "result": "dry_run",
-            "sent": False,
-            "tmux_target": target,
-            "prompt_preview": preview,
-            "nudge_manifest_path": str(nudge_manifest_path),
-            "nudge_manifest_ref": nudge_manifest_ref,
-            "nudge_manifest_persisted": persist_manifest,
-        }
-    if not truthy_input(role_row.get("queue_consumer")):
-        return {"result": "queue_consumer_unavailable", "sent": False, "tmux_target": target, "nudge_manifest_path": str(nudge_manifest_path), "nudge_manifest_ref": nudge_manifest_ref}
-    activation = activate_queue_consumer_provider(
-        role_row,
-        runtime=runtime,
-        message=message,
-        queue_root=queue_root,
-        dry_run=dry_run,
-        state=state,
-        session_dir=session_dir,
-        session_id=session_id,
-        organization_instance_id=organization_instance_id or normalize_cell(role_row.get("organization_instance_id")),
-        now=now or current_timestamp(),
-    )
-    launch_result = activation.get("launch_result") if isinstance(activation.get("launch_result"), dict) else {}
-    target = normalize_cell(launch_result.get("tmux_target")) or str(role_row.get("tmux_target") or target)
-    if activation.get("result") == "activation_failed":
-        return {
-            "result": "nudge_deferred_provider_activation_failed",
-            "sent": False,
-            "tmux_target": target,
-            "activation": activation,
-            "error": normalize_cell(activation.get("launch_error")) or normalize_cell(launch_result.get("launch_error")),
-            "prompt_preview": preview,
-            "nudge_manifest_path": str(nudge_manifest_path),
-            "nudge_manifest_ref": nudge_manifest_ref,
-        }
-    if not target:
-        return {"result": "missing_tmux_target", "sent": False, "tmux_target": target, "activation": activation, "nudge_manifest_path": str(nudge_manifest_path), "nudge_manifest_ref": nudge_manifest_ref}
-    if shutil.which("tmux") is None:
-        return {"result": "tmux_unavailable", "sent": False, "tmux_target": target, "activation": activation, "nudge_manifest_path": str(nudge_manifest_path), "nudge_manifest_ref": nudge_manifest_ref}
-    prompt_ready_timeout_seconds = bounded_float_input(
-        os.environ.get("ITB_ROLE_QUEUE_PROMPT_READY_TIMEOUT_SECONDS"),
-        default=0.8,
-        minimum=0.0,
-        maximum=30.0,
-    )
-    prompt_ready_poll_seconds = bounded_float_input(
-        os.environ.get("ITB_ROLE_QUEUE_PROMPT_READY_POLL_SECONDS"),
-        default=0.2,
-        minimum=0.05,
-        maximum=5.0,
-    )
-    if prompt_ready_timeout_seconds > 0:
-        prompt_ready, prompt_ready_error = wait_for_interactive_prompt(
-            target=target,
-            timeout_seconds=prompt_ready_timeout_seconds,
-            poll_interval_seconds=prompt_ready_poll_seconds,
-        )
-        if session_dir is not None and session_id:
-            activation["prompt_readiness"] = persist_queue_activation_prompt_readiness(
-                session_dir=session_dir,
-                role_id=normalize_cell(role_row.get("agent_id") or role_row.get("role_id")),
-                session_id=session_id,
-                organization_instance_id=organization_instance_id or normalize_cell(role_row.get("organization_instance_id")),
-                message=message,
-                now=current_timestamp(),
-                prompt_ready=prompt_ready,
-                prompt_error=prompt_ready_error,
-            )
-        if not prompt_ready:
-            prompt_error_lower = prompt_ready_error.lower()
-            approval_wait = "approval" in prompt_error_lower or "trust prompt" in prompt_error_lower
-            return {
-                "result": "nudge_deferred_provider_approval" if approval_wait else "nudge_deferred_prompt_not_ready",
-                "sent": False,
-                "tmux_target": target,
-                "error": prompt_ready_error,
-                "provider_status": "approval_wait" if approval_wait else "prompt_not_ready",
-                "activation": activation,
-                "prompt_preview": preview,
-                "nudge_manifest_path": str(nudge_manifest_path),
-                "nudge_manifest_ref": nudge_manifest_ref,
-            }
-    submit_enter_count = env_int_default("ITB_ROLE_QUEUE_SUBMIT_ENTER_COUNT", 2)
-    sent, send_error = tmux_send_payload(target, prompt, submit_enter_count=submit_enter_count)
-    if not sent:
-        return {
-            "result": "nudge_failed",
-            "sent": False,
-            "tmux_target": target,
-            "error": send_error,
-            "activation": activation,
-            "prompt_preview": preview,
-            "submit_enter_count": submit_enter_count,
-            "nudge_manifest_path": str(nudge_manifest_path),
-            "nudge_manifest_ref": nudge_manifest_ref,
-        }
-    normalized_ack_mode = normalize_cell(ack_mode).lower() or "defer"
-    if normalized_ack_mode in {"defer", "deferred", "daemon", "async"}:
-        return {
-            "result": "nudge_sent_ack_deferred",
-            "sent": True,
-            "tmux_target": target,
-            "activation": activation,
-            "prompt_preview": preview,
-            "submit_enter_count": submit_enter_count,
-            "ack_deferred": True,
-            "ack_owner": "queue-watch-daemon",
-            "nudge_manifest_path": str(nudge_manifest_path),
-            "nudge_manifest_ref": nudge_manifest_ref,
-        }
-    ack_timeout_seconds = bounded_float_input(
-        os.environ.get("ITB_ROLE_QUEUE_ACK_TIMEOUT_SECONDS"),
-        default=1.0,
-        minimum=0.0,
-        maximum=30.0,
-    )
-    ack_poll_seconds = bounded_float_input(
-        os.environ.get("ITB_ROLE_QUEUE_ACK_POLL_SECONDS"),
-        default=0.2,
-        minimum=0.05,
-        maximum=5.0,
-    )
-    ack_ok, ack_error = wait_for_tmux_payload_ack(
-        target=target,
-        markers=["[ITB_QUEUE_MESSAGE_READY]", normalize_cell(message.get("message_id"))],
-        timeout_seconds=ack_timeout_seconds,
-        poll_interval_seconds=ack_poll_seconds,
-    )
-    send_recovery: list[dict[str, Any]] = []
-    if not ack_ok:
-        ack_ok, ack_error, send_recovery = recover_unconfirmed_tmux_payload_send(
-            target=target,
-            payload=prompt,
-            markers=["[ITB_QUEUE_MESSAGE_READY]", normalize_cell(message.get("message_id"))],
-            timeout_seconds=ack_timeout_seconds,
-            poll_interval_seconds=ack_poll_seconds,
-            history_lines=240,
-            submit_enter_count=submit_enter_count,
-        )
-    if not ack_ok:
-        return {
-            "result": "nudge_send_unconfirmed",
-            "sent": True,
-            "tmux_target": target,
-            "error": ack_error,
-            "activation": activation,
-            "prompt_preview": preview,
-            "submit_enter_count": submit_enter_count,
-            "send_recovery": send_recovery,
-            "nudge_manifest_path": str(nudge_manifest_path),
-            "nudge_manifest_ref": nudge_manifest_ref,
-        }
-    return {
-        "result": "nudge_sent",
-        "sent": True,
-        "tmux_target": target,
-        "activation": activation,
-        "prompt_preview": preview,
-        "submit_enter_count": submit_enter_count,
-        "send_recovery": send_recovery,
-        "nudge_manifest_path": str(nudge_manifest_path),
-        "nudge_manifest_ref": nudge_manifest_ref,
-    }
 
 
 def role_queue(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
@@ -20238,7 +14350,7 @@ def role_queue(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) ->
         return {"decision": "block", "reason": "role-queue requires role_id or agent_id"}
     role_row = role_agent_row_for(role_id, organization_instance_id=organization_instance_id)
     if not role_row:
-        return {"decision": "block", "reason": f"role-agent registry has no active resident role: {role_id}"}
+        return {"decision": "block", "reason": f"role-agent registry has no active role: {role_id}"}
 
     queue_root = queue_root_for(session_dir, hook_input)
     queue_root.mkdir(parents=True, exist_ok=True)
@@ -20337,21 +14449,9 @@ def role_queue(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) ->
     except (TimeoutError, ValueError) as exc:
         return {"decision": "block", "reason": str(exc)}
     dry_run = truthy_input(hook_input.get("dry_run") or hook_input.get("dryRun") or os.environ.get("ITB_ROLE_QUEUE_DRY_RUN"))
-    force_nudge = truthy_input(
-        hook_input.get("force_nudge")
-        or hook_input.get("forceNudge")
-        or os.environ.get("ITB_ROLE_QUEUE_FORCE_NUDGE")
-    )
-    defer_nudge = truthy_input(
-        hook_input.get("defer_nudge")
-        or hook_input.get("deferNudge")
-        or hook_input.get("daemon_only")
-        or hook_input.get("daemonOnly")
-        or os.environ.get("ITB_ROLE_QUEUE_DEFER_NUDGE")
-    )
     pending_recovery_events: list[dict[str, Any]] = []
     unrecovered_pending_before_enqueue = list(pending_before_enqueue)
-    if pending_before_enqueue and not force_nudge:
+    if pending_before_enqueue:
         recovered_message_ids: set[str] = set()
         for pending_message in pending_before_enqueue:
             recovered_event = recover_pending_message_from_existing_report(
@@ -20389,75 +14489,30 @@ def role_queue(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) ->
                 if normalize_cell(item.get("message_id")) not in recovered_message_ids
             ]
 
-    stale_pending_watch: dict[str, Any] = {}
-    if unrecovered_pending_before_enqueue and not force_nudge:
+    if unrecovered_pending_before_enqueue:
         oldest_pending = unrecovered_pending_before_enqueue[0]
         oldest_sla = gate_sla_status_for_message(role_id, oldest_pending, now)
-        if oldest_sla.get("sla_breached"):
-            watch_input = dict(hook_input)
-            watch_input.update(
-                {
-                    "session_id": session_id,
-                    "role_id": role_id,
-                    "max_messages": 1,
-                    "dry_run": dry_run,
-                }
-            )
-            stale_pending_watch = role_queue_watch_once(
-                runtime=runtime,
-                state_root=state_root,
-                hook_input=watch_input,
-            )
-        stale_watch_summary = stale_pending_watch.get("queueWatch") if isinstance(stale_pending_watch.get("queueWatch"), dict) else {}
         nudge = {
-            "result": (
-                "nudge_deferred_pending_message_stale_head_renudged"
-                if stale_watch_summary
-                and (
-                    int(stale_watch_summary.get("nudged_count") or 0)
-                    or int(stale_watch_summary.get("recovered_count") or 0)
-                    or int(stale_watch_summary.get("dead_letter_count") or 0)
-                )
-                else "nudge_deferred_pending_message"
-            ),
+            "result": "enqueue_only_pending_message_present",
             "sent": False,
-            "tmux_target": str(role_row.get("tmux_target") or ""),
+            "transport": "headless_cli",
             "pending_message_count": len(unrecovered_pending_before_enqueue),
             "oldest_pending_message_id": normalize_cell(unrecovered_pending_before_enqueue[0].get("message_id")),
             "oldest_pending_sla": oldest_sla,
-            "stale_pending_watch": stale_pending_watch,
-            "recovered_pending_count": len(pending_recovery_events),
-            "recovered_pending_messages": pending_recovery_events,
-        }
-    elif defer_nudge and not force_nudge:
-        nudge = {
-            "result": "nudge_deferred_by_input",
-            "sent": False,
-            "tmux_target": str(role_row.get("tmux_target") or ""),
-            "reason": "role-queue defer_nudge requested; queue-watch-daemon is expected to nudge this pending message",
-            "pending_message_count": len(pending_before_enqueue) + 1,
             "recovered_pending_count": len(pending_recovery_events),
             "recovered_pending_messages": pending_recovery_events,
         }
     else:
-        nudge = nudge_role_agent(
-            role_row,
-            runtime=runtime,
-            message=message,
-            queue_root=queue_root,
-            inbox_path=inbox_path,
-            dry_run=dry_run,
-            ack_mode=os.environ.get("ITB_ROLE_QUEUE_ACK_MODE", "defer"),
-            state=state,
-            session_dir=session_dir,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            now=now,
-        )
-        if pending_recovery_events:
-            nudge.setdefault("recovered_pending_count", len(pending_recovery_events))
-            nudge.setdefault("recovered_pending_messages", pending_recovery_events)
-    result = "queued" if nudge.get("result") in {"dry_run", "nudge_sent"} else "queued_nudge_unconfirmed"
+        nudge = {
+            "result": "enqueue_only",
+            "sent": False,
+            "transport": "headless_cli",
+            "reason": "role-queue records durable queue state only; provider execution is performed by the independent CLI orchestration layer.",
+            "pending_message_count": len(pending_before_enqueue) + 1,
+            "recovered_pending_count": len(pending_recovery_events),
+            "recovered_pending_messages": pending_recovery_events,
+        }
+    result = "queued"
     sla = gate_sla_status_for_message(role_id, message, now)
     event = {
         "ts": now,
@@ -20493,7 +14548,7 @@ def role_queue(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) ->
         event_type="queued",
         result=result,
         now=now,
-        extra={"nudge_result": normalize_cell(nudge.get("result"))},
+        extra={"queue_transport": "headless_cli", "nudge_result": normalize_cell(nudge.get("result"))},
     )
     completion_wait = wait_for_role_queue_completion_if_requested(
         runtime=runtime,
@@ -20679,7 +14734,7 @@ def validate_agent_call_manifest(manifest: dict[str, Any], *, organization_insta
 
     to_row = role_agent_row_for(to_role, organization_instance_id=organization_instance_id) if to_role else {}
     if to_role and not to_row:
-        errors.append(f"role-agent registry has no active resident role: {to_role}")
+        errors.append(f"role-agent registry has no active role: {to_role}")
     role_layer = normalize_cell(to_row.get("role_layer")) if to_row else ""
     if to_row and role_layer not in STATIC_ROLE_LAYERS:
         errors.append(f"role-agent registry role_layer missing/invalid for {to_role}: {role_layer or '<missing>'}")
@@ -20827,10 +14882,8 @@ def agent_surfaces(*, runtime: str, state_root: Path, hook_input: dict[str, Any]
                 "provider": row["provider"],
                 "intended_model": row["intended_model"],
                 "execution_mode": row["execution_mode"],
-                "startup_profile": row["startup_profile"],
                 "queue_consumer": row["queue_consumer"],
                 "agent_call_supported": True,
-                "tmux_target": row["tmux_target"],
                 "inbox_path": row["inbox_path"],
                 "report_dir": row["report_dir"],
                 "assignment_roles": sorted(ASSIGNMENT_ROLE_VALUES) if row["role_layer"] == "worker" else [],
@@ -20862,10 +14915,9 @@ def transport_status(*, runtime: str, state_root: Path, hook_input: dict[str, An
             "state_root": str(state_root),
             "session_id": session_id,
             "queue_root": str(queue_root),
-            "tmux": {"available": bool(shutil.which("tmux")), "path": shutil.which("tmux") or ""},
             "providers": {
-                "anthropic": {"cli": "claude", "available": bool(shutil.which("claude")), "path": shutil.which("claude") or ""},
-                "openai": {"cli": "codex", "available": bool(shutil.which("codex")), "path": shutil.which("codex") or ""},
+                "claude_cli": {"cli": "claude", "available": bool(shutil.which("claude")), "path": shutil.which("claude") or ""},
+                "codex_exec": {"cli": "codex", "available": bool(shutil.which("codex")), "path": shutil.which("codex") or ""},
             },
         },
     }
@@ -20932,7 +14984,7 @@ def agent_switch(*, runtime: str, state_root: Path, hook_input: dict[str, Any], 
         errors.append("to.execution_mode could not be resolved")
     registry_row = role_agent_row_for(target_role, organization_instance_id=organization_instance_id) if target_role else {}
     if target_role and not registry_row:
-        errors.append(f"role-agent registry has no active resident role: {target_role}")
+        errors.append(f"role-agent registry has no active role: {target_role}")
     roster_row = next((item for item in roster if isinstance(item, dict) and item.get("agent_id") == target_role), None)
     if target_role and roster_row is None:
         errors.append(f"agent not found in roster: {target_role}")
@@ -20997,627 +15049,7 @@ def agent_switch(*, runtime: str, state_root: Path, hook_input: dict[str, Any], 
     return {"decision": "ok", "agentSwitch": event}
 
 
-def role_queue_watch_once(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(
-        current_session_id(state_root, hook_input)
-        or "unknown-session"
-    )
-    session_dir = state_root / safe_id(session_id)
-    state_path = session_dir / "bootstrap.json"
-    state = read_json(state_path) if state_path.exists() else {}
-    organization_instance_id = str(
-        state.get("organization_instance_id")
-        or hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or organization_id(session_id)
-    )
-    role_id = normalize_cell(hook_input.get("role_id") or hook_input.get("roleId") or hook_input.get("agent_id") or hook_input.get("agentId"))
-    if not role_id:
-        return {"decision": "block", "reason": "queue-watch requires role_id or agent_id"}
-    role_row = role_agent_row_for(role_id, organization_instance_id=organization_instance_id)
-    if not role_row:
-        return {"decision": "block", "reason": f"role-agent registry has no active resident role: {role_id}"}
-    queue_root = queue_root_for(session_dir, hook_input)
-    inbox_path = queue_root / str(role_row["inbox_path"])
-    inbox = load_inbox(inbox_path, role_id)
-    pending = [
-        item
-        for item in inbox.get("messages", [])
-        if isinstance(item, dict) and normalize_cell(item.get("status") or "pending") == "pending"
-    ]
-    max_messages = bounded_int_input(hook_input.get("max_messages") or hook_input.get("maxMessages") or 1, default=1, minimum=1, maximum=50)
-    max_retries = bounded_int_input(
-        hook_input.get("max_retries")
-        or hook_input.get("maxRetries")
-        or os.environ.get("ITB_QUEUE_WATCH_MAX_RETRIES")
-        or 5,
-        default=5,
-        minimum=0,
-        maximum=100,
-    )
-    dry_run = truthy_input(hook_input.get("dry_run") or hook_input.get("dryRun") or os.environ.get("ITB_QUEUE_WATCH_DRY_RUN"))
-    now = current_timestamp()
-    nudged: list[dict[str, Any]] = []
-    recovered: list[dict[str, Any]] = []
-    dead_lettered: list[dict[str, Any]] = []
-    sla_breaches: list[dict[str, Any]] = []
-    cooldown_skipped: list[dict[str, Any]] = []
-    provider_busy: list[dict[str, Any]] = []
-    for message in pending[:max_messages]:
-        recovered_event = recover_pending_message_from_existing_report(
-            runtime=runtime,
-            session_dir=session_dir,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            queue_root=queue_root,
-            inbox_path=inbox_path,
-            role_id=role_id,
-            role_row=role_row,
-            message=message,
-            now=now,
-            dry_run=dry_run,
-        )
-        if recovered_event:
-            if dry_run:
-                recovered_event["auto_handoff"] = {"result": "dry_run", "sent": False}
-            else:
-                recovery_handoff_input = merge_auto_handoff_context_from_payload(
-                    hook_input,
-                    message.get("payload") if isinstance(message.get("payload"), dict) else {},
-                )
-                recovered_event["auto_handoff"] = maybe_enqueue_auto_queue_handoff(
-                    runtime=runtime,
-                    state_root=state_root,
-                    session_id=session_id,
-                    organization_instance_id=organization_instance_id,
-                    from_role=role_id,
-                    finalized=recovered_event,
-                    hook_input=recovery_handoff_input,
-                )
-            recovered.append(recovered_event)
-            continue
-        current_retry_count = int(message.get("retry_count") or 0)
-        approval_probe = (
-            {}
-            if dry_run or not normalize_cell(message.get("last_nudged_at"))
-            else queue_provider_approval_probe(
-                session_dir=session_dir,
-                role_id=role_id,
-                role_row=role_row,
-            )
-        )
-        sla_breach: dict[str, Any] | None = None
 
-        def record_sla_breach_once(notification_result: str = "sla_breached") -> dict[str, Any] | None:
-            nonlocal sla_breach
-            if sla_breach is None:
-                sla_breach = record_queue_sla_breach(
-                    runtime=runtime,
-                    session_dir=session_dir,
-                    session_id=session_id,
-                    organization_instance_id=organization_instance_id,
-                    queue_root=queue_root,
-                    inbox_path=inbox_path,
-                    role_id=role_id,
-                    message=message,
-                    now=now,
-                    dry_run=dry_run,
-                    notification_result=notification_result,
-                )
-                if sla_breach:
-                    sla_breaches.append(sla_breach)
-            return sla_breach
-        cooldown = queue_nudge_cooldown_status(message, now, hook_input)
-        if cooldown.get("cooldown_active"):
-            if approval_probe:
-                record_sla_breach_once("approval_wait")
-                provider_busy.append(
-                    record_queue_provider_busy_event(
-                        runtime=runtime,
-                        session_dir=session_dir,
-                        session_id=session_id,
-                        organization_instance_id=organization_instance_id,
-                        queue_root=queue_root,
-                        inbox_path=inbox_path,
-                        role_id=role_id,
-                        message=message,
-                        now=now,
-                        retry_count=current_retry_count,
-                        nudge=approval_probe,
-                        metric_result="approval_wait",
-                        dry_run=dry_run,
-                    )
-                )
-                continue
-            record_sla_breach_once()
-            cooldown_event = {
-                "ts": now,
-                "runtime": runtime,
-                "event_type": "queue_watch",
-                "session_id": session_id,
-                "organization_instance_id": organization_instance_id,
-                "role_id": role_id,
-                "task_id": normalize_cell(message.get("task_id")),
-                "message_id": normalize_cell(message.get("message_id")),
-                "result": "nudge_cooldown",
-                "retry_count": current_retry_count,
-                "dry_run": dry_run,
-                "nudge": {"result": "nudge_cooldown", "sent": False, **cooldown},
-                **gate_sla_status_for_message(role_id, message, now),
-            }
-            cooldown_event["notification_class"] = "silent"
-            cooldown_skipped.append(cooldown_event)
-            continue
-        if approval_probe:
-            record_sla_breach_once("approval_wait")
-            provider_busy.append(
-                record_queue_provider_busy_event(
-                    session_dir=session_dir,
-                    queue_root=queue_root,
-                    runtime=runtime,
-                    session_id=session_id,
-                    organization_instance_id=organization_instance_id,
-                    inbox_path=inbox_path,
-                    role_id=role_id,
-                    message=message,
-                    now=now,
-                    retry_count=current_retry_count,
-                    nudge=approval_probe,
-                    metric_result="approval_wait",
-                    dry_run=dry_run,
-                )
-            )
-            continue
-        last_nudge_result = normalize_cell(message.get("last_nudge_result"))
-        transient_probe_results = {"nudge_deferred_prompt_not_ready", "nudge_deferred_provider_approval"}
-        if max_retries and current_retry_count >= max_retries and last_nudge_result not in transient_probe_results:
-            record_sla_breach_once()
-            reason = f"queue-watch max retries exceeded: retry_count={current_retry_count}, max_retries={max_retries}"
-            if dry_run:
-                dead_lettered.append(
-                    preview_dead_letter_pending_message(
-                        runtime=runtime,
-                        session_id=session_id,
-                        organization_instance_id=organization_instance_id,
-                        queue_root=queue_root,
-                        role_id=role_id,
-                        role_row=role_row,
-                        message=message,
-                        now=now,
-                        reason=reason,
-                    )
-                )
-            else:
-                dead_lettered.append(
-                    dead_letter_pending_message(
-                        runtime=runtime,
-                        session_dir=session_dir,
-                        session_id=session_id,
-                        organization_instance_id=organization_instance_id,
-                        queue_root=queue_root,
-                        inbox_path=inbox_path,
-                        role_id=role_id,
-                        role_row=role_row,
-                        message=message,
-                        now=now,
-                        reason=reason,
-                    )
-                )
-            continue
-        retry_count = current_retry_count + 1
-        nudge = nudge_role_agent(
-            role_row,
-            runtime=runtime,
-            message=message,
-            queue_root=queue_root,
-            inbox_path=inbox_path,
-            dry_run=dry_run,
-            ack_mode="recover",
-            state=state,
-            session_dir=session_dir,
-            session_id=session_id,
-            organization_instance_id=organization_instance_id,
-            now=now,
-            persist_dry_run_manifest=False,
-        )
-        nudge_result = normalize_cell(nudge.get("result"))
-        if nudge_result in {"queue_consumer_unavailable", "missing_tmux_target", "tmux_unavailable"}:
-            record_sla_breach_once()
-            reason = f"queue-watch live probe unavailable: {nudge_result}"
-            if dry_run:
-                dead_lettered.append(
-                    preview_dead_letter_pending_message(
-                        runtime=runtime,
-                        session_id=session_id,
-                        organization_instance_id=organization_instance_id,
-                        queue_root=queue_root,
-                        role_id=role_id,
-                        role_row=role_row,
-                        message=message,
-                        now=now,
-                        reason=reason,
-                        response_status="unavailable",
-                        provider_status=nudge_result,
-                    )
-                )
-            else:
-                dead_lettered.append(
-                    dead_letter_pending_message(
-                        runtime=runtime,
-                        session_dir=session_dir,
-                        session_id=session_id,
-                        organization_instance_id=organization_instance_id,
-                        queue_root=queue_root,
-                        inbox_path=inbox_path,
-                        role_id=role_id,
-                        role_row=role_row,
-                        message=message,
-                        now=now,
-                        reason=reason,
-                        response_status="unavailable",
-                        provider_status=nudge_result,
-                    )
-                )
-            continue
-        if nudge_result in {"nudge_deferred_prompt_not_ready", "nudge_deferred_provider_approval"}:
-            record_sla_breach_once("approval_wait" if nudge_result == "nudge_deferred_provider_approval" else "sla_breached")
-            provider_busy.append(
-                record_queue_provider_busy_event(
-                    runtime=runtime,
-                    session_dir=session_dir,
-                    session_id=session_id,
-                    organization_instance_id=organization_instance_id,
-                    queue_root=queue_root,
-                    inbox_path=inbox_path,
-                    role_id=role_id,
-                    message=message,
-                    now=now,
-                    retry_count=current_retry_count,
-                    nudge=nudge,
-                    metric_result="approval_wait" if nudge_result == "nudge_deferred_provider_approval" else "provider_busy",
-                    dry_run=dry_run,
-                    update_last_nudged_at=True,
-                )
-            )
-            continue
-        record_sla_breach_once()
-        event = {
-            "ts": now,
-            "runtime": runtime,
-            "event_type": "queue_watch",
-            "session_id": session_id,
-            "organization_instance_id": organization_instance_id,
-            "role_id": role_id,
-            "task_id": normalize_cell(message.get("task_id")),
-            "message_id": normalize_cell(message.get("message_id")),
-            "result": "nudged" if nudge_result in {"dry_run", "nudge_sent"} else "nudge_unconfirmed",
-            "retry_count": retry_count,
-            "dry_run": dry_run,
-            "nudge": nudge,
-            **gate_sla_status_for_message(role_id, message, now),
-        }
-        event["notification_class"] = notification_class_for_event(
-            event_type="queue_watch",
-            result=event["result"],
-            sla_breached=bool(event.get("sla_breached")),
-        )
-        if not dry_run:
-            update_inbox_message(
-                inbox_path,
-                role_id,
-                normalize_cell(message.get("message_id")),
-                queue_root,
-                {
-                    "last_nudged_at": now,
-                    "retry_count": retry_count,
-                    "last_nudge_result": nudge_result,
-                },
-            )
-            append_jsonl_atomic(session_dir / "queue-events.jsonl", event)
-            append_queue_metric(
-                session_dir=session_dir,
-                queue_root=queue_root,
-                runtime=runtime,
-                session_id=session_id,
-                organization_instance_id=organization_instance_id,
-                role_id=role_id,
-                message=message,
-                event_type="watch_nudge",
-                result=event["result"],
-                now=now,
-                retry_count=retry_count,
-                extra={"nudge_result": nudge_result},
-            )
-        nudged.append(event)
-    approval_wait_count = queue_watch_approval_wait_count(provider_busy)
-    summary_result = queue_watch_result_for_counts(
-        nudged_count=len(nudged),
-        recovered_count=len(recovered),
-        dead_letter_count=len(dead_lettered),
-        sla_breach_count=len(sla_breaches),
-        cooldown_skipped_count=len(cooldown_skipped),
-        provider_busy_count=len(provider_busy),
-        approval_wait_count=approval_wait_count,
-    )
-    summary_notification_result = (
-        "approval_wait"
-        if summary_result == "provider_busy"
-        and approval_wait_count
-        and approval_wait_count == len(provider_busy)
-        else summary_result
-    )
-    return {
-        "queueWatch": {
-            "result": summary_result,
-            "role_id": role_id,
-            "queue_root": str(queue_root),
-            "inbox_path": str(inbox_path),
-            "pending_count": len(pending),
-            "recovered_count": len(recovered),
-            "dead_letter_count": len(dead_lettered),
-            "nudged_count": len(nudged),
-            "sla_breach_count": len(sla_breaches),
-            "cooldown_skipped_count": len(cooldown_skipped),
-            "provider_busy_count": len(provider_busy),
-            "max_retries": max_retries,
-            "dry_run": dry_run,
-            "recovered_messages": recovered,
-            "dead_lettered_messages": dead_lettered,
-            "sla_breaches": sla_breaches,
-            "cooldown_skipped_messages": cooldown_skipped,
-            "provider_busy_messages": provider_busy,
-            "messages": nudged,
-            "notification_class": notification_class_for_event(
-                event_type="queue_watch",
-                result=summary_notification_result,
-                sla_breached=bool(sla_breaches),
-            ),
-        }
-    }
-
-
-def role_queue_watch_all(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
-    session_dir = state_root / safe_id(session_id)
-    state_path = session_dir / "bootstrap.json"
-    state = read_json(state_path) if state_path.exists() else {}
-    organization_instance_id = str(
-        state.get("organization_instance_id")
-        or hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or organization_id(session_id)
-    )
-    configured_roles = hook_input.get("role_ids") or hook_input.get("roleIds") or os.environ.get("ITB_QUEUE_WATCH_ROLE_IDS")
-    role_ids = normalize_allowed_tools(configured_roles) if configured_roles else []
-    if not role_ids:
-        role_ids = [
-            normalize_cell(row.get("role_id") or row.get("agent_id"))
-            for row in role_agent_rows(organization_instance_id=organization_instance_id)
-            if row.get("queue_consumer")
-        ]
-    dry_run = truthy_input(hook_input.get("dry_run") or hook_input.get("dryRun") or os.environ.get("ITB_QUEUE_WATCH_DRY_RUN"))
-    max_roles = bounded_int_input(
-        hook_input.get("max_roles") or hook_input.get("maxRoles") or os.environ.get("ITB_QUEUE_WATCH_MAX_ROLES") or 50,
-        default=50,
-        minimum=1,
-        maximum=200,
-    )
-    summaries: list[dict[str, Any]] = []
-    errors: list[dict[str, Any]] = []
-    for role_id in role_ids[:max_roles]:
-        if not role_id:
-            continue
-        child_input = dict(hook_input)
-        child_input["role_id"] = role_id
-        output = role_queue_watch_once(runtime=runtime, state_root=state_root, hook_input=child_input)
-        if "queueWatch" in output:
-            summaries.append(output["queueWatch"])
-        else:
-            errors.append({"role_id": role_id, "error": output.get("reason", "queue-watch failed")})
-    totals = {
-        "pending_count": sum(int(item.get("pending_count") or 0) for item in summaries),
-        "recovered_count": sum(int(item.get("recovered_count") or 0) for item in summaries),
-        "dead_letter_count": sum(int(item.get("dead_letter_count") or 0) for item in summaries),
-        "nudged_count": sum(int(item.get("nudged_count") or 0) for item in summaries),
-        "sla_breach_count": sum(int(item.get("sla_breach_count") or 0) for item in summaries),
-        "cooldown_skipped_count": sum(int(item.get("cooldown_skipped_count") or 0) for item in summaries),
-        "provider_busy_count": sum(int(item.get("provider_busy_count") or 0) for item in summaries),
-    }
-    provider_busy_messages: list[dict[str, Any]] = []
-    for summary in summaries:
-        messages = summary.get("provider_busy_messages")
-        if isinstance(messages, list):
-            provider_busy_messages.extend(item for item in messages if isinstance(item, dict))
-    approval_wait_count = queue_watch_approval_wait_count(provider_busy_messages)
-    result = queue_watch_result_for_counts(
-        nudged_count=totals["nudged_count"],
-        recovered_count=totals["recovered_count"],
-        dead_letter_count=totals["dead_letter_count"],
-        sla_breach_count=totals["sla_breach_count"],
-        cooldown_skipped_count=totals["cooldown_skipped_count"],
-        provider_busy_count=totals["provider_busy_count"],
-        approval_wait_count=approval_wait_count,
-        errors=bool(errors),
-        has_summaries=bool(summaries),
-    )
-    notification_result = (
-        "approval_wait"
-        if result == "provider_busy"
-        and approval_wait_count
-        and approval_wait_count == totals["provider_busy_count"]
-        else result
-    )
-    event = {
-        "ts": current_timestamp(),
-        "runtime": runtime,
-        "event_type": "queue_watch_all",
-        "session_id": session_id,
-        "organization_instance_id": organization_instance_id,
-        "result": result,
-        "role_count": len(summaries),
-        "error_count": len(errors),
-        "dry_run": dry_run,
-        "notification_class": notification_class_for_event(
-            event_type="queue_watch_all",
-            result=notification_result,
-            sla_breached=bool(totals["sla_breach_count"]),
-            errors=[item["error"] for item in errors] if errors else None,
-        ),
-        **totals,
-    }
-    if not dry_run:
-        append_jsonl_atomic(session_dir / "queue-events.jsonl", event)
-    return {
-        "queueWatchAll": {
-            "result": result,
-            "session_id": session_id,
-            "organization_instance_id": organization_instance_id,
-            "role_count": len(summaries),
-            "requested_role_count": len(role_ids),
-            "max_roles": max_roles,
-            "dry_run": dry_run,
-            "failed_replay_policy": "manual_queue_replay_failed_only",
-            "notification_class": event["notification_class"],
-            "error_count": len(errors),
-            "errors": errors,
-            **totals,
-            "roles": summaries,
-        }
-    }
-
-
-def role_queue_watch_daemon(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
-    session_dir = state_root / safe_id(session_id)
-    state_path = session_dir / "bootstrap.json"
-    state = read_json(state_path) if state_path.exists() else {}
-    organization_instance_id = str(
-        state.get("organization_instance_id")
-        or hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or organization_id(session_id)
-    )
-    max_cycles_raw = normalize_cell(
-        hook_input.get("max_cycles")
-        or hook_input.get("maxCycles")
-        or os.environ.get("ITB_QUEUE_WATCH_DAEMON_MAX_CYCLES")
-        or "1"
-    )
-    max_cycles = (
-        0
-        if max_cycles_raw in {"0", "forever", "infinite"}
-        else bounded_int_input(max_cycles_raw, default=1, minimum=1, maximum=10000)
-    )
-    poll_interval_seconds = bounded_float_input(
-        hook_input.get("poll_interval_seconds")
-        or hook_input.get("pollIntervalSeconds")
-        or os.environ.get("ITB_QUEUE_WATCH_DAEMON_POLL_SECONDS")
-        or 5,
-        default=5.0,
-        minimum=0.0,
-        maximum=3600.0,
-    )
-    if max_cycles == 0 and poll_interval_seconds <= 0:
-        poll_interval_seconds = 1.0
-    event_driven = truthy_input(
-        hook_input.get("event_driven")
-        or hook_input.get("eventDriven")
-        or os.environ.get("ITB_QUEUE_WATCH_DAEMON_EVENT_DRIVEN"),
-        default=True,
-    )
-    dry_run = truthy_input(hook_input.get("dry_run") or hook_input.get("dryRun") or os.environ.get("ITB_QUEUE_WATCH_DRY_RUN"))
-    queue_root = queue_root_for(session_dir, hook_input)
-    cycles: list[dict[str, Any]] = []
-    event_waits: list[dict[str, Any]] = []
-    totals = {
-        "pending_count": 0,
-        "recovered_count": 0,
-        "dead_letter_count": 0,
-        "nudged_count": 0,
-        "sla_breach_count": 0,
-        "cooldown_skipped_count": 0,
-        "provider_busy_count": 0,
-        "error_count": 0,
-    }
-    cycle_index = 0
-    while True:
-        cycle_index += 1
-        output = role_queue_watch_all(runtime=runtime, state_root=state_root, hook_input=hook_input)
-        summary = output.get("queueWatchAll")
-        if not isinstance(summary, dict):
-            error = normalize_cell(output.get("reason")) or "queue-watch-all failed"
-            summary = {
-                "result": "error",
-                "error": error,
-                "error_count": 1,
-                "errors": [{"error": error}],
-                "notification_class": "flow_alert",
-            }
-        cycle = {"cycle": cycle_index, **summary}
-        cycles.append(cycle)
-        for key in totals:
-            totals[key] += int(summary.get(key) or 0)
-        if max_cycles and cycle_index >= max_cycles:
-            break
-        if poll_interval_seconds > 0:
-            event_wait = queue_watch_wait_for_event(
-                queue_root=queue_root,
-                timeout_seconds=poll_interval_seconds,
-                event_driven=event_driven,
-            )
-            cycle["event_wait"] = event_wait
-            event_waits.append(event_wait)
-    child_error_results = {"error", "partial_error"}
-    result = "completed_with_errors" if any(normalize_cell(item.get("result")) in child_error_results for item in cycles) else "completed"
-    child_notification_classes = {normalize_cell(item.get("notification_class")) for item in cycles}
-    if result == "completed_with_errors" or "flow_alert" in child_notification_classes:
-        notification_result = "flow_alert"
-    elif "approval_wait" in child_notification_classes:
-        notification_result = "approval_wait"
-    else:
-        notification_result = result
-    event = {
-        "ts": current_timestamp(),
-        "runtime": runtime,
-        "event_type": "queue_watch_daemon",
-        "session_id": session_id,
-        "organization_instance_id": organization_instance_id,
-        "result": result,
-        "cycles_completed": cycle_index,
-        "max_cycles": max_cycles,
-        "poll_interval_seconds": poll_interval_seconds,
-        "event_driven": event_driven,
-        "dry_run": dry_run,
-        "event_wait_count": len(event_waits),
-        "event_wakeup_count": sum(1 for item in event_waits if item.get("result") == "event"),
-        "notification_class": notification_class_for_event(
-            event_type="queue_watch_daemon",
-            result=notification_result,
-            sla_breached=bool(totals["sla_breach_count"]),
-        ),
-        **totals,
-    }
-    if not dry_run:
-        append_jsonl_atomic(session_dir / "queue-events.jsonl", event)
-    return {
-        "queueWatchDaemon": {
-            "result": result,
-            "session_id": session_id,
-            "organization_instance_id": organization_instance_id,
-            "cycles_completed": cycle_index,
-            "max_cycles": max_cycles,
-            "poll_interval_seconds": poll_interval_seconds,
-            "event_driven": event_driven,
-            "dry_run": dry_run,
-            "event_wait_count": len(event_waits),
-            "event_wakeup_count": event["event_wakeup_count"],
-            "failed_replay_policy": "manual_queue_replay_failed_only",
-            "notification_class": event["notification_class"],
-            **totals,
-            "cycles": cycles,
-            "event_waits": event_waits,
-        }
-    }
 
 
 def role_queue_replay_failed(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
@@ -21638,7 +15070,7 @@ def role_queue_replay_failed(*, runtime: str, state_root: Path, hook_input: dict
         return {"decision": "block", "reason": "queue-replay-failed requires role_id or agent_id"}
     role_row = role_agent_row_for(role_id, organization_instance_id=organization_instance_id)
     if not role_row:
-        return {"decision": "block", "reason": f"role-agent registry has no active resident role: {role_id}"}
+        return {"decision": "block", "reason": f"role-agent registry has no active role: {role_id}"}
     queue_root = queue_root_for(session_dir, hook_input)
     inbox_path = queue_root / str(role_row["inbox_path"])
     inbox = load_inbox(inbox_path, role_id)
@@ -21765,7 +15197,7 @@ def role_queue_close_message(*, runtime: str, state_root: Path, hook_input: dict
         return {"decision": "block", "reason": "queue-close-message requires explicit message_id"}
     role_row = role_agent_row_for(role_id, organization_instance_id=organization_instance_id)
     if not role_row:
-        return {"decision": "block", "reason": f"role-agent registry has no active resident role: {role_id}"}
+        return {"decision": "block", "reason": f"role-agent registry has no active role: {role_id}"}
     queue_root = queue_root_for(session_dir, hook_input)
     inbox_path = queue_root / str(role_row["inbox_path"])
     try:
@@ -21782,7 +15214,7 @@ def role_queue_close_message(*, runtime: str, state_root: Path, hook_input: dict
     if report_path.exists():
         return {
             "decision": "block",
-            "reason": f"queue-close-message found existing terminal report; run queue-watch recovery before manual close: {report_ref}",
+            "reason": f"queue-close-message found existing terminal report; run queue recovery before manual close: {report_ref}",
             "role_id": role_id,
             "message_id": message_id,
             "report_path": str(report_path),
@@ -22087,7 +15519,7 @@ def recover_pending_message_from_existing_report(
         "last_request_id": normalize_cell(evidence.get("request_id")),
         "effective_model": normalize_cell(evidence.get("effective_model")),
         "transcript_path": normalize_cell(evidence.get("transcript_path")),
-        "notes": f"queue-watch recovered terminal {report_status} report from {report_ref}",
+        "notes": f"queue recovery found terminal {report_status} report from {report_ref}",
     }
     merge_roster_agent_row_locked(roster_path, fallback_roster, role_id, row_update)
 
@@ -22595,7 +16027,7 @@ def dead_letter_pending_message(
         now=now,
         response_status=response_status,
         provider_status=provider_status,
-        notes=f"queue-watch closed pending message: {reason}",
+        notes=f"queue recovery closed pending message: {reason}",
         extra={
             "last_failed_message_id": message_id,
             "last_failed_report_path": report_ref,
@@ -22886,7 +16318,7 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
         return {"decision": "block", "reason": "role-agent-worker requires role_id or ITB_AGENT_ID"}
     role_row = role_agent_row_for(role_id, organization_instance_id=organization_instance_id)
     if not role_row:
-        return {"decision": "block", "reason": f"role-agent registry has no active resident role: {role_id}"}
+        return {"decision": "block", "reason": f"role-agent registry has no active role: {role_id}"}
     queue_root = queue_root_for(session_dir, hook_input)
     inbox_path = queue_root / str(role_row["inbox_path"])
     now = current_timestamp()
@@ -23140,7 +16572,7 @@ def role_agent_worker(*, runtime: str, state_root: Path, hook_input: dict[str, A
 
 
 def block_reason(state: dict[str, Any]) -> str:
-    return f"""ITB preflight is not ready.
+    return f"""ITB bootstrap state is incomplete.
 
 | Field | Value |
 |---|---|
@@ -23148,144 +16580,12 @@ def block_reason(state: dict[str, Any]) -> str:
 | session_id | `{state.get('session_id', '')}` |
 | bootstrap_status | `{state.get('bootstrap_status', '')}` |
 | readiness_scope | `{state.get('readiness_scope', '')}` |
-| spawn_mode | `{state.get('spawn_mode', '')}` |
-| resident_process_mode | `{state.get('resident_process_mode', '')}` |
 | state_dir | `{state.get('outputs', {}).get('state_dir', '')}` |
-| process_launch_failure_count | `{state.get('process_launch_failure_count', 0)}` |
-| process_launch_failures | `{json.dumps(state.get('process_launch_failures', []), ensure_ascii=False)}` |
 | validation_errors | `{'; '.join(state.get('validation_errors', []))}` |
 
-Stop before `gate-prompt-formatter`, task creation, implementation, review, or commit.
-Run or repair `infra-team-bootstrap` readiness or task flow evidence first.
+Run metadata-only `infra-team-bootstrap session-start` or repair task flow evidence first.
 """
 
-
-def not_ready_context(reason: str) -> str:
-    """Wrap a not-ready reason as advisory context instead of a hard block.
-
-    The UserPromptSubmit hook must never return ``decision: block`` for ITB
-    readiness/flow gaps. Blocking the prompt creates a dead-lock where the user
-    cannot send any message (including the message needed to repair readiness).
-    Instead we surface the unfavorable state to the main agent as context so it
-    can decide how to proceed (e.g. run/repair ``infra-team-bootstrap`` or task
-    flow evidence) while still honoring the No Task, No Execution gate.
-    """
-    return f"""## ITB Preflight Not Ready (advisory, not blocking)
-
-The prompt was allowed through, but ITB readiness / task flow evidence is incomplete.
-Do NOT start task work, `gate-prompt-formatter`, task creation, implementation, review,
-or commit until this is resolved. First run or repair `infra-team-bootstrap` readiness
-or the missing task flow evidence, then continue.
-
-{reason}"""
-
-
-def shutdown_tmux_session(
-    *,
-    session_id: str,
-    state: dict[str, Any],
-    now: str,
-    dry_run: bool | None = None,
-    skip_tmux_shutdown: bool | None = None,
-) -> dict[str, Any]:
-    organization_instance_id = state.get("organization_instance_id") or organization_id(session_id)
-    expected_tmux_session = safe_tmux_name(f"itb-{organization_instance_id}", max_length=60)
-    tmux_session = state.get("tmux_session") or ""
-    result: dict[str, Any] = {
-        "ts": now,
-        "session_id": session_id,
-        "organization_instance_id": organization_instance_id,
-        "tmux_session": tmux_session,
-        "expected_tmux_session": expected_tmux_session,
-        "tmux_windows_before": None,
-        "tmux_windows_after": None,
-        "tmux_kill_attempted": False,
-        "tmux_shutdown_result": "not_attempted",
-        "tmux_shutdown_error": "",
-        "dry_run": env_flag("ITB_SESSION_END_DRY_RUN") if dry_run is None else dry_run,
-        "skip_tmux_shutdown": (
-            env_flag("ITB_SESSION_END_SKIP_TMUX")
-            if skip_tmux_shutdown is None
-            else skip_tmux_shutdown
-        ),
-        "child_context": os.environ.get(CHILD_AGENT_ENV) == "1",
-    }
-
-    if result["child_context"]:
-        result["tmux_shutdown_result"] = "skipped_child_agent_context"
-        return result
-
-    if not tmux_session:
-        result["tmux_shutdown_result"] = "no_tmux_session_recorded"
-        return result
-
-    if tmux_session != expected_tmux_session or not tmux_session.startswith("itb-org-"):
-        result["tmux_shutdown_result"] = "refused_unsafe_tmux_session"
-        result["tmux_shutdown_error"] = (
-            f"tmux_session={tmux_session} expected={expected_tmux_session}"
-        )
-        return result
-
-    if result["skip_tmux_shutdown"]:
-        result["tmux_shutdown_result"] = "tmux_shutdown_skipped"
-        return result
-
-    if result["dry_run"]:
-        result["tmux_shutdown_result"] = "tmux_kill_dry_run"
-        return result
-
-    if shutil.which("tmux") is None:
-        result["tmux_shutdown_result"] = "tmux_unavailable"
-        result["tmux_shutdown_error"] = "tmux command not found"
-        return result
-
-    if not tmux_session_exists(tmux_session):
-        result["tmux_shutdown_result"] = "tmux_already_stopped"
-        return result
-
-    before_count, before_error = tmux_window_count(tmux_session)
-    result["tmux_windows_before"] = before_count
-    if before_error:
-        result["tmux_shutdown_error"] = before_error
-
-    result["tmux_kill_attempted"] = True
-    completed = run_tmux(["kill-session", "-t", tmux_session], timeout=5.0)
-    if completed.returncode != 0:
-        result["tmux_shutdown_result"] = "tmux_kill_failed"
-        result["tmux_shutdown_error"] = completed.stderr.strip() or completed.stdout.strip()
-        return result
-
-    if tmux_session_exists(tmux_session):
-        after_count, after_error = tmux_window_count(tmux_session)
-        result["tmux_windows_after"] = after_count
-        result["tmux_shutdown_result"] = "tmux_still_running"
-        result["tmux_shutdown_error"] = after_error or "tmux session still exists after kill-session"
-        return result
-
-    result["tmux_windows_after"] = 0
-    result["tmux_shutdown_result"] = "tmux_killed"
-    result["tmux_shutdown_error"] = ""
-    return result
-
-
-def detached_process_shutdown_for_result(
-    *,
-    session_dir: Path,
-    now: str,
-    shutdown_result: dict[str, Any],
-) -> dict[str, Any]:
-    if shutdown_result.get("child_context"):
-        return {
-            "result": "skipped_child_agent_context",
-            "stopped_count": 0,
-            "refused_count": 0,
-            "processes": {},
-        }
-    return stop_session_detached_processes(
-        session_dir=session_dir,
-        now=now,
-        dry_run=bool(shutdown_result.get("dry_run")),
-    )
 
 
 def read_bootstrap_state(state_path: Path) -> dict[str, Any]:
@@ -23322,7 +16622,7 @@ def write_shutdown_evidence(
             event_type=event_type,
             session_id=session_id,
             organization_instance_id=shutdown_result["organization_instance_id"],
-            result=f"{evidence_prefix}_{shutdown_result['tmux_shutdown_result']}",
+            result=f"{evidence_prefix}_{shutdown_result.get('archive_result', 'archived')}",
             usage_source="bootstrap_metadata_only",
             notes=notes,
             extra=shutdown_result,
@@ -23330,42 +16630,55 @@ def write_shutdown_evidence(
     )
 
 
-def session_end(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = hook_input.get("session_id") or hook_input.get("sessionId") or "unknown-session"
-    session_dir = state_root / safe_id(session_id)
+
+def archive_shutdown(
+    *,
+    runtime: str,
+    state_root: Path,
+    hook_input: dict[str, Any],
+    session_id: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    resolved_session_id = normalize_cell(session_id)
+    if not resolved_session_id:
+        resolved_session_id, _ = resolve_session_id(state_root, hook_input)
+    if not resolved_session_id:
+        resolved_session_id = "unknown-session"
+    session_dir = state_root / safe_id(resolved_session_id)
     session_dir.mkdir(parents=True, exist_ok=True)
     now = current_timestamp()
-    state_path = session_dir / "bootstrap.json"
-    state = read_bootstrap_state(state_path)
-    shutdown_result = shutdown_tmux_session(
-        session_id=session_id,
-        state=state,
-        now=now,
+    state = read_bootstrap_state(session_dir / "bootstrap.json")
+    organization_instance_id = normalize_cell(
+        state.get("organization_instance_id")
+        or hook_input.get("organization_instance_id")
+        or hook_input.get("organizationInstanceId")
+        or organization_id(resolved_session_id)
     )
-    shutdown_result["detached_process_shutdown"] = detached_process_shutdown_for_result(
-        session_dir=session_dir,
-        now=now,
-        shutdown_result=shutdown_result,
-    )
-    shutdown_result["state_dir_gc"] = cleanup_archived_state_dirs(
-        state_root=state_root,
-        current_session_id=safe_id(session_id),
-        now_epoch=int(time.time()),
-    )
-    write_shutdown_evidence(
-        runtime=runtime,
-        session_dir=session_dir,
-        session_id=session_id,
-        hook_input=hook_input,
-        shutdown_result=shutdown_result,
-        now=now,
-        event_label="SessionEnd",
-        event_type="session_end",
-        input_filename="session-end-input.json",
-        evidence_prefix="session_archived",
-        notes="session end hook archived ITB state and attempted scoped tmux shutdown",
-    )
-    return {"suppressOutput": True}
+    result = {
+        "runtime": runtime,
+        "session_id": resolved_session_id,
+        "organization_instance_id": organization_instance_id,
+        "archive_result": "dry_run" if dry_run else "archived",
+        "dry_run": dry_run,
+        "archived_at": now,
+        "shutdown_scope": "state_only_headless",
+        "note": "No provider process shutdown is performed by ATV hooks; CLI orchestration owns worker lifecycle.",
+    }
+    if not dry_run:
+        write_shutdown_evidence(
+            runtime=runtime,
+            session_dir=session_dir,
+            session_id=resolved_session_id,
+            hook_input=hook_input,
+            shutdown_result=result,
+            now=now,
+            event_label="ArchiveShutdown",
+            event_type="archive_shutdown",
+            input_filename="archive-shutdown-input.json",
+            evidence_prefix="archive_shutdown",
+            notes="State-only archive completed for headless ATV runtime.",
+        )
+    return {"archiveShutdown": result}
 
 
 def resolve_session_id(state_root: Path, hook_input: dict[str, Any] | None = None) -> tuple[str, str]:
@@ -23386,94 +16699,6 @@ def current_session_id(state_root: Path, hook_input: dict[str, Any] | None = Non
     session_id, _source = resolve_session_id(state_root, hook_input)
     return session_id
 
-
-def archive_shutdown(
-    *,
-    runtime: str,
-    state_root: Path,
-    hook_input: dict[str, Any],
-    session_id: str,
-    dry_run: bool = False,
-) -> dict[str, Any]:
-    if not session_id:
-        return {
-            "decision": "block",
-            "reason": "archive-shutdown requires --current or --session-id",
-            "archiveShutdown": {"dry_run": dry_run},
-        }
-
-    session_dir = state_root / safe_id(session_id)
-    state_path = session_dir / "bootstrap.json"
-    if not state_path.exists():
-        return {
-            "decision": "block",
-            "reason": f"bootstrap state not found: {state_path}",
-            "archiveShutdown": {
-                "session_id": session_id,
-                "state_path": str(state_path),
-                "dry_run": dry_run,
-            },
-        }
-
-    state = read_bootstrap_state(state_path)
-    if not state:
-        return {
-            "decision": "block",
-            "reason": f"bootstrap state unreadable or invalid: {state_path}",
-            "archiveShutdown": {
-                "session_id": session_id,
-                "state_path": str(state_path),
-                "dry_run": dry_run,
-            },
-        }
-
-    now = current_timestamp()
-    shutdown_result = shutdown_tmux_session(
-        session_id=session_id,
-        state=state,
-        now=now,
-        dry_run=dry_run,
-    )
-    shutdown_result["detached_process_shutdown"] = detached_process_shutdown_for_result(
-        session_dir=session_dir,
-        now=now,
-        shutdown_result=shutdown_result,
-    )
-    summary = {
-        "session_id": session_id,
-        "state_path": str(state_path),
-        "dry_run": dry_run,
-        "state_updated": False,
-        "would_update_state": dry_run,
-        "tmux_shutdown_result": shutdown_result["tmux_shutdown_result"],
-        "tmux_session": shutdown_result["tmux_session"],
-        "expected_tmux_session": shutdown_result["expected_tmux_session"],
-        "tmux_kill_attempted": shutdown_result["tmux_kill_attempted"],
-        "tmux_shutdown_error": shutdown_result["tmux_shutdown_error"],
-        "detached_process_shutdown": shutdown_result["detached_process_shutdown"],
-    }
-
-    if dry_run:
-        return {"archiveShutdown": summary | {"shutdown": shutdown_result}}
-
-    archive_input = hook_input | {
-        "session_id": session_id,
-        "source": hook_input.get("source") or "manual_archive_shutdown",
-    }
-    write_shutdown_evidence(
-        runtime=runtime,
-        session_dir=session_dir,
-        session_id=session_id,
-        hook_input=archive_input,
-        shutdown_result=shutdown_result,
-        now=now,
-        event_label="ArchiveShutdown",
-        event_type="archive_shutdown",
-        input_filename="archive-shutdown-input.json",
-        evidence_prefix="archive_shutdown",
-        notes="manual archive-shutdown archived ITB state and attempted scoped tmux shutdown",
-    )
-    return {"archiveShutdown": summary | {"state_updated": True, "shutdown": shutdown_result}}
 
 
 def gate_skill_contract_lint_root(hook_input: dict[str, Any]) -> Path:
@@ -23575,7 +16800,7 @@ def gate_skill_contract_lint_findings(skills_root: Path) -> tuple[list[dict[str,
     registry_rel = "infra-team-bootstrap/config/role-agent-registry.yaml"
     model_registry_rel = "infra-team-bootstrap/references/model-registry.md"
     team_config_rel = "infra-team-bootstrap/references/team-config.md"
-    comprehensive_plan_rel = "infra-team-bootstrap/references/resident-organization-comprehensive-plan.md"
+    comprehensive_plan_rel = "infra-team-bootstrap/references/headless-organization-comprehensive-plan.md"
 
     assessor_text = read_required(assessor_rel)
     guardian_text = read_required(guardian_rel)
@@ -23599,9 +16824,9 @@ def gate_skill_contract_lint_findings(skills_root: Path) -> tuple[list[dict[str,
         require_contains(
             relative,
             text,
-            "runtime resident agent としては使わず",
+            "runtime execution agent としては使わず",
             f"{role_label}_must_forbid_runtime",
-            f"{role_label} role must explicitly forbid runtime resident use",
+            f"{role_label} role must explicitly forbid runtime execution use",
         )
         require_contains(
             relative,
@@ -23738,9 +16963,7 @@ def gate_skill_contract_lint_findings(skills_root: Path) -> tuple[list[dict[str,
             continue
         expected_model_values = {
             "status": "reference",
-            "resident_target": "false",
             "always_active": "false",
-            "startup_profile": "compatibility_only",
         }
         for key, expected in expected_model_values.items():
             actual = normalize_cell(row.get(key))
@@ -23758,8 +16981,8 @@ def gate_skill_contract_lint_findings(skills_root: Path) -> tuple[list[dict[str,
                     }
                 )
 
-    require_contains(team_config_rel, team_config_text, "`status: reference` / `startup_profile: compatibility_only`", "team_config_reference_profile_required", "team config must document compatibility-only reference roles")
-    forbid_contains(team_config_rel, team_config_text, "Gate 系 role と `teams-project-manager` は必ず", "team_config_forbid_all_gate_resident", "team config must not require all gate roles to be resident")
+    require_contains(team_config_rel, team_config_text, "`status: reference`", "team_config_reference_profile_required", "team config must document reference roles")
+    forbid_contains(team_config_rel, team_config_text, "Gate 系 role と `teams-project-manager` は必ず", "team_config_forbid_all_gate_runtime", "team config must not require all gate roles to be runtime-active")
     require_contains(comprehensive_plan_rel, comprehensive_plan_text, "-> team-completion-check", "plan_team_completion_check_required", "comprehensive plan must include team-completion-check")
     require_contains(comprehensive_plan_rel, comprehensive_plan_text, "-> finalization-check", "plan_finalization_check_required", "comprehensive plan must include finalization-check")
     require_contains(comprehensive_plan_rel, comprehensive_plan_text, "-> final-transport-render-check", "plan_final_transport_check_required", "comprehensive plan must include final-transport-render-check")
@@ -23960,18 +17183,11 @@ def run_main_command(
 ) -> dict[str, Any]:
     if args.command == "session-start":
         start_input = merge_cli_hook_input(args, hook_input)
-        state = build_roster(
+        return session_start_metadata_output(
             runtime=args.runtime,
-            event="SessionStart",
             state_root=state_root,
             hook_input=start_input,
-            launch_agents=args.launch_agents,
         )
-        return session_start_output(state)
-    if args.command == "prompt-preflight":
-        return preflight_output(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input))
-    if args.command == "pretooluse-guard":
-        return pretooluse_guard_output(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input))
     if args.command == "final-response-guard":
         return final_response_guard_output(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input))
     if args.command == "notification-dispatch":
@@ -23982,9 +17198,6 @@ def run_main_command(
         return hook_install_output(runtime=args.runtime, state_root=state_root, hook_input=install_input)
     if args.command == "hook-health-check":
         return hook_health_check_output(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input))
-    if args.command == "interactive-readiness-followup":
-        followup_input = merge_cli_hook_input(args, hook_input, role_field="role_id", include_dry_run=True)
-        return interactive_readiness_followup(runtime=args.runtime, state_root=state_root, hook_input=followup_input)
     if args.command == "active-task":
         return active_task_output(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input))
     if args.command == "gtc-scaffold":
@@ -24044,11 +17257,6 @@ def run_main_command(
         return transport_status(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input))
     if args.command == "agent-dispatch":
         return agent_dispatch(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input, role_field="agent_id"))
-    if args.command == "agent-dispatch-batch":
-        return agent_dispatch_batch(runtime=args.runtime, state_root=state_root, hook_input=merge_cli_hook_input(args, hook_input))
-    if args.command == "agent-dispatch-report":
-        report_input = merge_cli_hook_input(args, hook_input, role_field="role_id", include_report_json=True)
-        return agent_dispatch_report_command(runtime=args.runtime, state_root=state_root, hook_input=report_input)
     if args.command == "role-queue":
         queue_input = merge_cli_hook_input(args, hook_input, role_field="role_id", include_dry_run=True)
         return role_queue(runtime=args.runtime, state_root=state_root, hook_input=queue_input)
@@ -24067,35 +17275,6 @@ def run_main_command(
             include_report_json=True,
         )
         return role_report(runtime=args.runtime, state_root=state_root, hook_input=report_input)
-    if args.command == "queue-watch":
-        watch_input = merge_cli_hook_input(
-            args,
-            hook_input,
-            role_field="role_id",
-            include_dry_run=True,
-            include_max_messages=True,
-        )
-        return role_queue_watch_once(runtime=args.runtime, state_root=state_root, hook_input=watch_input)
-    if args.command == "queue-watch-all":
-        watch_input = merge_cli_hook_input(
-            args,
-            hook_input,
-            role_field="role_ids",
-            include_dry_run=True,
-            include_max_messages=True,
-        )
-        return role_queue_watch_all(runtime=args.runtime, state_root=state_root, hook_input=watch_input)
-    if args.command == "queue-watch-daemon":
-        daemon_input = merge_cli_hook_input(
-            args,
-            hook_input,
-            role_field="role_ids",
-            include_dry_run=True,
-            include_max_messages=True,
-            include_max_cycles=True,
-            include_poll_interval=True,
-        )
-        return role_queue_watch_daemon(runtime=args.runtime, state_root=state_root, hook_input=daemon_input)
     if args.command == "queue-replay-failed":
         replay_input = merge_cli_hook_input(
             args,
@@ -24145,9 +17324,6 @@ def run_main_command(
             include_idle_timeout=True,
         )
         return role_agent_worker(runtime=args.runtime, state_root=state_root, hook_input=worker_input)
-    if args.command == "session-end":
-        end_input = merge_cli_hook_input(args, hook_input)
-        return session_end(runtime=args.runtime, state_root=state_root, hook_input=end_input)
     if args.command == "archive-shutdown":
         session_id = args.session_id
         if args.current and args.session_id:
@@ -24170,13 +17346,10 @@ def main() -> int:
         "command",
         choices=[
             "session-start",
-            "prompt-preflight",
-            "pretooluse-guard",
             "final-response-guard",
             "notification-dispatch",
             "hook-install",
             "hook-health-check",
-            "interactive-readiness-followup",
             "active-task",
             "gtc-scaffold",
             "task-detail-append",
@@ -24194,13 +17367,8 @@ def main() -> int:
             "agent-surfaces",
             "transport-status",
             "agent-dispatch",
-            "agent-dispatch-batch",
-            "agent-dispatch-report",
             "role-queue",
             "role-report",
-            "queue-watch",
-            "queue-watch-all",
-            "queue-watch-daemon",
             "queue-replay-failed",
             "queue-close-message",
             "sync-policy-digest-skills",
@@ -24210,7 +17378,6 @@ def main() -> int:
             "context-surface-report",
             "gate-skill-contract-lint",
             "role-agent-worker",
-            "session-end",
             "archive-shutdown",
         ],
     )
@@ -24223,20 +17390,11 @@ def main() -> int:
     parser.add_argument("--report-json", default="")
     parser.add_argument("--input-json-file", default="")
     parser.add_argument("--max-messages", default="")
-    parser.add_argument("--max-cycles", default="")
     parser.add_argument("--poll-interval-seconds", default="")
     parser.add_argument("--idle-timeout-seconds", default="")
     parser.add_argument("--current", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--wait", action="store_true")
-    parser.add_argument(
-        "--launch-agents",
-        action="store_true",
-        help=(
-            "Ensure ITB-owned provider CLI processes during session-start. "
-            "Set ITB_AGENT_PROCESS_MODE=resident_shell only for fallback sentinel diagnostics."
-        ),
-    )
     args = parser.parse_args()
 
     state_root = Path(args.state_root).expanduser()

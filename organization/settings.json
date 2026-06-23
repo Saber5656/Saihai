@@ -40,7 +40,7 @@
       "organization_flow": "preapproved",
       "approved_scope": [
         "co/ITB organization-internal role dispatch",
-        "agent-call, agent-dispatch, agent-dispatch-batch, role-queue, provider-activate, agent-switch, and provider-failover transport payloads",
+        "agent-call, agent-dispatch, role-queue, provider-activate, agent-switch, and provider-failover transport payloads",
         "bounded task instructions, context refs, queue manifests, report paths, and provider evidence needed for the active task"
       ],
       "human_approval_record": {

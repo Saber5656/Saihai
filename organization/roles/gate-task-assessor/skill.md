@@ -7,7 +7,7 @@ category: Team Role
 created: 2026-05-18
 updated: 2026-06-14
 status: reference
-purpose: 旧 Completion Assessment 契約の互換参照。runtime resident agent としては使わず、TPM の Team Completion Check を正本にする
+purpose: 旧 Completion Assessment 契約の参照。runtime execution agent としては使わず、TPM の Team Completion Check を正本にする
 team: gate
 agent_id: gate-task-assessor
 ---
@@ -34,7 +34,7 @@ agent_id: gate-task-assessor
 ## Report / Queue Boundary
 
 この Gate role は現行 workflow の queue consumer ではない。
-新規 task で `gate-task-assessor` inbox、role-report、provider turn、tmux resident process を作ってはならない。
+新規 task で `gate-task-assessor` inbox、role-report、provider turn、runtime worker を作ってはならない。
 旧 Task Detail を読むときも、互換 section の意味を `teams-project-manager` / `team-completion-check` の現行 artifact へ写像するだけにする。
 
 ## Builder Precheck Compatibility
@@ -64,10 +64,10 @@ agent_id: gate-task-assessor
 
 | Forbidden | Replacement |
 |---|---|
-| `gate-task-assessor` を resident / queue consumer として起動する | `team-completion-check` command |
+| `gate-task-assessor` を runtime / queue consumer として起動する | `team-completion-check` command |
 | Team task board や review evidence を assessor LLM に再読込させる | TPM role-report と command artifact |
 | assessor 名義の Markdown 判定表を Task Detail に追加する | `task-detail-append` による `Team Completion Check` thin section |
-| evaluator への handoff を assessor が手書きする | builder / queue-watch の auto handoff |
+| evaluator への handoff を assessor が手書きする | builder の typed completion chain |
 
 ## Legacy Read Compatibility
 

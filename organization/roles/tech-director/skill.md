@@ -108,7 +108,7 @@ code-like diff がある場合は micro-flow でも `tech-qa` と `tech-reviewer
 
 Task Detail、Kanban、team task folder の管理形式は既存ポリシーを正とし、この節ではレビュー割り振りと作業連携の判断に限定する。
 
-独立した worker / reviewer を同時に動かす場合、`tech-director` は各 task の依存関係が無いことを確認し、builder の `agent-dispatch-batch` へ渡す item に `independent: true` または `dependency: none` を明示する。同一 role への同時 dispatch、同一ファイルや同一判断を競合して変更する作業、前段成果物を読まないと進めない作業は batch 化しない。
+独立した worker / reviewer を同時に動かす場合、`tech-director` は各 task の依存関係が無いことを確認し、個別の `agent-dispatch` item に `independent: true` または `dependency: none` を明示する。同一 role への同時 dispatch、同一ファイルや同一判断を競合して変更する作業、前段成果物を読まないと進めない作業は並列化しない。
 
 | 観点 | Director 判断 |
 |---|---|

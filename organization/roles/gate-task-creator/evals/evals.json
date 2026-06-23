@@ -4,7 +4,7 @@
     {
       "id": 1,
       "prompt": "Git 管理対象の SKILL.md 更新を含む Gate Intake Envelope を Task Detail 化する。GTC として done criteria と handoff に何を入れる？",
-      "expected_output": "commit_required と publication_required を仮置きし、Completion Gate として gate-task-assessor -> gate-task-evaluator -> git-publisher -> vault_final_update -> gate-task-guardian -> main_transport_renderer を記録する。guardian OK 前に done にしない。"
+      "expected_output": "commit_required と publication_required を仮置きし、Completion Gate として team-completion-check -> gate-task-evaluator -> git-publisher -> vault_final_update -> finalization-check -> main_transport_renderer を記録する。finalization-check pass 前に done にしない。"
     },
     {
       "id": 2,
@@ -13,13 +13,13 @@
     },
     {
       "id": 3,
-      "prompt": "Resident Organization Roster v2 を含む Gate Intake Envelope を Task Detail 化する。GTC として何を初期化する？",
-      "expected_output": "既存の Task Detail / Index / Kanban / PM Handoff / review line を保持したうえで、Resident Team Roster、Active Set、Invocation Evidence を初期化し、Gate / Infra は常時 active、Tech / Contents / Business は resident だが必要時 active、道具スキルは常駐外と記録する。"
+      "prompt": "Headless Organization Context v2 を含む Gate Intake Envelope を Task Detail 化する。GTC として何を初期化する？",
+      "expected_output": "既存の Task Detail / Index / Kanban / PM Handoff / review line を保持したうえで、Role Context、Active Set、Invocation Evidence を初期化し、Gate / Infra は常時 active、Tech / Contents / Business は organization-scoped だが必要時 active、道具スキルは常駐外と記録する。"
     },
     {
       "id": 4,
-      "prompt": "既存の Completion Gate eval を持つ GTC に Resident Roster テストを追加する。既存ケースを置き換えてよい？",
-      "expected_output": "置き換えない。既存テストケースを保持し、Resident Roster / Active Set / Invocation Evidence の追加ケースを追記する。"
+      "prompt": "既存の Completion Gate eval を持つ GTC に Role Context テストを追加する。既存ケースを置き換えてよい？",
+      "expected_output": "置き換えない。既存テストケースを保持し、Role Context / Active Set / Invocation Evidence の追加ケースを追記する。"
     },
     {
       "id": 5,
@@ -28,7 +28,7 @@
     },
     {
       "id": 6,
-      "prompt": "Task Detail に Resident Roster を初期化する。role_id と agent_instance_id は同じものとして扱ってよい？",
+      "prompt": "Task Detail に Role Context を初期化する。role_id と agent_instance_id は同じものとして扱ってよい？",
       "expected_output": "同一視しない。role_id はスキル/論理ロール、agent_instance_id はチャットセッションごとの実体として分け、organization_instance_id と chat_session_id を記録する。"
     },
     {

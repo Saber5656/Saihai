@@ -41,9 +41,6 @@
     "tech-tester": "worker"
   },
   "defaults": {
-    "tmux_session": "itb-{org_instance_id}",
-    "tmux_window": "{role_id}",
-    "tmux_pane": 0,
     "queue_consumer": false,
     "inbox_path": "inbox/{role_id}.yaml",
     "report_dir": "reports/{role_id}",
