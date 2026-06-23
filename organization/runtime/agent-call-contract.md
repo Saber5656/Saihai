@@ -92,6 +92,19 @@ context_refs:
 | Missing role metadata | Block |
 | Provider / model override | Not accepted by `agent-call` |
 
+## Assignment Overlays
+
+`assignment_role` tells the callee which evidence and handoff shape is required.
+It does not change provider transport or allow hook-side orchestration.
+
+| assignment_role | Required behavior |
+|---|---|
+| `implementer` | Produce bounded implementation or research output plus changed-artifact evidence |
+| `reviewer` | Produce findings, severity, file/line references when applicable, and residual risk |
+| `qa` | Produce validation steps, command results, failures, and unresolved test gaps |
+| `approver` | Produce approve/block verdict and typed reason |
+| `observer` | Produce read-only notes without mutating artifacts |
+
 ## Worker Evidence
 
 | Provider | Runtime |
