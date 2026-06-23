@@ -29,8 +29,7 @@ python3 server.py --port 8799
 
 | ソース | 用途 |
 |---|---|
-| `<ITB_STATE_ROOT>/<session_id>/session-metadata.json` | session、runtime、cwd、started_at、execution context pointer |
-| `<ITB_STATE_ROOT>/<session_id>/execution-context-pointer.json` | session-local pointer から task-owned canonical context への参照 |
+| `<ITB_STATE_ROOT>/<session_id>/active-execution-context.json` | session、runtime、cwd、started_at、session-local pointer |
 | `execution_context.json` | hard-block 判定と final gate の typed state 正本 |
 | `<ITB_STATE_ROOT>/<session_id>/active-task.json` | 現在の Task ID / flow_phase |
 | `<ITB_STATE_ROOT>/<session_id>/queue/inbox/*.yaml` | role 宛 message の pending / processing 状態 |
