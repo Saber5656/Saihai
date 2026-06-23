@@ -1,7 +1,7 @@
 # Agent-Teams-Viewer
 
-ITB Organization Instance（チャットセッションごとに起動する AI エージェント組織）の
-稼働状況と、AI 組織運用の設定・Policy・Role 定義を管理するローカルダッシュボード。
+ITB Organization Instance（チャットセッションごとに扱う AI エージェント組織）の
+状態、AI 組織運用の設定、Policy、Role 定義を管理するローカルダッシュボード。
 
 ![dark theme dashboard]
 
@@ -9,12 +9,12 @@ ITB Organization Instance（チャットセッションごとに起動する AI 
 
 | 機能 | 説明 |
 |---|---|
-| セッション切替 | ヘッダのプルダウンでチャットセッション（= Organization Instance）を切り替え。チャット名称・org id・live/offline を表示 |
-| 稼働中ハイライト | 作業中（tmux pane に直近出力あり）のエージェントカードに **黄色の枠** + 発光パルスを付与。黒ベース UI |
-| ペインビューア | エージェントカードをクリックすると右ドロワーに tmux pane の内容（作業中の画面そのもの）、inbox メッセージ、roster メタデータを表示 |
-| 組織構造表示 | Gate / Engineering / Contents / Business / Infrastructure のチーム別グルーピング（roster.json の `team` を正本とする） |
-| 組織設定表示 | `organization/settings.json` を読み、組織運用 state、fast/strict mode、Hook observer 方針を表示 |
-| Task mode 判定 | `/api/decide` と `scripts/configure_organization.py` で prompt を fast / strict / maintenance に判定 |
+| セッション切替 | ヘッダのプルダウンでチャットセッション（= Organization Instance）を切り替え、チャット名称・org id・live/offline を表示する |
+| タスク状態表示 | execution context、active task、queue report、provider evidence をもとに現在の進行状態を表示する |
+| ロール詳細表示 | エージェントカードから inbox message、report、role metadata、provider evidence を確認する |
+| 組織構造表示 | Gate / Engineering / Contents / Business / Infrastructure のチーム別グルーピングを表示する |
+| 組織設定表示 | `organization/settings.json` を読み、組織運用 state、fast/strict mode、Hook observer 方針を表示する |
+| Task mode 判定 | `/api/decide` と `scripts/configure_organization.py` で prompt を fast / strict / maintenance に判定する |
 
 ## 起動
 
@@ -23,17 +23,18 @@ python3 server.py            # http://127.0.0.1:8765/
 python3 server.py --port 8799
 ```
 
-依存は Python 3.9+ と tmux のみ（pip install 不要）。127.0.0.1 にのみ bind する。
+依存は Python 3.9+ のみ（pip install 不要）。127.0.0.1 にのみ bind する。
 
 ## データソース（正本）
 
 | ソース | 用途 |
 |---|---|
-| `~/.claude/hooks/state/itb/<session_id>/bootstrap.json` | session ⇔ organization_instance ⇔ tmux_session の紐付け |
-| `~/.claude/hooks/state/itb/<session_id>/roster.json` | 常駐 37 role の team / tmux_target / process・activation status |
-| `~/.claude/hooks/state/itb/<session_id>/active-task.json` | 現在の Task ID / flow_phase |
-| `~/.claude/hooks/state/itb/<session_id>/queue/inbox/*.yaml` | role 宛 message の pending / processing 状態 |
-| `tmux list-panes` / `tmux capture-pane` | window 活動時刻・pane 内容（読み取りのみ） |
+| `<ITB_STATE_ROOT>/<session_id>/session-metadata.json` | session、runtime、cwd、started_at、execution context pointer |
+| `<ITB_STATE_ROOT>/<session_id>/execution-context-pointer.json` | session-local pointer から task-owned canonical context への参照 |
+| `execution_context.json` | hard-block 判定と final gate の typed state 正本 |
+| `<ITB_STATE_ROOT>/<session_id>/active-task.json` | 現在の Task ID / flow_phase |
+| `<ITB_STATE_ROOT>/<session_id>/queue/inbox/*.yaml` | role 宛 message の pending / processing 状態 |
+| `<ITB_STATE_ROOT>/<session_id>/queue/reports/**/*.yaml` | role 実行結果と provider evidence |
 | `~/.claude/projects/*/<session_id>.jsonl` | チャット名称の best-effort 抽出（summary / 最初のユーザープロンプト） |
 | `~/.codex/state/itb/` | Codex 側 state（存在すれば同様に読む） |
 | `organization/settings.json` | 組織運用 enabled / disabled / maintenance、fast / strict、Hook observer 方針 |
@@ -45,22 +46,22 @@ python3 server.py --port 8799
 
 | status | 条件 | 表示 |
 |---|---|---|
-| `working` | tmux window の最終活動が 20 秒以内 | 黄色枠 + パルス |
+| `working` | queue report または provider evidence が processing / invoked | 黄色枠 + パルス |
 | `processing` | queue inbox に `processing` message | 黄色破線枠 |
 | `pending` | queue inbox に `pending` message | 黄色ドット |
-| `ready` | resident process は起動済みだが無活動 | 灰色枠 |
-| `lazy` | lazy_activation で未起動の resident | 低コントラスト |
-| `offline` | tmux session / window が存在しない | 赤系淡色 |
+| `ready` | metadata と dispatch surface が利用可能 | 灰色枠 |
+| `deferred` | lazy / on-call role で現タスク対象外 | 低コントラスト |
+| `offline` | session metadata または context pointer が存在しない | 赤系淡色 |
 
-判定は tmux 活動 × queue 状態の突合で行い、閾値は `server.py` の
-`ACTIVE_WINDOW_SECONDS` で変更できる。
+判定は typed state と queue/report evidence の突合で行う。Hook は observer /
+advisory として扱い、runtime の進行や role dispatch を Hook から開始しない。
 
 ## 安全性
 
-- 完全読み取り専用。tmux へは `list-sessions` / `list-panes` / `capture-pane` のみ使用し、
-  `send-keys` / `paste-buffer` は一切呼ばない。
+- 完全読み取り専用のローカルビューアとして動作する。
 - bind は `127.0.0.1` 固定。認証なしのためリモート公開しないこと。
-- pane 内容には作業中の機微情報が含まれ得る。画面共有時は注意。
+- 表示対象には作業中の指示や provider evidence が含まれ得る。画面共有時は注意。
+- live の `~/.claude` / `~/.codex` 設定変更は、明示承認なしに行わない。
 
 ## API
 
@@ -68,7 +69,7 @@ python3 server.py --port 8799
 |---|---|
 | `GET /api/sessions` | 監視可能なセッション一覧（live 優先・作成日時降順） |
 | `GET /api/org?session=<id>` | チーム別エージェント稼働状況 |
-| `GET /api/pane?session=<id>&role=<role_id>` | 対象エージェントの tmux pane 内容 + inbox |
+| `GET /api/role?session=<id>&role=<role_id>` | 対象エージェントの inbox / report / metadata / provider evidence |
 | `GET /api/config` | 組織運用設定、role count、policy count、policy index |
 | `GET /api/decide?prompt=<text>` | prompt を fast / strict / maintenance に判定 |
 
