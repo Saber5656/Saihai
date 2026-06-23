@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -76,6 +77,36 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             self.assertFalse((session_dir / "bootstrap.json").exists())
             self.assertFalse((session_dir / "roster.json").exists())
 
+    def test_active_task_set_after_metadata_only_session_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            task_detail_path = state_root / "vault" / "TSK-9999-test" / "task.md"
+            task_detail_path.parent.mkdir(parents=True)
+            task_detail_path.write_text("# TSK-9999 Test\n", encoding="utf-8")
+            self.run_builder(
+                state_root,
+                "session-start",
+                {"session_id": "headless-session", "cwd": "/tmp/project", "source": "startup"},
+            )
+
+            output = self.run_builder(
+                state_root,
+                "active-task",
+                {
+                    "session_id": "headless-session",
+                    "task_id": "TSK-9999",
+                    "task_detail_path": str(task_detail_path),
+                    "flow_phase": "pre_execution",
+                },
+            )
+
+            session_dir = state_root / "headless-session"
+            self.assertNotIn("decision", output)
+            self.assertEqual(output["activeTask"]["result"], "active_task_set")
+            self.assertTrue((session_dir / "active-task.json").exists())
+            self.assertFalse((session_dir / "bootstrap.json").exists())
+            self.assertFalse((session_dir / "status").exists())
+
     def test_role_agent_rows_expose_headless_metadata_only(self) -> None:
         builder = load_builder_module()
         rows = builder.role_agent_rows(organization_instance_id="org-test")
@@ -132,6 +163,128 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
     def test_retired_hook_wrappers_are_not_shipped(self) -> None:
         shipped = {path.name for path in HOOK_ROOT.glob("*.sh")}
         self.assertEqual(shipped, {"itb-hook-common.sh", "itb-session-start.sh", "itb-final-response-guard.sh"})
+
+    def test_merge_hook_settings_prunes_retired_wrappers(self) -> None:
+        builder = load_builder_module()
+        old_settings = {
+            "hooks": {
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command", "command": "/tmp/itb-prompt-preflight.sh"}]},
+                ],
+                "PreToolUse": [
+                    {"hooks": [{"type": "command", "command": "/tmp/itb-pretooluse-guard.sh"}]},
+                ],
+                "SessionEnd": [
+                    {"hooks": [{"type": "command", "command": "/tmp/itb-session-end.sh"}]},
+                ],
+            }
+        }
+
+        merged, changes = builder.merge_hook_settings(old_settings, "codex", HOOK_ROOT, BUILDER)
+
+        self.assertNotIn("UserPromptSubmit", merged["hooks"])
+        self.assertNotIn("PreToolUse", merged["hooks"])
+        self.assertNotIn("SessionEnd", merged["hooks"])
+        self.assertEqual([item["event"] for item in builder.hook_event_specs("codex", HOOK_ROOT, BUILDER)], ["SessionStart", "Stop"])
+        self.assertTrue(any(item["action"] == "remove_retired_itb_hook" for item in changes))
+
+    def test_codex_exec_dispatch_blocks_git_prompt_for_non_git_role_before_subprocess(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = state_root / "session"
+            session_dir.mkdir(parents=True)
+            (session_dir / "roster.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "agent_id": "tech-backend",
+                            "provider": "openai",
+                            "execution_mode": "codex_exec",
+                            "intended_model": "gpt-5.5",
+                            "allowed_tools": ["Read", "Grep", "Glob"],
+                            "git_operations_allowed": False,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(builder.subprocess, "run", side_effect=AssertionError("provider must not run")):
+                output = builder.codex_exec_agent_dispatch(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={
+                        "session_id": "session",
+                        "agent_id": "tech-backend",
+                        "prompt": "Please run `git push origin main`.",
+                    },
+                )
+
+        self.assertEqual(output["decision"], "block")
+        self.assertIn("git operation forbidden", output["reason"])
+
+    def test_claude_activation_command_omits_tools_when_no_tools_are_configured(self) -> None:
+        builder = load_builder_module()
+        command = builder.claude_activation_command(
+            {"agent_id": "ad-hoc", "intended_model": "claude-sonnet-4-5"},
+            "hello",
+            "0.01",
+        )
+
+        self.assertNotIn("--tools", command)
+
+    def test_claude_activation_command_passes_configured_allowed_tools(self) -> None:
+        builder = load_builder_module()
+        command = builder.claude_activation_command(
+            {
+                "agent_id": "tech-reviewer",
+                "intended_model": "claude-sonnet-4-5",
+                "allowed_tools": ["Read", "Grep", "Glob"],
+            },
+            "hello",
+            "0.01",
+        )
+
+        self.assertIn("--tools", command)
+        self.assertEqual(command[command.index("--tools") + 1], "Read,Grep,Glob")
+
+    def test_final_gate_required_artifact_missing_status_path_or_evidence_blocks(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = Path(tmp) / "artifact.json"
+            artifact.write_text("{}", encoding="utf-8")
+            cases = [
+                {"id": "missing_status", "path": str(artifact), "evidence_marker": "reviewed"},
+                {"id": "missing_path", "status": "complete", "evidence_marker": "reviewed"},
+                {"id": "missing_file", "status": "complete", "path": str(Path(tmp) / "missing.json"), "evidence_marker": "reviewed"},
+                {"id": "missing_evidence", "status": "complete", "path": str(artifact)},
+            ]
+
+            for case in cases:
+                with self.subTest(case=case["id"]):
+                    blockers = builder.final_gate_artifact_blockers({"required_artifacts": [case]})
+                    self.assertTrue(blockers)
+
+    def test_final_gate_required_artifact_complete_with_evidence_allows(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = Path(tmp) / "artifact.json"
+            artifact.write_text("{}", encoding="utf-8")
+
+            blockers = builder.final_gate_artifact_blockers(
+                {
+                    "required_artifacts": [
+                        {
+                            "id": "done",
+                            "status": "complete",
+                            "path": str(artifact),
+                            "evidence_marker": "reviewed",
+                        }
+                    ]
+                }
+            )
+
+        self.assertEqual(blockers, [])
 
 
 if __name__ == "__main__":

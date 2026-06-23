@@ -738,6 +738,20 @@ def claude_transport_allowed_tools_argument_for_role(row: dict[str, Any]) -> str
     return ",".join(dict.fromkeys(patterns))
 
 
+def claude_tools_argument_for_role(row: dict[str, Any]) -> str:
+    tools = normalize_allowed_tools(row.get("allowed_tools", []))
+    agent_id = normalize_cell(row.get("agent_id") or row.get("role_id"))
+    if not tools and agent_id:
+        registry_row = role_agent_row_for(agent_id)
+        tools = normalize_allowed_tools(registry_row.get("allowed_tools", [])) if registry_row else []
+    if not tools and agent_id:
+        tools = skill_allowed_tools(agent_id)
+    for tool in normalize_allowed_tools(claude_transport_allowed_tools_argument_for_role(row)):
+        if tool not in tools:
+            tools.append(tool)
+    return ",".join(dict.fromkeys(tools))
+
+
 def default_tools_argument_for_agent(agent_id: str, *, session_dir: Path | None = None) -> str:
     if session_dir is not None:
         roster_path = session_dir / "roster.json"
@@ -7893,9 +7907,9 @@ requires_human_approval: {str(truthy_input(envelope.get("approval_required"))).l
 | chat_session_id | {session_id} |
 | queue_root | {queue_root_text} |
 
-## Resident Team Roster
+## Organization Active Set
 
-| role_id | agent_instance_id | organization_instance_id | roster_scope | chat_session_id | project_id | lifecycle_status | active_for_task | notes |
+| role_id | agent_instance_id | organization_instance_id | context_scope | chat_session_id | project_id | lifecycle_status | active_for_task | notes |
 |---|---|---|---|---|---|---|---|---|
 | gate-prompt-formatter | gate-prompt-formatter@{session_id} | {organization_instance_id} | organization_instance | {session_id} | {task_detail_path.parent.parent.name} | active | true | entry role |
 | gate-task-creator | gtc-scaffold@{session_id} | {organization_instance_id} | command_artifact | {session_id} | {task_detail_path.parent.parent.name} | command_only | false | builder scaffold owner |
@@ -7903,7 +7917,7 @@ requires_human_approval: {str(truthy_input(envelope.get("approval_required"))).l
 
 ## Active Set
 
-| Task Phase | Core Active | Task Active | Lazy / Idle Resident | Reason |
+| Task Phase | Core Active | Task Active | Deferred Role | Reason |
 |---|---|---|---|---|
 | pre_execution | gate-prompt-formatter, teams-project-manager | {assignee} | gate-task-creator fallback, specialist teams | gtc-scaffold command created deterministic task artifacts |
 
@@ -7931,7 +7945,7 @@ requires_human_approval: {str(truthy_input(envelope.get("approval_required"))).l
 | kanban_synced | true | Kanban.md |
 | project_manager_handoff_created | true | Project Manager Handoff |
 | review_line_defined | true | Reviews |
-| team_roster_recorded | true | Resident Team Roster |
+| team_roster_recorded | true | Organization Active Set |
 | active_set_declared | true | Active Set |
 | queue_evidence_recorded | true | Queue Evidence |
 
@@ -9718,8 +9732,6 @@ def claude_activation_command(row: dict[str, Any], prompt: str, max_budget_usd: 
         provider_permission_mode(),
         "--effort",
         claude_effort_for_model(model),
-        "--tools",
-        "",
         "--no-session-persistence",
         "--max-budget-usd",
         max_budget_usd,
@@ -9727,6 +9739,9 @@ def claude_activation_command(row: dict[str, Any], prompt: str, max_budget_usd: 
         role_execution_prompt(row),
         prompt,
     ]
+    tools = claude_tools_argument_for_role(row)
+    if tools:
+        command[command.index("--no-session-persistence") : command.index("--no-session-persistence")] = ["--tools", tools]
     fallback_model = first_claude_fallback(row)
     if fallback_model:
         model_index = command.index("--model")
@@ -9863,6 +9878,9 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
                 f"{agent_id} provider={row.get('provider', '')} execution_mode={row.get('execution_mode', '')}"
             ),
         }
+    git_policy_error = validate_git_operation_for_role(row, prompt)
+    if git_policy_error:
+        return {"decision": "block", "reason": git_policy_error}
     if shutil.which("codex") is None:
         return {"decision": "block", "reason": "codex command not found"}
 
@@ -10088,6 +10106,9 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
                 f"{agent_id} provider={row.get('provider', '')} execution_mode={row.get('execution_mode', '')}"
             ),
         }
+    git_policy_error = validate_git_operation_for_role(row, prompt)
+    if git_policy_error:
+        return {"decision": "block", "reason": git_policy_error}
     if shutil.which("claude") is None:
         return {"decision": "block", "reason": "claude command not found"}
 
@@ -11097,7 +11118,7 @@ def validate_preflight_state(session_dir: Path, state: dict[str, Any]) -> tuple[
     if not evidence_path.exists():
         warnings.append("invocation-evidence.jsonl missing; legacy metadata-only state")
 
-    # Metadata-only SessionStart never proves provider readiness. Activation
+    # Metadata-only SessionStart never proves provider response availability. Activation
     # code may mark response_active only after provider evidence is recorded.
     for row in roster:
         status = row.get("activation_status", "")
@@ -11237,6 +11258,24 @@ def session_start_metadata_output(
     }
 
 
+def session_metadata_pointer_ready(session_dir: Path, session_id: str) -> bool:
+    pointer_path = session_dir / "active-execution-context.json"
+    if not pointer_path.exists():
+        return False
+    try:
+        pointer = read_json(pointer_path)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(pointer, dict):
+        return False
+    pointer_session_id = normalize_cell(pointer.get("session_id") or pointer.get("sessionId"))
+    pointer_path_value = normalize_cell(
+        pointer.get("active_execution_context_pointer_path")
+        or pointer.get("activeExecutionContextPointerPath")
+    )
+    return (not pointer_session_id or pointer_session_id == session_id) and bool(pointer_path_value)
+
+
 
 
 
@@ -11307,8 +11346,13 @@ def active_task_output(*, runtime: str, state_root: Path, hook_input: dict[str, 
         return {"decision": "block", "reason": reason, "activeTask": {"status": "blocked", "reason": reason}}
 
     errors: list[str] = []
-    if status != "ready" or not state_path.exists():
-        errors.append(f"ITB bootstrap status is not ready for active task registration: status={status}")
+    bootstrap_ready = status == "ready" and state_path.exists()
+    metadata_pointer_ready = session_metadata_pointer_ready(session_dir, session_id)
+    if not bootstrap_ready and not metadata_pointer_ready:
+        errors.append(
+            "ITB session metadata is not ready for active task registration: "
+            f"status={status}, metadata_pointer_ready={str(metadata_pointer_ready).lower()}"
+        )
 
     task_detail_path = hook_task_detail_path(hook_input)
     if task_detail_path is None:
@@ -12082,7 +12126,28 @@ def hook_existing_only_event_specs(runtime: str, hooks_dir: Path, builder_path: 
 
 
 def hook_retired_event_specs(runtime: str, hooks_dir: Path, builder_path: Path | None = None) -> list[dict[str, Any]]:
-    return []
+    builder_path = builder_path or ITB_ROOT / "scripts" / "itb_bootstrap_builder.py"
+    specs = [
+        {
+            "event": "UserPromptSubmit",
+            "script": "itb-prompt-preflight.sh",
+            "matcher": None,
+            "timeout": 10,
+        },
+        {
+            "event": "PreToolUse",
+            "script": "itb-pretooluse-guard.sh",
+            "matcher": None,
+            "timeout": 10,
+        },
+        {
+            "event": "SessionEnd",
+            "script": "itb-session-end.sh",
+            "matcher": None,
+            "timeout": 10,
+        },
+    ]
+    return [spec | {"command": hook_command_for_builder(runtime, hooks_dir, str(spec["script"]), builder_path)} for spec in specs]
 
 
 def simple_pipe_matcher_tokens(value: str) -> list[str]:
@@ -13688,6 +13753,31 @@ def final_gate_required_item(item: dict[str, Any]) -> bool:
     return True
 
 
+def final_gate_artifact_evidence_blocker(artifact: dict[str, Any], artifact_id: str) -> dict[str, Any] | None:
+    for key in ("evidence_marker", "evidenceMarker", "evidence_id", "evidenceId"):
+        if normalize_cell(artifact.get(key)):
+            return None
+    evidence = artifact.get("evidence")
+    if isinstance(evidence, dict) and evidence:
+        return None
+    if isinstance(evidence, list) and evidence:
+        return None
+    if isinstance(evidence, str) and normalize_cell(evidence):
+        return None
+    evidence_path_value = normalize_cell(
+        artifact.get("evidence_path")
+        or artifact.get("evidencePath")
+        or artifact.get("evidence_file")
+        or artifact.get("evidenceFile")
+    )
+    if not evidence_path_value:
+        return final_gate_blocker("missing_required_artifact_evidence", f"{artifact_id} evidence marker/path is missing.", next_action="fix")
+    evidence_path = Path(evidence_path_value).expanduser()
+    if not evidence_path.exists():
+        return final_gate_blocker("missing_required_artifact_evidence", f"{artifact_id} evidence path does not exist: {evidence_path}", next_action="fix")
+    return None
+
+
 def final_gate_context_path_from_pointer(pointer: dict[str, Any]) -> str:
     active = pointer.get("active_execution_context")
     if isinstance(active, dict):
@@ -13756,20 +13846,26 @@ def final_gate_artifact_blockers(context: dict[str, Any]) -> list[dict[str, Any]
             continue
         artifact_id = normalize_cell(artifact.get("id") or artifact.get("name") or f"artifact_{index}")
         status = artifact.get("status")
-        if status is not None and not final_gate_complete_status(status):
+        if not final_gate_complete_status(status):
             blockers.append(final_gate_blocker("missing_required_artifact", f"{artifact_id} status is not complete.", next_action="fix"))
             continue
         path_value = normalize_cell(artifact.get("path") or artifact.get("artifact_path") or artifact.get("artifactPath"))
-        if path_value:
-            path = Path(path_value).expanduser()
-            if not path.exists():
-                blockers.append(final_gate_blocker("missing_required_artifact", f"{artifact_id} does not exist: {path}", next_action="fix"))
-                continue
-            expected_sha = normalize_cell(artifact.get("sha256") or artifact.get("expected_sha256") or artifact.get("expectedSha256"))
-            if expected_sha:
-                actual_sha = file_sha256_if_exists(path)
-                if actual_sha != expected_sha:
-                    blockers.append(final_gate_blocker("artifact_hash_mismatch", f"{artifact_id} sha256 does not match: {path}", next_action="fix"))
+        if not path_value:
+            blockers.append(final_gate_blocker("missing_required_artifact", f"{artifact_id} path is missing.", next_action="fix"))
+            continue
+        path = Path(path_value).expanduser()
+        if not path.exists():
+            blockers.append(final_gate_blocker("missing_required_artifact", f"{artifact_id} does not exist: {path}", next_action="fix"))
+            continue
+        evidence_blocker = final_gate_artifact_evidence_blocker(artifact, artifact_id)
+        if evidence_blocker is not None:
+            blockers.append(evidence_blocker)
+            continue
+        expected_sha = normalize_cell(artifact.get("sha256") or artifact.get("expected_sha256") or artifact.get("expectedSha256"))
+        if expected_sha:
+            actual_sha = file_sha256_if_exists(path)
+            if actual_sha != expected_sha:
+                blockers.append(final_gate_blocker("artifact_hash_mismatch", f"{artifact_id} sha256 does not match: {path}", next_action="fix"))
     return blockers
 
 
