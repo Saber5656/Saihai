@@ -27,6 +27,7 @@ TRANSCRIPT_ROOT = HOME / ".claude" / "projects"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 ORG_DIR = Path(__file__).resolve().parent / "organization"
 ROLE_REGISTRY = ORG_DIR / "runtime" / "infra-team-bootstrap" / "config" / "role-agent-registry.yaml"
+MODEL_REGISTRY = ORG_DIR / "runtime" / "model-registry.md"
 
 SESSION_ID_RE = re.compile(r"^[0-9a-zA-Z_.:-]{3,128}$")
 TEAM_ORDER = ["gate", "tech", "contents", "business", "infra"]
@@ -69,6 +70,12 @@ def read_json(path: Path):
         return json.loads(text)
     except ValueError:
         return None
+
+
+def truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def org_json(name: str, default):
@@ -220,23 +227,55 @@ def read_execution_context(pointer: dict, session_dir: Path) -> tuple[str, dict]
     return str(path), context if isinstance(context, dict) else {}
 
 
+def markdown_table_rows(path: Path) -> list[dict[str, str]]:
+    headers: list[str] = []
+    rows: list[dict[str, str]] = []
+    for line in read_text(path).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or not stripped.endswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not headers:
+            if "agent_id" in cells:
+                headers = cells
+            continue
+        if cells and all(set(cell) <= {"-", ":"} for cell in cells):
+            continue
+        if len(cells) == len(headers):
+            rows.append(dict(zip(headers, cells)))
+    return rows
+
+
+def active_model_rows() -> list[dict[str, str]]:
+    return [row for row in markdown_table_rows(MODEL_REGISTRY) if row.get("status") == "active"]
+
+
 def load_role_registry() -> list[dict]:
     registry = read_json(ROLE_REGISTRY) or {}
     agents = registry.get("agents") if isinstance(registry, dict) else {}
     role_layers = registry.get("role_layers") if isinstance(registry, dict) else {}
     defaults = registry.get("defaults") if isinstance(registry, dict) else {}
+    models = {row.get("agent_id", ""): row for row in active_model_rows()}
     rows = []
-    if not isinstance(agents, dict):
+    if not isinstance(agents, dict) or not models:
         return rows
-    for role_id, config in sorted(agents.items()):
+    for role_id, model_row in sorted(models.items()):
+        if not role_id:
+            continue
+        config = agents.get(role_id, {})
         config = config if isinstance(config, dict) else {}
-        queue_consumer = bool(config.get("queue_consumer", defaults.get("queue_consumer", False)))
+        model_ref = config.get("model_registry_ref", role_id)
+        model_source = models.get(model_ref, model_row)
+        queue_consumer = truthy(config.get("queue_consumer", defaults.get("queue_consumer", False)))
         rows.append(
             {
                 "role_id": role_id,
-                "team": role_team(role_id),
-                "role_layer": role_layers.get(role_id, ""),
-                "model_registry_ref": config.get("model_registry_ref", role_id),
+                "team": model_row.get("team") or role_team(role_id),
+                "role_layer": config.get("role_layer") or role_layers.get(role_id, defaults.get("role_layer", "")),
+                "model_registry_ref": model_ref,
+                "provider": model_source.get("provider", ""),
+                "intended_model": model_source.get("primary_model", ""),
+                "execution_mode": model_source.get("execution_mode", ""),
                 "queue_consumer": queue_consumer,
                 "allowed_tools": config.get("allowed_tools", defaults.get("allowed_tools", [])),
             }

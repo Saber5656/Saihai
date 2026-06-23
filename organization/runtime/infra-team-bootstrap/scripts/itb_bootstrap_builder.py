@@ -14026,6 +14026,45 @@ def final_gate_from_legacy_gate_command(path: Path) -> dict[str, Any]:
     )
 
 
+def final_gate_from_active_task_state(
+    active_task: dict[str, Any] | None,
+    active_errors: list[str],
+) -> dict[str, Any] | None:
+    if active_errors:
+        return final_gate_schema(
+            verdict="block",
+            context_type="execution",
+            context_id="active_task",
+            reason_code="blocked",
+            blockers=[
+                final_gate_blocker(
+                    "invalid_active_task_state",
+                    "; ".join(active_errors),
+                    next_action="mark_blocked",
+                )
+            ],
+            allowed_next_actions=["mark_blocked"],
+        )
+    if not active_task:
+        return None
+    task_id = normalize_cell(active_task.get("task_id") or active_task.get("taskId")) or "active_task"
+    flow_phase = active_task_flow_phase(active_task)
+    return final_gate_schema(
+        verdict="block",
+        context_type="execution",
+        context_id=task_id,
+        reason_code="incomplete",
+        blockers=[
+            final_gate_blocker(
+                "active_task_without_execution_context",
+                f"Active task {task_id} is {flow_phase} but the session pointer has no execution context.",
+                next_action="fix",
+            )
+        ],
+        allowed_next_actions=["fix"],
+    )
+
+
 def execution_context_final_response_guard_output(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
     session_id, session_source = resolve_session_id(state_root, hook_input)
     if not session_id:
@@ -14037,14 +14076,16 @@ def execution_context_final_response_guard_output(*, runtime: str, state_root: P
     legacy_path = final_gate_legacy_gate_command_path(hook_input)
     pointer, pointer_issue = final_gate_read_json_object(pointer_path)
     context_path = final_gate_context_path_from_pointer(pointer) if pointer else ""
+    active_task, active_errors, active_warnings = load_active_task(session_dir)
+    active_task_gate = final_gate_from_active_task_state(active_task, active_errors)
     context: dict[str, Any] = {}
     context_issue = ""
     if pointer_issue == "missing" and legacy_path is not None:
         gate = final_gate_from_legacy_gate_command(legacy_path)
         source = "legacy_gate_command_adapter"
     elif pointer_issue == "missing":
-        gate = final_gate_schema(verdict="allow", context_type="none", context_id="null", reason_code="no_active_context")
-        source = "no_active_pointer"
+        gate = active_task_gate or final_gate_schema(verdict="allow", context_type="none", context_id="null", reason_code="no_active_context")
+        source = "active_task" if active_task_gate else "no_active_pointer"
     elif pointer_issue:
         gate = final_gate_schema(
             verdict="block",
@@ -14056,8 +14097,8 @@ def execution_context_final_response_guard_output(*, runtime: str, state_root: P
         )
         source = "session_pointer"
     elif not pointer.get("active_execution_context") and not context_path:
-        gate = final_gate_schema(verdict="allow", context_type="none", context_id="null", reason_code="no_active_context")
-        source = "session_pointer"
+        gate = active_task_gate or final_gate_schema(verdict="allow", context_type="none", context_id="null", reason_code="no_active_context")
+        source = "active_task" if active_task_gate else "session_pointer"
     elif not context_path:
         gate = final_gate_schema(
             verdict="block",
@@ -14069,7 +14110,11 @@ def execution_context_final_response_guard_output(*, runtime: str, state_root: P
         )
         source = "session_pointer"
     else:
-        context, context_issue = final_gate_read_json_object(Path(context_path).expanduser())
+        context_file = Path(context_path).expanduser()
+        if not context_file.is_absolute():
+            context_file = session_dir / context_file
+        context_path = str(context_file)
+        context, context_issue = final_gate_read_json_object(context_file)
         if context_issue:
             gate = final_gate_schema(
                 verdict="block",
@@ -14103,6 +14148,8 @@ def execution_context_final_response_guard_output(*, runtime: str, state_root: P
         "active_execution_context_pointer_path": str(pointer_path),
         "execution_context_path": context_path,
         "execution_context_read_issue": context_issue,
+        "active_task_result": normalize_cell(active_task.get("status")) if active_task else "",
+        "active_task_warnings": active_warnings,
         "legacy_gate_command_artifact_path": str(legacy_path) if legacy_path else "",
         "hard_block_enforced": enforce,
         "loop_policy": final_gate_loop_policy(),

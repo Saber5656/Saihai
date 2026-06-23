@@ -213,6 +213,66 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             self.assertEqual(output["finalGate"]["verdict"], "allow")
             self.assertEqual(output["finalGate"]["reason_code"], "no_active_context")
 
+    def test_final_response_guard_blocks_active_task_without_execution_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = state_root / "s"
+            session_dir.mkdir(parents=True)
+            (session_dir / "active-execution-context.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "s",
+                        "active_execution_context": None,
+                        "active_execution_context_pointer_path": str(session_dir / "active-execution-context.json"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_dir / "active-task.json").write_text(
+                json.dumps(
+                    {
+                        "status": "active",
+                        "task_id": "TSK-9999",
+                        "task_detail_path": "/tmp/task.md",
+                        "flow_phase": "pre_final_response",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            output = self.run_builder(state_root, "final-response-guard", {"session_id": "s", "enforce_final_gate": True})
+
+            self.assertEqual(output["decision"], "block")
+            self.assertEqual(output["finalGate"]["verdict"], "block")
+            self.assertEqual(output["finalGate"]["blockers"][0]["id"], "active_task_without_execution_context")
+
+    def test_final_response_guard_resolves_relative_execution_context_under_session_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = state_root / "s"
+            session_dir.mkdir(parents=True)
+            (session_dir / "active-execution-context.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "s",
+                        "active_execution_context": {"path": "execution_context.json"},
+                        "active_execution_context_pointer_path": str(session_dir / "active-execution-context.json"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_dir / "execution_context.json").write_text(
+                json.dumps({"context_type": "execution", "task_id": "TSK-9999", "blocking_level": "none"}),
+                encoding="utf-8",
+            )
+
+            output = self.run_builder(state_root, "final-response-guard", {"session_id": "s"})
+
+            self.assertEqual(output["finalGate"]["verdict"], "allow")
+            self.assertEqual(output["finalResponseGuard"]["source"], "execution_context")
+            self.assertEqual(output["finalResponseGuard"]["execution_context_path"], str(session_dir / "execution_context.json"))
+            self.assertEqual(output["finalResponseGuard"]["execution_context_read_issue"], "")
+
     def test_model_registry_no_longer_requires_process_columns(self) -> None:
         builder = load_builder_module()
         with tempfile.TemporaryDirectory() as tmp:
