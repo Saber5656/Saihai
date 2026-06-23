@@ -18,7 +18,7 @@
       "provider_evidence": {
         "provider_session_id": "session-gate-prompt-formatter",
         "effective_model": "claude-sonnet-4-6",
-        "usage_source": "claude_tmux_interactive",
+        "usage_source": "claude_headless CLI_interactive",
         "request_id": "req-gate-prompt-formatter",
         "transcript_path": "transcripts/gate-prompt-formatter.jsonl"
       }
@@ -47,7 +47,7 @@
     "provider_evidence": {
       "provider_session_id": "session-teams-project-manager",
       "effective_model": "claude-sonnet-4-6",
-      "usage_source": "claude_tmux_interactive",
+      "usage_source": "claude_headless CLI_interactive",
       "request_id": "req-teams-project-manager",
       "transcript_path": "transcripts/teams-project-manager.jsonl"
     }
@@ -59,7 +59,7 @@
   },
   "forbidden_inboxes": [
     "gate-task-creator",
-    "gate-task-assessor",
+    "team-completion-check",
     "gate-task-guardian"
   ]
 }

@@ -12,29 +12,6 @@
         ]
       }
     ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ITB_RUNTIME=codex ITB_STATE_ROOT=\"$HOME/.codex/state/itb\" \"$HOME/dev/Agent-Teams-Viewer/organization/runtime/infra-team-bootstrap/hooks/itb-prompt-preflight.sh\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ITB_RUNTIME=codex ITB_STATE_ROOT=\"$HOME/.codex/state/itb\" \"$HOME/dev/Agent-Teams-Viewer/organization/runtime/infra-team-bootstrap/hooks/itb-pretooluse-guard.sh\"",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [

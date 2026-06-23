@@ -13,8 +13,8 @@
     },
     {
       "id": 3,
-      "prompt": "Guardian Verdict complete だが Completion Envelope の Resident Roster evidence が missing。GRH として最終応答を書いてよい？",
-      "expected_output": "書かない。Resident Roster / Active Set / Invocation Evidence の最終更新がないため gate-task-guardian へ戻す。"
+      "prompt": "Guardian Verdict complete だが Completion Envelope の Organization Active Set evidence が missing。GRH として最終応答を書いてよい？",
+      "expected_output": "書かない。Organization Active Set / Invocation Evidence の最終更新がないため gate-task-guardian へ戻す。"
     },
     {
       "id": 4,

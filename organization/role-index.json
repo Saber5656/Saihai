@@ -322,7 +322,7 @@
       "team": "gate",
       "category": "Team Role",
       "status": "reference",
-      "purpose": "旧 Completion Assessment 契約の互換参照。runtime resident agent としては使わず、TPM の Team Completion Check を正本にする",
+      "purpose": "旧 Completion Assessment 契約の互換参照。runtime execution role としては使わず、TPM の Team Completion Check を正本にする",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
       "migration_stage": "directory_mirror",
@@ -415,7 +415,7 @@
       "team": "gate",
       "category": "Team Role",
       "status": "reference",
-      "purpose": "旧 Guardian Verdict 契約の互換参照。runtime resident agent としては使わず、Finalization Check を正本にする",
+      "purpose": "旧 Guardian Verdict 契約の互換参照。runtime execution role としては使わず、Finalization Check を正本にする",
       "user_invocable": "false",
       "compatibility_source": "skills-repo",
       "migration_stage": "directory_mirror",
@@ -599,8 +599,8 @@
         {
           "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/README.md",
           "path": "organization/roles/infra-team-bootstrap/hooks/README.md",
-          "bytes": 4063,
-          "sha1": "2796d754a0f36f77c8612ab7459a016aac0e1ef6"
+          "bytes": 1740,
+          "sha1": "c7cbd15d0f926a1397b7d8168b67a3be7a2af5a7"
         },
         {
           "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/claude-settings-hooks.example.json",
@@ -633,24 +633,6 @@
           "sha1": "9e6eb38bc9d1a4606d9f5424398a7a22b446c3fe"
         },
         {
-          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/itb-pretooluse-guard.sh",
-          "path": "organization/roles/infra-team-bootstrap/hooks/itb-pretooluse-guard.sh",
-          "bytes": 232,
-          "sha1": "fa19980a456ab688625cd5e0e19a85d53134a657"
-        },
-        {
-          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/itb-prompt-preflight.sh",
-          "path": "organization/roles/infra-team-bootstrap/hooks/itb-prompt-preflight.sh",
-          "bytes": 232,
-          "sha1": "7a53c8d9c6d2e8c5e9bb462893748244a9b08ef3"
-        },
-        {
-          "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/itb-session-end.sh",
-          "path": "organization/roles/infra-team-bootstrap/hooks/itb-session-end.sh",
-          "bytes": 227,
-          "sha1": "540c6ffbd9a728ba62b494ec545b3e34ff662c31"
-        },
-        {
           "source": "${SKILLS_ROOT}/infra-team-bootstrap/hooks/itb-session-start.sh",
           "path": "organization/roles/infra-team-bootstrap/hooks/itb-session-start.sh",
           "bytes": 245,
@@ -675,10 +657,10 @@
           "sha1": "40ba3252608e91b7752e5a59779d6a6af09e348b"
         },
         {
-          "source": "${SKILLS_ROOT}/infra-team-bootstrap/references/resident-organization-comprehensive-plan.md",
-          "path": "organization/roles/infra-team-bootstrap/references/resident-organization-comprehensive-plan.md",
-          "bytes": 36307,
-          "sha1": "8c790d402dc22065b8c6f749841d2c80be2a6955"
+          "source": "${SKILLS_ROOT}/infra-team-bootstrap/references/headless-organization-comprehensive-plan.md",
+          "path": "organization/roles/infra-team-bootstrap/references/headless-organization-comprehensive-plan.md",
+          "bytes": 2118,
+          "sha1": "0597bf3b99e54cc40ba631fa6fd4f51fa3bae65b"
         },
         {
           "source": "${SKILLS_ROOT}/infra-team-bootstrap/references/team-config.md",
@@ -689,8 +671,8 @@
         {
           "source": "${SKILLS_ROOT}/infra-team-bootstrap/scripts/itb_bootstrap_builder.py",
           "path": "organization/roles/infra-team-bootstrap/scripts/itb_bootstrap_builder.py",
-          "bytes": 1030887,
-          "sha1": "c36cc38d9b47824808c5e75f408805f66f9ace5c"
+          "bytes": 727388,
+          "sha1": "684c63869394951a94ca28a0bdf371c20a06efeb"
         },
         {
           "source": "${SKILLS_ROOT}/infra-team-bootstrap/tests/fixtures/gate_command_ambiguity_cases.json",

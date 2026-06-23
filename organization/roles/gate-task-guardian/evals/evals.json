@@ -18,8 +18,8 @@
     },
     {
       "id": 4,
-      "prompt": "evaluation ok、commit_not_required 理由あり、Vault final update 完了。ただし Resident Roster が未更新で Active Set が空。main transport renderer に渡してよい？",
-      "expected_output": "guardian_status: incomplete。Resident Roster / Active Set / Invocation Evidence の最終更新不足を理由に main transport renderer 進行を拒否する。"
+      "prompt": "evaluation ok、commit_not_required 理由あり、Vault final update 完了。ただし Organization Active Set が未更新で active set が空。main transport renderer に渡してよい？",
+      "expected_output": "guardian_status: incomplete。Organization Active Set / Invocation Evidence の最終更新不足を理由に main transport renderer 進行を拒否する。"
     },
     {
       "id": 5,
@@ -53,7 +53,7 @@
     },
     {
       "id": 11,
-      "prompt": "commit_required false、push_required false、pr_required false の理由があり、Git Publication Result は not_required。Vault final update、Index、Kanban、Resident Roster も完了している。完了判定して。",
+      "prompt": "commit_required false、push_required false、pr_required false の理由があり、Git Publication Result は not_required。Vault final update、Index、Kanban、Organization Active Set も完了している。完了判定して。",
       "expected_output": "git_publication_status not_required を受け入れ、他の Gate 条件が揃っていれば guardian_status: complete とする。"
     },
     {

@@ -20,7 +20,7 @@ agent_id: gate-response-humanizer
 現行フローでは、`finalization-check` と `final-transport-render-check` が complete と判定した Completion Envelope を main transport renderer が人間ユーザーに返す最終応答へ整形する。
 
 このスキルは、文体 profile と安全な事実保持ルールを残すために保持する。
-通常の Organization Instance では resident / provider-backed final gate として起動しない。
+通常の Organization Instance では provider-backed final gate として起動しない。
 
 - main transport renderer が最終表示だけに適用する文体 profile の参照先になる
 - 事実、判断、リスクを壊さずに読みやすさを上げる
@@ -52,7 +52,7 @@ agent_id: gate-response-humanizer
 | Completion Envelope | result、changed_artifacts、review_status、validation_status |
 | Commit evidence | commit hash または commit 不要判断 |
 | Vault update evidence | Vault final update 完了 |
-| Resident roster evidence | Resident Team Roster、Active Set、Invocation Evidence の最終更新 |
+| Active set evidence | Organization Active Set、Invocation Evidence の最終更新 |
 | Final Transport Render Check | main transport renderer が facts preserved / no new task judgment / worker persona leakage false を記録している |
 
 ## 出力ルール
@@ -68,7 +68,7 @@ agent_id: gate-response-humanizer
 - 不確かな内容は断定せず、元の担当エージェントの不確実性を保つ
 - finalization / final transport render evidence がない場合は、最終応答を整えず `finalization-check` / `final-transport-render-check` へ戻す
 - 重要な警告や失敗は、文体をやわらげても深刻度を下げない
-- Resident Roster、active set、model/session/request/usage 証跡は事実として扱い、文体調整で丸めない
+- Organization Active Set、model/session/request/usage 証跡は事実として扱い、文体調整で丸めない
 - 箇条書きや表は、読みやすさが上がる場合だけ使う
 - コード、コマンド、ファイルパス、API名、エラー文は文体変換しない
 - 引用、ログ、コマンド出力、ファイルパス、エラー文、固有のUI文言、表の field 名は、`です` `ます` が含まれていても原文保持を優先する
@@ -111,7 +111,7 @@ agent_id: gate-response-humanizer
 | Finalization Check が complete である | Yes |
 | commit hash または commit 不要判断がある | Yes |
 | Vault final update 完了が記録されている | Yes |
-| Resident Roster / Active Set / Invocation Evidence の最終更新がある | Yes |
+| Organization Active Set / Invocation Evidence の最終更新がある | Yes |
 | 未実施事項を完了扱いしていない | Yes |
 | 通常の完了・進捗・方針回答で、本文の地の文に `です` `ます` `しました` `しています` `ください` が原則残っていない | Yes |
 | 通常の完了・進捗・方針回答に複数の柔らかい妹文体シグナルがある | Yes |

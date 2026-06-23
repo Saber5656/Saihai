@@ -32,7 +32,7 @@
     },
     {
       "id": 2,
-      "prompt": "AI エージェント常駐運用の記事を書く前提で、Claude Code 直接利用、OpenClaw 経由、Codex remote access の違いを調査してください。技術的な設計判断が必要な点は結論にせず、適切な tech 系ロールへ引き継いでください。",
+      "prompt": "AI エージェント組織運用の記事を書く前提で、Claude Code 直接利用、OpenClaw 経由、Codex remote access の違いを調査してください。技術的な設計判断が必要な点は結論にせず、適切な tech 系ロールへ引き継いでください。",
       "expected_output": "比較表と調査結論を含むが、技術選定や設計採否は CR が確定せず、tech-architect / tech-debugger / tech-lead のいずれかへの handoff として整理している。",
       "files": [],
       "expectations": [

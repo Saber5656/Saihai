@@ -24,7 +24,7 @@ Completion Gate の機械検証用チェーン、pre-final 必須 section、main
 | `AI-Organization.md` | 組織共通ルールの要約 |
 | 各 `SKILL.md` Flow Contract | 担当ロールと次 hop の正本 |
 | ITB `model-registry.md` | モデル、provider、実行モードの正本 |
-| ITB role-agent registry | 常駐 / queue consumer / inbox / report directory の正本 |
+| ITB role-agent registry | role metadata / queue consumer / inbox / report directory の正本 |
 | ITB runtime queue | role 間 I/O の runtime evidence。Vault には要約と report path を記録する |
 
 ## Canonical Flow

@@ -25,7 +25,7 @@ TPM は `tech-backend`、`infra-local-qa`、`contents-formatter` などの個別
 | 区分 | 内容 |
 |---|---|
 | In | Task Detail、routing hint、review requirements、approval status、open questions |
-| Out | 主担当チーム、支援チーム、レビュー担当チーム、実行順序、Branch Plan、Resident Roster の active set、director handoff、Team Completion Check、completion gate handoff |
+| Out | 主担当チーム、支援チーム、レビュー担当チーム、実行順序、Branch Plan、Organization Active Set、director handoff、Team Completion Check、completion gate handoff |
 | 前ロール | `gate-task-creator` |
 | 次ロール | 各チーム director または Gate 固定フロー |
 | 対象外 | 個別エージェント選定、実作業、レビュー実施、Kanban 同期実装、Task ID 採番 |
@@ -45,7 +45,7 @@ TPM は `tech-backend`、`infra-local-qa`、`contents-formatter` などの個別
 TPM は全チーム共通の「チーム配車係」として振る舞う。
 
 各チーム内で誰が作業するかは、チーム内 director が決める。
-Resident Organization Roster 運用では、TPM は Gate / Infra を常時 active として扱い、タスクごとに active 化するチームと director までを宣言する。Tech / Contents / Business の個別 worker active 化は各 director の責務とする。
+Organization Active Set 運用では、TPM は Gate / Infra を常時 active として扱い、タスクごとに active 化するチームと director までを宣言する。Tech / Contents / Business の個別 worker active 化は各 director の責務とする。
 TPM は role 定義ではなく、現チャットセッションの agent instance を active set に載せる。全チャット横断の singleton agent を前提にしない。
 
 | 主担当チーム | TPM が渡す先 | チーム内の割り振り責任 |
@@ -109,18 +109,18 @@ TPM は role 定義ではなく、現チャットセッションの agent instan
    - Task Detail には `task-detail-append` command で status、1行 summary、report path、report sha256 だけを残す。
    - Vault に記録していない判断を共有済み事実として扱わないが、長文本文を Task Detail へ直接貼らない。
 
-7.5. Resident Roster の active set を残す。
+7.5. Organization Active Set を残す。
    - Gate / Infra は常時 active として `Always Active` に記録する。
    - 主担当チームと支援チームの director を `Task Active` に記録する。
-   - タスク対象外の resident チームは `Idle Resident` に記録する。
+   - タスク対象外のチームは inactive team として記録する。
    - `role_id` と `agent_instance_id` を区別し、`chat_session_id` / `organization_instance_id` が一致する agent instance だけを active 化する。
-   - bridge、commit、git-publisher、push、git-workspace-prep、save、Obsidian CLI などの道具スキルを resident active set に混ぜない。
+   - bridge、commit、git-publisher、push、git-workspace-prep、save、Obsidian CLI などの道具スキルを organization active set に混ぜない。
    - モデル、session、request、usage の証跡は `Invocation Evidence` に記録する前提を維持する。
 
 8. Team Completion Check と Completion Gate handoff を維持する。
    - 各 Director は担当チームの作業・レビュー完了後、TPM へ completion report を返す。
    - TPM は `team-completion-check` command evidence として、対象チームの完了報告、未解決 blocker、human approval、レビュー証跡を集約し、全チーム完了時だけ `Completion Status: ready_for_evaluation` を記録する。
-   - Director 完了報告後の次工程は `skills/infra-team-bootstrap/config/completion-chain.yaml` の `completion_chain`、`auto_queue_handoffs`、`assessor_integration_policy` に従う。現行 mode は `tpm_team_completion_check` のため、TPM の terminal report 後に builder / queue-watch が `team-completion-check` command を実行し、`pass` の場合だけ `gate-task-evaluator` を queue する。
+   - Director 完了報告後の次工程は `skills/infra-team-bootstrap/config/completion-chain.yaml` の `completion_chain`、`auto_queue_handoffs`、`assessor_integration_policy` に従う。現行 mode は `tpm_team_completion_check` のため、TPM の terminal report 後に builder が `team-completion-check` command を実行し、`pass` の場合だけ `gate-task-evaluator` を queue する。
    - TPM は evaluator inbox を手書き生成しない。command が `block` / `ambiguous` の場合は `missing_evidence`、`blockers`、`reason` を直してから再 report する。
    - TPM は品質評価、commit 実行、finalization 判定を行わない。
    - TPM は Director 完了報告を main transport renderer へ直接渡さない。
@@ -171,16 +171,16 @@ TPM の出力は次の形式を基本にする。
 | Micro Team Record | `in_task_certificate` / `team_task_board_required` |
 ```
 
-## Resident Active Set
+## Organization Active Set
 
 Task Detail には次を残す。
 
 ```markdown
 ## Active Set
 
-| Task Phase | Always Active | Task Active | Idle Resident | Reason |
+| Task Phase | Always Active | Task Active | Deferred Role | Reason |
 |---|---|---|---|---|
-| routing | Gate + Infra | <main/support directors> | <non-target resident teams> | Gate/Infra operate cross-task; other teams activate only when in scope. |
+| routing | Gate + Infra | <main/support directors> | <non-target teams> | Gate/Infra operate cross-task; other teams activate only when in scope. |
 ```
 
 ## 判断基準
@@ -228,7 +228,7 @@ Task Detail には次を残す。
 | Team Completion Check を Task Detail に記録した | Yes |
 | Completion Gate の後段フローを保持した | Yes |
 | Gate / Infra を常時 active として扱い、タスク別 active set を記録した | Yes |
-| 道具スキルを resident active set に混ぜていない | Yes |
+| 道具スキルを organization active set に混ぜていない | Yes |
 
 ## Related Notes
 
