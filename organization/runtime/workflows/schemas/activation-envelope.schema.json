@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/workflows/activation-envelope.schema.json",
+  "title": "Activation Envelope",
+  "description": "Typed gate state for moving a draft/proposed goal toward an approved workflow run.",
+  "type": "object",
+  "required": [
+    "activation_version",
+    "activation_source",
+    "activation_status",
+    "task_id",
+    "request_id",
+    "workflow_selection",
+    "policy",
+    "context_scope",
+    "activation_scope",
+    "next_action"
+  ],
+  "properties": {
+    "activation_version": {
+      "const": "1"
+    },
+    "activation_source": {
+      "type": "string",
+      "enum": [
+        "frontdoor_prompt",
+        "orchestrator-start",
+        "human_ui",
+        "manual_cli"
+      ]
+    },
+    "activation_status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "proposed",
+        "approved",
+        "blocked",
+        "waiting_human"
+      ]
+    },
+    "approved_by": {
+      "type": "string",
+      "enum": [
+        "human_explicit_skill_invocation",
+        "human_ui_action",
+        "manual_operator"
+      ]
+    },
+    "approved_at": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "goal_state_transition": {
+      "type": "object",
+      "required": [
+        "from",
+        "to"
+      ],
+      "properties": {
+        "from": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "proposed"
+          ]
+        },
+        "to": {
+          "type": "string",
+          "enum": [
+            "proposed",
+            "approved",
+            "blocked",
+            "waiting_human"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "workflow_selection": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "selected",
+            "blocked",
+            "waiting_human"
+          ]
+        },
+        "workflow_id": {
+          "type": "string"
+        },
+        "initial_step": {
+          "type": "string"
+        },
+        "optional_expansions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "required": [
+        "bounded_provider_transport",
+        "destructive_operations",
+        "publication"
+      ],
+      "properties": {
+        "bounded_provider_transport": {
+          "type": "string",
+          "enum": [
+            "allowed",
+            "not_approved",
+            "blocked"
+          ]
+        },
+        "destructive_operations": {
+          "type": "string",
+          "enum": [
+            "not_approved",
+            "blocked"
+          ]
+        },
+        "publication": {
+          "type": "string",
+          "enum": [
+            "not_required",
+            "separate_gate_required",
+            "blocked"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "context_scope": {
+      "type": "object",
+      "required": [
+        "mode",
+        "refs",
+        "raw_transcript_sharing"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "bounded_refs",
+            "refs_only",
+            "selected_snapshot",
+            "diff_summary"
+          ]
+        },
+        "refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "raw_transcript_sharing": {
+          "const": "forbidden"
+        }
+      },
+      "additionalProperties": false
+    },
+    "activation_scope": {
+      "type": "object",
+      "required": [
+        "allowed_paths",
+        "allowed_ops",
+        "step_budget",
+        "expires_at"
+      ],
+      "properties": {
+        "allowed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_ops": {
+          "type": "object",
+          "required": [
+            "edit",
+            "commit",
+            "push",
+            "network"
+          ],
+          "properties": {
+            "edit": {
+              "type": "boolean"
+            },
+            "commit": {
+              "type": "boolean"
+            },
+            "push": {
+              "type": "boolean"
+            },
+            "network": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "step_budget": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "approval_required_reason": {
+      "type": "string"
+    },
+    "next_action": {
+      "type": "string",
+      "enum": [
+        "create_workflow_run",
+        "ask_human",
+        "keep_draft",
+        "abort"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "activation_status": {
+            "const": "approved"
+          }
+        },
+        "required": [
+          "activation_status"
+        ]
+      },
+      "then": {
+        "required": [
+          "approved_by",
+          "approved_at"
+        ],
+        "properties": {
+          "context_scope": {
+            "properties": {
+              "refs": {
+                "minItems": 1
+              }
+            }
+          },
+          "activation_scope": {
+            "properties": {
+              "step_budget": {
+                "const": 1
+              },
+              "allowed_ops": {
+                "properties": {
+                  "edit": {
+                    "const": false
+                  },
+                  "commit": {
+                    "const": false
+                  },
+                  "push": {
+                    "const": false
+                  },
+                  "network": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/workflows/workflow-run.schema.json",
+  "title": "Workflow Run State",
+  "description": "Durable per-task execution instance. Queue messages are step artifacts under this run.",
+  "type": "object",
+  "required": [
+    "run_version",
+    "run_id",
+    "task_id",
+    "request_id",
+    "workflow_id",
+    "goal_state",
+    "run_state",
+    "current_step",
+    "iteration",
+    "max_steps",
+    "step_history",
+    "activation",
+    "terminal",
+    "requester",
+    "scheduling",
+    "context_sharing"
+  ],
+  "properties": {
+    "run_version": {
+      "const": "1"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "workflow_id": {
+      "type": "string"
+    },
+    "goal_state": {
+      "type": "string",
+      "enum": [
+        "approved",
+        "active",
+        "blocked",
+        "complete",
+        "aborted"
+      ]
+    },
+    "run_state": {
+      "type": "string",
+      "enum": [
+        "created",
+        "step_queued",
+        "waiting_provider",
+        "validating",
+        "remediating",
+        "waiting_human",
+        "complete",
+        "failed",
+        "aborted"
+      ]
+    },
+    "current_step": {
+      "type": "string"
+    },
+    "iteration": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_steps": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "step_history": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "activation": {
+      "type": "object"
+    },
+    "terminal": {
+      "type": "object",
+      "required": [
+        "status",
+        "reason"
+      ],
+      "properties": {
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "requester": {
+      "type": "object"
+    },
+    "scheduling": {
+      "type": "object",
+      "required": [
+        "scheduler_mode",
+        "concurrency_group",
+        "lock_policy",
+        "concurrency",
+        "resume_policy"
+      ],
+      "properties": {
+        "scheduler_mode": {
+          "const": "invocation-drain"
+        },
+        "concurrency_group": {
+          "const": "global"
+        },
+        "lock_policy": {
+          "const": "global_advisory_lock"
+        },
+        "concurrency": {
+          "const": 1
+        },
+        "resume_policy": {
+          "type": "string",
+          "enum": [
+            "manual",
+            "daemon_future"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "context_sharing": {
+      "type": "object",
+      "required": [
+        "shared_run_state",
+        "step_local_snapshot",
+        "provider_transcript"
+      ],
+      "properties": {
+        "shared_run_state": {
+          "const": "typed_durable_state"
+        },
+        "step_local_snapshot": {
+          "const": "immutable_step_attempt_snapshot"
+        },
+        "provider_transcript": {
+          "const": "confined_evidence_path_only"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

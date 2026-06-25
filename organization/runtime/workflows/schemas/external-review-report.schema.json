@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/workflows/external-review-report.schema.json",
+  "title": "External Review Report",
+  "description": "Authoritative typed report for single_step_external_review. Provider stdout/transcript is signal only.",
+  "type": "object",
+  "required": [
+    "report_version",
+    "report_id",
+    "request_id",
+    "run_id",
+    "workflow_id",
+    "step_id",
+    "result",
+    "summary",
+    "provider_evidence",
+    "findings",
+    "authority"
+  ],
+  "properties": {
+    "report_version": {
+      "const": "1"
+    },
+    "report_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "workflow_id": {
+      "const": "single_step_external_review"
+    },
+    "step_id": {
+      "const": "review"
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "findings",
+        "blocked",
+        "invalid"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "provider_evidence": {
+      "type": "object",
+      "required": [
+        "provider",
+        "effective_model",
+        "request_id",
+        "provider_session_id",
+        "transcript_path",
+        "evidence_path"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "effective_model": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "provider_session_id": {
+          "type": "string"
+        },
+        "transcript_path": {
+          "type": "string"
+        },
+        "evidence_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "finding_id",
+          "severity",
+          "status",
+          "summary",
+          "evidence_refs"
+        ],
+        "properties": {
+          "finding_id": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low",
+              "info"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "closed",
+              "waived",
+              "informational"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "recommendations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "authority": {
+      "type": "object",
+      "required": [
+        "canonical_result",
+        "stdout_is_signal_only",
+        "raw_transcript_shared"
+      ],
+      "properties": {
+        "canonical_result": {
+          "const": "typed_report_file"
+        },
+        "stdout_is_signal_only": {
+          "const": true
+        },
+        "raw_transcript_shared": {
+          "const": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

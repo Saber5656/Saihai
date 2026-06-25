@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/workflows/provider-adapter-capability.schema.json",
+  "title": "Provider Adapter Capability",
+  "description": "Capability descriptor for headless CLI and future tmux interactive provider adapters.",
+  "type": "object",
+  "required": [
+    "adapter_contract_version",
+    "provider_adapter_id",
+    "transport",
+    "sync_mode",
+    "context_freshness",
+    "concurrency_unit",
+    "permission_enforcement",
+    "supports_structured_output",
+    "requires_marker",
+    "reset_strategy",
+    "report_authority"
+  ],
+  "properties": {
+    "adapter_contract_version": {
+      "const": "1"
+    },
+    "provider_adapter_id": {
+      "type": "string"
+    },
+    "transport": {
+      "type": "string",
+      "enum": [
+        "headless_cli",
+        "tmux_interactive",
+        "codex_exec"
+      ]
+    },
+    "sync_mode": {
+      "type": "string",
+      "enum": [
+        "sync",
+        "async",
+        "marker_wait",
+        "polling"
+      ]
+    },
+    "context_freshness": {
+      "type": "string",
+      "enum": [
+        "fresh_process",
+        "persistent_session",
+        "requires_reset"
+      ]
+    },
+    "concurrency_unit": {
+      "type": "string",
+      "enum": [
+        "process",
+        "pane",
+        "session",
+        "account",
+        "model"
+      ]
+    },
+    "permission_enforcement": {
+      "type": "string",
+      "enum": [
+        "harness",
+        "provider",
+        "unsupported"
+      ]
+    },
+    "supports_structured_output": {
+      "type": "boolean"
+    },
+    "requires_marker": {
+      "type": "boolean"
+    },
+    "reset_strategy": {
+      "type": "string",
+      "enum": [
+        "none",
+        "clear",
+        "compact",
+        "new_session"
+      ]
+    },
+    "report_authority": {
+      "const": "typed_report_and_evidence_file"
+    }
+  },
+  "additionalProperties": false
+}

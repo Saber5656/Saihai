@@ -1,0 +1,130 @@
+{
+  "workflow_template_version": "1",
+  "workflow_id": "single_step_external_review",
+  "lifecycle_status": "active",
+  "purpose": "Send one bounded readonly review or consultation work order to an external provider adapter and require an authoritative typed report/evidence file.",
+  "initial_step": "review",
+  "max_steps": 1,
+  "scheduler": {
+    "mode": "invocation-drain",
+    "state_persistence": "durable_state",
+    "lock_policy": "global_advisory_lock",
+    "concurrency": 1
+  },
+  "result_authority": {
+    "canonical": [
+      "typed_report_file",
+      "normalized_provider_evidence_file"
+    ],
+    "signals_only": [
+      "stdout",
+      "tmux_pane_output",
+      "provider_transcript"
+    ]
+  },
+  "context_sharing": {
+    "shared_run_state": "typed_durable_state",
+    "step_local_snapshot": "immutable_step_attempt_snapshot",
+    "provider_transcript": "confined_evidence_path_only"
+  },
+  "provider_adapter": {
+    "capability_schema": "organization/runtime/workflows/schemas/provider-adapter-capability.schema.json",
+    "allowed_transports": [
+      "headless_cli",
+      "tmux_interactive"
+    ],
+    "default_transport": "headless_cli"
+  },
+  "output_contracts": {
+    "external_review_report": {
+      "schema_path": "organization/runtime/workflows/schemas/external-review-report.schema.json",
+      "required": true,
+      "canonical": true
+    }
+  },
+  "steps": [
+    {
+      "id": "review",
+      "role": "tech-reviewer",
+      "assignment_role": "reviewer",
+      "permission_mode": "readonly",
+      "provider_route": {
+        "adapter_kind": "external_provider",
+        "default_provider": "claude_cli",
+        "default_transport": "headless_cli",
+        "future_transports": [
+          "tmux_interactive"
+        ],
+        "runner_authority": "write_report_only",
+        "transition_authority": "harness_engine"
+      },
+      "input_contract": "work_order",
+      "output_contract": "external_review_report",
+      "context_scope": {
+        "allowed_modes": [
+          "refs_only",
+          "selected_snapshot",
+          "diff_summary"
+        ],
+        "raw_transcript_sharing": "forbidden",
+        "promotion_rule": "typed_report_refs_only"
+      },
+      "quality_gates": [
+        {
+          "gate": "schema_gate",
+          "requires": "external_review_report"
+        },
+        {
+          "gate": "provider_evidence_gate",
+          "requires": [
+            "provider_session_id",
+            "request_id",
+            "effective_model",
+            "transcript_path",
+            "evidence_path"
+          ]
+        },
+        {
+          "gate": "context_scope_gate",
+          "forbids": [
+            "secrets",
+            "unbounded_repo_dump",
+            "unbounded_vault_dump",
+            "raw_transcript_broadcast"
+          ]
+        }
+      ],
+      "transitions": [
+        {
+          "on": "report_valid",
+          "to": "complete"
+        },
+        {
+          "on": "report_invalid",
+          "to": "blocked",
+          "reason_class": "invalid_report"
+        },
+        {
+          "on": "scope_violation",
+          "to": "waiting_human",
+          "reason_class": "scope_violation"
+        }
+      ]
+    }
+  ],
+  "optional_expansions": [
+    {
+      "id": "security_focus",
+      "enabled_when": {
+        "security_sensitive": true
+      },
+      "effect": "Require security-sensitive findings and explicit evidence gaps in the same readonly review step."
+    }
+  ],
+  "terminal_states": [
+    "complete",
+    "blocked",
+    "waiting_human",
+    "aborted"
+  ]
+}
