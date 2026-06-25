@@ -104,6 +104,8 @@ def validate_classification(candidate: dict[str, Any]) -> tuple[bool, list[str]]
     expected_artifacts = candidate.get("expected_artifacts")
     if not isinstance(expected_artifacts, list) or not expected_artifacts:
         errors.append("expected_artifacts must be a non-empty list")
+    elif any(not isinstance(item, str) for item in expected_artifacts):
+        errors.append("expected_artifacts entries must be strings")
     else:
         invalid = sorted(set(expected_artifacts) - CLASSIFICATION_ENUMS["expected_artifacts"])
         if invalid:
@@ -284,11 +286,23 @@ def select_workflow(classification: dict[str, Any]) -> dict[str, Any]:
         "publication": "publication_required",
         "policy_change": "policy_or_permission_change",
     }
+    if classification["security_sensitive"] and task_kind in {"code_change", "policy_change"}:
+        candidate = "security_sensitive_change"
+        return {
+            "schema_version": 1,
+            "decision": "waiting_human",
+            "selector_version": "1",
+            "workflow_selection": waiting_selection(
+                "specialized_security_or_policy_template_required",
+                [candidate],
+            ),
+            "classification_errors": [],
+            "policy": policy,
+        }
+
     candidate = planned_map.get(task_kind)
     if candidate in planned:
         reason = "planned_template_not_installed_in_p0"
-        if classification["security_sensitive"] and task_kind != "research":
-            reason = "specialized_security_or_policy_template_required"
         return {
             "schema_version": 1,
             "decision": "waiting_human",
@@ -380,11 +394,11 @@ def activation_envelope(
         return envelope
 
     envelope["activation_status"] = "approved"
-    envelope["approved_by"] = (
-        "human_explicit_skill_invocation"
-        if activation_source == "orchestrator-start"
-        else "manual_operator"
-    )
+    envelope["approved_by"] = {
+        "orchestrator-start": "human_explicit_skill_invocation",
+        "human_ui": "human_ui_action",
+        "manual_cli": "manual_operator",
+    }[activation_source]
     envelope["approved_at"] = now_iso()
     envelope["goal_state_transition"] = {"from": "proposed", "to": "approved"}
     envelope["next_action"] = "create_workflow_run"
@@ -497,11 +511,26 @@ def validate_contracts() -> dict[str, Any]:
     approved_condition = json.dumps(activation_schema.get("allOf", []), sort_keys=True)
     if '"minItems": 1' not in approved_condition:
         errors.append("approved activation must require bounded context refs")
+    if '"activation_source"' not in approved_condition or '"enum": ["orchestrator-start", "human_ui", "manual_cli"]' not in approved_condition:
+        errors.append("approved activation must reject frontdoor_prompt source")
+    for required_fragment in (
+        '"next_action": {"const": "create_workflow_run"}',
+        '"status": {"const": "selected"}',
+        '"workflow_id"',
+        '"initial_step"',
+    ):
+        if required_fragment not in approved_condition:
+            errors.append(f"approved activation missing selected-workflow constraint: {required_fragment}")
     for op in ("edit", "commit", "push", "network"):
         if f'"{op}": {{"const": false}}' not in approved_condition:
             errors.append(f"approved activation must keep {op}=false in P0")
 
     work_order_schema = loaded_schemas.get("work-order.schema.json", {})
+    work_order_context = (work_order_schema.get("properties") or {}).get("context_scope", {})
+    if "raw_transcript_sharing" not in work_order_context.get("required", []):
+        errors.append("work order context_scope must require raw_transcript_sharing")
+    if work_order_context.get("additionalProperties") is not False:
+        errors.append("work order context_scope must reject undeclared raw sharing fields")
     work_order_condition = json.dumps(work_order_schema.get("allOf", []), sort_keys=True)
     for required_fragment in (
         '"workflow_id": {"const": "single_step_external_review"}',
@@ -525,6 +554,22 @@ def validate_contracts() -> dict[str, Any]:
         errors.append("external review provider_evidence must not allow embedded raw fields")
     if finding_items.get("additionalProperties") is not False:
         errors.append("external review findings must not allow embedded raw fields")
+    report_condition = json.dumps(report_schema.get("allOf", []), sort_keys=True)
+    if '"result": {"const": "findings"}' not in report_condition or '"minItems": 1' not in report_condition:
+        errors.append("external review findings result must require non-empty findings")
+
+    workflow_run_schema = loaded_schemas.get("workflow-run.schema.json", {})
+    run_activation = (workflow_run_schema.get("properties") or {}).get("activation", {})
+    run_activation_condition = json.dumps(run_activation, sort_keys=True)
+    for required_fragment in (
+        '"activation_status": {"const": "approved"}',
+        '"next_action": {"const": "create_workflow_run"}',
+        '"status": {"const": "selected"}',
+    ):
+        if required_fragment not in run_activation_condition:
+            errors.append(f"workflow run activation missing approved-envelope constraint: {required_fragment}")
+    if '"activation_source"' not in run_activation_condition or '"enum": ["orchestrator-start", "human_ui", "manual_cli"]' not in run_activation_condition:
+        errors.append("workflow run activation missing approved-envelope source constraint")
 
     return {
         "schema_version": 1,
@@ -578,7 +623,7 @@ def main() -> None:
         payload = validate_contracts()
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if payload.get("decision") == "blocked":
+    if payload.get("decision") == "blocked" or payload.get("activation_status") == "blocked":
         raise SystemExit(2)
 
 

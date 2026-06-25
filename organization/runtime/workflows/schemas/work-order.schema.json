@@ -76,7 +76,8 @@
     "context_scope": {
       "type": "object",
       "required": [
-        "mode"
+        "mode",
+        "raw_transcript_sharing"
       ],
       "properties": {
         "mode": {
@@ -86,9 +87,12 @@
             "selected_snapshot",
             "diff_summary"
           ]
+        },
+        "raw_transcript_sharing": {
+          "const": "forbidden"
         }
       },
-      "additionalProperties": true
+      "additionalProperties": false
     },
     "permission_mode": {
       "type": "string",

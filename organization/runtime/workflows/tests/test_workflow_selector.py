@@ -15,6 +15,7 @@ FACADE = ROOT / "scripts/configure_organization.py"
 TEMPLATE = ROOT / "organization/runtime/workflows/templates/single_step_external_review.yaml"
 WORK_ORDER_SCHEMA = ROOT / "organization/runtime/workflows/schemas/work-order.schema.json"
 WORKFLOW_RUN_SCHEMA = ROOT / "organization/runtime/workflows/schemas/workflow-run.schema.json"
+ACTIVATION_SCHEMA = ROOT / "organization/runtime/workflows/schemas/activation-envelope.schema.json"
 
 
 def load_selector_module():
@@ -57,6 +58,16 @@ def run_facade(*args: str) -> dict:
         check=True,
     )
     return json.loads(completed.stdout)
+
+
+def run_facade_raw(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(FACADE), "workflow-selector", *args],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def test_contract_validation() -> None:
@@ -120,6 +131,21 @@ def test_activation_prompt_is_only_proposed() -> None:
     )
 
 
+def test_activation_schema_approved_envelope_constraints() -> None:
+    schema = json.loads(ACTIVATION_SCHEMA.read_text(encoding="utf-8"))
+    approved_condition = json.dumps(schema["allOf"], sort_keys=True)
+    for fragment in (
+        '"status": {"const": "selected"}',
+        '"workflow_id"',
+        '"initial_step"',
+        '"next_action": {"const": "create_workflow_run"}',
+        '"minItems": 1',
+    ):
+        assert fragment in approved_condition, f"missing approved activation constraint {fragment}"
+    assert '"activation_source"' in approved_condition
+    assert '"enum": ["orchestrator-start", "human_ui", "manual_cli"]' in approved_condition
+
+
 def test_activation_requires_bounded_refs_for_approval() -> None:
     missing_refs = selector.activation_envelope(
         external_review_classification(),
@@ -158,6 +184,27 @@ def test_orchestrator_start_can_approve_bounded_external_review() -> None:
         "approved allowed ops",
     )
     assert_equal(approved["activation_scope"]["step_budget"], 1, "approved step budget")
+
+
+def test_human_ui_and_manual_cli_approval_attribution() -> None:
+    human_ui = selector.activation_envelope(
+        external_review_classification(),
+        activation_source="human_ui",
+        task_id="TSK-test",
+        request_id="req-test",
+        refs=["organization/runtime/workflows/README.md"],
+    )
+    assert_equal(human_ui["activation_status"], "approved", "human ui activation")
+    assert_equal(human_ui["approved_by"], "human_ui_action", "human ui approval source")
+
+    manual_cli = selector.activation_envelope(
+        external_review_classification(),
+        activation_source="manual_cli",
+        task_id="TSK-test",
+        request_id="req-test",
+        refs=["organization/runtime/workflows/README.md"],
+    )
+    assert_equal(manual_cli["approved_by"], "manual_operator", "manual cli approval source")
 
 
 def test_selector_blocks_destructive_and_publication_gate() -> None:
@@ -203,6 +250,52 @@ def test_p0_waits_for_planned_code_change_template() -> None:
         "planned code change workflow",
     )
 
+    security_sensitive_code = selector.select_workflow(
+        {
+            "classification_version": "1",
+            "task_kind": "code_change",
+            "permission_required": "edit",
+            "external_provider_required": False,
+            "publication_required": False,
+            "security_sensitive": True,
+            "destructive_operation": False,
+            "context_scope": "diff_summary",
+            "expected_artifacts": ["code_diff", "validation_result", "vault_update"],
+        }
+    )
+    assert_equal(
+        security_sensitive_code["workflow_selection"]["candidates"],
+        ["security_sensitive_change"],
+        "security-sensitive code change workflow",
+    )
+
+    security_sensitive_policy = selector.select_workflow(
+        {
+            "classification_version": "1",
+            "task_kind": "policy_change",
+            "permission_required": "readonly",
+            "external_provider_required": False,
+            "publication_required": False,
+            "security_sensitive": True,
+            "destructive_operation": False,
+            "context_scope": "refs_only",
+            "expected_artifacts": ["typed_report"],
+        }
+    )
+    assert_equal(
+        security_sensitive_policy["workflow_selection"]["candidates"],
+        ["security_sensitive_change"],
+        "security-sensitive policy workflow",
+    )
+
+
+def test_malformed_expected_artifacts_blocks_without_crashing() -> None:
+    malformed = selector.select_workflow(
+        external_review_classification(expected_artifacts=[1])
+    )
+    assert_equal(malformed["decision"], "blocked", "malformed artifacts decision")
+    assert "expected_artifacts entries must be strings" in malformed["classification_errors"]
+
 
 def test_work_order_schema_constrains_single_step_external_review() -> None:
     work_order_schema = json.loads(WORK_ORDER_SCHEMA.read_text(encoding="utf-8"))
@@ -213,6 +306,18 @@ def test_work_order_schema_constrains_single_step_external_review() -> None:
         allowed_ops["properties"]["push"]["type"],
         "boolean",
         "work order push gate type",
+    )
+    context_scope = work_order_schema["properties"]["context_scope"]
+    assert "raw_transcript_sharing" in context_scope["required"]
+    assert_equal(
+        context_scope["properties"]["raw_transcript_sharing"]["const"],
+        "forbidden",
+        "work order raw transcript sharing",
+    )
+    assert_equal(
+        context_scope["additionalProperties"],
+        False,
+        "work order context extra fields",
     )
     conditional = json.dumps(work_order_schema["allOf"], sort_keys=True)
     for fragment in (
@@ -248,6 +353,9 @@ def test_external_review_report_schema_rejects_embedded_raw_fields() -> None:
     )
     assert "transcript_path" in provider_evidence["required"]
     assert "evidence_refs" in finding_items["required"]
+    conditional = json.dumps(report_schema["allOf"], sort_keys=True)
+    assert '"result": {"const": "findings"}' in conditional
+    assert '"minItems": 1' in conditional
 
 
 def test_workflow_run_schema_encodes_p0_scheduler() -> None:
@@ -256,11 +364,40 @@ def test_workflow_run_schema_encodes_p0_scheduler() -> None:
     assert_equal(scheduling["scheduler_mode"]["const"], "invocation-drain", "scheduler mode")
     assert_equal(scheduling["lock_policy"]["const"], "global_advisory_lock", "lock policy")
     assert_equal(scheduling["concurrency"]["const"], 1, "concurrency")
+    activation = json.dumps(
+        workflow_run_schema["properties"]["activation"],
+        sort_keys=True,
+    )
+    for fragment in (
+        '"activation_status": {"const": "approved"}',
+        '"status": {"const": "selected"}',
+        '"next_action": {"const": "create_workflow_run"}',
+    ):
+        assert fragment in activation, f"missing run activation constraint {fragment}"
+    assert '"activation_source"' in activation
+    assert '"enum": ["orchestrator-start", "human_ui", "manual_cli"]' in activation
 
 
 def test_configure_organization_facade() -> None:
     facade_result = run_facade("validate-contracts")
     assert_equal(facade_result["decision"], "ok", "facade validation")
+
+
+def test_blocked_activation_cli_exits_nonzero() -> None:
+    completed = run_facade_raw(
+        "activation-envelope",
+        "--activation-source",
+        "orchestrator-start",
+        "--task-id",
+        "TSK-test",
+        "--request-id",
+        "req-test",
+        "--classification",
+        json.dumps(external_review_classification()),
+    )
+    assert_equal(completed.returncode, 2, "blocked activation exit code")
+    payload = json.loads(completed.stdout)
+    assert_equal(payload["activation_status"], "blocked", "blocked activation payload")
 
 
 def main() -> None:
@@ -269,14 +406,18 @@ def main() -> None:
         test_single_step_external_review_template,
         test_selector_external_review,
         test_activation_prompt_is_only_proposed,
+        test_activation_schema_approved_envelope_constraints,
         test_activation_requires_bounded_refs_for_approval,
         test_orchestrator_start_can_approve_bounded_external_review,
+        test_human_ui_and_manual_cli_approval_attribution,
         test_selector_blocks_destructive_and_publication_gate,
         test_p0_waits_for_planned_code_change_template,
+        test_malformed_expected_artifacts_blocks_without_crashing,
         test_work_order_schema_constrains_single_step_external_review,
         test_external_review_report_schema_rejects_embedded_raw_fields,
         test_workflow_run_schema_encodes_p0_scheduler,
         test_configure_organization_facade,
+        test_blocked_activation_cli_exits_nonzero,
     ]
     for test in tests:
         test()

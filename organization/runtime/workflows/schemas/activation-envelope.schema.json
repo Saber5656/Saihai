@@ -259,9 +259,36 @@
       "then": {
         "required": [
           "approved_by",
-          "approved_at"
+          "approved_at",
+          "goal_state_transition"
         ],
         "properties": {
+          "activation_source": {
+            "enum": [
+              "orchestrator-start",
+              "human_ui",
+              "manual_cli"
+            ]
+          },
+          "workflow_selection": {
+            "required": [
+              "status",
+              "workflow_id",
+              "initial_step"
+            ],
+            "properties": {
+              "status": {
+                "const": "selected"
+              }
+            }
+          },
+          "goal_state_transition": {
+            "properties": {
+              "to": {
+                "const": "approved"
+              }
+            }
+          },
           "context_scope": {
             "properties": {
               "refs": {
@@ -291,6 +318,9 @@
                 }
               }
             }
+          },
+          "next_action": {
+            "const": "create_workflow_run"
           }
         }
       }

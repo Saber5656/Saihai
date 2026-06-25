@@ -80,7 +80,153 @@
       }
     },
     "activation": {
-      "type": "object"
+      "type": "object",
+      "required": [
+        "activation_version",
+        "activation_source",
+        "activation_status",
+        "approved_by",
+        "approved_at",
+        "workflow_selection",
+        "context_scope",
+        "activation_scope",
+        "next_action"
+      ],
+      "properties": {
+        "activation_version": {
+          "const": "1"
+        },
+        "activation_source": {
+          "type": "string",
+          "enum": [
+            "orchestrator-start",
+            "human_ui",
+            "manual_cli"
+          ]
+        },
+        "activation_status": {
+          "const": "approved"
+        },
+        "approved_by": {
+          "type": "string",
+          "enum": [
+            "human_explicit_skill_invocation",
+            "human_ui_action",
+            "manual_operator"
+          ]
+        },
+        "approved_at": {
+          "type": "string"
+        },
+        "workflow_selection": {
+          "type": "object",
+          "required": [
+            "status",
+            "workflow_id",
+            "initial_step"
+          ],
+          "properties": {
+            "status": {
+              "const": "selected"
+            },
+            "workflow_id": {
+              "type": "string"
+            },
+            "initial_step": {
+              "type": "string"
+            },
+            "optional_expansions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "context_scope": {
+          "type": "object",
+          "required": [
+            "mode",
+            "refs",
+            "raw_transcript_sharing"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "bounded_refs",
+                "refs_only",
+                "selected_snapshot",
+                "diff_summary"
+              ]
+            },
+            "refs": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            "raw_transcript_sharing": {
+              "const": "forbidden"
+            }
+          },
+          "additionalProperties": false
+        },
+        "activation_scope": {
+          "type": "object",
+          "required": [
+            "allowed_paths",
+            "allowed_ops",
+            "step_budget",
+            "expires_at"
+          ],
+          "properties": {
+            "allowed_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowed_ops": {
+              "type": "object",
+              "required": [
+                "edit",
+                "commit",
+                "push",
+                "network"
+              ],
+              "properties": {
+                "edit": {
+                  "const": false
+                },
+                "commit": {
+                  "const": false
+                },
+                "push": {
+                  "const": false
+                },
+                "network": {
+                  "const": false
+                }
+              },
+              "additionalProperties": false
+            },
+            "step_budget": {
+              "const": 1
+            },
+            "expires_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "next_action": {
+          "const": "create_workflow_run"
+        }
+      },
+      "additionalProperties": false
     },
     "terminal": {
       "type": "object",
