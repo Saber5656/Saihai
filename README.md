@@ -40,6 +40,7 @@ python3 server.py --port 8799
 | `organization/policies/*.md` | 組織運用 Policy のミラー正本 |
 | `organization/roles/<role>/skill.md` | Team Role 定義のミラー正本（既存 skill は削除せず互換保持） |
 | `organization/runtime/*` | role registry / model registry / team config の runtime 参照 |
+| `organization/runtime/workflows/` | TAKT P0 workflow contract、schema、deterministic selector、initial template |
 
 ## 稼働判定（status）
 
@@ -78,11 +79,21 @@ advisory として扱い、runtime の進行や role dispatch を Hook から開
 python3 scripts/configure_organization.py status
 python3 scripts/configure_organization.py classify --prompt "最近の天気予報を調べる"
 AGENT_ORG_MAINTENANCE=1 python3 scripts/configure_organization.py classify --prompt "Hookを直す"
+python3 scripts/configure_organization.py workflow-selector validate-contracts
 ```
 
 全ての作業は task record を持つ。`fast` は task 化を省略する mode ではなく、
 ごく簡単な作業を main agent が軽量 task record と Vault 記録で処理する mode。
 `strict` は role dispatch / review / final evidence を要求する通常 mode。
+
+## TAKT P0 Workflow Contracts
+
+`organization/runtime/workflows/` は TAKT-based agent orchestrator の P0 contract
+正本である。通常 prompt は draft / proposed までで orchestration を開始せず、
+`/orchestrator-start` などの明示 activation だけが bounded scope 内で approved
+envelope を作れる。P0 は schema、`single_step_external_review` template、
+deterministic selector、unit/static tests までを提供し、provider runner、tmux
+worker、daemon、Viewer UI は実装しない。
 
 ## ライセンス
 

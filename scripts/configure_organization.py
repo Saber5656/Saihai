@@ -20,6 +20,7 @@ ITB_RUNTIME_ROOT = ORG_ROOT / "runtime" / "infra-team-bootstrap"
 ITB_BUILDER = ITB_RUNTIME_ROOT / "scripts" / "itb_bootstrap_builder.py"
 ITB_HOOKS = ITB_RUNTIME_ROOT / "hooks"
 ITD_MONITOR = ORG_ROOT / "runtime" / "infra-task-dispatcher" / "scripts" / "itd_monitor.py"
+WORKFLOW_SELECTOR = ORG_ROOT / "runtime" / "workflows" / "scripts" / "takt_workflow_selector.py"
 ITB_FACADE_COMMANDS = {
     "agent-call",
     "agent-switch",
@@ -133,6 +134,7 @@ def runtime_paths() -> dict[str, Any]:
         "itb_builder": ITB_BUILDER,
         "itb_hooks": ITB_HOOKS,
         "itd_monitor": ITD_MONITOR,
+        "workflow_selector": WORKFLOW_SELECTOR,
         "role_root": ORG_ROOT / "roles",
         "runtime_registry": ITB_RUNTIME_ROOT / "config" / "role-agent-registry.yaml",
         "runtime_registry_mirror": ORG_ROOT / "runtime" / "role-agent-registry.yaml",
@@ -253,6 +255,8 @@ def main() -> None:
         raise SystemExit(run_runtime_script(ITB_BUILDER, sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "itd-monitor":
         raise SystemExit(run_runtime_script(ITD_MONITOR, sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "workflow-selector":
+        raise SystemExit(run_runtime_script(WORKFLOW_SELECTOR, sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] in ITB_FACADE_COMMANDS:
         raise SystemExit(run_runtime_script(ITB_BUILDER, sys.argv[1:]))
 
@@ -268,6 +272,8 @@ def main() -> None:
     itb_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     itd_parser = sub.add_parser("itd-monitor", help="Run the Agent-Teams-Viewer ITD monitor runtime")
     itd_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
+    workflow_parser = sub.add_parser("workflow-selector", help="Run TAKT P0 workflow selector")
+    workflow_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     for command in sorted(ITB_FACADE_COMMANDS):
         facade_parser = sub.add_parser(command, help=f"Run ITB facade command: {command}")
         facade_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
@@ -281,6 +287,8 @@ def main() -> None:
         raise SystemExit(run_runtime_script(ITB_BUILDER, args.runtime_args))
     elif args.command == "itd-monitor":
         raise SystemExit(run_runtime_script(ITD_MONITOR, args.runtime_args))
+    elif args.command == "workflow-selector":
+        raise SystemExit(run_runtime_script(WORKFLOW_SELECTOR, args.runtime_args))
     elif args.command in ITB_FACADE_COMMANDS:
         raise SystemExit(run_runtime_script(ITB_BUILDER, [args.command, *args.runtime_args]))
     else:

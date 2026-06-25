@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/takt/work-order.schema.json",
+  "title": "TAKT Work Order",
+  "description": "Bounded request from a front door to the harness runner for one workflow step.",
+  "type": "object",
+  "required": [
+    "work_order_version",
+    "task_id",
+    "request_id",
+    "run_id",
+    "workflow_id",
+    "step_id",
+    "from_role",
+    "to_role",
+    "assignment_role",
+    "instruction",
+    "expected_output",
+    "context_refs",
+    "context_scope",
+    "permission_mode",
+    "external_provider_allowed",
+    "report_path",
+    "policy_digest",
+    "requester",
+    "activation_scope"
+  ],
+  "properties": {
+    "work_order_version": {
+      "const": "1"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "workflow_id": {
+      "type": "string"
+    },
+    "step_id": {
+      "type": "string"
+    },
+    "from_role": {
+      "type": "string"
+    },
+    "to_role": {
+      "type": "string"
+    },
+    "assignment_role": {
+      "type": "string",
+      "enum": [
+        "implementer",
+        "reviewer",
+        "qa",
+        "approver",
+        "observer"
+      ]
+    },
+    "instruction": {
+      "type": "string"
+    },
+    "expected_output": {
+      "type": "string"
+    },
+    "context_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object"
+      }
+    },
+    "context_scope": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "refs_only",
+            "selected_snapshot",
+            "diff_summary"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "permission_mode": {
+      "type": "string",
+      "enum": [
+        "readonly",
+        "edit",
+        "full"
+      ]
+    },
+    "external_provider_allowed": {
+      "type": "boolean"
+    },
+    "max_budget_usd": {
+      "type": "string"
+    },
+    "report_path": {
+      "type": "string"
+    },
+    "policy_digest": {
+      "type": "string"
+    },
+    "requester": {
+      "type": "object",
+      "required": [
+        "frontdoor"
+      ],
+      "properties": {
+        "frontdoor": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "manual"
+          ]
+        },
+        "chat_session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "activation_scope": {
+      "type": "object",
+      "required": [
+        "allowed_paths",
+        "allowed_ops",
+        "step_budget",
+        "expires_at"
+      ],
+      "properties": {
+        "allowed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_ops": {
+          "type": "object",
+          "required": [
+            "edit",
+            "commit",
+            "push",
+            "network"
+          ],
+          "properties": {
+            "edit": {
+              "type": "boolean"
+            },
+            "commit": {
+              "type": "boolean"
+            },
+            "push": {
+              "type": "boolean"
+            },
+            "network": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "step_budget": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "workflow_id": {
+            "const": "single_step_external_review"
+          }
+        },
+        "required": [
+          "workflow_id"
+        ]
+      },
+      "then": {
+        "properties": {
+          "step_id": {
+            "const": "review"
+          },
+          "assignment_role": {
+            "const": "reviewer"
+          },
+          "expected_output": {
+            "const": "external_review_report"
+          },
+          "permission_mode": {
+            "const": "readonly"
+          },
+          "external_provider_allowed": {
+            "const": true
+          },
+          "activation_scope": {
+            "properties": {
+              "step_budget": {
+                "const": 1
+              },
+              "allowed_ops": {
+                "properties": {
+                  "edit": {
+                    "const": false
+                  },
+                  "commit": {
+                    "const": false
+                  },
+                  "push": {
+                    "const": false
+                  },
+                  "network": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
