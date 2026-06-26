@@ -1,0 +1,107 @@
+{
+  "workflow_registry_version": "1",
+  "authority": {
+    "workflow_selection": "deterministic_selector",
+    "llm_role": "typed_classification_proposal_only",
+    "ordinary_prompt_activation": "draft_or_proposed_only",
+    "explicit_activation_sources": [
+      "orchestrator-start",
+      "human_ui",
+      "manual_cli"
+    ]
+  },
+  "templates": [
+    {
+      "workflow_id": "single_step_external_review",
+      "path": "organization/runtime/workflows/templates/single_step_external_review.yaml",
+      "status": "active",
+      "initial_step": "review",
+      "max_steps": 1
+    }
+  ],
+  "planned_templates": [
+    {
+      "workflow_id": "standard_code_change",
+      "status": "planned_after_p0"
+    },
+    {
+      "workflow_id": "research_only",
+      "status": "planned_after_p0"
+    },
+    {
+      "workflow_id": "publication_required",
+      "status": "planned_after_p0"
+    },
+    {
+      "workflow_id": "policy_or_permission_change",
+      "status": "planned_after_p0"
+    },
+    {
+      "workflow_id": "security_sensitive_change",
+      "status": "planned_after_p0"
+    }
+  ],
+  "selector_rules": [
+    {
+      "rule_id": "external_review_readonly",
+      "when": {
+        "task_kind": "external_review",
+        "permission_required": "readonly"
+      },
+      "workflow_id": "single_step_external_review",
+      "status": "selected"
+    },
+    {
+      "rule_id": "code_change_without_publication",
+      "when": {
+        "task_kind": "code_change",
+        "publication_required": false
+      },
+      "workflow_id": "standard_code_change",
+      "status": "waiting_human",
+      "reason": "planned_template_not_installed_in_p0"
+    },
+    {
+      "rule_id": "code_change_with_publication",
+      "when": {
+        "task_kind": "code_change",
+        "publication_required": true
+      },
+      "workflow_id": "publication_required",
+      "status": "waiting_human",
+      "reason": "separate_publication_gate_required"
+    },
+    {
+      "rule_id": "research_only",
+      "when": {
+        "task_kind": "research"
+      },
+      "workflow_id": "research_only",
+      "status": "waiting_human",
+      "reason": "planned_template_not_installed_in_p0"
+    }
+  ],
+  "p0_scheduler_policy": {
+    "mode": "invocation-drain",
+    "state_persistence": "durable_state",
+    "lock_policy": "global_advisory_lock",
+    "concurrency": 1
+  },
+  "context_sharing_policy": {
+    "shared_run_state": "typed_durable_state",
+    "step_local_snapshot": "immutable_step_attempt_snapshot",
+    "provider_transcript": "confined_evidence_path_only",
+    "raw_transcript_agent_sharing": "forbidden"
+  },
+  "result_authority": {
+    "canonical": [
+      "typed_report_file",
+      "normalized_provider_evidence_file"
+    ],
+    "signals_only": [
+      "stdout",
+      "tmux_pane_output",
+      "provider_transcript"
+    ]
+  }
+}

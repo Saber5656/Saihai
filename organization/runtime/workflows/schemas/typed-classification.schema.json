@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/workflows/typed-classification.schema.json",
+  "title": "Typed Classification Candidate",
+  "description": "LLM-assisted classification proposal. The deterministic selector is the authority for workflow_id.",
+  "type": "object",
+  "required": [
+    "classification_version",
+    "task_kind",
+    "permission_required",
+    "external_provider_required",
+    "publication_required",
+    "security_sensitive",
+    "destructive_operation",
+    "context_scope",
+    "expected_artifacts"
+  ],
+  "properties": {
+    "classification_version": {
+      "const": "1"
+    },
+    "task_kind": {
+      "type": "string",
+      "enum": [
+        "external_review",
+        "code_change",
+        "research",
+        "publication",
+        "policy_change"
+      ]
+    },
+    "permission_required": {
+      "type": "string",
+      "enum": [
+        "readonly",
+        "edit",
+        "full"
+      ]
+    },
+    "external_provider_required": {
+      "type": "boolean"
+    },
+    "publication_required": {
+      "type": "boolean"
+    },
+    "security_sensitive": {
+      "type": "boolean"
+    },
+    "destructive_operation": {
+      "type": "boolean"
+    },
+    "context_scope": {
+      "type": "string",
+      "enum": [
+        "refs_only",
+        "selected_snapshot",
+        "diff_summary"
+      ]
+    },
+    "expected_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "typed_report",
+          "code_diff",
+          "validation_result",
+          "vault_update",
+          "workflow_run",
+          "work_order"
+        ]
+      }
+    },
+    "classification_source": {
+      "type": "string",
+      "enum": [
+        "frontdoor_llm_proposal",
+        "human_supplied",
+        "deterministic_fixture"
+      ]
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

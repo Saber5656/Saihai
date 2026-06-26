@@ -87,8 +87,10 @@ def main() -> None:
     assert paths["itb_builder"]["exists"] is True
     assert paths["itb_hooks"]["exists"] is True
     assert paths["itd_monitor"]["exists"] is True
+    assert paths["workflow_selector"]["exists"] is True
     assert "organization/runtime/infra-team-bootstrap/scripts/itb_bootstrap_builder.py" in paths["itb_builder"]["path"]
-    print(json.dumps({"result": "pass", "cases": 6}, ensure_ascii=False))
+    assert "organization/runtime/workflows/scripts/workflow_selector.py" in paths["workflow_selector"]["path"]
+    print(json.dumps({"result": "pass", "cases": 7}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
