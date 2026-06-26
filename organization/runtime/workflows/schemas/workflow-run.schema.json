@@ -258,6 +258,7 @@
       "required": [
         "scheduler_mode",
         "concurrency_group",
+        "state_persistence",
         "lock_policy",
         "concurrency",
         "resume_policy"
@@ -268,6 +269,9 @@
         },
         "concurrency_group": {
           "const": "global"
+        },
+        "state_persistence": {
+          "const": "durable_state"
         },
         "lock_policy": {
           "const": "global_advisory_lock"

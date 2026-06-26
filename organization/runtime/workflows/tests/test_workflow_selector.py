@@ -363,6 +363,7 @@ def test_workflow_run_schema_encodes_p0_scheduler() -> None:
     scheduling = workflow_run_schema["properties"]["scheduling"]["properties"]
     assert_equal(scheduling["scheduler_mode"]["const"], "invocation-drain", "scheduler mode")
     assert_equal(scheduling["lock_policy"]["const"], "global_advisory_lock", "lock policy")
+    assert_equal(scheduling["state_persistence"]["const"], "durable_state", "scheduler state persistence")
     assert_equal(scheduling["concurrency"]["const"], 1, "concurrency")
     activation = json.dumps(
         workflow_run_schema["properties"]["activation"],

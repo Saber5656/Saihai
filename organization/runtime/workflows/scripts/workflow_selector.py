@@ -570,6 +570,9 @@ def validate_contracts() -> dict[str, Any]:
             errors.append(f"workflow run activation missing approved-envelope constraint: {required_fragment}")
     if '"activation_source"' not in run_activation_condition or '"enum": ["orchestrator-start", "human_ui", "manual_cli"]' not in run_activation_condition:
         errors.append("workflow run activation missing approved-envelope source constraint")
+    workflow_run_scheduling = (workflow_run_schema.get("properties") or {}).get("scheduling", {})
+    if workflow_run_scheduling.get("properties", {}).get("state_persistence", {}).get("const") != "durable_state":
+        errors.append("workflow run scheduling must require durable_state persistence")
 
     return {
         "schema_version": 1,
