@@ -17,7 +17,10 @@ any provider.
 | `schemas/provider-adapter-capability.schema.json` | Adapter capability descriptor, including future `tmux_interactive` transport |
 | `schemas/external-review-report.schema.json` | Authoritative typed report for the P0 workflow |
 | `scripts/workflow_selector.py` | Deterministic selector and activation-envelope helper |
+| `scripts/frontdoor_orchestrator.py` | Host-owned frontdoor and invocation-drain P0 harness |
+| `scripts/frontdoor_server.py` | Local HTTP wrapper for Agent UI integration |
 | `tests/test_workflow_selector.py` | Unit/static contract tests |
+| `frontdoor-orchestrator-protocol.md` | Implementation boundary for Agent UI, host frontdoor, harness, and Claude adapter control |
 
 The `.yaml` files in this directory are JSON-compatible by design, matching the
 existing runtime config convention in `organization/runtime/infra-team-bootstrap`.
@@ -71,6 +74,57 @@ python3 scripts/configure_organization.py workflow-selector activation-envelope 
   --ref organization/runtime/workflows/README.md \
   --classification '{"classification_version":"1","task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
 ```
+
+## Frontdoor Harness CLI
+
+The host-owned frontdoor/harness is available through the organization facade:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state propose \
+  --task-id TSK-example \
+  --request-id req-example \
+  --prompt "Run a readonly external review." \
+  --ref organization/runtime/workflows/README.md \
+  --classification '{"classification_version":"1","task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state approve \
+  --request-id req-example \
+  --human-action-id ui-click-example
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state create-run \
+  --request-id req-example
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state drain \
+  --run-id <run_id>
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state prepare-claude-adapter \
+  --run-id <run_id>
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state validate-report \
+  --run-id <run_id>
+```
+
+## Frontdoor HTTP API
+
+The same host-owned operations are exposed as a local JSON API for an Agent UI:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor-server \
+  --state-root /tmp/frontdoor-state \
+  --host 127.0.0.1 \
+  --port 8766
+```
+
+| Endpoint | Harness Operation |
+|---|---|
+| `GET /` | Minimal Agent UI shell for proposal, approval, run, drain, adapter, validation, and state reads |
+| `GET /healthz` | Health check |
+| `POST /frontdoor/propose` | `workflow-frontdoor propose` |
+| `POST /frontdoor/approve` | `workflow-frontdoor approve` |
+| `POST /orchestrator/runs` | `workflow-frontdoor create-run` |
+| `POST /orchestrator/runs/{run_id}/drain` | `workflow-frontdoor drain` |
+| `POST /provider/claude/prepare` | `workflow-frontdoor prepare-claude-adapter` |
+| `POST /provider/reports/validate` | `workflow-frontdoor validate-report` |
 
 ## P0 Non-Scope
 
