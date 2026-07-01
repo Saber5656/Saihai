@@ -14,13 +14,14 @@ import frontdoor_orchestrator as frontdoor
 RUN_DRAIN_RE = re.compile(r"^/orchestrator/runs/([^/]+)/drain$")
 RUN_READ_RE = re.compile(r"^/orchestrator/runs/([^/]+)$")
 REQUEST_READ_RE = re.compile(r"^/frontdoor/requests/([^/]+)$")
+BRIDGE_PROJECTION_RE = re.compile(r"^/main-agent/projections/([^/]+)$")
 
 INDEX_HTML = """<!doctype html>
-<html lang="en" data-frontdoor-ui="p0">
+<html lang="en" data-frontdoor-ui="output-confirmation">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>P0 Frontdoor</title>
+  <title>Orchestrator Output</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -182,12 +183,12 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
   <header>
-    <h1>P0 Frontdoor</h1>
+    <h1>Orchestrator Output</h1>
   </header>
   <main>
     <section>
       <div class="section-head">
-        <h2>Request</h2>
+        <h2>Main Agent Bridge</h2>
         <span id="status" class="status">idle</span>
       </div>
       <form id="frontdoor-form">
@@ -200,11 +201,11 @@ INDEX_HTML = """<!doctype html>
           </label>
         </div>
         <div class="grid-two">
-          <label>Run ID
-            <input id="run-id" value="run-ui">
+          <label>Request Kind
+            <input id="request-kind" value="external_review_request">
           </label>
-          <label>Report Path
-            <input id="report-path" placeholder="optional">
+          <label>Idempotency Key
+            <input id="idempotency-key" value="ui-key-1">
           </label>
         </div>
         <label>Prompt
@@ -216,19 +217,11 @@ INDEX_HTML = """<!doctype html>
         <label>Allowed Paths
           <textarea id="allowed-paths">organization/runtime/workflows</textarea>
         </label>
-        <label>Typed Classification
-          <textarea id="classification">{"classification_version":"1","task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}</textarea>
-        </label>
       </form>
       <div class="actions">
-        <button class="primary" data-action="propose">Propose</button>
-        <button class="primary" data-action="approve">Approve</button>
-        <button class="secondary" data-action="create">Create Run</button>
-        <button data-action="drain">Drain</button>
-        <button data-action="prepare">Prepare</button>
-        <button data-action="validate">Validate</button>
-        <button data-action="read-request">Read Request</button>
-        <button data-action="read-run">Read Run</button>
+        <button class="primary" data-action="bridge-submit">Submit</button>
+        <button class="secondary" data-action="bridge-projection">Projection</button>
+        <button data-action="bridge-ack">Ack</button>
         <button data-action="health">Health</button>
       </div>
     </section>
@@ -245,12 +238,11 @@ INDEX_HTML = """<!doctype html>
     const fields = {
       taskId: byId("task-id"),
       requestId: byId("request-id"),
-      runId: byId("run-id"),
-      reportPath: byId("report-path"),
+      requestKind: byId("request-kind"),
+      idempotencyKey: byId("idempotency-key"),
       prompt: byId("prompt"),
       refs: byId("refs"),
       allowedPaths: byId("allowed-paths"),
-      classification: byId("classification"),
     };
     const output = byId("output");
     const statusEl = byId("status");
@@ -258,10 +250,6 @@ INDEX_HTML = """<!doctype html>
 
     function lines(value) {
       return value.split(/\\n|,/).map((item) => item.trim()).filter(Boolean);
-    }
-
-    function classification() {
-      return JSON.parse(fields.classification.value);
     }
 
     function setBusy(isBusy) {
@@ -295,32 +283,30 @@ INDEX_HTML = """<!doctype html>
 
     const actions = {
       health: () => call("GET", "/healthz"),
-      propose: () => call("POST", "/frontdoor/propose", {
+      "bridge-submit": () => call("POST", "/main-agent/submit-request", {
         task_id: fields.taskId.value,
         request_id: fields.requestId.value,
+        request_kind: fields.requestKind.value,
         prompt: fields.prompt.value,
         refs: lines(fields.refs.value),
         allowed_paths: lines(fields.allowedPaths.value),
-        classification: classification(),
         frontdoor: "codex",
         chat_session_id: "frontdoor-ui",
+        idempotency_key: fields.idempotencyKey.value,
       }),
-      approve: () => call("POST", "/frontdoor/approve", {
-        request_id: fields.requestId.value,
-        human_action_id: `ui-${Date.now()}`,
-      }),
-      create: () => call("POST", "/orchestrator/runs", {
-        request_id: fields.requestId.value,
-        run_id: fields.runId.value,
-      }),
-      drain: () => call("POST", `/orchestrator/runs/${encodeURIComponent(fields.runId.value)}/drain`, {}),
-      prepare: () => call("POST", "/provider/claude/prepare", { run_id: fields.runId.value }),
-      validate: () => call("POST", "/provider/reports/validate", {
-        run_id: fields.runId.value,
-        report_path: fields.reportPath.value,
-      }),
-      "read-request": () => call("GET", `/frontdoor/requests/${encodeURIComponent(fields.requestId.value)}`),
-      "read-run": () => call("GET", `/orchestrator/runs/${encodeURIComponent(fields.runId.value)}`),
+      "bridge-projection": () => call("GET", `/main-agent/projections/${encodeURIComponent(fields.requestId.value)}`),
+      "bridge-ack": () => {
+        let digest = "sha256:unknown";
+        try {
+          digest = JSON.parse(output.textContent).projection_digest || digest;
+        } catch (_error) {}
+        return call("POST", "/main-agent/ack-output", {
+          request_id: fields.requestId.value,
+          projection_digest: digest,
+          frontdoor: "codex",
+          chat_session_id: "frontdoor-ui",
+        });
+      },
     };
 
     document.querySelector(".actions").addEventListener("click", (event) => {
@@ -380,6 +366,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _operator_principal(self, body: dict, *, default_id: str, default_authn: str) -> dict:
+        principal_type = body.get("principal_type")
+        if not isinstance(principal_type, str) or not principal_type:
+            raise frontdoor.FrontdoorError("operator principal_type is required")
+        return frontdoor.make_principal(
+            principal_type,
+            str(body.get("principal_id") or default_id),
+            authn_method=str(body.get("authn_method") or default_authn),
+        )
+
     def do_GET(self) -> None:
         try:
             if self.path in {"/", "/index.html"}:
@@ -388,15 +384,37 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/healthz":
                 self._send_json({"schema_version": 1, "decision": "ok"})
                 return
+            bridge_projection_match = BRIDGE_PROJECTION_RE.match(self.path)
+            if bridge_projection_match:
+                payload = frontdoor.bridge_read_projection(
+                    state_root=self.state_root,
+                    request_id=bridge_projection_match.group(1),
+                    frontdoor="codex",
+                    chat_session_id="frontdoor-ui",
+                )
+                self._send_json(payload)
+                return
             request_match = REQUEST_READ_RE.match(self.path)
             if request_match:
-                record = frontdoor.read_json(frontdoor.request_path(self.state_root, request_match.group(1)))
-                self._send_json({"schema_version": 1, "decision": "ok", "request": record})
+                self._send_json(
+                    {
+                        "schema_version": 1,
+                        "decision": "blocked",
+                        "reason": "raw request read requires operator principal; use /main-agent/projections/{request_id}",
+                    },
+                    403,
+                )
                 return
             run_match = RUN_READ_RE.match(self.path)
             if run_match:
-                run = frontdoor.read_json(frontdoor.run_path(self.state_root, run_match.group(1)))
-                self._send_json({"schema_version": 1, "decision": "ok", "workflow_run": run})
+                self._send_json(
+                    {
+                        "schema_version": 1,
+                        "decision": "blocked",
+                        "reason": "raw run read requires operator principal",
+                    },
+                    403,
+                )
                 return
             self._send_json({"schema_version": 1, "decision": "blocked", "reason": "not_found"}, 404)
         except frontdoor.FrontdoorError as exc:
@@ -405,6 +423,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             body = self._read_json()
+            if self.path == "/main-agent/submit-request":
+                payload = frontdoor.bridge_submit_request(
+                    state_root=self.state_root,
+                    payload=body,
+                )
+                self._send_json(payload)
+                return
+            if self.path == "/main-agent/ack-output":
+                payload = frontdoor.bridge_ack_output(
+                    state_root=self.state_root,
+                    request_id=str(body["request_id"]),
+                    projection_digest=str(body["projection_digest"]),
+                    frontdoor=str(body.get("frontdoor") or "codex"),
+                    chat_session_id=str(body.get("chat_session_id") or "frontdoor-ui"),
+                )
+                self._send_json(payload)
+                return
             if self.path == "/frontdoor/propose":
                 payload = frontdoor.proposed_request(
                     state_root=self.state_root,
@@ -417,6 +452,7 @@ class Handler(BaseHTTPRequestHandler):
                     expires_at=str(body.get("expires_at") or "run_terminal"),
                     frontdoor=str(body.get("frontdoor") or "codex"),
                     chat_session_id=str(body.get("chat_session_id") or ""),
+                    principal=self._operator_principal(body, default_id="http-operator", default_authn="local_http"),
                 )
                 self._send_json(payload)
                 return
@@ -425,6 +461,7 @@ class Handler(BaseHTTPRequestHandler):
                     state_root=self.state_root,
                     request_id=str(body["request_id"]),
                     human_action_id=str(body["human_action_id"]),
+                    principal=self._operator_principal(body, default_id="human-ui", default_authn="local_ui"),
                 )
                 status = 200 if payload.get("decision") == "ok" else 400
                 self._send_json(payload, status)
@@ -435,18 +472,24 @@ class Handler(BaseHTTPRequestHandler):
                     request_id=str(body["request_id"]),
                     run_id=str(body.get("run_id") or ""),
                     resume_policy=str(body.get("resume_policy") or "manual"),
+                    principal=self._operator_principal(body, default_id="http-operator", default_authn="local_http"),
                 )
                 self._send_json(payload)
                 return
             drain_match = RUN_DRAIN_RE.match(self.path)
             if drain_match:
-                payload = frontdoor.drain_run(state_root=self.state_root, run_id=drain_match.group(1))
+                payload = frontdoor.drain_run(
+                    state_root=self.state_root,
+                    run_id=drain_match.group(1),
+                    principal=self._operator_principal(body, default_id="http-operator", default_authn="local_http"),
+                )
                 self._send_json(payload)
                 return
             if self.path == "/provider/claude/prepare":
                 payload = frontdoor.prepare_claude_adapter(
                     state_root=self.state_root,
                     run_id=str(body["run_id"]),
+                    principal=self._operator_principal(body, default_id="http-operator", default_authn="local_http"),
                 )
                 status = 200 if payload.get("decision") == "ok" else 400
                 self._send_json(payload, status)
@@ -456,6 +499,7 @@ class Handler(BaseHTTPRequestHandler):
                     state_root=self.state_root,
                     run_id=str(body["run_id"]),
                     report_path_arg=str(body.get("report_path") or ""),
+                    principal=self._operator_principal(body, default_id="local-harness", default_authn="local_http"),
                 )
                 status = 200 if payload.get("decision") == "ok" else 400
                 self._send_json(payload, status)

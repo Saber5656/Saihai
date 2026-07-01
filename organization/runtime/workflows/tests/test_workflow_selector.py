@@ -32,6 +32,9 @@ selector = load_selector_module()
 def external_review_classification(**overrides):
     candidate = {
         "classification_version": "1",
+        "classification_source": "deterministic_fixture",
+        "classification_confidence": 1.0,
+        "classification_evidence": ["test-fixture"],
         "task_kind": "external_review",
         "permission_required": "readonly",
         "external_provider_required": True,
@@ -142,6 +145,7 @@ def test_activation_schema_approved_envelope_constraints() -> None:
         '"minItems": 1',
     ):
         assert fragment in approved_condition, f"missing approved activation constraint {fragment}"
+    assert "classification_provenance" in schema["required"]
     assert '"activation_source"' in approved_condition
     assert '"enum": ["orchestrator-start", "human_ui", "manual_cli"]' in approved_condition
 
@@ -233,6 +237,9 @@ def test_p0_waits_for_planned_code_change_template() -> None:
     code_change = selector.select_workflow(
         {
             "classification_version": "1",
+            "classification_source": "deterministic_fixture",
+            "classification_confidence": 1.0,
+            "classification_evidence": ["test-fixture"],
             "task_kind": "code_change",
             "permission_required": "edit",
             "external_provider_required": False,
@@ -253,6 +260,9 @@ def test_p0_waits_for_planned_code_change_template() -> None:
     security_sensitive_code = selector.select_workflow(
         {
             "classification_version": "1",
+            "classification_source": "deterministic_fixture",
+            "classification_confidence": 1.0,
+            "classification_evidence": ["test-fixture"],
             "task_kind": "code_change",
             "permission_required": "edit",
             "external_provider_required": False,
@@ -272,6 +282,9 @@ def test_p0_waits_for_planned_code_change_template() -> None:
     security_sensitive_policy = selector.select_workflow(
         {
             "classification_version": "1",
+            "classification_source": "deterministic_fixture",
+            "classification_confidence": 1.0,
+            "classification_evidence": ["test-fixture"],
             "task_kind": "policy_change",
             "permission_required": "readonly",
             "external_provider_required": False,
@@ -297,9 +310,57 @@ def test_malformed_expected_artifacts_blocks_without_crashing() -> None:
     assert "expected_artifacts entries must be strings" in malformed["classification_errors"]
 
 
+def test_classifier_provenance_is_required_and_bounded() -> None:
+    missing_source = selector.select_workflow(
+        external_review_classification(classification_source="frontdoor_llm_proposal")
+    )
+    assert_equal(missing_source["decision"], "blocked", "llm proposal source decision")
+    assert any("classification_source unsupported" in item for item in missing_source["classification_errors"])
+
+    low_confidence = selector.select_workflow(
+        external_review_classification(classification_confidence=0.5)
+    )
+    assert_equal(low_confidence["decision"], "blocked", "low confidence decision")
+    assert any("below threshold" in item for item in low_confidence["classification_errors"])
+
+    no_evidence = selector.select_workflow(
+        external_review_classification(classification_evidence=[])
+    )
+    assert_equal(no_evidence["decision"], "blocked", "missing evidence decision")
+    assert "classification_evidence must be a non-empty list" in no_evidence["classification_errors"]
+
+
+def test_permission_monotonicity_fuzz_for_p0_selection() -> None:
+    selected_cases = []
+    for task_kind in ("external_review", "code_change", "research", "publication", "policy_change"):
+        for permission in ("readonly", "edit", "full"):
+            for destructive in (False, True):
+                for publication_required in (False, True):
+                    candidate = external_review_classification(
+                        task_kind=task_kind,
+                        permission_required=permission,
+                        destructive_operation=destructive,
+                        publication_required=publication_required,
+                        external_provider_required=task_kind == "external_review",
+                        expected_artifacts=["typed_report"]
+                        if task_kind in {"external_review", "research", "policy_change"}
+                        else ["code_diff", "validation_result", "vault_update"],
+                        context_scope="refs_only" if permission == "readonly" else "diff_summary",
+                    )
+                    decision = selector.select_workflow(candidate)
+                    if decision["decision"] == "selected":
+                        selected_cases.append((task_kind, permission, destructive, publication_required))
+
+    assert_equal(
+        selected_cases,
+        [("external_review", "readonly", False, False)],
+        "only readonly external review can be selected in P0",
+    )
+
+
 def test_work_order_schema_constrains_single_step_external_review() -> None:
     work_order_schema = json.loads(WORK_ORDER_SCHEMA.read_text(encoding="utf-8"))
-    for field in ["run_id", "workflow_id", "step_id", "activation_scope"]:
+    for field in ["run_id", "workflow_id", "step_id", "activation_scope", "work_order_authority"]:
         assert field in work_order_schema["required"], f"work order requires {field}"
     allowed_ops = work_order_schema["properties"]["activation_scope"]["properties"]["allowed_ops"]
     assert_equal(
@@ -330,6 +391,9 @@ def test_work_order_schema_constrains_single_step_external_review() -> None:
     for op in ("edit", "commit", "push", "network"):
         fragment = f'"{op}": {{"const": false}}'
         assert fragment in conditional, f"missing work order op constraint {fragment}"
+    authority = work_order_schema["properties"]["work_order_authority"]
+    assert "signature" in authority["required"]
+    assert "runner_claim" in authority["required"]
 
 
 def test_external_review_report_schema_rejects_embedded_raw_fields() -> None:
@@ -375,6 +439,7 @@ def test_workflow_run_schema_encodes_p0_scheduler() -> None:
         '"next_action": {"const": "create_workflow_run"}',
     ):
         assert fragment in activation, f"missing run activation constraint {fragment}"
+    assert "classification_provenance" in workflow_run_schema["properties"]["activation"]["required"]
     assert '"activation_source"' in activation
     assert '"enum": ["orchestrator-start", "human_ui", "manual_cli"]' in activation
 
@@ -414,6 +479,8 @@ def main() -> None:
         test_selector_blocks_destructive_and_publication_gate,
         test_p0_waits_for_planned_code_change_template,
         test_malformed_expected_artifacts_blocks_without_crashing,
+        test_classifier_provenance_is_required_and_bounded,
+        test_permission_monotonicity_fuzz_for_p0_selection,
         test_work_order_schema_constrains_single_step_external_review,
         test_external_review_report_schema_rejects_embedded_raw_fields,
         test_workflow_run_schema_encodes_p0_scheduler,

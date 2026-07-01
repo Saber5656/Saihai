@@ -21,6 +21,9 @@ SCHEMA_ROOT = WORKFLOW_ROOT / "schemas"
 
 CLASSIFICATION_REQUIRED_FIELDS = [
     "classification_version",
+    "classification_source",
+    "classification_confidence",
+    "classification_evidence",
     "task_kind",
     "permission_required",
     "external_provider_required",
@@ -44,6 +47,14 @@ CLASSIFICATION_ENUMS = {
         "work_order",
     },
 }
+
+CLASSIFICATION_SOURCES = {
+    "human_supplied",
+    "deterministic_fixture",
+    "bounded_classifier_step",
+}
+
+MIN_CLASSIFICATION_CONFIDENCE = 0.85
 
 BOOLEAN_CLASSIFICATION_FIELDS = {
     "external_provider_required",
@@ -91,6 +102,26 @@ def validate_classification(candidate: dict[str, Any]) -> tuple[bool, list[str]]
 
     if candidate.get("classification_version") != "1":
         errors.append("classification_version must be '1'")
+
+    source = candidate.get("classification_source")
+    if source not in CLASSIFICATION_SOURCES:
+        errors.append(f"classification_source unsupported: {source!r}")
+
+    confidence = candidate.get("classification_confidence")
+    if not isinstance(confidence, int | float) or isinstance(confidence, bool):
+        errors.append("classification_confidence must be number")
+    elif not 0 <= confidence <= 1:
+        errors.append("classification_confidence must be between 0 and 1")
+    elif confidence < MIN_CLASSIFICATION_CONFIDENCE:
+        errors.append(
+            f"classification_confidence below threshold: {confidence!r} < {MIN_CLASSIFICATION_CONFIDENCE}"
+        )
+
+    evidence = candidate.get("classification_evidence")
+    if not isinstance(evidence, list) or not evidence:
+        errors.append("classification_evidence must be a non-empty list")
+    elif any(not isinstance(item, str) or not item for item in evidence):
+        errors.append("classification_evidence entries must be non-empty strings")
 
     for field in BOOLEAN_CLASSIFICATION_FIELDS:
         if not isinstance(candidate.get(field), bool):
@@ -356,6 +387,13 @@ def activation_envelope(
             for key, value in selection.items()
             if key in {"status", "workflow_id", "initial_step", "optional_expansions", "candidates"}
         },
+        "classification_provenance": {
+            "source": classification.get("classification_source"),
+            "confidence": classification.get("classification_confidence"),
+            "evidence_refs": list(classification.get("classification_evidence") or []),
+            "selector_threshold": MIN_CLASSIFICATION_CONFIDENCE,
+            "tie_break": "deterministic_status_order:selected_waiting_human_blocked",
+        },
         "policy": policy,
         "context_scope": {
             "mode": "bounded_refs",
@@ -513,6 +551,8 @@ def validate_contracts() -> dict[str, Any]:
         errors.append("approved activation must require bounded context refs")
     if '"activation_source"' not in approved_condition or '"enum": ["orchestrator-start", "human_ui", "manual_cli"]' not in approved_condition:
         errors.append("approved activation must reject frontdoor_prompt source")
+    if "classification_provenance" not in activation_schema.get("required", []):
+        errors.append("activation envelope must require classification_provenance")
     for required_fragment in (
         '"next_action": {"const": "create_workflow_run"}',
         '"status": {"const": "selected"}',
@@ -570,9 +610,43 @@ def validate_contracts() -> dict[str, Any]:
             errors.append(f"workflow run activation missing approved-envelope constraint: {required_fragment}")
     if '"activation_source"' not in run_activation_condition or '"enum": ["orchestrator-start", "human_ui", "manual_cli"]' not in run_activation_condition:
         errors.append("workflow run activation missing approved-envelope source constraint")
+    if "classification_provenance" not in run_activation.get("required", []):
+        errors.append("workflow run activation must require classification_provenance")
     workflow_run_scheduling = (workflow_run_schema.get("properties") or {}).get("scheduling", {})
     if workflow_run_scheduling.get("properties", {}).get("state_persistence", {}).get("const") != "durable_state":
         errors.append("workflow run scheduling must require durable_state persistence")
+
+    typed_classification_schema = loaded_schemas.get("typed-classification.schema.json", {})
+    typed_required = set(typed_classification_schema.get("required", []))
+    for field in ("classification_source", "classification_confidence", "classification_evidence"):
+        if field not in typed_required:
+            errors.append(f"typed classification must require {field}")
+    classification_source = (
+        typed_classification_schema.get("properties", {}).get("classification_source", {})
+    )
+    if "frontdoor_llm_proposal" in set(classification_source.get("enum", [])):
+        errors.append("frontdoor_llm_proposal must not be authority classification source")
+    confidence = typed_classification_schema.get("properties", {}).get("classification_confidence", {})
+    if confidence.get("minimum") != MIN_CLASSIFICATION_CONFIDENCE:
+        errors.append("typed classification confidence minimum must match selector threshold")
+
+    bridge_schema = loaded_schemas.get("main-agent-bridge-request.schema.json", {})
+    if "classification" not in json.dumps(bridge_schema.get("not", {}), sort_keys=True):
+        errors.append("main-agent bridge request schema must forbid classification")
+    if bridge_schema.get("additionalProperties") is not False:
+        errors.append("main-agent bridge request schema must reject unknown fields")
+    bridge_props = bridge_schema.get("properties", {})
+    for field in ("task_id", "request_id"):
+        if bridge_props.get(field, {}).get("pattern") != r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$":
+            errors.append(f"main-agent bridge request schema must constrain {field} as safe artifact id")
+    if bridge_props.get("refs", {}).get("minItems") != 1:
+        errors.append("main-agent bridge request schema must require non-empty refs")
+
+    projection_schema = loaded_schemas.get("orchestrator-projection.schema.json", {})
+    projection_text = json.dumps(projection_schema, sort_keys=True)
+    for fragment in ('"transition_effect": {"const": "none"}', '"const": "user_prompt"'):
+        if fragment not in projection_text:
+            errors.append(f"orchestrator projection missing redaction/no-op constraint: {fragment}")
 
     return {
         "schema_version": 1,

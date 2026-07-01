@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/workflows/orchestrator-projection.schema.json",
+  "title": "Orchestrator Projection",
+  "description": "Redacted output-confirmation projection safe for a main-agent bridge principal.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "decision",
+    "projection_version",
+    "safe_for_principal",
+    "request_id",
+    "request_status",
+    "next_allowed_bridge_actions",
+    "context",
+    "redacted_fields",
+    "transition_effect"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "decision": {
+      "const": "ok"
+    },
+    "projection_version": {
+      "const": "1"
+    },
+    "safe_for_principal": {
+      "type": "object"
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    },
+    "request_kind": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "request_status": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "orchestrator_decision": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "next_action": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "next_allowed_bridge_actions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "submit_request",
+          "read_projection",
+          "ack_output"
+        ]
+      }
+    },
+    "context": {
+      "type": "object",
+      "required": [
+        "ref_count",
+        "ref_labels",
+        "refs_digest"
+      ],
+      "properties": {
+        "ref_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ref_labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "refs_digest": {
+          "type": "string",
+          "pattern": "^sha256:"
+        }
+      },
+      "additionalProperties": false
+    },
+    "approval": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "redacted_fields": {
+      "type": "array",
+      "contains": {
+        "const": "user_prompt"
+      },
+      "items": {
+        "type": "string"
+      }
+    },
+    "transition_effect": {
+      "const": "none"
+    },
+    "projection_digest": {
+      "type": "string",
+      "pattern": "^sha256:"
+    },
+    "replayed": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}

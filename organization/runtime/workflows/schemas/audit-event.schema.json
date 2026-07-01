@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/workflows/audit-event.schema.json",
+  "title": "Audit Event",
+  "description": "Append-only provenance event for frontdoor, bridge, harness, and gate transitions.",
+  "type": "object",
+  "required": [
+    "audit_event_version",
+    "event_id",
+    "created_at",
+    "event_type",
+    "principal",
+    "subject",
+    "outcome",
+    "details"
+  ],
+  "properties": {
+    "audit_event_version": {
+      "const": "1"
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^evt-"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "event_type": {
+      "type": "string"
+    },
+    "principal": {
+      "type": "object",
+      "required": [
+        "principal_type",
+        "principal_id",
+        "authn_method"
+      ],
+      "properties": {
+        "principal_type": {
+          "type": "string"
+        },
+        "principal_id": {
+          "type": "string"
+        },
+        "authn_method": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "subject": {
+      "type": "object"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "blocked",
+        "replayed"
+      ]
+    },
+    "details": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}

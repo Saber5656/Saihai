@@ -6,6 +6,9 @@
   "type": "object",
   "required": [
     "classification_version",
+    "classification_source",
+    "classification_confidence",
+    "classification_evidence",
     "task_kind",
     "permission_required",
     "external_provider_required",
@@ -75,10 +78,23 @@
     "classification_source": {
       "type": "string",
       "enum": [
-        "frontdoor_llm_proposal",
         "human_supplied",
-        "deterministic_fixture"
+        "deterministic_fixture",
+        "bounded_classifier_step"
       ]
+    },
+    "classification_confidence": {
+      "type": "number",
+      "minimum": 0.85,
+      "maximum": 1
+    },
+    "classification_evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "notes": {
       "type": "string"
