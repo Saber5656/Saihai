@@ -14,6 +14,9 @@ any provider.
 | `schemas/activation-envelope.schema.json` | Gate envelope for draft/proposed/approved/blocked activation state |
 | `schemas/workflow-run.schema.json` | Durable per-task workflow run state contract |
 | `schemas/work-order.schema.json` | Bounded work order contract for one workflow step |
+| `schemas/main-agent-bridge-request.schema.json` | Restricted submit request accepted from the main-agent confirmation surface |
+| `schemas/orchestrator-projection.schema.json` | Redacted output projection safe for main-agent rendering |
+| `schemas/audit-event.schema.json` | Append-only principal/provenance event contract |
 | `schemas/provider-adapter-capability.schema.json` | Adapter capability descriptor, including future `tmux_interactive` transport |
 | `schemas/external-review-report.schema.json` | Authoritative typed report for the P0 workflow |
 | `scripts/workflow_selector.py` | Deterministic selector and activation-envelope helper |
@@ -32,6 +35,10 @@ existing runtime config convention in `organization/runtime/infra-team-bootstrap
 | Prompt does not start orchestration | `frontdoor_prompt` activation can only produce `proposed` state. |
 | Explicit activation only | `orchestrator-start`, `human_ui`, or `manual_cli` can approve a selected bounded workflow. |
 | Workflow selection is deterministic | The selector consumes typed classification; it does not read free-form prompt text. |
+| Classification has provenance | A classification must include source, confidence, and evidence. `frontdoor_llm_proposal` is not an authority source. |
+| Main agent is a confirmation bridge | The main-agent bridge can submit a typed request, read a redacted projection, and ack output only. |
+| Execution requires a signed non-bridge principal | Run creation, drain, adapter preparation, report validation, and workflow-definition changes reject `main_agent_bridge`. |
+| Audit is append-only | Frontdoor, bridge, approval, execution, replay, and rejection decisions write principal-scoped audit events. |
 | Agent output is not authoritative | `typed_report_file` and normalized evidence are canonical. stdout, tmux pane output, and provider transcript are signals only. |
 | Context sharing is typed | Shared run state is durable typed state; step snapshots are immutable; provider transcripts remain confined evidence paths. |
 | Scheduler is bounded | P0 policy is invocation-drain, durable state, global advisory lock, concurrency 1. |
@@ -50,7 +57,7 @@ Select from typed classification:
 
 ```sh
 python3 scripts/configure_organization.py workflow-selector select \
-  --classification '{"classification_version":"1","task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
+  --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
 ```
 
 Create a proposed envelope for an ordinary prompt source:
@@ -61,7 +68,7 @@ python3 scripts/configure_organization.py workflow-selector activation-envelope 
   --task-id TSK-example \
   --request-id req-example \
   --ref organization/runtime/workflows/README.md \
-  --classification '{"classification_version":"1","task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
+  --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
 ```
 
 Create an approved envelope only from explicit invocation:
@@ -72,7 +79,7 @@ python3 scripts/configure_organization.py workflow-selector activation-envelope 
   --task-id TSK-example \
   --request-id req-example \
   --ref organization/runtime/workflows/README.md \
-  --classification '{"classification_version":"1","task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
+  --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
 ```
 
 ## Frontdoor Harness CLI
@@ -85,11 +92,11 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
   --request-id req-example \
   --prompt "Run a readonly external review." \
   --ref organization/runtime/workflows/README.md \
-  --classification '{"classification_version":"1","task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
+  --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
 
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state approve \
   --request-id req-example \
-  --human-action-id ui-click-example
+  --human-action-id <approval.human_action_id>
 
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state create-run \
   --request-id req-example
@@ -104,6 +111,37 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
   --run-id <run_id>
 ```
 
+The `human_action_id` is a proposal-digest challenge returned by `propose`.
+It is not arbitrary UI text. Execution commands accept `--principal-type`,
+`--principal-id`, and `--authn-method`; `main_agent_bridge` is rejected for
+execution-class transitions.
+
+## Main-Agent Bridge CLI
+
+Use this surface when the main agent is acting only as an orchestrator output
+confirmation UI:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state bridge-submit-request \
+  --task-id TSK-example \
+  --request-id req-example \
+  --request-kind external_review_request \
+  --prompt "Run a readonly external review." \
+  --ref organization/runtime/workflows/README.md \
+  --idempotency-key req-example-v1
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state bridge-read-projection \
+  --request-id req-example
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state bridge-ack-output \
+  --request-id req-example \
+  --projection-digest <projection_digest>
+```
+
+The bridge rejects classification, workflow selection, approval, run IDs,
+report paths, adapter requests, and workflow-definition data. `ack_output` is a
+pure acknowledgement and has `transition_effect = none`.
+
 ## Frontdoor HTTP API
 
 The same host-owned operations are exposed as a local JSON API for an Agent UI:
@@ -117,14 +155,17 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
 
 | Endpoint | Harness Operation |
 |---|---|
-| `GET /` | Minimal Agent UI shell for proposal, approval, run, drain, adapter, validation, and state reads |
+| `GET /` | Main-agent output confirmation UI |
 | `GET /healthz` | Health check |
-| `POST /frontdoor/propose` | `workflow-frontdoor propose` |
-| `POST /frontdoor/approve` | `workflow-frontdoor approve` |
-| `POST /orchestrator/runs` | `workflow-frontdoor create-run` |
-| `POST /orchestrator/runs/{run_id}/drain` | `workflow-frontdoor drain` |
-| `POST /provider/claude/prepare` | `workflow-frontdoor prepare-claude-adapter` |
-| `POST /provider/reports/validate` | `workflow-frontdoor validate-report` |
+| `POST /main-agent/submit-request` | Restricted bridge submit; no classification or execution fields |
+| `GET /main-agent/projections/{request_id}` | Redacted typed projection for main-agent rendering |
+| `POST /main-agent/ack-output` | No-op acknowledgement; no state transition |
+| `POST /frontdoor/propose` | Operator path for `workflow-frontdoor propose`; requires `principal_type` |
+| `POST /frontdoor/approve` | Operator path for `workflow-frontdoor approve`; requires `principal_type` and challenge id |
+| `POST /orchestrator/runs` | Operator/harness path for `workflow-frontdoor create-run`; requires `principal_type` |
+| `POST /orchestrator/runs/{run_id}/drain` | Operator/harness path for `workflow-frontdoor drain`; requires `principal_type` |
+| `POST /provider/claude/prepare` | Operator/harness path for `workflow-frontdoor prepare-claude-adapter`; requires `principal_type` |
+| `POST /provider/reports/validate` | Harness gate path for `workflow-frontdoor validate-report`; requires `principal_type` |
 
 ## P0 Non-Scope
 
