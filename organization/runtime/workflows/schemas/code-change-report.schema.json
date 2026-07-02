@@ -51,10 +51,47 @@
       "additionalProperties": false
     },
     "review": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "approved",
+            "changes_requested",
+            "blocked"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "validation": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "not_run"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "final_evidence": {
       "type": "object",
@@ -73,5 +110,35 @@
       "additionalProperties": false
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "result": {
+            "const": "complete"
+          }
+        },
+        "required": [
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "review": {
+            "required": [
+              "status",
+              "evidence_refs"
+            ]
+          },
+          "validation": {
+            "required": [
+              "status",
+              "evidence_refs"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

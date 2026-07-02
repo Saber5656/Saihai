@@ -61,11 +61,25 @@ BOOLEAN_CLASSIFICATION_FIELDS = {
 EXPLICIT_APPROVAL_SOURCES = {"orchestrator-start", "human_ui", "manual_cli"}
 PROMPT_ONLY_SOURCES = {"frontdoor_prompt"}
 PUBLICATION_GATE_ID = "exit.publication_result_recorded"
+POLICY_APPROVAL_GATE_ID = "exit.policy_approval_recorded"
 SAFETY_RANK = {
     "readonly": 0,
     "standard": 1,
     "policy": 2,
     "security": 3,
+}
+PERMISSION_RANK = {
+    "readonly": 0,
+    "edit": 1,
+    "full": 2,
+}
+ARTIFACT_BY_OUTPUT_CONTRACT = {
+    "external_review_report": "typed_report",
+    "research_report": "research_report",
+    "code_change_report": "code_change_report",
+    "publication_result": "publication_result",
+    "policy_change_report": "policy_change_report",
+    "security_review_report": "security_review_report",
 }
 
 
@@ -202,6 +216,65 @@ def candidate_workflow_id(classification: dict[str, Any]) -> str | None:
     return None
 
 
+def required_gates_for_candidate(
+    template: dict[str, Any],
+    classification: dict[str, Any],
+    publication_gate_required: bool,
+) -> list[str]:
+    required_gates = list(template.get("mandatory_gates") or [])
+    exit_gates = set((template.get("gates") or {}).get("exit") or [])
+
+    if publication_gate_required and PUBLICATION_GATE_ID not in required_gates:
+        required_gates.append(PUBLICATION_GATE_ID)
+
+    if classification.get("task_kind") == "policy_change":
+        if POLICY_APPROVAL_GATE_ID not in exit_gates:
+            return []
+        if POLICY_APPROVAL_GATE_ID not in required_gates:
+            required_gates.append(POLICY_APPROVAL_GATE_ID)
+
+    return required_gates
+
+
+def required_permission_for_candidate(
+    template: dict[str, Any],
+    publication_gate_required: bool,
+) -> str:
+    if publication_gate_required:
+        return "full"
+    non_publication_modes = {
+        step.get("permission_mode")
+        for step in template.get("steps", [])
+        if step.get("output_contract") != "publication_result"
+    }
+    if "full" in non_publication_modes or "edit" in non_publication_modes:
+        return "edit"
+    return "readonly"
+
+
+def required_artifacts_for_candidate(
+    template: dict[str, Any],
+    classification: dict[str, Any],
+    publication_gate_required: bool,
+    required_gates: list[str],
+) -> set[str]:
+    artifacts: set[str] = set()
+    for contract_name, contract in (template.get("output_contracts") or {}).items():
+        if contract.get("required"):
+            artifact = ARTIFACT_BY_OUTPUT_CONTRACT.get(contract_name)
+            if artifact:
+                artifacts.add(artifact)
+
+    if publication_gate_required:
+        artifacts.add("publication_result")
+    if classification.get("task_kind") == "policy_change":
+        artifacts.add("policy_change_report")
+    if "exit.final_evidence_complete" in required_gates:
+        artifacts.add("final_evidence")
+
+    return artifacts
+
+
 def base_policy() -> dict[str, str]:
     return {
         "bounded_provider_transport": "not_approved",
@@ -297,6 +370,29 @@ def validate_workflow_candidate(
             candidates=[workflow_id],
         )
 
+    required_gates = required_gates_for_candidate(
+        template,
+        classification,
+        publication_gate_required,
+    )
+    if classification.get("task_kind") == "policy_change" and not required_gates:
+        return blocked_selection(
+            "policy_approval_gate_required",
+            candidates=[workflow_id],
+        )
+
+    required_permission = required_permission_for_candidate(
+        template,
+        publication_gate_required,
+    )
+    requested_permission = classification.get("permission_required")
+    if PERMISSION_RANK.get(requested_permission, -1) < PERMISSION_RANK[required_permission]:
+        return blocked_selection(
+            "permission_scope_insufficient",
+            candidates=[workflow_id],
+            missing_fields=[required_permission],
+        )
+
     if workflow_id == "single_step_external_review":
         if classification.get("task_kind") != "external_review":
             return blocked_selection("external_review_template_requires_external_review")
@@ -310,9 +406,20 @@ def validate_workflow_candidate(
         if "typed_report" not in set(classification.get("expected_artifacts") or []):
             return blocked_selection("typed_report_artifact_required")
 
-    required_gates = list(template.get("mandatory_gates") or [])
-    if publication_gate_required and PUBLICATION_GATE_ID not in required_gates:
-        required_gates.append(PUBLICATION_GATE_ID)
+    required_artifacts = required_artifacts_for_candidate(
+        template,
+        classification,
+        publication_gate_required,
+        required_gates,
+    )
+    expected_artifacts = set(classification.get("expected_artifacts") or [])
+    missing_artifacts = sorted(required_artifacts - expected_artifacts)
+    if missing_artifacts:
+        return blocked_selection(
+            "required_artifacts_missing",
+            candidates=[workflow_id],
+            missing_fields=missing_artifacts,
+        )
 
     optional_expansions = []
     if workflow_id == "single_step_external_review" and classification.get("security_sensitive"):
@@ -350,8 +457,14 @@ def activation_scope_for_selection(
         if template:
             step_budget = int(template.get("max_steps", step_budget))
             permission_modes = {step.get("permission_mode") for step in template.get("steps", [])}
-            allowed_ops["edit"] = bool(permission_modes & {"edit", "full"})
-            publication_allowed = bool(selection.get("publication_gate_required"))
+            requested_rank = PERMISSION_RANK.get(classification.get("permission_required"), -1)
+            allowed_ops["edit"] = requested_rank >= PERMISSION_RANK["edit"] and bool(
+                permission_modes & {"edit", "full"}
+            )
+            publication_allowed = (
+                requested_rank >= PERMISSION_RANK["full"]
+                and bool(selection.get("publication_gate_required"))
+            )
             allowed_ops["commit"] = publication_allowed
             allowed_ops["push"] = publication_allowed
             allowed_ops["network"] = publication_allowed
@@ -692,6 +805,28 @@ def validate_registry(registry: dict[str, Any]) -> list[str]:
     return errors
 
 
+def template_step_constraint_fragments(registry: dict[str, Any]) -> list[tuple[str, str]]:
+    fragments: list[tuple[str, str]] = []
+    for entry in registry.get("templates", []):
+        path = REPO_ROOT / entry["path"]
+        try:
+            template = load_json_path(path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        workflow_id = template.get("workflow_id")
+        for step in template.get("steps", []):
+            fragments.extend(
+                [
+                    (workflow_id, f'"workflow_id": {{"const": "{workflow_id}"}}'),
+                    (workflow_id, f'"step_id": {{"const": "{step.get("id")}"}}'),
+                    (workflow_id, f'"assignment_role": {{"const": "{step.get("assignment_role")}"}}'),
+                    (workflow_id, f'"permission_mode": {{"const": "{step.get("permission_mode")}"}}'),
+                    (workflow_id, f'"expected_output": {{"const": "{step.get("output_contract")}"}}'),
+                ]
+            )
+    return fragments
+
+
 def validate_contracts() -> dict[str, Any]:
     errors: list[str] = []
     loaded_schemas: dict[str, Any] = {}
@@ -740,6 +875,10 @@ def validate_contracts() -> dict[str, Any]:
         '"status": {"const": "selected"}',
         '"workflow_id"',
         '"initial_step"',
+        '"safety_class"',
+        '"required_safety_class"',
+        '"publication_gate_required"',
+        '"required_gates"',
     ):
         if required_fragment not in approved_condition:
             errors.append(f"approved activation missing selected-workflow constraint: {required_fragment}")
@@ -773,6 +912,11 @@ def validate_contracts() -> dict[str, Any]:
     for op in ("edit", "commit", "push", "network"):
         if f'"{op}": {{"const": false}}' not in work_order_condition:
             errors.append(f"work order must keep {op}=false for P0 single_step_external_review")
+    if '"publisher"' not in json.dumps(work_order_schema, sort_keys=True):
+        errors.append("work order must allow publisher assignment role")
+    for workflow_id, fragment in template_step_constraint_fragments(registry):
+        if fragment not in work_order_condition:
+            errors.append(f"work order missing template step constraint for {workflow_id}: {fragment}")
 
     report_schema = loaded_schemas.get("external-review-report.schema.json", {})
     provider_evidence = (
@@ -795,6 +939,10 @@ def validate_contracts() -> dict[str, Any]:
         '"activation_status": {"const": "approved"}',
         '"next_action": {"const": "create_workflow_run"}',
         '"status": {"const": "selected"}',
+        '"safety_class"',
+        '"required_safety_class"',
+        '"publication_gate_required"',
+        '"required_gates"',
     ):
         if required_fragment not in run_activation_condition:
             errors.append(f"workflow run activation missing approved-envelope constraint: {required_fragment}")

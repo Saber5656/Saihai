@@ -18,6 +18,9 @@ TEMPLATE_ROOT = WORKFLOW_ROOT / "templates"
 WORK_ORDER_SCHEMA = WORKFLOW_ROOT / "schemas/work-order.schema.json"
 WORKFLOW_RUN_SCHEMA = WORKFLOW_ROOT / "schemas/workflow-run.schema.json"
 ACTIVATION_SCHEMA = WORKFLOW_ROOT / "schemas/activation-envelope.schema.json"
+WORKFLOW_TEMPLATE_SCHEMA = WORKFLOW_ROOT / "schemas/workflow-template.schema.json"
+PUBLICATION_RESULT_SCHEMA = WORKFLOW_ROOT / "schemas/publication-result.schema.json"
+CODE_CHANGE_REPORT_SCHEMA = WORKFLOW_ROOT / "schemas/code-change-report.schema.json"
 
 PUBLICATION_GATE_ID = "exit.publication_result_recorded"
 
@@ -231,6 +234,21 @@ def test_selector_active_template_routes() -> None:
     )
     assert PUBLICATION_GATE_ID in security_publication["workflow_selection"]["required_gates"]
 
+    security_policy = assert_selected(
+        typed_classification(
+            "policy_change",
+            security_sensitive=True,
+            expected_artifacts=[
+                "security_review_report",
+                "code_change_report",
+                "policy_change_report",
+                "final_evidence",
+            ],
+        ),
+        "security_sensitive_change",
+    )
+    assert "exit.policy_approval_recorded" in security_policy["workflow_selection"]["required_gates"]
+
 
 def test_candidate_validation_blocks_downgrades() -> None:
     security_on_standard = selector.validate_workflow_candidate(
@@ -264,6 +282,43 @@ def test_candidate_validation_blocks_downgrades() -> None:
         publication_on_policy["reason"],
         "publication_gate_required",
         "policy publication unsupported",
+    )
+
+
+def test_selector_rejects_permission_and_artifact_downgrades() -> None:
+    readonly_code = selector.select_workflow(
+        typed_classification("code_change", permission_required="readonly")
+    )
+    assert_equal(readonly_code["decision"], "blocked", "readonly code change decision")
+    assert_equal(
+        readonly_code["workflow_selection"]["reason"],
+        "permission_scope_insufficient",
+        "readonly code change reason",
+    )
+
+    edit_publication = selector.select_workflow(
+        typed_classification("code_change", permission_required="edit", publication_required=True)
+    )
+    assert_equal(edit_publication["decision"], "blocked", "edit publication decision")
+    assert_equal(
+        edit_publication["workflow_selection"]["reason"],
+        "permission_scope_insufficient",
+        "edit publication reason",
+    )
+
+    missing_artifacts = selector.select_workflow(
+        typed_classification("research", expected_artifacts=["typed_report"])
+    )
+    assert_equal(missing_artifacts["decision"], "blocked", "missing artifacts decision")
+    assert_equal(
+        missing_artifacts["workflow_selection"]["reason"],
+        "required_artifacts_missing",
+        "missing artifacts reason",
+    )
+    assert_equal(
+        missing_artifacts["workflow_selection"]["missing_fields"],
+        ["research_report"],
+        "missing artifact names",
     )
 
 
@@ -338,6 +393,10 @@ def test_activation_schema_approved_envelope_constraints() -> None:
         '"status": {"const": "selected"}',
         '"workflow_id"',
         '"initial_step"',
+        '"safety_class"',
+        '"required_safety_class"',
+        '"publication_gate_required"',
+        '"required_gates"',
         '"next_action": {"const": "create_workflow_run"}',
         '"minItems": 1',
     ):
@@ -412,6 +471,8 @@ def test_work_order_schema_constrains_single_step_external_review() -> None:
     for field in ["run_id", "workflow_id", "step_id", "activation_scope"]:
         assert field in work_order_schema["required"], f"work order requires {field}"
     allowed_ops = work_order_schema["properties"]["activation_scope"]["properties"]["allowed_ops"]
+    assignment_roles = work_order_schema["properties"]["assignment_role"]["enum"]
+    assert "publisher" in assignment_roles
     assert_equal(
         allowed_ops["properties"]["push"]["type"],
         "boolean",
@@ -440,6 +501,16 @@ def test_work_order_schema_constrains_single_step_external_review() -> None:
     for op in ("edit", "commit", "push", "network"):
         fragment = f'"{op}": {{"const": false}}'
         assert fragment in conditional, f"missing work order op constraint {fragment}"
+    for fragment in (
+        '"workflow_id": {"const": "publication_required"}',
+        '"step_id": {"const": "publication_gate"}',
+        '"assignment_role": {"const": "publisher"}',
+        '"expected_output": {"const": "publication_result"}',
+        '"workflow_id": {"const": "security_sensitive_change"}',
+        '"step_id": {"const": "policy_review"}',
+        '"expected_output": {"const": "policy_change_report"}',
+    ):
+        assert fragment in conditional, f"missing work order template constraint {fragment}"
 
 
 def test_external_review_report_schema_rejects_embedded_raw_fields() -> None:
@@ -467,6 +538,46 @@ def test_external_review_report_schema_rejects_embedded_raw_fields() -> None:
     assert '"minItems": 1' in conditional
 
 
+def test_publication_and_code_change_report_schemas_require_evidence() -> None:
+    publication_schema = json.loads(PUBLICATION_RESULT_SCHEMA.read_text(encoding="utf-8"))
+    publication_condition = json.dumps(publication_schema["allOf"], sort_keys=True)
+    assert '"result": {"const": "completed"}' in publication_condition
+    assert '"approved": {"const": true}' in publication_condition
+
+    code_schema = json.loads(CODE_CHANGE_REPORT_SCHEMA.read_text(encoding="utf-8"))
+    complete_condition = json.dumps(code_schema["allOf"], sort_keys=True)
+    assert '"result": {"const": "complete"}' in complete_condition
+    assert '"review": {"required": ["status", "evidence_refs"]}' in complete_condition
+    assert '"validation": {"required": ["status", "evidence_refs"]}' in complete_condition
+
+
+def test_workflow_template_schema_and_security_template_publication_path() -> None:
+    template_schema = json.loads(WORKFLOW_TEMPLATE_SCHEMA.read_text(encoding="utf-8"))
+    publication_gate_schema = template_schema["properties"]["publication_gate"]["properties"]
+    assert "required_when" not in publication_gate_schema
+
+    template = json.loads(
+        (TEMPLATE_ROOT / "security_sensitive_change.yaml").read_text(encoding="utf-8")
+    )
+    assert_equal(template["max_steps"], 7, "security max steps")
+    assert "required_when" not in template["publication_gate"]
+    assert "exit.policy_approval_recorded" in template["gates"]["exit"]
+    publication_steps = [
+        step
+        for step in template["steps"]
+        if step["id"] == "publication_gate"
+        and step["output_contract"] == "publication_result"
+    ]
+    assert_equal(len(publication_steps), 1, "security publication step")
+    policy_steps = [
+        step
+        for step in template["steps"]
+        if step["id"] == "policy_review"
+        and step["output_contract"] == "policy_change_report"
+    ]
+    assert_equal(len(policy_steps), 1, "security policy step")
+
+
 def test_workflow_run_schema_encodes_scheduler_and_activation_scope() -> None:
     workflow_run_schema = json.loads(WORKFLOW_RUN_SCHEMA.read_text(encoding="utf-8"))
     scheduling = workflow_run_schema["properties"]["scheduling"]["properties"]
@@ -480,6 +591,10 @@ def test_workflow_run_schema_encodes_scheduler_and_activation_scope() -> None:
         '"activation_status": {"const": "approved"}',
         '"status": {"const": "selected"}',
         '"next_action": {"const": "create_workflow_run"}',
+        '"safety_class"',
+        '"required_safety_class"',
+        '"publication_gate_required"',
+        '"required_gates"',
     ):
         assert fragment in activation_text, f"missing run activation constraint {fragment}"
     assert '"activation_source"' in activation_text
@@ -520,6 +635,7 @@ def main() -> None:
         test_selector_external_review,
         test_selector_active_template_routes,
         test_candidate_validation_blocks_downgrades,
+        test_selector_rejects_permission_and_artifact_downgrades,
         test_activation_prompt_is_only_proposed,
         test_activation_scope_follows_selected_template,
         test_activation_schema_approved_envelope_constraints,
@@ -529,6 +645,8 @@ def main() -> None:
         test_malformed_expected_artifacts_blocks_without_crashing,
         test_work_order_schema_constrains_single_step_external_review,
         test_external_review_report_schema_rejects_embedded_raw_fields,
+        test_publication_and_code_change_report_schemas_require_evidence,
+        test_workflow_template_schema_and_security_template_publication_path,
         test_workflow_run_schema_encodes_scheduler_and_activation_scope,
         test_configure_organization_facade,
         test_blocked_activation_cli_exits_nonzero,

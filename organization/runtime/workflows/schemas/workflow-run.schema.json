@@ -123,7 +123,11 @@
           "required": [
             "status",
             "workflow_id",
-            "initial_step"
+            "initial_step",
+            "safety_class",
+            "required_safety_class",
+            "publication_gate_required",
+            "required_gates"
           ],
           "properties": {
             "status": {

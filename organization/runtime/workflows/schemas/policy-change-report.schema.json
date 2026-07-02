@@ -16,7 +16,11 @@
       "const": "1"
     },
     "workflow_id": {
-      "const": "policy_or_permission_change"
+      "type": "string",
+      "enum": [
+        "policy_or_permission_change",
+        "security_sensitive_change"
+      ]
     },
     "human_approval": {
       "type": "object",

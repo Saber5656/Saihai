@@ -6,8 +6,7 @@
   "safety_class": "security",
   "publication_gate": {
     "supported": true,
-    "required_by_default": false,
-    "required_when": "classification.publication_required == true or classification.task_kind == 'publication'"
+    "required_by_default": false
   },
   "gates": {
     "entry": [
@@ -17,6 +16,7 @@
     "exit": [
       "exit.typed_report_valid",
       "exit.code_change_evidence_complete",
+      "exit.policy_approval_recorded",
       "exit.security_review_complete",
       "exit.publication_result_recorded",
       "exit.final_evidence_complete"
@@ -31,7 +31,7 @@
     "exit.final_evidence_complete"
   ],
   "initial_step": "security_review",
-  "max_steps": 5,
+  "max_steps": 7,
   "scheduler": {
     "mode": "invocation-drain",
     "state_persistence": "durable_state",
@@ -74,6 +74,11 @@
       "required": true,
       "canonical": true
     },
+    "policy_change_report": {
+      "schema_path": "organization/runtime/workflows/schemas/policy-change-report.schema.json",
+      "required": false,
+      "canonical": true
+    },
     "publication_result": {
       "schema_path": "organization/runtime/workflows/schemas/publication-result.schema.json",
       "required": false,
@@ -114,9 +119,43 @@
           "to": "implement"
         },
         {
+          "on": "policy_approval_required",
+          "to": "policy_review"
+        },
+        {
           "on": "security_scope_blocked",
           "to": "waiting_human",
           "reason_class": "security_scope_blocked"
+        }
+      ]
+    },
+    {
+      "id": "policy_review",
+      "role": "business-legal-reviewer",
+      "assignment_role": "approver",
+      "permission_mode": "readonly",
+      "provider_route": {
+        "adapter_kind": "bounded_provider",
+        "runner_authority": "write_report_only",
+        "transition_authority": "harness_engine"
+      },
+      "input_contract": "work_order",
+      "output_contract": "policy_change_report",
+      "quality_gates": [
+        {
+          "gate": "policy_approval_gate",
+          "requires": "human_approval"
+        }
+      ],
+      "transitions": [
+        {
+          "on": "approval_recorded",
+          "to": "implement"
+        },
+        {
+          "on": "approval_missing",
+          "to": "waiting_human",
+          "reason_class": "human_approval_required"
         }
       ]
     },
@@ -203,9 +242,47 @@
           "to": "final_evidence"
         },
         {
+          "on": "publication_required",
+          "to": "publication_gate"
+        },
+        {
           "on": "security_review_blocked",
           "to": "blocked",
           "reason_class": "security_review_blocked"
+        }
+      ]
+    },
+    {
+      "id": "publication_gate",
+      "role": "git-publisher",
+      "assignment_role": "publisher",
+      "permission_mode": "full",
+      "provider_route": {
+        "adapter_kind": "harness_gate",
+        "runner_authority": "publication_manifest_only",
+        "transition_authority": "harness_engine"
+      },
+      "input_contract": "work_order",
+      "output_contract": "publication_result",
+      "quality_gates": [
+        {
+          "gate": "publication_approval_gate",
+          "requires": "human_approval"
+        },
+        {
+          "gate": "publication_result_gate",
+          "requires": "publication_result"
+        }
+      ],
+      "transitions": [
+        {
+          "on": "publication_recorded",
+          "to": "final_evidence"
+        },
+        {
+          "on": "publication_blocked",
+          "to": "waiting_human",
+          "reason_class": "publication_blocked"
         }
       ]
     },

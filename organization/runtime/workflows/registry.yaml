@@ -134,7 +134,7 @@
       "path": "organization/runtime/workflows/templates/security_sensitive_change.yaml",
       "status": "active",
       "initial_step": "security_review",
-      "max_steps": 5
+      "max_steps": 7
     }
   ],
   "planned_templates": [],

@@ -62,9 +62,6 @@
         },
         "required_by_default": {
           "type": "boolean"
-        },
-        "required_when": {
-          "type": "string"
         }
       },
       "additionalProperties": false

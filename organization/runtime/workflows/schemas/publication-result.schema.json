@@ -64,5 +64,37 @@
       }
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "result": {
+            "const": "completed"
+          }
+        },
+        "required": [
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "attempted_action": {
+            "enum": [
+              "commit",
+              "push",
+              "pull_request"
+            ]
+          },
+          "human_approval": {
+            "properties": {
+              "approved": {
+                "const": true
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }
