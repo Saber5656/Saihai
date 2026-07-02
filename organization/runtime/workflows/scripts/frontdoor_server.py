@@ -15,6 +15,7 @@ RUN_DRAIN_RE = re.compile(r"^/orchestrator/runs/([^/]+)/drain$")
 RUN_READ_RE = re.compile(r"^/orchestrator/runs/([^/]+)$")
 REQUEST_READ_RE = re.compile(r"^/frontdoor/requests/([^/]+)$")
 BRIDGE_PROJECTION_RE = re.compile(r"^/main-agent/projections/([^/]+)$")
+BODY_PRINCIPAL_FIELDS = {"principal_type", "principal_id", "authn_method"}
 
 INDEX_HTML = """<!doctype html>
 <html lang="en" data-frontdoor-ui="output-confirmation">
@@ -366,14 +367,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _operator_principal(self, body: dict, *, default_id: str, default_authn: str) -> dict:
-        principal_type = body.get("principal_type")
-        if not isinstance(principal_type, str) or not principal_type:
-            raise frontdoor.FrontdoorError("operator principal_type is required")
-        return frontdoor.make_principal(
-            principal_type,
-            str(body.get("principal_id") or default_id),
-            authn_method=str(body.get("authn_method") or default_authn),
+    def _channel_principal(self, body: dict, *, allowed_channels: set[str]) -> dict:
+        supplied_principal_fields = sorted(BODY_PRINCIPAL_FIELDS & set(body))
+        if supplied_principal_fields:
+            raise frontdoor.FrontdoorError(
+                "principal fields are not accepted in request body; use authenticated channel headers: "
+                + ",".join(supplied_principal_fields)
+            )
+        channel = self.headers.get("X-Orchestrator-Channel", "")
+        if not channel:
+            raise frontdoor.FrontdoorError("missing orchestrator channel")
+        if channel not in allowed_channels:
+            raise frontdoor.FrontdoorError(f"channel not allowed for endpoint: {channel}")
+        return frontdoor.principal_from_authenticated_channel(
+            self.state_root,
+            channel,
+            self.headers.get("X-Orchestrator-Token", ""),
         )
 
     def do_GET(self) -> None:
@@ -452,7 +461,7 @@ class Handler(BaseHTTPRequestHandler):
                     expires_at=str(body.get("expires_at") or "run_terminal"),
                     frontdoor=str(body.get("frontdoor") or "codex"),
                     chat_session_id=str(body.get("chat_session_id") or ""),
-                    principal=self._operator_principal(body, default_id="http-operator", default_authn="local_http"),
+                    principal=self._channel_principal(body, allowed_channels={"operator"}),
                 )
                 self._send_json(payload)
                 return
@@ -461,7 +470,7 @@ class Handler(BaseHTTPRequestHandler):
                     state_root=self.state_root,
                     request_id=str(body["request_id"]),
                     human_action_id=str(body["human_action_id"]),
-                    principal=self._operator_principal(body, default_id="human-ui", default_authn="local_ui"),
+                    principal=self._channel_principal(body, allowed_channels={"human_ui"}),
                 )
                 status = 200 if payload.get("decision") == "ok" else 400
                 self._send_json(payload, status)
@@ -472,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
                     request_id=str(body["request_id"]),
                     run_id=str(body.get("run_id") or ""),
                     resume_policy=str(body.get("resume_policy") or "manual"),
-                    principal=self._operator_principal(body, default_id="http-operator", default_authn="local_http"),
+                    principal=self._channel_principal(body, allowed_channels={"operator"}),
                 )
                 self._send_json(payload)
                 return
@@ -481,7 +490,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = frontdoor.drain_run(
                     state_root=self.state_root,
                     run_id=drain_match.group(1),
-                    principal=self._operator_principal(body, default_id="http-operator", default_authn="local_http"),
+                    principal=self._channel_principal(body, allowed_channels={"operator"}),
                 )
                 self._send_json(payload)
                 return
@@ -489,7 +498,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = frontdoor.prepare_claude_adapter(
                     state_root=self.state_root,
                     run_id=str(body["run_id"]),
-                    principal=self._operator_principal(body, default_id="http-operator", default_authn="local_http"),
+                    principal=self._channel_principal(body, allowed_channels={"operator"}),
                 )
                 status = 200 if payload.get("decision") == "ok" else 400
                 self._send_json(payload, status)
@@ -499,7 +508,7 @@ class Handler(BaseHTTPRequestHandler):
                     state_root=self.state_root,
                     run_id=str(body["run_id"]),
                     report_path_arg=str(body.get("report_path") or ""),
-                    principal=self._operator_principal(body, default_id="local-harness", default_authn="local_http"),
+                    principal=self._channel_principal(body, allowed_channels={"harness"}),
                 )
                 status = 200 if payload.get("decision") == "ok" else 400
                 self._send_json(payload, status)

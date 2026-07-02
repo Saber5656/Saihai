@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import hmac
 import json
@@ -20,6 +21,11 @@ WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_STATE_ROOT = Path.home() / ".codex" / "state" / "itb" / "frontdoor-orchestrator"
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
+HTTP_CHANNEL_PRINCIPALS = {
+    "operator": ("manual_operator", "http-operator", "local_http_channel"),
+    "human_ui": ("human_operator", "human-ui", "local_http_channel"),
+    "harness": ("harness_runner", "local-harness", "local_http_channel"),
+}
 EXECUTION_PRINCIPAL_TYPES = {
     "human_operator",
     "manual_operator",
@@ -64,9 +70,44 @@ BRIDGE_FORBIDDEN_FIELDS = {
     "secret",
     "credential",
     "authorization",
+    "principal_type",
+    "principal_id",
+    "authn_method",
 }
 MAX_APPROVAL_FAILURES = 3
+MAX_CONTEXT_REF_COUNT = 50
+MAX_ALLOWED_PATH_COUNT = 50
+MAX_CONTEXT_REF_FILE_BYTES = 1_000_000
+MAX_CONTEXT_REF_TOTAL_BYTES = 5_000_000
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
+REF_DENYLIST_NAMES = {
+    ".git",
+    ".env",
+    "id_rsa",
+    "id_ed25519",
+    "credentials",
+}
+REF_DENYLIST_PATTERNS = (
+    ".env*",
+    "id_rsa*",
+    "id_ed25519*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*private_key*",
+    "*private-key*",
+    "*deploy_key*",
+    "*deploy-key*",
+    "*secret_key*",
+    "*secret-key*",
+    "*auth_key*",
+    "*auth-key*",
+    "*credential*",
+    "*credentials*",
+    "*secret*",
+    "*token*",
+)
 
 
 def now_iso() -> str:
@@ -307,6 +348,7 @@ def state_paths(state_root: Path) -> dict[str, Path]:
         "idempotency": state_root / "idempotency",
         "acks": state_root / "acks",
         "signing_keys": state_root / "principal-keys",
+        "channel_tokens": state_root / "channel-tokens",
     }
 
 
@@ -356,6 +398,175 @@ def path_is_within(path: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def channel_token_path(state_root: Path, channel: str) -> Path:
+    if channel not in HTTP_CHANNEL_PRINCIPALS:
+        raise FrontdoorError(f"unsupported channel: {channel}")
+    return state_paths(state_root)["channel_tokens"] / f"{channel}.token"
+
+
+def channel_token(state_root: Path, channel: str) -> str:
+    path = channel_token_path(state_root, channel)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(secrets.token_urlsafe(32) + "\n", encoding="utf-8")
+        path.chmod(0o600)
+    return path.read_text(encoding="utf-8").strip()
+
+
+def principal_from_authenticated_channel(state_root: Path, channel: str, token: str) -> dict[str, str]:
+    if channel not in HTTP_CHANNEL_PRINCIPALS:
+        raise FrontdoorError(f"unsupported channel: {channel}")
+    if not token:
+        raise FrontdoorError("missing orchestrator channel token")
+    expected = channel_token(state_root, channel)
+    if not hmac.compare_digest(token, expected):
+        raise FrontdoorError("invalid orchestrator channel token")
+    principal_type, principal_id, authn_method = HTTP_CHANNEL_PRINCIPALS[channel]
+    return make_principal(principal_type, principal_id, authn_method=authn_method)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _denylisted_ref_part(relative_path: Path) -> str | None:
+    for part in relative_path.parts:
+        lowered = part.lower()
+        if lowered in REF_DENYLIST_NAMES:
+            return part
+        if any(fnmatch.fnmatch(lowered, pattern) for pattern in REF_DENYLIST_PATTERNS):
+            return part
+    return None
+
+
+def _resolve_repo_path(raw: str, *, ref_root: Path, label: str) -> tuple[Path, Path]:
+    if not isinstance(raw, str) or not raw.strip():
+        raise FrontdoorError(f"{label} must be a non-empty string")
+    if "\x00" in raw:
+        raise FrontdoorError(f"{label} cannot contain NUL bytes")
+    root = ref_root.expanduser().resolve()
+    candidate = Path(raw).expanduser()
+    path = candidate if candidate.is_absolute() else root / candidate
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise FrontdoorError(f"{label} does not exist: {raw}") from exc
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError as exc:
+        raise FrontdoorError(f"{label} outside approved ref root: {raw}") from exc
+    denied_part = _denylisted_ref_part(relative)
+    if denied_part:
+        raise FrontdoorError(f"{label} denylisted path component: {denied_part}")
+    return resolved, relative
+
+
+def resolve_context_refs(refs: list[str], *, ref_root: Path = REPO_ROOT) -> list[dict[str, Any]]:
+    if len(refs) > MAX_CONTEXT_REF_COUNT:
+        raise FrontdoorError(f"too many context refs: {len(refs)} > {MAX_CONTEXT_REF_COUNT}")
+    resolved_refs: list[dict[str, Any]] = []
+    total_size = 0
+    root = ref_root.expanduser().resolve()
+    for raw in refs:
+        resolved, relative = _resolve_repo_path(raw, ref_root=root, label="context ref")
+        if not resolved.is_file():
+            raise FrontdoorError(f"context ref must be a file: {raw}")
+        size = resolved.stat().st_size
+        if size > MAX_CONTEXT_REF_FILE_BYTES:
+            raise FrontdoorError(
+                f"context ref exceeds file size cap: {relative.as_posix()} > {MAX_CONTEXT_REF_FILE_BYTES}"
+            )
+        total_size += size
+        if total_size > MAX_CONTEXT_REF_TOTAL_BYTES:
+            raise FrontdoorError(f"context refs exceed total size cap: {total_size} > {MAX_CONTEXT_REF_TOTAL_BYTES}")
+        resolved_refs.append(
+            {
+                "type": "repo_file",
+                "original": raw,
+                "path": relative.as_posix(),
+                "size_bytes": size,
+                "digest": file_sha256(resolved),
+            }
+        )
+    return resolved_refs
+
+
+def resolve_allowed_paths(paths: list[str], *, ref_root: Path = REPO_ROOT) -> list[dict[str, Any]]:
+    if len(paths) > MAX_ALLOWED_PATH_COUNT:
+        raise FrontdoorError(f"too many allowed paths: {len(paths)} > {MAX_ALLOWED_PATH_COUNT}")
+    resolved_paths: list[dict[str, Any]] = []
+    root = ref_root.expanduser().resolve()
+    for raw in paths:
+        resolved, relative = _resolve_repo_path(raw, ref_root=root, label="allowed path")
+        resolved_paths.append(
+            {
+                "type": "repo_dir" if resolved.is_dir() else "repo_file",
+                "original": raw,
+                "path": relative.as_posix(),
+            }
+        )
+    return resolved_paths
+
+
+def resolved_ref_paths(resolved_refs: list[dict[str, Any]]) -> list[str]:
+    return [str(item["path"]) for item in resolved_refs]
+
+
+def bounded_context(
+    refs: list[str],
+    allowed_paths: list[str],
+    *,
+    require_refs: bool = False,
+) -> dict[str, Any]:
+    if require_refs and not refs:
+        raise FrontdoorError("refs must be non-empty")
+    resolved_refs = resolve_context_refs(refs) if refs else []
+    resolved_allowed_paths = resolve_allowed_paths(allowed_paths) if allowed_paths else []
+    return {
+        "requested_context_refs": list(refs),
+        "context_refs": resolved_ref_paths(resolved_refs),
+        "resolved_context_refs": resolved_refs,
+        "requested_allowed_paths": list(allowed_paths),
+        "allowed_paths": resolved_ref_paths(resolved_allowed_paths),
+        "resolved_allowed_paths": resolved_allowed_paths,
+    }
+
+
+def approval_ref_summaries(resolved_refs: list[Any]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for item in resolved_refs:
+        if not isinstance(item, dict):
+            continue
+        summary = {
+            "type": str(item.get("type") or "repo_file"),
+            "path": str(item.get("path") or ""),
+        }
+        if "size_bytes" in item:
+            summary["size_bytes"] = item["size_bytes"]
+        if "digest" in item:
+            summary["digest"] = item["digest"]
+        summaries.append(summary)
+    return summaries
+
+
+def approval_allowed_path_summaries(resolved_paths: list[Any]) -> list[dict[str, str]]:
+    summaries: list[dict[str, str]] = []
+    for item in resolved_paths:
+        if not isinstance(item, dict):
+            continue
+        summaries.append(
+            {
+                "type": str(item.get("type") or "repo_path"),
+                "path": str(item.get("path") or ""),
+            }
+        )
+    return summaries
 
 
 def stable_run_id(request_id: str, workflow_id: str) -> str:
@@ -421,6 +632,7 @@ def proposed_request(
     validate_artifact_id(request_id, "request_id")
     validate_artifact_id(task_id, "task_id")
     actor = principal or default_manual_principal()
+    bounded = bounded_context(refs, allowed_paths)
     if classification is None:
         payload = {
             "schema_version": 1,
@@ -438,8 +650,7 @@ def proposed_request(
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "user_prompt": user_prompt,
-            "context_refs": refs,
-            "allowed_paths": allowed_paths,
+            **bounded,
             "expires_at": expires_at,
             "classification": None,
             "requester": requester(frontdoor, chat_session_id),
@@ -462,8 +673,8 @@ def proposed_request(
         activation_source="frontdoor_prompt",
         task_id=task_id,
         request_id=request_id,
-        refs=refs,
-        allowed_paths=allowed_paths,
+        refs=list(bounded["context_refs"]),
+        allowed_paths=list(bounded["allowed_paths"]),
         expires_at=expires_at,
     )
     record = {
@@ -473,8 +684,7 @@ def proposed_request(
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "user_prompt": user_prompt,
-        "context_refs": refs,
-        "allowed_paths": allowed_paths,
+        **bounded,
         "expires_at": expires_at,
         "classification": classification,
         "requester": requester(frontdoor, chat_session_id),
@@ -519,6 +729,7 @@ def approval_action_id(record: dict[str, Any]) -> str:
         "workflow_selection": proposal.get("workflow_selection"),
         "classification_provenance": proposal.get("classification_provenance"),
         "context_refs": record.get("context_refs") or [],
+        "resolved_context_refs": record.get("resolved_context_refs") or [],
         "allowed_paths": record.get("allowed_paths") or [],
         "expires_at": record.get("expires_at"),
     }
@@ -546,9 +757,19 @@ def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
             "permission_mode": "readonly",
             "step_budget": activation_scope.get("step_budget"),
             "context_refs": list(record.get("context_refs") or []),
+            "resolved_context_refs": approval_ref_summaries(list(record.get("resolved_context_refs") or [])),
             "allowed_paths": list(record.get("allowed_paths") or []),
+            "resolved_allowed_paths": approval_allowed_path_summaries(
+                list(record.get("resolved_allowed_paths") or [])
+            ),
             "denied_ops": denied_ops,
             "provider_adapter": "claude_headless_p0",
+            "ref_boundary": {
+                "workspace_root": str(REPO_ROOT),
+                "max_ref_count": MAX_CONTEXT_REF_COUNT,
+                "max_ref_file_bytes": MAX_CONTEXT_REF_FILE_BYTES,
+                "max_ref_total_bytes": MAX_CONTEXT_REF_TOTAL_BYTES,
+            },
         },
         "classification_provenance": proposal.get("classification_provenance"),
         "next_action": proposal.get("next_action"),
@@ -639,6 +860,23 @@ def bridge_submit_request(
         )
         raise FrontdoorError("invalid bridge submit_request: " + "; ".join(errors))
 
+    try:
+        bounded = bounded_context(
+            list(payload.get("refs") or []),
+            list(payload.get("allowed_paths") or []),
+            require_refs=True,
+        )
+    except FrontdoorError as exc:
+        append_audit_event(
+            state_root=state_root,
+            event_type="bridge_submit_request",
+            principal=principal,
+            subject=subject,
+            outcome="blocked",
+            details={"reason": str(exc)},
+        )
+        raise
+
     digest = request_digest(payload)
     idempotency_key = str(payload["idempotency_key"])
     idempotency_file = idempotency_path(state_root, idempotency_key)
@@ -701,8 +939,7 @@ def bridge_submit_request(
         "updated_at": now,
         "user_prompt": str(payload.get("prompt") or ""),
         "request_digest": digest,
-        "context_refs": list(payload.get("refs") or []),
-        "allowed_paths": list(payload.get("allowed_paths") or []),
+        **bounded,
         "expires_at": str(payload.get("expires_at") or "run_terminal"),
         "classification": None,
         "requester": requester(str(payload.get("frontdoor") or "codex"), str(payload.get("chat_session_id") or "")),
@@ -921,6 +1158,23 @@ def approve_request(
     classification = record.get("classification")
     if not isinstance(classification, dict):
         raise FrontdoorError("typed classification is required before approval")
+    record.setdefault("requested_context_refs", list(record.get("context_refs") or []))
+    record.setdefault("requested_allowed_paths", list(record.get("allowed_paths") or []))
+    requested_refs = list(record.get("requested_context_refs") or record.get("context_refs") or [])
+    requested_allowed_paths = list(record.get("requested_allowed_paths") or record.get("allowed_paths") or [])
+    refreshed = bounded_context(
+        requested_refs,
+        requested_allowed_paths,
+    )
+    for key in (
+        "requested_context_refs",
+        "requested_allowed_paths",
+        "context_refs",
+        "resolved_context_refs",
+        "allowed_paths",
+        "resolved_allowed_paths",
+    ):
+        record[key] = refreshed[key]
     attach_approval_summary(record)
     expected_action_id = approval_action_id(record)
     if human_action_id != expected_action_id:
@@ -974,10 +1228,11 @@ def approve_request(
                 "request_id": record.get("request_id"),
                 "user_prompt": record.get("user_prompt"),
                 "context_refs": record.get("context_refs") or [],
+                "resolved_context_refs": record.get("resolved_context_refs") or [],
                 "allowed_paths": record.get("allowed_paths") or [],
             }
         ),
-        "refs_digest": "sha256:" + stable_digest(record.get("context_refs") or []),
+        "refs_digest": "sha256:" + stable_digest(record.get("resolved_context_refs") or record.get("context_refs") or []),
         "display_digest": "sha256:" + stable_digest(record.get("approval") or {}),
         "signature": signature,
     }
@@ -1621,6 +1876,9 @@ def build_work_order(
     issuer_principal: dict[str, Any],
 ) -> dict[str, Any]:
     refs = run["activation"]["context_scope"]["refs"]
+    resolved_refs = request_record.get("resolved_context_refs")
+    if not isinstance(resolved_refs, list) or not resolved_refs:
+        resolved_refs = [{"type": "repo_file", "value": ref, "path": ref} for ref in refs]
     step_id = str(step["id"])
     authority_subject = {
         "request_id": str(run["request_id"]),
@@ -1644,7 +1902,24 @@ def build_work_order(
             "Use only context_refs and this work-order contract as executable authority."
         ).strip(),
         "expected_output": str(step["output_contract"]),
-        "context_refs": [{"type": "ref", "value": ref} for ref in refs],
+        "context_refs": [
+            {
+                "type": str(item.get("type") or "repo_file"),
+                "value": str(item.get("path") or item.get("value") or ""),
+                **(
+                    {"size_bytes": item["size_bytes"]}
+                    if isinstance(item, dict) and "size_bytes" in item
+                    else {}
+                ),
+                **(
+                    {"digest": item["digest"]}
+                    if isinstance(item, dict) and "digest" in item
+                    else {}
+                ),
+            }
+            for item in resolved_refs
+            if isinstance(item, dict)
+        ],
         "context_scope": {
             "mode": str(request_record.get("classification", {}).get("context_scope") or "refs_only"),
             "raw_transcript_sharing": "forbidden",
@@ -1748,6 +2023,9 @@ def parser() -> argparse.ArgumentParser:
     bridge_ack.add_argument("--projection-digest", required=True)
     bridge_ack.add_argument("--frontdoor", choices=["codex", "claude", "manual"], default="codex")
     bridge_ack.add_argument("--chat-session-id", default="")
+
+    channel = sub.add_parser("channel-token")
+    channel.add_argument("--channel", choices=sorted(HTTP_CHANNEL_PRINCIPALS), required=True)
     return parser
 
 
@@ -1841,6 +2119,15 @@ def main() -> None:
                 frontdoor=args.frontdoor,
                 chat_session_id=args.chat_session_id,
             )
+        elif args.command == "channel-token":
+            token = channel_token(state_root, args.channel)
+            payload = {
+                "schema_version": 1,
+                "decision": "ok",
+                "channel": args.channel,
+                "token_path": str(channel_token_path(state_root, args.channel)),
+                "token": token,
+            }
         else:
             raise FrontdoorError(f"unsupported command: {args.command}")
     except FrontdoorError as exc:
