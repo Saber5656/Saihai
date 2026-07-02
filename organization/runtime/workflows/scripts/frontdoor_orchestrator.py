@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_STATE_ROOT = Path.home() / ".codex" / "state" / "itb" / "frontdoor-orchestrator"
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
 HTTP_CHANNEL_PRINCIPALS = {
+    "bridge": (BRIDGE_PRINCIPAL_TYPE, "http-bridge", "local_http_channel"),
     "operator": ("manual_operator", "http-operator", "local_http_channel"),
     "human_ui": ("human_operator", "human-ui", "local_http_channel"),
     "harness": ("harness_runner", "local-harness", "local_http_channel"),
@@ -861,6 +862,21 @@ def request_digest(payload: dict[str, Any]) -> str:
     return "sha256:" + stable_digest(material)
 
 
+def bridge_audit_details(
+    *,
+    frontdoor: str,
+    chat_session_id: str = "",
+    peer: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {"requester": requester(frontdoor, chat_session_id)}
+    if peer:
+        details["peer"] = {str(key): str(value) for key, value in peer.items()}
+    if extra:
+        details.update(extra)
+    return details
+
+
 def validate_bridge_submit_payload(payload: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     extra = sorted(set(payload) - BRIDGE_SUBMIT_ALLOWED_FIELDS)
@@ -901,9 +917,13 @@ def bridge_submit_request(
     *,
     state_root: Path,
     payload: dict[str, Any],
+    principal: dict[str, Any] | None = None,
+    peer: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     errors = validate_bridge_submit_payload(payload)
-    principal = bridge_principal(str(payload.get("frontdoor") or "codex"), str(payload.get("chat_session_id") or ""))
+    frontdoor_name = str(payload.get("frontdoor") or "codex")
+    chat_session_id = str(payload.get("chat_session_id") or "")
+    principal = principal or bridge_principal(frontdoor_name, chat_session_id)
     subject = {
         "request_id": str(payload.get("request_id") or ""),
         "task_id": str(payload.get("task_id") or ""),
@@ -915,7 +935,12 @@ def bridge_submit_request(
             principal=principal,
             subject=subject,
             outcome="blocked",
-            details={"errors": errors},
+            details=bridge_audit_details(
+                frontdoor=frontdoor_name,
+                chat_session_id=chat_session_id,
+                peer=peer,
+                extra={"errors": errors},
+            ),
         )
         raise FrontdoorError("invalid bridge submit_request: " + "; ".join(errors))
 
@@ -931,14 +956,21 @@ def bridge_submit_request(
                 principal=principal,
                 subject=subject,
                 outcome="blocked",
-                details={"reason": "idempotency_conflict"},
+                details=bridge_audit_details(
+                    frontdoor=frontdoor_name,
+                    chat_session_id=chat_session_id,
+                    peer=peer,
+                    extra={"reason": "idempotency_conflict"},
+                ),
             )
             raise FrontdoorError("idempotency conflict for bridge submit_request")
         projection = bridge_read_projection(
             state_root=state_root,
             request_id=str(existing["request_id"]),
-            frontdoor=str(payload.get("frontdoor") or "codex"),
-            chat_session_id=str(payload.get("chat_session_id") or ""),
+            frontdoor=frontdoor_name,
+            chat_session_id=chat_session_id,
+            principal=principal,
+            peer=peer,
         )
         projection["replayed"] = True
         append_audit_event(
@@ -947,7 +979,12 @@ def bridge_submit_request(
             principal=principal,
             subject=subject,
             outcome="replayed",
-            details={"idempotency_key": idempotency_key},
+            details=bridge_audit_details(
+                frontdoor=frontdoor_name,
+                chat_session_id=chat_session_id,
+                peer=peer,
+                extra={"idempotency_key": idempotency_key},
+            ),
         )
         return projection
 
@@ -961,14 +998,21 @@ def bridge_submit_request(
                 principal=principal,
                 subject=subject,
                 outcome="blocked",
-                details={"reason": "request_id_conflict"},
+                details=bridge_audit_details(
+                    frontdoor=frontdoor_name,
+                    chat_session_id=chat_session_id,
+                    peer=peer,
+                    extra={"reason": "request_id_conflict"},
+                ),
             )
             raise FrontdoorError("request_id conflict for bridge submit_request")
         return bridge_read_projection(
             state_root=state_root,
             request_id=str(payload["request_id"]),
-            frontdoor=str(payload.get("frontdoor") or "codex"),
-            chat_session_id=str(payload.get("chat_session_id") or ""),
+            frontdoor=frontdoor_name,
+            chat_session_id=chat_session_id,
+            principal=principal,
+            peer=peer,
         )
 
     try:
@@ -984,7 +1028,12 @@ def bridge_submit_request(
             principal=principal,
             subject=subject,
             outcome="blocked",
-            details={"reason": str(exc)},
+            details=bridge_audit_details(
+                frontdoor=frontdoor_name,
+                chat_session_id=chat_session_id,
+                peer=peer,
+                extra={"reason": str(exc)},
+            ),
         )
         raise
 
@@ -1001,7 +1050,7 @@ def bridge_submit_request(
         **bounded,
         "expires_at": str(payload.get("expires_at") or "run_terminal"),
         "classification": None,
-        "requester": requester(str(payload.get("frontdoor") or "codex"), str(payload.get("chat_session_id") or "")),
+        "requester": requester(frontdoor_name, chat_session_id),
         "principal": redacted_principal(principal),
         "status": "waiting_human",
         "proposal": {
@@ -1043,13 +1092,20 @@ def bridge_submit_request(
         principal=principal,
         subject=subject,
         outcome="ok",
-        details={"request_digest": digest},
+        details=bridge_audit_details(
+            frontdoor=frontdoor_name,
+            chat_session_id=chat_session_id,
+            peer=peer,
+            extra={"request_digest": digest},
+        ),
     )
     return bridge_read_projection(
         state_root=state_root,
         request_id=str(payload["request_id"]),
-        frontdoor=str(payload.get("frontdoor") or "codex"),
-        chat_session_id=str(payload.get("chat_session_id") or ""),
+        frontdoor=frontdoor_name,
+        chat_session_id=chat_session_id,
+        principal=principal,
+        peer=peer,
     )
 
 
@@ -1090,17 +1146,15 @@ def redacted_approval_summary(summary: Any) -> dict[str, Any] | None:
     }
 
 
-def bridge_read_projection(
+def build_bridge_projection(
     *,
     state_root: Path,
     request_id: str,
-    frontdoor: str,
-    chat_session_id: str,
-) -> dict[str, Any]:
-    principal = bridge_principal(frontdoor, chat_session_id)
+    principal: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     record = read_json(request_path(state_root, request_id))
     proposal = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
-    projection = {
+    return {
         "schema_version": 1,
         "decision": "ok",
         "projection_version": "1",
@@ -1132,16 +1186,44 @@ def bridge_read_projection(
             "principal_keys",
         ],
         "transition_effect": "none",
-    }
+    }, record
+
+
+def bridge_projection_digest(projection: dict[str, Any]) -> str:
+    material = {key: value for key, value in projection.items() if key != "projection_digest"}
+    return "sha256:" + stable_digest(material)
+
+
+def bridge_read_projection(
+    *,
+    state_root: Path,
+    request_id: str,
+    frontdoor: str,
+    chat_session_id: str,
+    principal: dict[str, Any] | None = None,
+    peer: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    principal = principal or bridge_principal(frontdoor, chat_session_id)
+    projection, record = build_bridge_projection(
+        state_root=state_root,
+        request_id=request_id,
+        principal=principal,
+    )
+    digest = bridge_projection_digest(projection)
     append_audit_event(
         state_root=state_root,
         event_type="bridge_read_projection",
         principal=principal,
         subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
         outcome="ok",
-        details={"projection_digest": "sha256:" + stable_digest(projection)},
+        details=bridge_audit_details(
+            frontdoor=frontdoor,
+            chat_session_id=chat_session_id,
+            peer=peer,
+            extra={"projection_digest": digest},
+        ),
     )
-    projection["projection_digest"] = "sha256:" + stable_digest(projection)
+    projection["projection_digest"] = digest
     return projection
 
 
@@ -1152,13 +1234,43 @@ def bridge_ack_output(
     projection_digest: str,
     frontdoor: str,
     chat_session_id: str,
+    principal: dict[str, Any] | None = None,
+    peer: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    principal = bridge_principal(frontdoor, chat_session_id)
-    before = read_json(request_path(state_root, request_id))
+    principal = principal or bridge_principal(frontdoor, chat_session_id)
+    projection, before = build_bridge_projection(
+        state_root=state_root,
+        request_id=request_id,
+        principal=principal,
+    )
+    expected_projection_digest = bridge_projection_digest(projection)
+    ack_verified = hmac.compare_digest(projection_digest, expected_projection_digest)
+    if not ack_verified:
+        append_audit_event(
+            state_root=state_root,
+            event_type="bridge_ack_output",
+            principal=principal,
+            subject={"request_id": request_id, "task_id": str(before.get("task_id") or "")},
+            outcome="blocked",
+            details=bridge_audit_details(
+                frontdoor=frontdoor,
+                chat_session_id=chat_session_id,
+                peer=peer,
+                extra={
+                    "transition_effect": "none",
+                    "ack_verified": False,
+                    "supplied_projection_digest": projection_digest,
+                    "expected_projection_digest": expected_projection_digest,
+                },
+            ),
+        )
+        raise FrontdoorError("projection digest mismatch for bridge ack_output")
     ack = {
         "ack_version": "1",
         "request_id": request_id,
         "projection_digest": projection_digest,
+        "expected_projection_digest": expected_projection_digest,
+        "ack_verified": True,
         "principal": redacted_principal(principal),
         "acked_at": now_iso(),
         "transition_effect": "none",
@@ -1172,16 +1284,26 @@ def bridge_ack_output(
         principal=principal,
         subject={"request_id": request_id, "task_id": str(before.get("task_id") or "")},
         outcome="ok",
-        details={
-            "transition_effect": "none",
-            "request_digest_before": "sha256:" + stable_digest(before),
-            "request_digest_after": "sha256:" + stable_digest(after),
-        },
+        details=bridge_audit_details(
+            frontdoor=frontdoor,
+            chat_session_id=chat_session_id,
+            peer=peer,
+            extra={
+                "transition_effect": "none",
+                "ack_verified": True,
+                "projection_digest": projection_digest,
+                "expected_projection_digest": expected_projection_digest,
+                "request_digest_before": "sha256:" + stable_digest(before),
+                "request_digest_after": "sha256:" + stable_digest(after),
+            },
+        ),
     )
     return {
         "schema_version": 1,
         "decision": "ok",
         "ack_path": str(ack_path),
+        "ack_verified": True,
+        "expected_projection_digest": expected_projection_digest,
         "transition_effect": "none",
         "request_status": after.get("status"),
     }

@@ -140,7 +140,8 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
 
 The bridge rejects classification, workflow selection, approval, run IDs,
 report paths, adapter requests, and workflow-definition data. `ack_output` is a
-pure acknowledgement and has `transition_effect = none`.
+pure acknowledgement and has `transition_effect = none`. The acknowledgement is
+accepted only when `projection_digest` matches the current redacted projection.
 
 Context refs are resolved by the frontdoor before they can be shown in an
 approval view or passed to a work order. Refs must point to existing files under
@@ -164,9 +165,9 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
 |---|---|
 | `GET /` | Main-agent output confirmation UI |
 | `GET /healthz` | Health check |
-| `POST /main-agent/submit-request` | Restricted bridge submit; no classification or execution fields |
-| `GET /main-agent/projections/{request_id}` | Redacted typed projection for main-agent rendering |
-| `POST /main-agent/ack-output` | No-op acknowledgement; no state transition |
+| `POST /main-agent/submit-request` | Restricted bridge submit; derives principal from authenticated `bridge` channel headers |
+| `GET /main-agent/projections/{request_id}` | Redacted typed projection for main-agent rendering; derives principal from authenticated `bridge` channel headers |
+| `POST /main-agent/ack-output` | Verified no-op acknowledgement; derives principal from authenticated `bridge` channel headers |
 | `POST /frontdoor/propose` | Operator path for `workflow-frontdoor propose`; derives principal from authenticated `operator` channel headers |
 | `POST /frontdoor/approve` | Human UI path for `workflow-frontdoor approve`; derives principal from authenticated `human_ui` channel headers and challenge id |
 | `POST /orchestrator/runs` | Operator path for `workflow-frontdoor create-run`; derives principal from authenticated `operator` channel headers |
@@ -178,12 +179,14 @@ Generate a local channel token with:
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state channel-token \
-  --channel operator
+  --channel bridge
 ```
 
 Send the returned token in `X-Orchestrator-Token` with
-`X-Orchestrator-Channel: operator`, `human_ui`, or `harness`. The HTTP server
-rejects `principal_type`, `principal_id`, and `authn_method` in request bodies.
+`X-Orchestrator-Channel: bridge`, `operator`, `human_ui`, or `harness`. The HTTP
+server rejects `principal_type`, `principal_id`, and `authn_method` in request
+bodies. Bridge audit events use the authenticated `bridge` channel principal and
+record requester / peer metadata only as non-authoritative details.
 
 ## P0 Non-Scope
 

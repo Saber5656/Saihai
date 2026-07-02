@@ -201,6 +201,9 @@ INDEX_HTML = """<!doctype html>
             <input id="request-id" value="req-ui">
           </label>
         </div>
+        <label>Bridge Token
+          <input id="bridge-token" type="password" autocomplete="off">
+        </label>
         <div class="grid-two">
           <label>Request Kind
             <input id="request-kind" value="external_review_request">
@@ -239,6 +242,7 @@ INDEX_HTML = """<!doctype html>
     const fields = {
       taskId: byId("task-id"),
       requestId: byId("request-id"),
+      bridgeToken: byId("bridge-token"),
       requestKind: byId("request-kind"),
       idempotencyKey: byId("idempotency-key"),
       prompt: byId("prompt"),
@@ -260,11 +264,26 @@ INDEX_HTML = """<!doctype html>
       });
     }
 
+    function bridgeHeaders() {
+      const headers = { "Content-Type": "application/json" };
+      const token = fields.bridgeToken.value.trim();
+      if (token) {
+        headers["X-Orchestrator-Channel"] = "bridge";
+        headers["X-Orchestrator-Token"] = token;
+      }
+      return headers;
+    }
+
+    function renderLocalBlocked(reason) {
+      output.textContent = JSON.stringify({ decision: "blocked", reason }, null, 2);
+      statusEl.textContent = "blocked";
+    }
+
     async function call(method, endpoint, body) {
       setBusy(true);
       endpointEl.textContent = endpoint;
       try {
-        const options = { method, headers: { "Content-Type": "application/json" } };
+        const options = { method, headers: bridgeHeaders() };
         if (body !== undefined) {
           options.body = JSON.stringify(body);
         }
@@ -297,10 +316,17 @@ INDEX_HTML = """<!doctype html>
       }),
       "bridge-projection": () => call("GET", `/main-agent/projections/${encodeURIComponent(fields.requestId.value)}`),
       "bridge-ack": () => {
-        let digest = "sha256:unknown";
+        let digest = "";
         try {
-          digest = JSON.parse(output.textContent).projection_digest || digest;
-        } catch (_error) {}
+          digest = JSON.parse(output.textContent).projection_digest || "";
+        } catch (_error) {
+          renderLocalBlocked("projection payload is required before ack");
+          return Promise.resolve();
+        }
+        if (!digest) {
+          renderLocalBlocked("projection_digest missing");
+          return Promise.resolve();
+        }
         return call("POST", "/main-agent/ack-output", {
           request_id: fields.requestId.value,
           projection_digest: digest,
@@ -338,6 +364,13 @@ class Handler(BaseHTTPRequestHandler):
     def state_root(self) -> Path:
         return self.server.state_root  # type: ignore[attr-defined]
 
+    def _peer_details(self) -> dict[str, str]:
+        return {
+            "client_address": str(self.client_address[0]),
+            "client_port": str(self.client_address[1]),
+            "path": self.path,
+        }
+
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or "0")
         if length <= 0:
@@ -367,13 +400,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _channel_principal(self, body: dict, *, allowed_channels: set[str]) -> dict:
-        supplied_principal_fields = sorted(BODY_PRINCIPAL_FIELDS & set(body))
-        if supplied_principal_fields:
-            raise frontdoor.FrontdoorError(
-                "principal fields are not accepted in request body; use authenticated channel headers: "
-                + ",".join(supplied_principal_fields)
-            )
+    def _body_principal_fields(self, body: dict) -> list[str]:
+        return sorted(BODY_PRINCIPAL_FIELDS & set(body))
+
+    def _body_principal_error(self, supplied_principal_fields: list[str]) -> frontdoor.FrontdoorError:
+        return frontdoor.FrontdoorError(
+            "principal fields are not accepted in request body; use authenticated channel headers: "
+            + ",".join(supplied_principal_fields)
+        )
+
+    def _authenticated_channel_principal(self, *, allowed_channels: set[str]) -> dict:
         channel = self.headers.get("X-Orchestrator-Channel", "")
         if not channel:
             raise frontdoor.FrontdoorError("missing orchestrator channel")
@@ -385,6 +421,32 @@ class Handler(BaseHTTPRequestHandler):
             self.headers.get("X-Orchestrator-Token", ""),
         )
 
+    def _channel_principal(self, body: dict, *, allowed_channels: set[str]) -> dict:
+        principal = self._authenticated_channel_principal(allowed_channels=allowed_channels)
+        supplied_principal_fields = self._body_principal_fields(body)
+        if supplied_principal_fields:
+            raise self._body_principal_error(supplied_principal_fields)
+        return principal
+
+    def _bridge_principal(self, body: dict, *, event_type: str, subject: dict[str, str]) -> dict:
+        principal = self._authenticated_channel_principal(allowed_channels={"bridge"})
+        supplied_principal_fields = self._body_principal_fields(body)
+        if supplied_principal_fields:
+            frontdoor.append_audit_event(
+                state_root=self.state_root,
+                event_type=event_type,
+                principal=principal,
+                subject=subject,
+                outcome="blocked",
+                details={
+                    "reason": "body_principal_fields",
+                    "fields": supplied_principal_fields,
+                    "peer": self._peer_details(),
+                },
+            )
+            raise self._body_principal_error(supplied_principal_fields)
+        return principal
+
     def do_GET(self) -> None:
         try:
             if self.path in {"/", "/index.html"}:
@@ -395,11 +457,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             bridge_projection_match = BRIDGE_PROJECTION_RE.match(self.path)
             if bridge_projection_match:
+                principal = self._authenticated_channel_principal(allowed_channels={"bridge"})
                 payload = frontdoor.bridge_read_projection(
                     state_root=self.state_root,
                     request_id=bridge_projection_match.group(1),
                     frontdoor="codex",
                     chat_session_id="frontdoor-ui",
+                    principal=principal,
+                    peer=self._peer_details(),
                 )
                 self._send_json(payload)
                 return
@@ -433,19 +498,39 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self._read_json()
             if self.path == "/main-agent/submit-request":
+                principal = self._bridge_principal(
+                    body,
+                    event_type="bridge_submit_request",
+                    subject={
+                        "request_id": str(body.get("request_id") or ""),
+                        "task_id": str(body.get("task_id") or ""),
+                    },
+                )
                 payload = frontdoor.bridge_submit_request(
                     state_root=self.state_root,
                     payload=body,
+                    principal=principal,
+                    peer=self._peer_details(),
                 )
                 self._send_json(payload)
                 return
             if self.path == "/main-agent/ack-output":
+                principal = self._bridge_principal(
+                    body,
+                    event_type="bridge_ack_output",
+                    subject={
+                        "request_id": str(body.get("request_id") or ""),
+                        "task_id": "",
+                    },
+                )
                 payload = frontdoor.bridge_ack_output(
                     state_root=self.state_root,
                     request_id=str(body["request_id"]),
                     projection_digest=str(body["projection_digest"]),
                     frontdoor=str(body.get("frontdoor") or "codex"),
                     chat_session_id=str(body.get("chat_session_id") or "frontdoor-ui"),
+                    principal=principal,
+                    peer=self._peer_details(),
                 )
                 self._send_json(payload)
                 return

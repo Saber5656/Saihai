@@ -499,6 +499,7 @@ def test_http_frontdoor_api_flow() -> None:
             index = http_text("GET", f"{base}/")
             assert "data-frontdoor-ui=\"output-confirmation\"" in index, "frontdoor UI marker missing"
             assert "POST\", \"/main-agent/submit-request\"" in index, "bridge UI submit action missing"
+            assert "bridge-token" in index, "bridge UI token field missing"
             assert "Typed Classification" not in index, "bridge UI must not expose classification editing"
 
             health = http_json("GET", f"{base}/healthz")
@@ -684,6 +685,23 @@ def test_main_agent_bridge_is_output_confirmation_only() -> None:
         assert "idempotency conflict" in load_payload(conflict)["reason"]
 
         before = json.loads((state_root / "requests" / "req-bridge.json").read_text(encoding="utf-8"))
+        bad_ack = run_frontdoor(
+            state_root,
+            "bridge-ack-output",
+            "--request-id",
+            "req-bridge",
+            "--projection-digest",
+            "sha256:bad",
+            "--frontdoor",
+            "codex",
+            "--chat-session-id",
+            "thread-bridge",
+            check=False,
+        )
+        assert_equal(bad_ack.returncode, 2, "bridge ack digest mismatch exit")
+        assert "projection digest mismatch" in load_payload(bad_ack)["reason"]
+        assert not (state_root / "acks").exists(), "bad ack must not create ack files"
+
         ack = load_payload(
             run_frontdoor(
                 state_root,
@@ -700,6 +718,7 @@ def test_main_agent_bridge_is_output_confirmation_only() -> None:
         )
         after = json.loads((state_root / "requests" / "req-bridge.json").read_text(encoding="utf-8"))
         assert_equal(ack["transition_effect"], "none", "ack transition effect")
+        assert_equal(ack["ack_verified"], True, "ack digest verified")
         assert_equal(before["status"], after["status"], "ack request status unchanged")
         assert not (state_root / "runs").exists(), "ack must not create runs"
 
@@ -781,6 +800,56 @@ def test_bridge_rejects_smuggled_authority_fields_over_http() -> None:
         thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
         try:
+            bridge_headers = channel_headers(server_module, state_root, "bridge")
+            missing_channel = http_json(
+                "POST",
+                f"{base}/main-agent/submit-request",
+                {
+                    "task_id": "TSK-smuggle-missing",
+                    "request_id": "req-smuggle-missing",
+                    "request_kind": "external_review_request",
+                    "prompt": "run it",
+                    "refs": ["organization/runtime/workflows/README.md"],
+                    "idempotency_key": "smuggle-missing-key",
+                },
+            )
+            assert_equal(missing_channel["decision"], "blocked", "bridge missing channel blocked")
+            assert "missing orchestrator channel" in missing_channel["reason"]
+
+            spoofed_principal = http_json(
+                "POST",
+                f"{base}/main-agent/submit-request",
+                {
+                    "task_id": "TSK-smuggle-principal",
+                    "request_id": "req-smuggle-principal",
+                    "request_kind": "external_review_request",
+                    "prompt": "run it",
+                    "refs": ["organization/runtime/workflows/README.md"],
+                    "idempotency_key": "smuggle-principal-key",
+                    "principal_type": "manual_operator",
+                },
+                bridge_headers,
+            )
+            assert_equal(spoofed_principal["decision"], "blocked", "bridge body principal blocked")
+            assert "principal fields are not accepted" in spoofed_principal["reason"]
+            smuggle_events = [
+                event
+                for event in read_audit_events(state_root)
+                if event["event_type"] == "bridge_submit_request"
+                and event["outcome"] == "blocked"
+                and event["details"].get("reason") == "body_principal_fields"
+            ]
+            assert smuggle_events, "authenticated bridge principal smuggling should be audited"
+            assert_equal(
+                smuggle_events[-1]["principal"],
+                {
+                    "principal_type": "main_agent_bridge",
+                    "principal_id": "http-bridge",
+                    "authn_method": "local_http_channel",
+                },
+                "smuggling audit principal",
+            )
+
             payload = http_json(
                 "POST",
                 f"{base}/main-agent/submit-request",
@@ -792,12 +861,117 @@ def test_bridge_rejects_smuggled_authority_fields_over_http() -> None:
                     "refs": ["organization/runtime/workflows/README.md"],
                     "idempotency_key": "smuggle-key",
                     "classification": external_review_classification(),
-                    "principal_type": "manual_operator",
                     "run_id": "run-smuggle",
                 },
+                bridge_headers,
             )
             assert_equal(payload["decision"], "blocked", "bridge smuggling blocked")
             assert "forbidden_fields" in payload["reason"]
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+
+def test_http_bridge_uses_authenticated_principal_and_verified_ack() -> None:
+    server_module = load_server_module()
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        server = server_module.FrontdoorServer(
+            ("127.0.0.1", 0),
+            server_module.Handler,
+            state_root=state_root,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            bridge_headers = channel_headers(server_module, state_root, "bridge")
+            submitted = http_json(
+                "POST",
+                f"{base}/main-agent/submit-request",
+                {
+                    "task_id": "TSK-http-bridge",
+                    "request_id": "req-http-bridge",
+                    "request_kind": "external_review_request",
+                    "prompt": "Run HTTP bridge review",
+                    "refs": ["organization/runtime/workflows/README.md"],
+                    "allowed_paths": ["organization/runtime/workflows"],
+                    "frontdoor": "codex",
+                    "chat_session_id": "claimed-thread",
+                    "idempotency_key": "http-bridge-key",
+                },
+                bridge_headers,
+            )
+            assert_equal(submitted["request_status"], "waiting_human", "http bridge submitted")
+            assert_equal(
+                submitted["safe_for_principal"]["principal_id"],
+                "http-bridge",
+                "http bridge principal id",
+            )
+
+            projection = http_json(
+                "GET",
+                f"{base}/main-agent/projections/req-http-bridge",
+                headers=bridge_headers,
+            )
+            assert_equal(projection["decision"], "ok", "http bridge projection")
+
+            bad_ack = http_json(
+                "POST",
+                f"{base}/main-agent/ack-output",
+                {
+                    "request_id": "req-http-bridge",
+                    "projection_digest": "sha256:bad",
+                    "frontdoor": "codex",
+                    "chat_session_id": "claimed-thread",
+                },
+                bridge_headers,
+            )
+            assert_equal(bad_ack["decision"], "blocked", "http bridge bad ack blocked")
+            assert "projection digest mismatch" in bad_ack["reason"]
+            assert not (state_root / "acks").exists(), "bad http ack must not create ack files"
+
+            ack = http_json(
+                "POST",
+                f"{base}/main-agent/ack-output",
+                {
+                    "request_id": "req-http-bridge",
+                    "projection_digest": projection["projection_digest"],
+                    "frontdoor": "codex",
+                    "chat_session_id": "claimed-thread",
+                },
+                bridge_headers,
+            )
+            assert_equal(ack["decision"], "ok", "http bridge ack")
+            assert_equal(ack["ack_verified"], True, "http bridge ack verified")
+
+            events = read_audit_events(state_root)
+            submit_events = [
+                event
+                for event in events
+                if event["event_type"] == "bridge_submit_request" and event["outcome"] == "ok"
+            ]
+            assert submit_events, "expected bridge submit audit event"
+            submit_event = submit_events[-1]
+            assert_equal(
+                submit_event["principal"],
+                {
+                    "principal_type": "main_agent_bridge",
+                    "principal_id": "http-bridge",
+                    "authn_method": "local_http_channel",
+                },
+                "http bridge audit principal",
+            )
+            assert_equal(
+                submit_event["details"]["requester"],
+                {"frontdoor": "codex", "chat_session_id": "claimed-thread"},
+                "http bridge requester detail",
+            )
+            assert_equal(
+                submit_event["details"]["peer"]["client_address"],
+                "127.0.0.1",
+                "http bridge peer address",
+            )
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -1111,6 +1285,7 @@ def main() -> None:
         test_main_agent_bridge_is_output_confirmation_only,
         test_bridge_idempotent_replay_does_not_reresolve_refs,
         test_bridge_rejects_smuggled_authority_fields_over_http,
+        test_http_bridge_uses_authenticated_principal_and_verified_ack,
         test_context_ref_boundary_blocks_exfiltration_paths,
         test_work_order_revalidates_refs_before_provider_handoff,
         test_bridge_rejects_path_unsafe_ids_and_missing_refs,
