@@ -116,6 +116,30 @@ def read_audit_events(state_root: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def test_channel_token_permissions_are_private() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        token = frontdoor_module.channel_token(state_root, "operator")
+        token_path = frontdoor_module.channel_token_path(state_root, "operator")
+        assert_equal(token_path.stat().st_mode & 0o777, 0o600, "created token mode")
+
+        token_path.chmod(0o644)
+        assert_equal(frontdoor_module.channel_token(state_root, "operator"), token, "existing token")
+        assert_equal(token_path.stat().st_mode & 0o777, 0o600, "tightened token mode")
+
+        token_path.unlink()
+        symlink_target = state_root / "leaked-token"
+        symlink_target.write_text("unsafe\n", encoding="utf-8")
+        token_path.symlink_to(symlink_target)
+        try:
+            frontdoor_module.channel_token(state_root, "operator")
+        except frontdoor_module.FrontdoorError as exc:
+            assert "must not be a symlink" in str(exc)
+        else:
+            raise AssertionError("channel token symlink should be blocked")
+
+
 def test_frontdoor_propose_approve_create_run_and_drain() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -680,6 +704,70 @@ def test_main_agent_bridge_is_output_confirmation_only() -> None:
         assert not (state_root / "runs").exists(), "ack must not create runs"
 
 
+def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        payload = {
+            "task_id": "TSK-replay",
+            "request_id": "req-replay",
+            "request_kind": "external_review_request",
+            "prompt": "Replay existing request",
+            "refs": ["organization/runtime/workflows/deleted-after-persist.md"],
+            "allowed_paths": [],
+            "frontdoor": "codex",
+            "chat_session_id": "thread-replay",
+            "idempotency_key": "replay-key",
+        }
+        digest = frontdoor_module.request_digest(payload)
+        now = frontdoor_module.now_iso()
+        frontdoor_module.write_json(
+            frontdoor_module.request_path(state_root, "req-replay"),
+            {
+                "request_version": "1",
+                "task_id": "TSK-replay",
+                "request_id": "req-replay",
+                "request_kind": "external_review_request",
+                "created_at": now,
+                "updated_at": now,
+                "user_prompt": "Replay existing request",
+                "request_digest": digest,
+                "context_refs": ["organization/runtime/workflows/deleted-after-persist.md"],
+                "allowed_paths": [],
+                "expires_at": "run_terminal",
+                "classification": None,
+                "requester": {"frontdoor": "codex", "chat_session_id": "thread-replay"},
+                "principal": frontdoor_module.redacted_principal(
+                    frontdoor_module.bridge_principal("codex", "thread-replay")
+                ),
+                "status": "waiting_human",
+                "proposal": {
+                    "schema_version": 1,
+                    "decision": "waiting_human",
+                    "request_status": "waiting_human",
+                    "reason": "typed_classification_required_from_non_bridge_principal",
+                    "task_id": "TSK-replay",
+                    "request_id": "req-replay",
+                    "next_action": "ask_human",
+                },
+            },
+        )
+        frontdoor_module.write_json(
+            frontdoor_module.idempotency_path(state_root, "replay-key"),
+            {
+                "idempotency_version": "1",
+                "idempotency_key": "replay-key",
+                "request_id": "req-replay",
+                "request_digest": digest,
+                "created_at": now,
+            },
+        )
+
+        replayed = frontdoor_module.bridge_submit_request(state_root=state_root, payload=payload)
+        assert_equal(replayed["replayed"], True, "idempotent replay")
+        assert_equal(replayed["request_status"], "waiting_human", "replayed request status")
+
+
 def test_bridge_rejects_smuggled_authority_fields_over_http() -> None:
     server_module = load_server_module()
     with tempfile.TemporaryDirectory() as raw_tmp:
@@ -771,6 +859,65 @@ def test_context_ref_boundary_blocks_exfiltration_paths() -> None:
             assert "too many context refs" in str(exc)
         else:
             raise AssertionError("context ref count cap should be enforced")
+
+
+def test_work_order_revalidates_refs_before_provider_handoff() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        ref_path = "organization/runtime/workflows/README.md"
+        approved_refs = frontdoor_module.resolve_context_refs([ref_path])
+        tampered_approved_refs = [{**approved_refs[0], "digest": "sha256:" + "0" * 64}]
+        activation_scope = {
+            "allowed_paths": ["organization/runtime/workflows"],
+            "allowed_ops": {"edit": False, "commit": False, "push": False, "network": False},
+            "step_budget": 1,
+            "expires_at": "run_terminal",
+        }
+        run = {
+            "run_id": "run-refcheck",
+            "task_id": "TSK-refcheck",
+            "request_id": "req-refcheck",
+            "workflow_id": "single_step_external_review",
+            "activation": {
+                "context_scope": {"refs": [ref_path]},
+                "activation_scope": activation_scope,
+            },
+        }
+        request_record = {
+            "task_id": "TSK-refcheck",
+            "request_id": "req-refcheck",
+            "classification": external_review_classification(),
+            "requested_context_refs": [ref_path],
+            "context_refs": [ref_path],
+            "resolved_context_refs": tampered_approved_refs,
+            "approved_activation": {
+                "policy": {},
+                "activation_scope": activation_scope,
+                "context_scope": {"refs": [ref_path]},
+                "workflow_selection": {"workflow_id": "single_step_external_review", "initial_step": "review"},
+            },
+        }
+        step = {
+            "id": "review",
+            "role": "external_reviewer",
+            "assignment_role": "external_reviewer",
+            "output_contract": "external-review-report",
+            "permission_mode": "readonly",
+        }
+        try:
+            frontdoor_module.build_work_order(
+                state_root=state_root,
+                run=run,
+                request_record=request_record,
+                template={},
+                step=step,
+                issuer_principal=frontdoor_module.default_manual_principal(),
+            )
+        except frontdoor_module.FrontdoorError as exc:
+            assert "context refs changed after approval" in str(exc)
+        else:
+            raise AssertionError("changed context ref digest should block work order")
 
 
 def test_bridge_rejects_path_unsafe_ids_and_missing_refs() -> None:
@@ -956,13 +1103,16 @@ def test_bridge_principal_cannot_execute_or_change_workflow_definitions() -> Non
 
 def main() -> None:
     tests = [
+        test_channel_token_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
         test_approval_uses_requested_ref_forms_without_leaking_original_paths,
         test_frontdoor_blocks_unapproved_and_unbounded_requests,
         test_http_frontdoor_api_flow,
         test_main_agent_bridge_is_output_confirmation_only,
+        test_bridge_idempotent_replay_does_not_reresolve_refs,
         test_bridge_rejects_smuggled_authority_fields_over_http,
         test_context_ref_boundary_blocks_exfiltration_paths,
+        test_work_order_revalidates_refs_before_provider_handoff,
         test_bridge_rejects_path_unsafe_ids_and_missing_refs,
         test_bridge_principal_cannot_execute_or_change_workflow_definitions,
     ]

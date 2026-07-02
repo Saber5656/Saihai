@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import sys
@@ -406,13 +407,46 @@ def channel_token_path(state_root: Path, channel: str) -> Path:
     return state_paths(state_root)["channel_tokens"] / f"{channel}.token"
 
 
+def ensure_private_file(path: Path, *, label: str) -> None:
+    if path.is_symlink():
+        raise FrontdoorError(f"{label} must not be a symlink: {path}")
+    mode = path.stat().st_mode & 0o777
+    if mode & 0o077:
+        path.chmod(0o600)
+        mode = path.stat().st_mode & 0o777
+    if mode != 0o600:
+        raise FrontdoorError(f"{label} must have 0600 permissions: {path}")
+
+
+def read_private_file_text(path: Path, *, label: str) -> str:
+    ensure_private_file(path, label=label)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise FrontdoorError(f"{label} cannot be opened safely: {path}") from exc
+    with os.fdopen(fd, "r", encoding="utf-8") as handle:
+        return handle.read().strip()
+
+
 def channel_token(state_root: Path, channel: str) -> str:
     path = channel_token_path(state_root, channel)
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
     if not path.exists():
-        path.write_text(secrets.token_urlsafe(32) + "\n", encoding="utf-8")
-        path.chmod(0o600)
-    return path.read_text(encoding="utf-8").strip()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(secrets.token_urlsafe(32) + "\n")
+    return read_private_file_text(path, label="channel token")
 
 
 def principal_from_authenticated_channel(state_root: Path, channel: str, token: str) -> dict[str, str]:
@@ -567,6 +601,31 @@ def approval_allowed_path_summaries(resolved_paths: list[Any]) -> list[dict[str,
             }
         )
     return summaries
+
+
+def ref_integrity_view(refs: list[Any]) -> list[dict[str, Any]]:
+    view: list[dict[str, Any]] = []
+    for item in refs:
+        if not isinstance(item, dict):
+            continue
+        view.append(
+            {
+                "path": str(item.get("path") or ""),
+                "size_bytes": item.get("size_bytes"),
+                "digest": str(item.get("digest") or ""),
+            }
+        )
+    return view
+
+
+def verified_context_refs_for_work_order(request_record: dict[str, Any]) -> list[dict[str, Any]]:
+    approved_refs = request_record.get("resolved_context_refs")
+    requested_refs = list(request_record.get("requested_context_refs") or request_record.get("context_refs") or [])
+    current_refs = resolve_context_refs(requested_refs) if requested_refs else []
+    if isinstance(approved_refs, list) and approved_refs:
+        if ref_integrity_view(current_refs) != ref_integrity_view(approved_refs):
+            raise FrontdoorError("context refs changed after approval")
+    return current_refs
 
 
 def stable_run_id(request_id: str, workflow_id: str) -> str:
@@ -860,23 +919,6 @@ def bridge_submit_request(
         )
         raise FrontdoorError("invalid bridge submit_request: " + "; ".join(errors))
 
-    try:
-        bounded = bounded_context(
-            list(payload.get("refs") or []),
-            list(payload.get("allowed_paths") or []),
-            require_refs=True,
-        )
-    except FrontdoorError as exc:
-        append_audit_event(
-            state_root=state_root,
-            event_type="bridge_submit_request",
-            principal=principal,
-            subject=subject,
-            outcome="blocked",
-            details={"reason": str(exc)},
-        )
-        raise
-
     digest = request_digest(payload)
     idempotency_key = str(payload["idempotency_key"])
     idempotency_file = idempotency_path(state_root, idempotency_key)
@@ -928,6 +970,23 @@ def bridge_submit_request(
             frontdoor=str(payload.get("frontdoor") or "codex"),
             chat_session_id=str(payload.get("chat_session_id") or ""),
         )
+
+    try:
+        bounded = bounded_context(
+            list(payload.get("refs") or []),
+            list(payload.get("allowed_paths") or []),
+            require_refs=True,
+        )
+    except FrontdoorError as exc:
+        append_audit_event(
+            state_root=state_root,
+            event_type="bridge_submit_request",
+            principal=principal,
+            subject=subject,
+            outcome="blocked",
+            details={"reason": str(exc)},
+        )
+        raise
 
     now = now_iso()
     record = {
@@ -1876,7 +1935,7 @@ def build_work_order(
     issuer_principal: dict[str, Any],
 ) -> dict[str, Any]:
     refs = run["activation"]["context_scope"]["refs"]
-    resolved_refs = request_record.get("resolved_context_refs")
+    resolved_refs = verified_context_refs_for_work_order(request_record)
     if not isinstance(resolved_refs, list) or not resolved_refs:
         resolved_refs = [{"type": "repo_file", "value": ref, "path": ref} for ref in refs]
     step_id = str(step["id"])
