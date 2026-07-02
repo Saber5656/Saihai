@@ -51,8 +51,9 @@ side effects.
    `activation_source = frontdoor_prompt`.
 8. `frontdoor_prompt` can only produce `activation_status = proposed`.
 9. Human UI renders the orchestrator-owned approval summary, challenge id,
-   planned workflow, permission mode, refs digest, denied operations, and rate
-   limit state. It does not render main-agent prose as authority.
+   planned workflow, permission mode, resolved refs, refs digest, denied
+   operations, and rate limit state. It does not render main-agent prose as
+   authority.
 10. Human clicks the explicit start control.
 11. Frontdoor verifies the challenge id and recomputes the activation envelope with
    `activation_source = human_ui`.
@@ -91,11 +92,14 @@ side effects.
 | Provider result is not authoritative by itself | Evidence gate validates typed report and normalized evidence |
 | Harness owns transitions | Provider adapter has `runner_authority = write_report_only` |
 | Audit records authority | Request, approval, execution, replay, ack, and rejection events include principal identity |
+| Principal is channel-bound | HTTP operator/human/harness APIs derive principal from authenticated channel headers, not request body fields |
+| Refs stay inside boundary | Context refs resolve under the repository root, reject symlink escape and denylisted secret/key paths, and enforce count/size caps |
 
 ## Host API Shape
 
-The main-agent UI should call only the bridge APIs. Operator/harness APIs are
-separate and require an explicit non-bridge principal.
+The main-agent UI should call only the bridge APIs. Operator/human/harness APIs
+are separate and derive a non-bridge principal from authenticated channel
+headers.
 The current P0 implementation exposes both a JSON CLI
 (`scripts/configure_organization.py workflow-frontdoor ...`) and a local HTTP
 wrapper (`scripts/configure_organization.py workflow-frontdoor-server ...`).
@@ -104,7 +108,7 @@ Both call the same host-owned frontdoor/harness functions.
 ```text
 POST /main-agent/submit-request
   input: task_id, request_id, request_kind, prompt, refs, idempotency_key
-  forbidden: classification, activation, workflow_selection, run_id, report_path, work_order, adapter_request
+  forbidden: classification, activation, workflow_selection, run_id, report_path, work_order, adapter_request, principal_type
   output: redacted orchestrator projection
 
 GET /main-agent/projections/{request_id}
@@ -115,27 +119,27 @@ POST /main-agent/ack-output
   output: acknowledgement with transition_effect = none
 
 POST /frontdoor/propose
-  input: operator principal, user_prompt, selected_context_refs, typed_classification
+  input: X-Orchestrator-Channel=operator, user_prompt, selected_context_refs, typed_classification
   output: proposed activation envelope or blocked/waiting_human reason
 
 POST /frontdoor/approve
-  input: human/operator principal, request_id, human_action_id
+  input: X-Orchestrator-Channel=human_ui, request_id, human_action_id
   output: approved activation envelope or blocked reason
 
 POST /orchestrator/runs
-  input: operator/harness principal, approved activation envelope
+  input: X-Orchestrator-Channel=operator, approved activation envelope
   output: workflow_run
 
 POST /orchestrator/runs/{run_id}/drain
-  input: operator/harness principal, run_id
+  input: X-Orchestrator-Channel=operator, run_id
   output: updated workflow_run and generated work_orders
 
 POST /provider/claude/prepare
-  input: operator/harness principal, run_id
+  input: X-Orchestrator-Channel=operator, run_id
   output: bounded adapter request, prompt, report path, and evidence paths
 
 POST /provider/reports/validate
-  input: harness principal, run_id, optional report_path
+  input: X-Orchestrator-Channel=harness, run_id, optional report_path
   output: validated workflow_run terminal state or blocked reason
 ```
 

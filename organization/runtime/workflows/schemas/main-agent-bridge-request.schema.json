@@ -91,6 +91,21 @@
         "required": [
           "report_path"
         ]
+      },
+      {
+        "required": [
+          "principal_type"
+        ]
+      },
+      {
+        "required": [
+          "principal_id"
+        ]
+      },
+      {
+        "required": [
+          "authn_method"
+        ]
       }
     ]
   },

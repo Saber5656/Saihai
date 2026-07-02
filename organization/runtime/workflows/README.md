@@ -142,6 +142,13 @@ The bridge rejects classification, workflow selection, approval, run IDs,
 report paths, adapter requests, and workflow-definition data. `ack_output` is a
 pure acknowledgement and has `transition_effect = none`.
 
+Context refs are resolved by the frontdoor before they can be shown in an
+approval view or passed to a work order. Refs must point to existing files under
+the repository root, cannot escape through symlinks, cannot include `.git`,
+`.env*`, credential, secret, token, or key material, and are capped by count and
+file/total byte limits. Approval summaries render the resolved repository
+relative path, size, and digest.
+
 ## Frontdoor HTTP API
 
 The same host-owned operations are exposed as a local JSON API for an Agent UI:
@@ -160,12 +167,23 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
 | `POST /main-agent/submit-request` | Restricted bridge submit; no classification or execution fields |
 | `GET /main-agent/projections/{request_id}` | Redacted typed projection for main-agent rendering |
 | `POST /main-agent/ack-output` | No-op acknowledgement; no state transition |
-| `POST /frontdoor/propose` | Operator path for `workflow-frontdoor propose`; requires `principal_type` |
-| `POST /frontdoor/approve` | Operator path for `workflow-frontdoor approve`; requires `principal_type` and challenge id |
-| `POST /orchestrator/runs` | Operator/harness path for `workflow-frontdoor create-run`; requires `principal_type` |
-| `POST /orchestrator/runs/{run_id}/drain` | Operator/harness path for `workflow-frontdoor drain`; requires `principal_type` |
-| `POST /provider/claude/prepare` | Operator/harness path for `workflow-frontdoor prepare-claude-adapter`; requires `principal_type` |
-| `POST /provider/reports/validate` | Harness gate path for `workflow-frontdoor validate-report`; requires `principal_type` |
+| `POST /frontdoor/propose` | Operator path for `workflow-frontdoor propose`; derives principal from authenticated `operator` channel headers |
+| `POST /frontdoor/approve` | Human UI path for `workflow-frontdoor approve`; derives principal from authenticated `human_ui` channel headers and challenge id |
+| `POST /orchestrator/runs` | Operator path for `workflow-frontdoor create-run`; derives principal from authenticated `operator` channel headers |
+| `POST /orchestrator/runs/{run_id}/drain` | Operator path for `workflow-frontdoor drain`; derives principal from authenticated `operator` channel headers |
+| `POST /provider/claude/prepare` | Operator path for `workflow-frontdoor prepare-claude-adapter`; derives principal from authenticated `operator` channel headers |
+| `POST /provider/reports/validate` | Harness gate path for `workflow-frontdoor validate-report`; derives principal from authenticated `harness` channel headers |
+
+Generate a local channel token with:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state channel-token \
+  --channel operator
+```
+
+Send the returned token in `X-Orchestrator-Token` with
+`X-Orchestrator-Channel: operator`, `human_ui`, or `harness`. The HTTP server
+rejects `principal_type`, `principal_id`, and `authn_method` in request bodies.
 
 ## P0 Non-Scope
 
