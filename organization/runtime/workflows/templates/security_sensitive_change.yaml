@@ -1,0 +1,253 @@
+{
+  "workflow_template_version": "1",
+  "workflow_id": "security_sensitive_change",
+  "lifecycle_status": "active",
+  "purpose": "Handle security-sensitive implementation or policy work with threat/risk evidence, security review, and optional publication-gate evidence when publication is required.",
+  "safety_class": "security",
+  "publication_gate": {
+    "supported": true,
+    "required_by_default": false,
+    "required_when": "classification.publication_required == true or classification.task_kind == 'publication'"
+  },
+  "gates": {
+    "entry": [
+      "entry.activation_approved",
+      "entry.work_order_valid"
+    ],
+    "exit": [
+      "exit.typed_report_valid",
+      "exit.code_change_evidence_complete",
+      "exit.security_review_complete",
+      "exit.publication_result_recorded",
+      "exit.final_evidence_complete"
+    ]
+  },
+  "mandatory_gates": [
+    "entry.activation_approved",
+    "entry.work_order_valid",
+    "exit.typed_report_valid",
+    "exit.code_change_evidence_complete",
+    "exit.security_review_complete",
+    "exit.final_evidence_complete"
+  ],
+  "initial_step": "security_review",
+  "max_steps": 5,
+  "scheduler": {
+    "mode": "invocation-drain",
+    "state_persistence": "durable_state",
+    "lock_policy": "global_advisory_lock",
+    "concurrency": 1
+  },
+  "result_authority": {
+    "canonical": [
+      "typed_report_file",
+      "normalized_provider_evidence_file"
+    ],
+    "signals_only": [
+      "stdout",
+      "tmux_pane_output",
+      "provider_transcript"
+    ]
+  },
+  "context_sharing": {
+    "shared_run_state": "typed_durable_state",
+    "step_local_snapshot": "immutable_step_attempt_snapshot",
+    "provider_transcript": "confined_evidence_path_only"
+  },
+  "provider_adapter": {
+    "capability_schema": "organization/runtime/workflows/schemas/provider-adapter-capability.schema.json",
+    "allowed_transports": [
+      "headless_cli",
+      "tmux_interactive",
+      "codex_exec"
+    ],
+    "default_transport": "codex_exec"
+  },
+  "output_contracts": {
+    "security_review_report": {
+      "schema_path": "organization/runtime/workflows/schemas/security-review-report.schema.json",
+      "required": true,
+      "canonical": true
+    },
+    "code_change_report": {
+      "schema_path": "organization/runtime/workflows/schemas/code-change-report.schema.json",
+      "required": true,
+      "canonical": true
+    },
+    "publication_result": {
+      "schema_path": "organization/runtime/workflows/schemas/publication-result.schema.json",
+      "required": false,
+      "canonical": true
+    }
+  },
+  "steps": [
+    {
+      "id": "security_review",
+      "role": "tech-security",
+      "assignment_role": "reviewer",
+      "permission_mode": "readonly",
+      "provider_route": {
+        "adapter_kind": "bounded_provider",
+        "runner_authority": "write_report_only",
+        "transition_authority": "harness_engine"
+      },
+      "input_contract": "work_order",
+      "output_contract": "security_review_report",
+      "context_scope": {
+        "allowed_modes": [
+          "refs_only",
+          "selected_snapshot",
+          "diff_summary"
+        ],
+        "raw_transcript_sharing": "forbidden",
+        "promotion_rule": "typed_report_refs_only"
+      },
+      "quality_gates": [
+        {
+          "gate": "threat_risk_gate",
+          "requires": "threat_risk_evidence"
+        }
+      ],
+      "transitions": [
+        {
+          "on": "security_scope_defined",
+          "to": "implement"
+        },
+        {
+          "on": "security_scope_blocked",
+          "to": "waiting_human",
+          "reason_class": "security_scope_blocked"
+        }
+      ]
+    },
+    {
+      "id": "implement",
+      "role": "tech-backend",
+      "assignment_role": "implementer",
+      "permission_mode": "edit",
+      "provider_route": {
+        "adapter_kind": "bounded_provider",
+        "runner_authority": "allowed_paths_only",
+        "transition_authority": "harness_engine"
+      },
+      "input_contract": "work_order",
+      "output_contract": "code_change_report",
+      "quality_gates": [
+        {
+          "gate": "diff_scope_gate",
+          "requires": "code_diff"
+        }
+      ],
+      "transitions": [
+        {
+          "on": "implementation_complete",
+          "to": "qa"
+        },
+        {
+          "on": "scope_violation",
+          "to": "waiting_human",
+          "reason_class": "scope_violation"
+        }
+      ]
+    },
+    {
+      "id": "qa",
+      "role": "tech-tester",
+      "assignment_role": "qa",
+      "permission_mode": "readonly",
+      "provider_route": {
+        "adapter_kind": "bounded_provider",
+        "runner_authority": "write_report_only",
+        "transition_authority": "harness_engine"
+      },
+      "input_contract": "work_order",
+      "output_contract": "code_change_report",
+      "quality_gates": [
+        {
+          "gate": "validation_gate",
+          "requires": "validation"
+        }
+      ],
+      "transitions": [
+        {
+          "on": "qa_complete",
+          "to": "final_security_review"
+        }
+      ]
+    },
+    {
+      "id": "final_security_review",
+      "role": "tech-security",
+      "assignment_role": "reviewer",
+      "permission_mode": "readonly",
+      "provider_route": {
+        "adapter_kind": "bounded_provider",
+        "runner_authority": "write_report_only",
+        "transition_authority": "harness_engine"
+      },
+      "input_contract": "work_order",
+      "output_contract": "security_review_report",
+      "quality_gates": [
+        {
+          "gate": "security_review_gate",
+          "requires": "security_review"
+        },
+        {
+          "gate": "residual_risk_gate",
+          "requires": "residual_risk"
+        }
+      ],
+      "transitions": [
+        {
+          "on": "security_review_complete",
+          "to": "final_evidence"
+        },
+        {
+          "on": "security_review_blocked",
+          "to": "blocked",
+          "reason_class": "security_review_blocked"
+        }
+      ]
+    },
+    {
+      "id": "final_evidence",
+      "role": "gate-task-evaluator",
+      "assignment_role": "reviewer",
+      "permission_mode": "readonly",
+      "provider_route": {
+        "adapter_kind": "harness_gate",
+        "runner_authority": "validate_evidence_only",
+        "transition_authority": "harness_engine"
+      },
+      "input_contract": "work_order",
+      "output_contract": "code_change_report",
+      "quality_gates": [
+        {
+          "gate": "final_evidence_gate",
+          "requires": "final_evidence"
+        },
+        {
+          "gate": "conditional_publication_gate",
+          "requires": "publication_result_when_required"
+        }
+      ],
+      "transitions": [
+        {
+          "on": "final_evidence_valid",
+          "to": "complete"
+        },
+        {
+          "on": "final_evidence_invalid",
+          "to": "blocked",
+          "reason_class": "missing_final_evidence"
+        }
+      ]
+    }
+  ],
+  "terminal_states": [
+    "complete",
+    "blocked",
+    "waiting_human",
+    "aborted"
+  ]
+}

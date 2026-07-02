@@ -140,6 +140,33 @@
               "items": {
                 "type": "string"
               }
+            },
+            "safety_class": {
+              "type": "string",
+              "enum": [
+                "readonly",
+                "standard",
+                "policy",
+                "security"
+              ]
+            },
+            "required_safety_class": {
+              "type": "string",
+              "enum": [
+                "readonly",
+                "standard",
+                "policy",
+                "security"
+              ]
+            },
+            "publication_gate_required": {
+              "type": "boolean"
+            },
+            "required_gates": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           },
           "additionalProperties": false
@@ -199,22 +226,23 @@
               ],
               "properties": {
                 "edit": {
-                  "const": false
+                  "type": "boolean"
                 },
                 "commit": {
-                  "const": false
+                  "type": "boolean"
                 },
                 "push": {
-                  "const": false
+                  "type": "boolean"
                 },
                 "network": {
-                  "const": false
+                  "type": "boolean"
                 }
               },
               "additionalProperties": false
             },
             "step_budget": {
-              "const": 1
+              "type": "integer",
+              "minimum": 1
             },
             "expires_at": {
               "type": "string"

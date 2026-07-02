@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/workflows/policy-change-report.schema.json",
+  "title": "Policy Or Permission Change Report",
+  "type": "object",
+  "required": [
+    "report_version",
+    "workflow_id",
+    "human_approval",
+    "policy_diff",
+    "result",
+    "evidence_refs"
+  ],
+  "properties": {
+    "report_version": {
+      "const": "1"
+    },
+    "workflow_id": {
+      "const": "policy_or_permission_change"
+    },
+    "human_approval": {
+      "type": "object",
+      "required": [
+        "approved_before_mutation",
+        "source"
+      ],
+      "properties": {
+        "approved_before_mutation": {
+          "const": true
+        },
+        "source": {
+          "const": "human"
+        }
+      },
+      "additionalProperties": false
+    },
+    "policy_diff": {
+      "type": "object"
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "blocked"
+      ]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}
