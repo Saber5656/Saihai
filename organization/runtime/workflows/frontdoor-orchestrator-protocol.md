@@ -92,14 +92,14 @@ side effects.
 | Provider result is not authoritative by itself | Evidence gate validates typed report and normalized evidence |
 | Harness owns transitions | Provider adapter has `runner_authority = write_report_only` |
 | Audit records authority | Request, approval, execution, replay, ack, and rejection events include principal identity |
-| Principal is channel-bound | HTTP operator/human/harness APIs derive principal from authenticated channel headers, not request body fields |
+| Principal is channel-bound | HTTP bridge/operator/human/harness APIs derive principal from authenticated channel headers, not request body fields |
 | Refs stay inside boundary | Context refs resolve under the repository root, reject symlink escape and denylisted secret/key paths, and enforce count/size caps |
 
 ## Host API Shape
 
-The main-agent UI should call only the bridge APIs. Operator/human/harness APIs
-are separate and derive a non-bridge principal from authenticated channel
-headers.
+The main-agent UI should call only the bridge APIs. Bridge/operator/human/harness
+APIs derive principal from authenticated channel headers. Requester fields such
+as `frontdoor` and `chat_session_id` are retained as metadata, not authority.
 The current P0 implementation exposes both a JSON CLI
 (`scripts/configure_organization.py workflow-frontdoor ...`) and a local HTTP
 wrapper (`scripts/configure_organization.py workflow-frontdoor-server ...`).
@@ -107,15 +107,16 @@ Both call the same host-owned frontdoor/harness functions.
 
 ```text
 POST /main-agent/submit-request
-  input: task_id, request_id, request_kind, prompt, refs, idempotency_key
+  input: X-Orchestrator-Channel=bridge, task_id, request_id, request_kind, prompt, refs, idempotency_key
   forbidden: classification, activation, workflow_selection, run_id, report_path, work_order, adapter_request, principal_type
   output: redacted orchestrator projection
 
 GET /main-agent/projections/{request_id}
+  input: X-Orchestrator-Channel=bridge
   output: redacted typed projection for main-agent rendering
 
 POST /main-agent/ack-output
-  input: request_id, projection_digest
+  input: X-Orchestrator-Channel=bridge, request_id, projection_digest
   output: acknowledgement with transition_effect = none
 
 POST /frontdoor/propose
@@ -161,6 +162,10 @@ classification, run id, report path, or workflow definition as authority. On
 approval, the frontdoor reloads the stored request, verifies the
 orchestrator-owned challenge, recomputes selection, verifies context refs, and
 then stamps `approved_by = human_ui_action`.
+
+Bridge output acknowledgement verifies `projection_digest` against the current
+redacted projection before writing an ack record. A mismatch is blocked and
+records only an audit event with `ack_verified = false`.
 
 Raw request/run HTTP reads are not exposed to principal-less main-agent reads.
 The bridge projection is the supported main-agent read surface.
