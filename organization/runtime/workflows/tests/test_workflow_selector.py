@@ -501,6 +501,33 @@ def test_work_order_schema_constrains_single_step_external_review() -> None:
     for op in ("edit", "commit", "push", "network"):
         fragment = f'"{op}": {{"const": false}}'
         assert fragment in conditional, f"missing work order op constraint {fragment}"
+    readonly_conditions = [
+        item
+        for item in work_order_schema["allOf"]
+        if (
+            item.get("if", {})
+            .get("properties", {})
+            .get("permission_mode", {})
+            .get("const")
+            == "readonly"
+        )
+    ]
+    assert_equal(len(readonly_conditions), 1, "readonly work order op condition")
+    readonly_ops = readonly_conditions[0]["then"]["properties"]["activation_scope"][
+        "properties"
+    ]["allowed_ops"]["properties"]
+    for op in ("edit", "commit", "push", "network"):
+        assert_equal(
+            readonly_ops[op]["const"],
+            False,
+            f"readonly work order {op} constraint",
+        )
+    readonly_branches = [
+        branch
+        for branch in work_order_schema["allOf"][0]["then"]["anyOf"]
+        if branch["properties"]["permission_mode"]["const"] == "readonly"
+    ]
+    assert readonly_branches, "work order has readonly branches"
     for fragment in (
         '"workflow_id": {"const": "publication_required"}',
         '"step_id": {"const": "publication_gate"}',

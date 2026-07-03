@@ -912,6 +912,32 @@ def validate_contracts() -> dict[str, Any]:
     for op in ("edit", "commit", "push", "network"):
         if f'"{op}": {{"const": false}}' not in work_order_condition:
             errors.append(f"work order must keep {op}=false for P0 single_step_external_review")
+    readonly_conditions = [
+        item
+        for item in work_order_schema.get("allOf", [])
+        if (
+            item.get("if", {})
+            .get("properties", {})
+            .get("permission_mode", {})
+            .get("const")
+            == "readonly"
+        )
+    ]
+    if not readonly_conditions:
+        errors.append("work order must pin allowed_ops=false for readonly permission_mode")
+    else:
+        readonly_ops = (
+            readonly_conditions[0]
+            .get("then", {})
+            .get("properties", {})
+            .get("activation_scope", {})
+            .get("properties", {})
+            .get("allowed_ops", {})
+            .get("properties", {})
+        )
+        for op in ("edit", "commit", "push", "network"):
+            if readonly_ops.get(op, {}).get("const") is not False:
+                errors.append(f"work order readonly permission_mode must keep {op}=false")
     if '"publisher"' not in json.dumps(work_order_schema, sort_keys=True):
         errors.append("work order must allow publisher assignment role")
     for workflow_id, fragment in template_step_constraint_fragments(registry):
