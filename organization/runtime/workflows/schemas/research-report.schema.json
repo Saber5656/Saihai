@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/workflows/research-report.schema.json",
+  "title": "Research Only Report",
+  "type": "object",
+  "required": [
+    "report_version",
+    "workflow_id",
+    "result",
+    "source_refs",
+    "findings",
+    "uncertainty",
+    "no_diff_completion"
+  ],
+  "properties": {
+    "report_version": {
+      "const": "1"
+    },
+    "workflow_id": {
+      "const": "research_only"
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "findings",
+        "blocked"
+      ]
+    },
+    "source_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    },
+    "findings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "summary",
+          "evidence_refs"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "evidence_refs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "uncertainty": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "no_diff_completion": {
+      "const": true
+    }
+  },
+  "additionalProperties": false
+}

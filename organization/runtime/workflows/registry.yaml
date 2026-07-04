@@ -10,6 +10,89 @@
       "manual_cli"
     ]
   },
+  "safety_classes": [
+    {
+      "safety_class": "readonly",
+      "rank": 0,
+      "description": "Read-only analysis, review, or research. No file mutation."
+    },
+    {
+      "safety_class": "standard",
+      "rank": 1,
+      "description": "Bounded file edits without policy, permission, or security-sensitive escalation."
+    },
+    {
+      "safety_class": "policy",
+      "rank": 2,
+      "description": "Policy, permission, approval, hook, or governance-impacting changes."
+    },
+    {
+      "safety_class": "security",
+      "rank": 3,
+      "description": "Security-sensitive work requiring explicit threat/risk evidence and security review."
+    }
+  ],
+  "gate_profiles": [
+    {
+      "gate_id": "entry.activation_approved",
+      "phase": "entry",
+      "owner": "harness",
+      "description": "A prompt can only enter execution after explicit activation approval."
+    },
+    {
+      "gate_id": "entry.work_order_valid",
+      "phase": "entry",
+      "owner": "harness",
+      "description": "The selected workflow step receives a bounded typed work order."
+    },
+    {
+      "gate_id": "exit.typed_report_valid",
+      "phase": "exit",
+      "owner": "harness",
+      "description": "Provider or worker output is accepted only through a typed report schema."
+    },
+    {
+      "gate_id": "exit.research_evidence_complete",
+      "phase": "exit",
+      "owner": "harness",
+      "description": "Research work must include source refs, findings, uncertainty, and no-diff completion."
+    },
+    {
+      "gate_id": "exit.code_change_evidence_complete",
+      "phase": "exit",
+      "owner": "harness",
+      "description": "Code work must include scoped diff, review, validation, and evidence refs."
+    },
+    {
+      "gate_id": "exit.final_evidence_complete",
+      "phase": "exit",
+      "owner": "gate-task-evaluator",
+      "description": "Final evidence must close requirements, validation, and Vault update expectations."
+    },
+    {
+      "gate_id": "exit.publication_result_recorded",
+      "phase": "exit",
+      "owner": "git-publisher",
+      "description": "Commit, push, or PR publication requires explicit human approval and result evidence."
+    },
+    {
+      "gate_id": "exit.policy_approval_recorded",
+      "phase": "exit",
+      "owner": "gate-task-evaluator",
+      "description": "Policy or permission mutation requires human approval evidence before mutation."
+    },
+    {
+      "gate_id": "exit.security_review_complete",
+      "phase": "exit",
+      "owner": "tech-security",
+      "description": "Security-sensitive work requires threat/risk evidence, review verdict, and residual risk."
+    }
+  ],
+  "mandatory_gate_profiles": [
+    "entry.activation_approved",
+    "entry.work_order_valid",
+    "exit.typed_report_valid"
+  ],
   "templates": [
     {
       "workflow_id": "single_step_external_review",
@@ -17,33 +100,48 @@
       "status": "active",
       "initial_step": "review",
       "max_steps": 1
-    }
-  ],
-  "planned_templates": [
-    {
-      "workflow_id": "standard_code_change",
-      "status": "planned_after_p0"
     },
     {
       "workflow_id": "research_only",
-      "status": "planned_after_p0"
+      "path": "organization/runtime/workflows/templates/research_only.yaml",
+      "status": "active",
+      "initial_step": "research",
+      "max_steps": 1
+    },
+    {
+      "workflow_id": "standard_code_change",
+      "path": "organization/runtime/workflows/templates/standard_code_change.yaml",
+      "status": "active",
+      "initial_step": "implement",
+      "max_steps": 4
     },
     {
       "workflow_id": "publication_required",
-      "status": "planned_after_p0"
+      "path": "organization/runtime/workflows/templates/publication_required.yaml",
+      "status": "active",
+      "initial_step": "implement",
+      "max_steps": 5
     },
     {
       "workflow_id": "policy_or_permission_change",
-      "status": "planned_after_p0"
+      "path": "organization/runtime/workflows/templates/policy_or_permission_change.yaml",
+      "status": "active",
+      "initial_step": "policy_review",
+      "max_steps": 3
     },
     {
       "workflow_id": "security_sensitive_change",
-      "status": "planned_after_p0"
+      "path": "organization/runtime/workflows/templates/security_sensitive_change.yaml",
+      "status": "active",
+      "initial_step": "security_review",
+      "max_steps": 7
     }
   ],
+  "planned_templates": [],
   "selector_rules": [
     {
       "rule_id": "external_review_readonly",
+      "precedence": 10,
       "when": {
         "task_kind": "external_review",
         "permission_required": "readonly"
@@ -52,33 +150,55 @@
       "status": "selected"
     },
     {
+      "rule_id": "security_sensitive",
+      "precedence": 20,
+      "when": {
+        "security_sensitive": true
+      },
+      "workflow_id": "security_sensitive_change",
+      "status": "selected"
+    },
+    {
+      "rule_id": "policy_or_permission_change",
+      "precedence": 30,
+      "when": {
+        "task_kind": "policy_change"
+      },
+      "workflow_id": "policy_or_permission_change",
+      "status": "selected"
+    },
+    {
+      "rule_id": "publication_required",
+      "precedence": 40,
+      "when_any": [
+        {
+          "task_kind": "publication"
+        },
+        {
+          "publication_required": true
+        }
+      ],
+      "workflow_id": "publication_required",
+      "status": "selected"
+    },
+    {
       "rule_id": "code_change_without_publication",
+      "precedence": 50,
       "when": {
         "task_kind": "code_change",
         "publication_required": false
       },
       "workflow_id": "standard_code_change",
-      "status": "waiting_human",
-      "reason": "planned_template_not_installed_in_p0"
-    },
-    {
-      "rule_id": "code_change_with_publication",
-      "when": {
-        "task_kind": "code_change",
-        "publication_required": true
-      },
-      "workflow_id": "publication_required",
-      "status": "waiting_human",
-      "reason": "separate_publication_gate_required"
+      "status": "selected"
     },
     {
       "rule_id": "research_only",
+      "precedence": 60,
       "when": {
         "task_kind": "research"
       },
       "workflow_id": "research_only",
-      "status": "waiting_human",
-      "reason": "planned_template_not_installed_in_p0"
+      "status": "selected"
     }
   ],
   "p0_scheduler_policy": {

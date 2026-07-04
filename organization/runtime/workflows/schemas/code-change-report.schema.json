@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-teams-viewer.local/schemas/workflows/code-change-report.schema.json",
+  "title": "Code Change Report",
+  "type": "object",
+  "required": [
+    "report_version",
+    "workflow_id",
+    "result",
+    "code_diff",
+    "review",
+    "validation",
+    "final_evidence"
+  ],
+  "properties": {
+    "report_version": {
+      "const": "1"
+    },
+    "workflow_id": {
+      "type": "string",
+      "enum": [
+        "standard_code_change",
+        "publication_required",
+        "security_sensitive_change"
+      ]
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "blocked"
+      ]
+    },
+    "code_diff": {
+      "type": "object",
+      "required": [
+        "paths",
+        "summary"
+      ],
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "review": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "approved",
+            "changes_requested",
+            "blocked"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "validation": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "not_run"
+          ]
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "final_evidence": {
+      "type": "object",
+      "required": [
+        "refs"
+      ],
+      "properties": {
+        "refs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "result": {
+            "const": "complete"
+          }
+        },
+        "required": [
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "review": {
+            "required": [
+              "status",
+              "evidence_refs"
+            ]
+          },
+          "validation": {
+            "required": [
+              "status",
+              "evidence_refs"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
