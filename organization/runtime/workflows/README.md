@@ -1,6 +1,6 @@
-# Orchestrator P0 Workflow Contracts
+# Orchestrator Workflow Contracts
 
-This directory is the P0 contract surface for the typed agent orchestrator.
+This directory is the contract surface for the typed agent orchestrator.
 It defines process data only. It does not run Claude, Codex, tmux, a daemon, or
 any provider.
 
@@ -8,8 +8,13 @@ any provider.
 
 | File | Purpose |
 |---|---|
-| `registry.yaml` | Active workflow registry, deterministic selector policy, P0 scheduler policy |
-| `templates/single_step_external_review.yaml` | Initial single-step readonly external review workflow |
+| `registry.yaml` | Active workflow registry, common gate profiles, safety classes, deterministic selector policy, scheduler policy |
+| `templates/single_step_external_review.yaml` | Single-step readonly external review workflow |
+| `templates/research_only.yaml` | No-diff research/design/source-review workflow |
+| `templates/standard_code_change.yaml` | Bounded code-change workflow without publication |
+| `templates/publication_required.yaml` | Code-change workflow with explicit publication gate |
+| `templates/policy_or_permission_change.yaml` | Policy, permission, hook, or governance-impacting workflow |
+| `templates/security_sensitive_change.yaml` | Security-sensitive workflow with required security review and optional publication gate |
 | `schemas/typed-classification.schema.json` | Required fields an LLM or human may propose before deterministic selection |
 | `schemas/activation-envelope.schema.json` | Gate envelope for draft/proposed/approved/blocked activation state |
 | `schemas/workflow-run.schema.json` | Durable per-task workflow run state contract |
@@ -18,7 +23,12 @@ any provider.
 | `schemas/orchestrator-projection.schema.json` | Redacted output projection safe for main-agent rendering |
 | `schemas/audit-event.schema.json` | Append-only principal/provenance event contract |
 | `schemas/provider-adapter-capability.schema.json` | Adapter capability descriptor, including future `tmux_interactive` transport |
-| `schemas/external-review-report.schema.json` | Authoritative typed report for the P0 workflow |
+| `schemas/external-review-report.schema.json` | Authoritative typed report for external review |
+| `schemas/research-report.schema.json` | Authoritative typed report for research-only work |
+| `schemas/code-change-report.schema.json` | Authoritative typed report for code-change work |
+| `schemas/publication-result.schema.json` | Publication gate result schema |
+| `schemas/policy-change-report.schema.json` | Policy or permission change evidence schema |
+| `schemas/security-review-report.schema.json` | Security-sensitive review evidence schema |
 | `scripts/workflow_selector.py` | Deterministic selector and activation-envelope helper |
 | `scripts/frontdoor_orchestrator.py` | Host-owned frontdoor and invocation-drain P0 harness |
 | `scripts/frontdoor_server.py` | Local HTTP wrapper for Agent UI integration |
@@ -41,8 +51,22 @@ existing runtime config convention in `organization/runtime/infra-team-bootstrap
 | Audit is append-only | Frontdoor, bridge, approval, execution, replay, and rejection decisions write principal-scoped audit events. |
 | Agent output is not authoritative | `typed_report_file` and normalized evidence are canonical. stdout, tmux pane output, and provider transcript are signals only. |
 | Context sharing is typed | Shared run state is durable typed state; step snapshots are immutable; provider transcripts remain confined evidence paths. |
-| Scheduler is bounded | P0 policy is invocation-drain, durable state, global advisory lock, concurrency 1. |
+| Common gates are centralized | `registry.yaml` defines reusable `entry.*` and `exit.*` gate profiles; templates reference them by id. |
+| Safety class cannot downgrade | Selector validation rejects routing `policy` or `security` classifications into weaker templates. |
+| Publication is a separate axis | Publication is represented by `publication_gate` and `exit.publication_result_recorded`, not by duplicating every workflow. |
+| Scheduler is bounded | Policy is invocation-drain, durable state, global advisory lock, concurrency 1. |
 | Provider is an adapter | `headless_cli` is the default transport. `tmux_interactive` is modeled but not implemented. |
+
+## Active Template Routes
+
+| Classification | Selected workflow | Notes |
+|---|---|---|
+| `external_review` + `readonly` | `single_step_external_review` | Keeps the existing one-step external review route. |
+| `research` | `research_only` | Read-only, no-diff research and decision support. |
+| `code_change` without publication | `standard_code_change` | Bounded edits, review, QA, and final evidence. |
+| `code_change` with publication or `publication` | `publication_required` | Adds explicit publication result evidence. |
+| `policy_change` | `policy_or_permission_change` | Requires policy approval evidence before mutation. |
+| `security_sensitive: true` | `security_sensitive_change` | Requires security review; publication gate is required only when publication is requested. |
 
 ## Selector CLI
 
@@ -188,7 +212,7 @@ server rejects `principal_type`, `principal_id`, and `authn_method` in request
 bodies. Bridge audit events use the authenticated `bridge` channel principal and
 record requester / peer metadata only as non-authoritative details.
 
-## P0 Non-Scope
+## Non-Scope
 
 | Non-scope | Reason |
 |---|---|

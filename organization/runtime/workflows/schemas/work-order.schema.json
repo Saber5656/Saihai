@@ -62,7 +62,8 @@
         "reviewer",
         "qa",
         "approver",
-        "observer"
+        "observer",
+        "publisher"
       ]
     },
     "instruction": {
@@ -260,51 +261,261 @@
   "allOf": [
     {
       "if": {
+        "required": [
+          "workflow_id",
+          "step_id"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "workflow_id": { "const": "single_step_external_review" },
+              "step_id": { "const": "review" },
+              "assignment_role": { "const": "reviewer" },
+              "expected_output": { "const": "external_review_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": true },
+              "activation_scope": {
+                "properties": {
+                  "step_budget": { "const": 1 },
+                  "allowed_ops": {
+                    "properties": {
+                      "edit": { "const": false },
+                      "commit": { "const": false },
+                      "push": { "const": false },
+                      "network": { "const": false }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "research_only" },
+              "step_id": { "const": "research" },
+              "assignment_role": { "const": "observer" },
+              "expected_output": { "const": "research_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "standard_code_change" },
+              "step_id": { "const": "implement" },
+              "assignment_role": { "const": "implementer" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "edit" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "standard_code_change" },
+              "step_id": { "const": "review" },
+              "assignment_role": { "const": "reviewer" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "standard_code_change" },
+              "step_id": { "const": "qa" },
+              "assignment_role": { "const": "qa" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "standard_code_change" },
+              "step_id": { "const": "final_evidence" },
+              "assignment_role": { "const": "reviewer" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "publication_required" },
+              "step_id": { "const": "implement" },
+              "assignment_role": { "const": "implementer" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "edit" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "publication_required" },
+              "step_id": { "const": "review" },
+              "assignment_role": { "const": "reviewer" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "publication_required" },
+              "step_id": { "const": "qa" },
+              "assignment_role": { "const": "qa" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "publication_required" },
+              "step_id": { "const": "publication_gate" },
+              "assignment_role": { "const": "publisher" },
+              "expected_output": { "const": "publication_result" },
+              "permission_mode": { "const": "full" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "publication_required" },
+              "step_id": { "const": "final_evidence" },
+              "assignment_role": { "const": "reviewer" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "policy_or_permission_change" },
+              "step_id": { "const": "policy_review" },
+              "assignment_role": { "const": "reviewer" },
+              "expected_output": { "const": "policy_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "policy_or_permission_change" },
+              "step_id": { "const": "apply_policy_change" },
+              "assignment_role": { "const": "implementer" },
+              "expected_output": { "const": "policy_change_report" },
+              "permission_mode": { "const": "edit" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "policy_or_permission_change" },
+              "step_id": { "const": "final_evidence" },
+              "assignment_role": { "const": "reviewer" },
+              "expected_output": { "const": "policy_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "security_sensitive_change" },
+              "step_id": { "const": "security_review" },
+              "assignment_role": { "const": "reviewer" },
+              "expected_output": { "const": "security_review_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "security_sensitive_change" },
+              "step_id": { "const": "policy_review" },
+              "assignment_role": { "const": "approver" },
+              "expected_output": { "const": "policy_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "security_sensitive_change" },
+              "step_id": { "const": "implement" },
+              "assignment_role": { "const": "implementer" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "edit" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "security_sensitive_change" },
+              "step_id": { "const": "qa" },
+              "assignment_role": { "const": "qa" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "security_sensitive_change" },
+              "step_id": { "const": "final_security_review" },
+              "assignment_role": { "const": "reviewer" },
+              "expected_output": { "const": "security_review_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "security_sensitive_change" },
+              "step_id": { "const": "publication_gate" },
+              "assignment_role": { "const": "publisher" },
+              "expected_output": { "const": "publication_result" },
+              "permission_mode": { "const": "full" },
+              "external_provider_allowed": { "const": false }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": { "const": "security_sensitive_change" },
+              "step_id": { "const": "final_evidence" },
+              "assignment_role": { "const": "reviewer" },
+              "expected_output": { "const": "code_change_report" },
+              "permission_mode": { "const": "readonly" },
+              "external_provider_allowed": { "const": false }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
         "properties": {
-          "workflow_id": {
-            "const": "single_step_external_review"
+          "permission_mode": {
+            "const": "readonly"
           }
         },
         "required": [
-          "workflow_id"
+          "permission_mode",
+          "activation_scope"
         ]
       },
       "then": {
         "properties": {
-          "step_id": {
-            "const": "review"
-          },
-          "assignment_role": {
-            "const": "reviewer"
-          },
-          "expected_output": {
-            "const": "external_review_report"
-          },
-          "permission_mode": {
-            "const": "readonly"
-          },
-          "external_provider_allowed": {
-            "const": true
-          },
           "activation_scope": {
             "properties": {
-              "step_budget": {
-                "const": 1
-              },
               "allowed_ops": {
                 "properties": {
-                  "edit": {
-                    "const": false
-                  },
-                  "commit": {
-                    "const": false
-                  },
-                  "push": {
-                    "const": false
-                  },
-                  "network": {
-                    "const": false
-                  }
+                  "edit": { "const": false },
+                  "commit": { "const": false },
+                  "push": { "const": false },
+                  "network": { "const": false }
                 }
               }
             }

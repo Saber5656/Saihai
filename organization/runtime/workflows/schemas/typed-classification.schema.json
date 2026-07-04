@@ -71,7 +71,13 @@
           "validation_result",
           "vault_update",
           "workflow_run",
-          "work_order"
+          "work_order",
+          "research_report",
+          "code_change_report",
+          "publication_result",
+          "policy_change_report",
+          "security_review_report",
+          "final_evidence"
         ]
       }
     },

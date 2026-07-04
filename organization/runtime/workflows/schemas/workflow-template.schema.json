@@ -9,6 +9,10 @@
     "workflow_id",
     "lifecycle_status",
     "purpose",
+    "safety_class",
+    "publication_gate",
+    "gates",
+    "mandatory_gates",
     "initial_step",
     "max_steps",
     "scheduler",
@@ -36,6 +40,59 @@
     },
     "purpose": {
       "type": "string"
+    },
+    "safety_class": {
+      "type": "string",
+      "enum": [
+        "readonly",
+        "standard",
+        "policy",
+        "security"
+      ]
+    },
+    "publication_gate": {
+      "type": "object",
+      "required": [
+        "supported",
+        "required_by_default"
+      ],
+      "properties": {
+        "supported": {
+          "type": "boolean"
+        },
+        "required_by_default": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "gates": {
+      "type": "object",
+      "required": [
+        "entry",
+        "exit"
+      ],
+      "properties": {
+        "entry": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exit": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "mandatory_gates": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "initial_step": {
       "type": "string"

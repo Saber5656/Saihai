@@ -112,6 +112,33 @@
             "type": "string"
           }
         },
+        "safety_class": {
+          "type": "string",
+          "enum": [
+            "readonly",
+            "standard",
+            "policy",
+            "security"
+          ]
+        },
+        "required_safety_class": {
+          "type": "string",
+          "enum": [
+            "readonly",
+            "standard",
+            "policy",
+            "security"
+          ]
+        },
+        "publication_gate_required": {
+          "type": "boolean"
+        },
+        "required_gates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "candidates": {
           "type": "array",
           "items": {
@@ -317,7 +344,11 @@
             "required": [
               "status",
               "workflow_id",
-              "initial_step"
+              "initial_step",
+              "safety_class",
+              "required_safety_class",
+              "publication_gate_required",
+              "required_gates"
             ],
             "properties": {
               "status": {
@@ -336,29 +367,6 @@
             "properties": {
               "refs": {
                 "minItems": 1
-              }
-            }
-          },
-          "activation_scope": {
-            "properties": {
-              "step_budget": {
-                "const": 1
-              },
-              "allowed_ops": {
-                "properties": {
-                  "edit": {
-                    "const": false
-                  },
-                  "commit": {
-                    "const": false
-                  },
-                  "push": {
-                    "const": false
-                  },
-                  "network": {
-                    "const": false
-                  }
-                }
               }
             }
           },
