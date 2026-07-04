@@ -207,10 +207,19 @@ def signing_key_path(state_root: Path, principal: dict[str, Any]) -> Path:
 def principal_key(state_root: Path, principal: dict[str, Any]) -> bytes:
     path = signing_key_path(state_root, principal)
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
     if not path.exists():
-        path.write_text(secrets.token_hex(32) + "\n", encoding="utf-8")
-        path.chmod(0o600)
-    return path.read_text(encoding="utf-8").strip().encode("utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(secrets.token_hex(32) + "\n")
+    return read_private_file_text(path, label="principal signing key").encode("utf-8")
 
 
 def sign_transition(
@@ -383,6 +392,14 @@ def provider_evidence_path(state_root: Path, run_id: str, step_id: str) -> Path:
         state_paths(state_root)["provider_evidence"]
         / validate_artifact_id(run_id, "run_id")
         / f"{validate_artifact_id(step_id, 'step_id')}-provider-evidence.json"
+    )
+
+
+def provider_transcript_path(state_root: Path, run_id: str, step_id: str) -> Path:
+    return (
+        state_paths(state_root)["provider_evidence"]
+        / validate_artifact_id(run_id, "run_id")
+        / f"{validate_artifact_id(step_id, 'step_id')}-claude-transcript.json"
     )
 
 
@@ -693,6 +710,66 @@ def proposed_request(
     validate_artifact_id(task_id, "task_id")
     actor = principal or default_manual_principal()
     bounded = bounded_context(refs, allowed_paths)
+    path = request_path(state_root, request_id)
+    existing_record = read_json(path) if path.exists() else None
+    if existing_record is not None:
+        if classification is None:
+            if existing_record.get("status") == "waiting_human" and isinstance(existing_record.get("proposal"), dict):
+                append_audit_event(
+                    state_root=state_root,
+                    event_type="request_waiting_human",
+                    principal=actor,
+                    subject={"request_id": request_id, "task_id": task_id},
+                    outcome="replayed",
+                    details={"reason": "request_id_already_waiting_human"},
+                )
+                return existing_record["proposal"]
+            append_audit_event(
+                state_root=state_root,
+                event_type="request_waiting_human",
+                principal=actor,
+                subject={"request_id": request_id, "task_id": task_id},
+                outcome="blocked",
+                details={"reason": "request_id_conflict"},
+            )
+            raise FrontdoorError("request_id conflict for propose")
+        if existing_record.get("status") != "waiting_human" or existing_record.get("approved_activation"):
+            append_audit_event(
+                state_root=state_root,
+                event_type="request_proposed",
+                principal=actor,
+                subject={"request_id": request_id, "task_id": task_id},
+                outcome="blocked",
+                details={
+                    "reason": "request_id_conflict",
+                    "existing_status": existing_record.get("status"),
+                },
+            )
+            raise FrontdoorError("request_id conflict for propose")
+        immutable_mismatches = []
+        expected = {
+            "task_id": task_id,
+            "user_prompt": user_prompt,
+            "context_refs": bounded["context_refs"],
+            "allowed_paths": bounded["allowed_paths"],
+            "expires_at": expires_at,
+        }
+        for key, value in expected.items():
+            if existing_record.get(key) != value:
+                immutable_mismatches.append(key)
+        if immutable_mismatches:
+            append_audit_event(
+                state_root=state_root,
+                event_type="request_proposed",
+                principal=actor,
+                subject={"request_id": request_id, "task_id": task_id},
+                outcome="blocked",
+                details={
+                    "reason": "request_id_conflict",
+                    "immutable_mismatches": immutable_mismatches,
+                },
+            )
+            raise FrontdoorError("request_id conflict for propose")
     if classification is None:
         payload = {
             "schema_version": 1,
@@ -717,7 +794,7 @@ def proposed_request(
             "status": "waiting_human",
             "proposal": payload,
         }
-        write_json(request_path(state_root, request_id), record)
+        write_json(path, record)
         append_audit_event(
             state_root=state_root,
             event_type="request_waiting_human",
@@ -737,22 +814,29 @@ def proposed_request(
         allowed_paths=list(bounded["allowed_paths"]),
         expires_at=expires_at,
     )
-    record = {
-        "request_version": "1",
-        "task_id": task_id,
-        "request_id": request_id,
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-        "user_prompt": user_prompt,
-        **bounded,
-        "expires_at": expires_at,
-        "classification": classification,
-        "requester": requester(frontdoor, chat_session_id),
-        "status": envelope["activation_status"],
-        "proposal": envelope,
-    }
+    if existing_record is None:
+        record = {
+            "request_version": "1",
+            "task_id": task_id,
+            "request_id": request_id,
+            "created_at": now_iso(),
+            "user_prompt": user_prompt,
+            **bounded,
+            "expires_at": expires_at,
+            "requester": requester(frontdoor, chat_session_id),
+        }
+    else:
+        record = dict(existing_record)
+    record.update(
+        {
+            "updated_at": now_iso(),
+            "classification": classification,
+            "status": envelope["activation_status"],
+            "proposal": envelope,
+        }
+    )
     attach_approval_summary(record)
-    write_json(request_path(state_root, request_id), record)
+    write_json(path, record)
     append_audit_event(
         state_root=state_root,
         event_type="request_proposed",
@@ -766,9 +850,9 @@ def proposed_request(
     )
     return {
         "schema_version": 1,
-        "decision": "ok",
+        "decision": "blocked" if envelope["activation_status"] == "blocked" else "ok",
         "request_status": envelope["activation_status"],
-        "request_path": str(request_path(state_root, request_id)),
+        "request_path": str(path),
         "activation": envelope,
         "approval": record.get("approval"),
     }
@@ -844,7 +928,8 @@ def attach_approval_summary(record: dict[str, Any]) -> None:
 
 
 def idempotency_path(state_root: Path, key: str) -> Path:
-    return state_paths(state_root)["idempotency"] / f"{safe_id(key)}.json"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return state_paths(state_root)["idempotency"] / f"key-{digest}.json"
 
 
 def request_digest(payload: dict[str, Any]) -> str:
@@ -1447,6 +1532,8 @@ def create_run(
     validate_artifact_id(request_id, "request_id")
     if run_id:
         validate_artifact_id(run_id, "run_id")
+    if resume_policy not in {"manual", "daemon_future"}:
+        raise FrontdoorError("resume_policy unsupported")
     actor = principal or default_manual_principal()
     record = read_json(request_path(state_root, request_id))
     envelope = record.get("approved_activation")
@@ -1460,6 +1547,9 @@ def create_run(
 
     template = load_template(str(workflow_id))
     effective_run_id = run_id or stable_run_id(request_id, str(workflow_id))
+    bound_run_id = str(record.get("run_id") or "")
+    if bound_run_id and bound_run_id != effective_run_id:
+        raise FrontdoorError("request_id is already bound to a different run_id")
     signature = assert_execution_principal(
         state_root=state_root,
         principal=actor,
@@ -1471,6 +1561,10 @@ def create_run(
         existing = read_json(path)
         if existing.get("request_id") != request_id:
             raise FrontdoorError("run_id conflict for different request")
+        if not bound_run_id:
+            record["run_id"] = effective_run_id
+            record["updated_at"] = now_iso()
+            write_json(request_path(state_root, request_id), record)
         append_audit_event(
             state_root=state_root,
             event_type="create_run",
@@ -1524,6 +1618,9 @@ def create_run(
         ],
     }
     write_json(path, run)
+    record["run_id"] = effective_run_id
+    record["updated_at"] = now_iso()
+    write_json(request_path(state_root, request_id), record)
     append_audit_event(
         state_root=state_root,
         event_type="create_run",
@@ -1682,7 +1779,7 @@ def prepare_claude_adapter(
 
     capability = claude_headless_capability()
     evidence_path = provider_evidence_path(state_root, run_id, step_id)
-    transcript_path = state_paths(state_root)["provider_evidence"] / run_id / f"{step_id}-claude-transcript.json"
+    transcript_path = provider_transcript_path(state_root, run_id, step_id)
     prompt = bounded_claude_prompt(work_order, evidence_path=evidence_path, transcript_path=transcript_path)
     adapter_request = {
         "adapter_request_version": "1",
@@ -1822,9 +1919,12 @@ def validate_report(
         }
     step_id = str(run["current_step"])
     work_order = read_json(work_order_path(state_root, run_id, step_id))
-    path = Path(report_path_arg).expanduser() if report_path_arg else Path(work_order["report_path"]).expanduser()
+    canonical_report_path = Path(str(work_order["report_path"])).expanduser()
+    path = Path(report_path_arg).expanduser() if report_path_arg else canonical_report_path
     if not path_is_within(path, state_paths(state_root)["reports"]):
         raise FrontdoorError("report path must stay under orchestrator state reports directory")
+    if path.resolve() != canonical_report_path.resolve():
+        raise FrontdoorError("report path must match canonical work order report path")
     report = read_json(path)
     errors = validate_external_review_report(report, run=run, work_order=work_order, state_root=state_root)
     if errors:
@@ -1961,13 +2061,18 @@ def validate_external_review_report(
     if not isinstance(report.get("summary"), str) or not report.get("summary"):
         errors.append("summary must be non-empty string")
 
-    errors.extend(validate_provider_evidence(report.get("provider_evidence"), run, state_root))
+    errors.extend(validate_provider_evidence(report.get("provider_evidence"), run, work_order, state_root))
     errors.extend(validate_findings(report.get("findings"), report.get("result")))
     errors.extend(validate_authority(report.get("authority")))
     return errors
 
 
-def validate_provider_evidence(value: Any, run: dict[str, Any], state_root: Path) -> list[str]:
+def validate_provider_evidence(
+    value: Any,
+    run: dict[str, Any],
+    work_order: dict[str, Any],
+    state_root: Path,
+) -> list[str]:
     errors: list[str] = []
     if not isinstance(value, dict):
         return ["provider_evidence must be object"]
@@ -1990,12 +2095,26 @@ def validate_provider_evidence(value: Any, run: dict[str, Any], state_root: Path
     for field in ("provider", "effective_model", "provider_session_id", "transcript_path", "evidence_path"):
         if not isinstance(value.get(field), str) or not value.get(field):
             errors.append(f"provider_evidence.{field} must be non-empty string")
+    expected_paths = {
+        "transcript_path": provider_transcript_path(
+            state_root,
+            str(run.get("run_id") or ""),
+            str(work_order.get("step_id") or ""),
+        ),
+        "evidence_path": provider_evidence_path(
+            state_root,
+            str(run.get("run_id") or ""),
+            str(work_order.get("step_id") or ""),
+        ),
+    }
     for field in ("transcript_path", "evidence_path"):
         path = Path(str(value.get(field, ""))).expanduser()
         if value.get(field) and not path.exists():
             errors.append(f"provider_evidence.{field} does not exist: {path}")
         if value.get(field) and not path_is_within(path, state_paths(state_root)["provider_evidence"]):
             errors.append(f"provider_evidence.{field} must stay under provider evidence state directory")
+        if value.get(field) and path.resolve() != expected_paths[field].resolve():
+            errors.append(f"provider_evidence.{field} must match current run evidence path")
     return errors
 
 
@@ -2021,8 +2140,14 @@ def validate_findings(value: Any, result: Any) -> list[str]:
             errors.append(f"findings[{index}].severity unsupported")
         if finding.get("status") not in {"open", "closed", "waived", "informational"}:
             errors.append(f"findings[{index}].status unsupported")
+        if not isinstance(finding.get("finding_id"), str) or not finding.get("finding_id"):
+            errors.append(f"findings[{index}].finding_id must be non-empty string")
+        if not isinstance(finding.get("summary"), str) or not finding.get("summary"):
+            errors.append(f"findings[{index}].summary must be non-empty string")
         if not isinstance(finding.get("evidence_refs"), list):
             errors.append(f"findings[{index}].evidence_refs must be array")
+        elif any(not isinstance(item, str) or not item for item in finding["evidence_refs"]):
+            errors.append(f"findings[{index}].evidence_refs entries must be non-empty strings")
     return errors
 
 

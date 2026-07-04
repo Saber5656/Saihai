@@ -16,6 +16,7 @@ RUN_READ_RE = re.compile(r"^/orchestrator/runs/([^/]+)$")
 REQUEST_READ_RE = re.compile(r"^/frontdoor/requests/([^/]+)$")
 BRIDGE_PROJECTION_RE = re.compile(r"^/main-agent/projections/([^/]+)$")
 BODY_PRINCIPAL_FIELDS = {"principal_type", "principal_id", "authn_method"}
+MAX_BODY_BYTES = 2_000_000
 
 INDEX_HTML = """<!doctype html>
 <html lang="en" data-frontdoor-ui="output-confirmation">
@@ -372,9 +373,14 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length") or "0")
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError as exc:
+            raise frontdoor.FrontdoorError("invalid Content-Length") from exc
         if length <= 0:
             return {}
+        if length > MAX_BODY_BYTES:
+            raise frontdoor.FrontdoorError("request body too large")
         raw = self.rfile.read(length)
         try:
             data = json.loads(raw.decode("utf-8"))
@@ -548,7 +554,8 @@ class Handler(BaseHTTPRequestHandler):
                     chat_session_id=str(body.get("chat_session_id") or ""),
                     principal=self._channel_principal(body, allowed_channels={"operator"}),
                 )
-                self._send_json(payload)
+                status = 400 if payload.get("decision") == "blocked" else 200
+                self._send_json(payload, status)
                 return
             if self.path == "/frontdoor/approve":
                 payload = frontdoor.approve_request(

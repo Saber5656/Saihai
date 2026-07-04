@@ -4,6 +4,200 @@
   "title": "Orchestrator Projection",
   "description": "Redacted output-confirmation projection safe for a main-agent bridge principal.",
   "type": "object",
+  "$defs": {
+    "principal": {
+      "type": "object",
+      "required": [
+        "principal_type",
+        "principal_id",
+        "authn_method"
+      ],
+      "properties": {
+        "principal_type": {
+          "type": "string"
+        },
+        "principal_id": {
+          "type": "string"
+        },
+        "authn_method": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rate_limit": {
+      "type": "object",
+      "required": [
+        "max_failed_attempts",
+        "failed_attempts"
+      ],
+      "properties": {
+        "max_failed_attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_attempts": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "approval_work": {
+      "type": "object",
+      "required": [
+        "workflow_id",
+        "initial_step",
+        "permission_mode",
+        "step_budget",
+        "context_ref_count",
+        "context_refs_digest",
+        "allowed_paths_digest",
+        "denied_ops",
+        "provider_adapter"
+      ],
+      "properties": {
+        "workflow_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "initial_step": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permission_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "step_budget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "context_ref_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "context_refs_digest": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "allowed_paths_digest": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "denied_ops": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "provider_adapter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "classification_provenance": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "source",
+        "confidence",
+        "evidence_refs",
+        "selector_threshold",
+        "tie_break"
+      ],
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "selector_threshold": {
+          "type": "number"
+        },
+        "tie_break": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "redacted_approval": {
+      "type": "object",
+      "required": [
+        "approval_view_version",
+        "source",
+        "main_agent_prose_used",
+        "human_action_id",
+        "rate_limit",
+        "what_will_execute",
+        "classification_provenance",
+        "next_action"
+      ],
+      "properties": {
+        "approval_view_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "main_agent_prose_used": {
+          "const": false
+        },
+        "human_action_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rate_limit": {
+          "$ref": "#/$defs/rate_limit"
+        },
+        "what_will_execute": {
+          "$ref": "#/$defs/approval_work"
+        },
+        "classification_provenance": {
+          "$ref": "#/$defs/classification_provenance"
+        },
+        "next_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
   "required": [
     "schema_version",
     "decision",
@@ -27,7 +221,7 @@
       "const": "1"
     },
     "safe_for_principal": {
-      "type": "object"
+      "$ref": "#/$defs/principal"
     },
     "request_id": {
       "type": "string",
@@ -104,9 +298,13 @@
       "additionalProperties": false
     },
     "approval": {
-      "type": [
-        "object",
-        "null"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/redacted_approval"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "redacted_fields": {

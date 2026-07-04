@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import importlib.util
 import subprocess
 import sys
@@ -79,6 +80,15 @@ def http_json(
     payload: dict | None = None,
     headers: dict[str, str] | None = None,
 ) -> dict:
+    return http_json_response(method, url, payload, headers)[1]
+
+
+def http_json_response(
+    method: str,
+    url: str,
+    payload: dict | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict]:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     request_headers = {"Content-Type": "application/json"}
     if headers:
@@ -91,9 +101,28 @@ def http_json(
     )
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
-            return json.loads(response.read().decode("utf-8"))
+            return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        return json.loads(exc.read().decode("utf-8"))
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def http_post_with_content_length(
+    port: int,
+    path: str,
+    content_length: str,
+) -> dict:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.putrequest("POST", path)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", content_length)
+        connection.endheaders()
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        payload["http_status"] = response.status
+        return payload
+    finally:
+        connection.close()
 
 
 def http_text(method: str, url: str) -> str:
@@ -114,6 +143,82 @@ def read_audit_events(state_root: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def prepare_review_handoff(state_root: Path, *, request_id: str, run_id: str) -> dict:
+    proposed = load_payload(
+        run_frontdoor(
+            state_root,
+            "propose",
+            "--task-id",
+            f"TSK-{request_id}",
+            "--request-id",
+            request_id,
+            "--prompt",
+            "Run bounded external review",
+            "--classification",
+            json.dumps(external_review_classification()),
+            "--ref",
+            "organization/runtime/workflows/README.md",
+        )
+    )
+    load_payload(
+        run_frontdoor(
+            state_root,
+            "approve",
+            "--request-id",
+            request_id,
+            "--human-action-id",
+            proposed["approval"]["human_action_id"],
+        )
+    )
+    load_payload(run_frontdoor(state_root, "create-run", "--request-id", request_id, "--run-id", run_id))
+    load_payload(run_frontdoor(state_root, "drain", "--run-id", run_id))
+    prepared = load_payload(run_frontdoor(state_root, "prepare-claude-adapter", "--run-id", run_id))
+    adapter_request = prepared["adapter_request"]
+    evidence_path = Path(adapter_request["evidence_path"])
+    transcript_path = Path(adapter_request["transcript_path"])
+    report_path = Path(adapter_request["report_path"])
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(json.dumps({"normalized": True}) + "\n", encoding="utf-8")
+    transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+    return adapter_request
+
+
+def external_review_report(
+    adapter_request: dict,
+    *,
+    request_id: str,
+    run_id: str,
+    result: str = "pass",
+    findings: list[dict] | None = None,
+) -> dict:
+    return {
+        "report_version": "1",
+        "report_id": f"report-{run_id}",
+        "request_id": request_id,
+        "run_id": run_id,
+        "workflow_id": "single_step_external_review",
+        "step_id": "review",
+        "result": result,
+        "summary": "Review completed.",
+        "provider_evidence": {
+            "provider": "claude",
+            "effective_model": "claude-sonnet-test",
+            "request_id": request_id,
+            "provider_session_id": f"session-{run_id}",
+            "transcript_path": adapter_request["transcript_path"],
+            "evidence_path": adapter_request["evidence_path"],
+        },
+        "findings": findings or [],
+        "authority": {
+            "canonical_result": "typed_report_file",
+            "stdout_is_signal_only": True,
+            "raw_transcript_shared": False,
+        },
+    }
 
 
 def test_channel_token_permissions_are_private() -> None:
@@ -138,6 +243,33 @@ def test_channel_token_permissions_are_private() -> None:
             assert "must not be a symlink" in str(exc)
         else:
             raise AssertionError("channel token symlink should be blocked")
+
+
+def test_principal_key_permissions_are_private() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        principal = frontdoor_module.default_manual_principal()
+        key = frontdoor_module.principal_key(state_root, principal)
+        key_path = frontdoor_module.signing_key_path(state_root, principal)
+        assert key, "principal signing key should be created"
+        assert_equal(key_path.parent.stat().st_mode & 0o777, 0o700, "principal key dir mode")
+        assert_equal(key_path.stat().st_mode & 0o777, 0o600, "principal key mode")
+
+        key_path.chmod(0o644)
+        frontdoor_module.principal_key(state_root, principal)
+        assert_equal(key_path.stat().st_mode & 0o777, 0o600, "principal key mode tightened")
+
+        key_path.unlink()
+        symlink_target = state_root / "leaked-principal-key"
+        symlink_target.write_text("unsafe\n", encoding="utf-8")
+        key_path.symlink_to(symlink_target)
+        try:
+            frontdoor_module.principal_key(state_root, principal)
+        except frontdoor_module.FrontdoorError as exc:
+            assert "must not be a symlink" in str(exc)
+        else:
+            raise AssertionError("principal key symlink should be blocked")
 
 
 def test_frontdoor_propose_approve_create_run_and_drain() -> None:
@@ -339,6 +471,163 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(validated["workflow_run"]["goal_state"], "complete", "validated goal state")
 
 
+def test_propose_updates_waiting_request_and_blocks_duplicate_overwrite() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "bridge-submit-request",
+                "--task-id",
+                "TSK-duplicate",
+                "--request-id",
+                "req-duplicate",
+                "--request-kind",
+                "external_review_request",
+                "--prompt",
+                "Run bounded review",
+                "--ref",
+                "organization/runtime/workflows/README.md",
+                "--frontdoor",
+                "codex",
+                "--chat-session-id",
+                "thread-duplicate",
+                "--idempotency-key",
+                "duplicate-key",
+            )
+        )
+        proposed = load_payload(
+            run_frontdoor(
+                state_root,
+                "propose",
+                "--task-id",
+                "TSK-duplicate",
+                "--request-id",
+                "req-duplicate",
+                "--prompt",
+                "Run bounded review",
+                "--classification",
+                json.dumps(external_review_classification()),
+                "--ref",
+                "organization/runtime/workflows/README.md",
+            )
+        )
+        assert_equal(proposed["request_status"], "proposed", "waiting request promoted")
+        record = json.loads((state_root / "requests" / "req-duplicate.json").read_text(encoding="utf-8"))
+        assert_equal(record["request_kind"], "external_review_request", "bridge request metadata preserved")
+
+        approved = load_payload(
+            run_frontdoor(
+                state_root,
+                "approve",
+                "--request-id",
+                "req-duplicate",
+                "--human-action-id",
+                proposed["approval"]["human_action_id"],
+            )
+        )
+        assert_equal(approved["request_status"], "approved", "duplicate approval")
+
+        duplicate = run_frontdoor(
+            state_root,
+            "propose",
+            "--task-id",
+            "TSK-duplicate",
+            "--request-id",
+            "req-duplicate",
+            "--prompt",
+            "Run bounded review",
+            "--classification",
+            json.dumps(external_review_classification()),
+            "--ref",
+            "organization/runtime/workflows/README.md",
+            check=False,
+        )
+        assert_equal(duplicate.returncode, 2, "duplicate proposed request exit")
+        assert "request_id conflict" in load_payload(duplicate)["reason"]
+
+        blocked = run_frontdoor(
+            state_root,
+            "propose",
+            "--task-id",
+            "TSK-blocked-propose",
+            "--request-id",
+            "req-blocked-propose",
+            "--prompt",
+            "Run bounded review",
+            "--classification",
+            json.dumps(external_review_classification(classification_confidence=0.1)),
+            "--ref",
+            "organization/runtime/workflows/README.md",
+            check=False,
+        )
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "blocked proposal exit")
+        assert_equal(payload["decision"], "blocked", "blocked proposal decision")
+
+
+def test_create_run_validates_resume_policy_and_binds_request() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        proposed = load_payload(
+            run_frontdoor(
+                state_root,
+                "propose",
+                "--task-id",
+                "TSK-run-binding",
+                "--request-id",
+                "req-run-binding",
+                "--prompt",
+                "Run bounded review",
+                "--classification",
+                json.dumps(external_review_classification()),
+                "--ref",
+                "organization/runtime/workflows/README.md",
+            )
+        )
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "approve",
+                "--request-id",
+                "req-run-binding",
+                "--human-action-id",
+                proposed["approval"]["human_action_id"],
+            )
+        )
+
+        try:
+            frontdoor_module.create_run(
+                state_root=state_root,
+                request_id="req-run-binding",
+                run_id="run-invalid-policy",
+                resume_policy="typo",
+            )
+        except frontdoor_module.FrontdoorError as exc:
+            assert "resume_policy unsupported" in str(exc)
+        else:
+            raise AssertionError("invalid resume policy should be blocked")
+
+        load_payload(run_frontdoor(state_root, "create-run", "--request-id", "req-run-binding", "--run-id", "run-one"))
+        replayed = load_payload(
+            run_frontdoor(state_root, "create-run", "--request-id", "req-run-binding", "--run-id", "run-one")
+        )
+        assert_equal(replayed["created"], False, "same run id replays")
+
+        second = run_frontdoor(
+            state_root,
+            "create-run",
+            "--request-id",
+            "req-run-binding",
+            "--run-id",
+            "run-two",
+            check=False,
+        )
+        assert_equal(second.returncode, 2, "second run id blocked")
+        assert "already bound" in load_payload(second)["reason"]
+
+
 def test_approval_uses_requested_ref_forms_without_leaking_original_paths() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -536,6 +825,21 @@ def test_http_frontdoor_api_flow() -> None:
             assert_equal(spoofed_principal["decision"], "blocked", "http body principal blocked")
             assert "principal fields are not accepted" in spoofed_principal["reason"]
 
+            blocked_status, blocked_proposal = http_json_response(
+                "POST",
+                f"{base}/frontdoor/propose",
+                {
+                    "task_id": "TSK-http-blocked-propose",
+                    "request_id": "req-http-blocked-propose",
+                    "prompt": "Run HTTP readonly review",
+                    "refs": ["organization/runtime/workflows/README.md"],
+                    "classification": external_review_classification(classification_confidence=0.1),
+                },
+                operator_headers,
+            )
+            assert_equal(blocked_status, 400, "http blocked proposal status")
+            assert_equal(blocked_proposal["decision"], "blocked", "http blocked proposal decision")
+
             proposed = http_json(
                 "POST",
                 f"{base}/frontdoor/propose",
@@ -595,6 +899,38 @@ def test_http_frontdoor_api_flow() -> None:
 
             run_read = http_json("GET", f"{base}/orchestrator/runs/run-http")
             assert_equal(run_read["decision"], "blocked", "http raw run read blocked")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+
+def test_http_rejects_malformed_and_oversized_content_length() -> None:
+    server_module = load_server_module()
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        server = server_module.FrontdoorServer(
+            ("127.0.0.1", 0),
+            server_module.Handler,
+            state_root=state_root,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            malformed = http_post_with_content_length(
+                server.server_port,
+                "/frontdoor/propose",
+                "not-a-number",
+            )
+            assert_equal(malformed["http_status"], 400, "malformed content length status")
+            assert "invalid Content-Length" in malformed["reason"]
+
+            oversized = http_post_with_content_length(
+                server.server_port,
+                "/frontdoor/propose",
+                str(server_module.MAX_BODY_BYTES + 1),
+            )
+            assert_equal(oversized["http_status"], 400, "oversized content length status")
+            assert "request body too large" in oversized["reason"]
         finally:
             server.shutdown()
             thread.join(timeout=5)
@@ -785,6 +1121,18 @@ def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
         replayed = frontdoor_module.bridge_submit_request(state_root=state_root, payload=payload)
         assert_equal(replayed["replayed"], True, "idempotent replay")
         assert_equal(replayed["request_status"], "waiting_human", "replayed request status")
+
+
+def test_bridge_idempotency_uses_raw_key_digest_paths() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        first = frontdoor_module.idempotency_path(state_root, "abc?")
+        second = frontdoor_module.idempotency_path(state_root, "abc#")
+        punctuation_only = frontdoor_module.idempotency_path(state_root, "???")
+        assert first.name.startswith("key-"), "idempotency path should use digest prefix"
+        assert first != second, "distinct raw idempotency keys must not collide"
+        assert punctuation_only.name != "anonymous.json", "punctuation-only keys must not normalize to anonymous"
 
 
 def test_bridge_rejects_smuggled_authority_fields_over_http() -> None:
@@ -1094,6 +1442,89 @@ def test_work_order_revalidates_refs_before_provider_handoff() -> None:
             raise AssertionError("changed context ref digest should block work order")
 
 
+def test_validate_report_rejects_noncanonical_report_and_stale_evidence() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        adapter_request = prepare_review_handoff(state_root, request_id="req-report-alt", run_id="run-report-alt")
+        alternate_path = state_root / "reports" / "run-report-alt" / "alternate-report.json"
+        alternate_path.parent.mkdir(parents=True, exist_ok=True)
+        alternate_path.write_text(
+            json.dumps(
+                external_review_report(
+                    adapter_request,
+                    request_id="req-report-alt",
+                    run_id="run-report-alt",
+                ),
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        alternate = run_frontdoor(
+            state_root,
+            "validate-report",
+            "--run-id",
+            "run-report-alt",
+            "--report-path",
+            str(alternate_path),
+            check=False,
+        )
+        assert_equal(alternate.returncode, 2, "alternate report path exit")
+        assert "canonical work order report path" in load_payload(alternate)["reason"]
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        adapter_request = prepare_review_handoff(state_root, request_id="req-stale-evidence", run_id="run-stale-evidence")
+        stale_dir = state_root / "provider-evidence" / "run-stale-other"
+        stale_dir.mkdir(parents=True, exist_ok=True)
+        stale_evidence = stale_dir / "review-provider-evidence.json"
+        stale_transcript = stale_dir / "review-claude-transcript.json"
+        stale_evidence.write_text(json.dumps({"stale": True}) + "\n", encoding="utf-8")
+        stale_transcript.write_text(json.dumps({"stale": True}) + "\n", encoding="utf-8")
+        report = external_review_report(
+            adapter_request,
+            request_id="req-stale-evidence",
+            run_id="run-stale-evidence",
+        )
+        report["provider_evidence"]["evidence_path"] = str(stale_evidence)
+        report["provider_evidence"]["transcript_path"] = str(stale_transcript)
+        Path(adapter_request["report_path"]).write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        stale = run_frontdoor(state_root, "validate-report", "--run-id", "run-stale-evidence", check=False)
+        payload = load_payload(stale)
+        assert_equal(stale.returncode, 2, "stale evidence report exit")
+        assert_equal(payload["reason"], "invalid_report", "stale evidence reason")
+        assert any("must match current run evidence path" in item for item in payload["errors"])
+
+
+def test_validate_report_rejects_malformed_findings() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        adapter_request = prepare_review_handoff(state_root, request_id="req-bad-findings", run_id="run-bad-findings")
+        report = external_review_report(
+            adapter_request,
+            request_id="req-bad-findings",
+            run_id="run-bad-findings",
+            result="findings",
+            findings=[
+                {
+                    "finding_id": "",
+                    "severity": "high",
+                    "status": "open",
+                    "summary": "",
+                    "evidence_refs": [1],
+                }
+            ],
+        )
+        Path(adapter_request["report_path"]).write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        bad_findings = run_frontdoor(state_root, "validate-report", "--run-id", "run-bad-findings", check=False)
+        payload = load_payload(bad_findings)
+        assert_equal(bad_findings.returncode, 2, "malformed findings exit")
+        assert_equal(payload["reason"], "invalid_report", "malformed findings reason")
+        assert "findings[0].finding_id must be non-empty string" in payload["errors"]
+        assert "findings[0].summary must be non-empty string" in payload["errors"]
+        assert "findings[0].evidence_refs entries must be non-empty strings" in payload["errors"]
+
+
 def test_bridge_rejects_path_unsafe_ids_and_missing_refs() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -1278,16 +1709,23 @@ def test_bridge_principal_cannot_execute_or_change_workflow_definitions() -> Non
 def main() -> None:
     tests = [
         test_channel_token_permissions_are_private,
+        test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
+        test_propose_updates_waiting_request_and_blocks_duplicate_overwrite,
+        test_create_run_validates_resume_policy_and_binds_request,
         test_approval_uses_requested_ref_forms_without_leaking_original_paths,
         test_frontdoor_blocks_unapproved_and_unbounded_requests,
         test_http_frontdoor_api_flow,
+        test_http_rejects_malformed_and_oversized_content_length,
         test_main_agent_bridge_is_output_confirmation_only,
         test_bridge_idempotent_replay_does_not_reresolve_refs,
+        test_bridge_idempotency_uses_raw_key_digest_paths,
         test_bridge_rejects_smuggled_authority_fields_over_http,
         test_http_bridge_uses_authenticated_principal_and_verified_ack,
         test_context_ref_boundary_blocks_exfiltration_paths,
         test_work_order_revalidates_refs_before_provider_handoff,
+        test_validate_report_rejects_noncanonical_report_and_stale_evidence,
+        test_validate_report_rejects_malformed_findings,
         test_bridge_rejects_path_unsafe_ids_and_missing_refs,
         test_bridge_principal_cannot_execute_or_change_workflow_definitions,
     ]

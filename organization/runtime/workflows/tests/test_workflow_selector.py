@@ -21,6 +21,7 @@ ACTIVATION_SCHEMA = WORKFLOW_ROOT / "schemas/activation-envelope.schema.json"
 WORKFLOW_TEMPLATE_SCHEMA = WORKFLOW_ROOT / "schemas/workflow-template.schema.json"
 PUBLICATION_RESULT_SCHEMA = WORKFLOW_ROOT / "schemas/publication-result.schema.json"
 CODE_CHANGE_REPORT_SCHEMA = WORKFLOW_ROOT / "schemas/code-change-report.schema.json"
+ORCHESTRATOR_PROJECTION_SCHEMA = WORKFLOW_ROOT / "schemas/orchestrator-projection.schema.json"
 
 PUBLICATION_GATE_ID = "exit.publication_result_recorded"
 
@@ -621,6 +622,25 @@ def test_external_review_report_schema_rejects_embedded_raw_fields() -> None:
     assert '"minItems": 1' in conditional
 
 
+def test_orchestrator_projection_schema_closes_redacted_objects() -> None:
+    schema = json.loads(ORCHESTRATOR_PROJECTION_SCHEMA.read_text(encoding="utf-8"))
+    defs = schema["$defs"]
+    assert_equal(
+        schema["properties"]["safe_for_principal"]["$ref"],
+        "#/$defs/principal",
+        "safe principal closed ref",
+    )
+    assert_equal(defs["principal"]["additionalProperties"], False, "safe principal extra fields")
+    approval = defs["redacted_approval"]
+    assert_equal(approval["additionalProperties"], False, "approval extra fields")
+    assert_equal(
+        defs["approval_work"]["additionalProperties"],
+        False,
+        "approval work extra fields",
+    )
+    assert "anyOf" in schema["properties"]["approval"], "approval must allow only redacted object or null"
+
+
 def test_publication_and_code_change_report_schemas_require_evidence() -> None:
     publication_schema = json.loads(PUBLICATION_RESULT_SCHEMA.read_text(encoding="utf-8"))
     publication_condition = json.dumps(publication_schema["allOf"], sort_keys=True)
@@ -731,6 +751,7 @@ def main() -> None:
         test_permission_monotonicity_fuzz_for_p0_selection,
         test_work_order_schema_constrains_single_step_external_review,
         test_external_review_report_schema_rejects_embedded_raw_fields,
+        test_orchestrator_projection_schema_closes_redacted_objects,
         test_publication_and_code_change_report_schemas_require_evidence,
         test_workflow_template_schema_and_security_template_publication_path,
         test_workflow_run_schema_encodes_scheduler_and_activation_scope,
