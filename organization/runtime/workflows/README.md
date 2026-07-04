@@ -57,6 +57,33 @@ existing runtime config convention in `organization/runtime/infra-team-bootstrap
 | Scheduler is bounded | Policy is invocation-drain, durable state, global advisory lock, concurrency 1. |
 | Provider is an adapter | `headless_cli` is the default transport. `tmux_interactive` is modeled but not implemented. |
 
+## Run Store Layout
+
+Default state root: `~/.codex/state/itb/frontdoor-orchestrator`
+
+```text
+<state_root>/                                  default: ~/.codex/state/itb/frontdoor-orchestrator
+  runs/
+    <run_id>.json                              canonical workflow-run record (schema-validated)
+    <run_id>.error.json                        latest typed store/load error artifact (overwritten)
+    <run_id>.corrupt-<n>.json                  quarantined unreadable payload, n = 1,2,...
+    .<name>.<hex>.tmp                          in-flight temp files; readers MUST ignore them
+```
+
+| Path | Purpose |
+|---|---|
+| `runs/<run_id>.json` | Canonical workflow-run record. It is validated before store/load acceptance and written with atomic replace semantics. |
+| `runs/<run_id>.error.json` | Latest typed store/load error artifact for that run. It is overwritten atomically. |
+| `runs/<run_id>.corrupt-<n>.json` | Quarantined unreadable canonical payload. The lowest available `n >= 1` is used. |
+| `runs/.<name>.<hex>.tmp` | In-flight temp file for atomic writes. Readers must ignore these files. |
+
+Naming rules:
+
+- `run_id` must match `^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$` and must not contain path separators or traversal segments.
+- Linkage is embedded in the run record through `task_id` and `request_id`.
+- The request record lives at `requests/<request_id>.json`.
+- No extra run index files are maintained by this workflow-run store.
+
 ## Active Template Routes
 
 | Classification | Selected workflow | Notes |

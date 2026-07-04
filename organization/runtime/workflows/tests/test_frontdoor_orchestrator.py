@@ -471,6 +471,51 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(validated["workflow_run"]["goal_state"], "complete", "validated goal state")
 
 
+def test_drain_blocks_and_quarantines_corrupt_run_json() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        proposed = load_payload(
+            run_frontdoor(
+                state_root,
+                "propose",
+                "--task-id",
+                "TSK-corrupt-run",
+                "--request-id",
+                "req-corrupt-run",
+                "--prompt",
+                "Run bounded external review",
+                "--classification",
+                json.dumps(external_review_classification()),
+                "--ref",
+                "organization/runtime/workflows/README.md",
+            )
+        )
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "approve",
+                "--request-id",
+                "req-corrupt-run",
+                "--human-action-id",
+                proposed["approval"]["human_action_id"],
+            )
+        )
+        load_payload(run_frontdoor(state_root, "create-run", "--request-id", "req-corrupt-run", "--run-id", "run-corrupt-run"))
+        load_payload(run_frontdoor(state_root, "drain", "--run-id", "run-corrupt-run"))
+
+        canonical = state_root / "runs" / "run-corrupt-run.json"
+        canonical.write_text('{"run_id": tru', encoding="utf-8")
+        blocked = run_frontdoor(state_root, "drain", "--run-id", "run-corrupt-run", check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "corrupt run drain exit")
+        assert_equal(payload["decision"], "blocked", "corrupt run decision")
+        assert_equal(payload["reason"], "corrupt_json", "corrupt run reason")
+        assert (state_root / "runs" / "run-corrupt-run.corrupt-1.json").exists()
+        error_artifact = json.loads((state_root / "runs" / "run-corrupt-run.error.json").read_text(encoding="utf-8"))
+        assert_equal(error_artifact["operation"], "load", "corrupt run error operation")
+        assert_equal(error_artifact["reason_class"], "corrupt_json", "corrupt run error class")
+
+
 def test_propose_updates_waiting_request_and_blocks_duplicate_overwrite() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -1711,6 +1756,7 @@ def main() -> None:
         test_channel_token_permissions_are_private,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
+        test_drain_blocks_and_quarantines_corrupt_run_json,
         test_propose_updates_waiting_request_and_blocks_duplicate_overwrite,
         test_create_run_validates_resume_policy_and_binds_request,
         test_approval_uses_requested_ref_forms_without_leaking_original_paths,
