@@ -3,9 +3,11 @@
 **初版:** 2026-07-04(vol.1 から 7 件+vol.2 から 15 件+scanmd = 23 件)
 **追記 1:** 2026-07-04 — vol.3 から 50 件採用+オリジナル 3 件追加 → 合計 76 件
 **追記 2:** 2026-07-04 — vol.4 から 7 件採用(skillsmith, tracegit, gitquest,
-debugdungeon, terrarium, musicbattle, 8bitme)→ **合計 83 件**。
+debugdungeon, terrarium, musicbattle, 8bitme)→ 合計 83 件。
 このとき採用基準が明文化された: **「AI にプロンプトを投げるだけで代替できるものは
 作らない。LLM 抜きでも成立する技術コアを持つこと」**(vol.5 の生成規則に反映)
+**追記 3:** 2026-07-04 — vol.5 から 1 件採用(tinkerbox)→ **合計 84 件**。
+発案者の関心軸が再確認された: **CLI / AI / ゲーム / 遊び心 / MCP**(vol.6 に反映)
 **方針:** ここに載せたプロダクトは、形はどうあれ制作に着手する。
 出典: [vol.1](./oss-product-ideas.md) / [vol.2](./oss-product-ideas-vol2.md) /
 [vol.3](./oss-product-ideas-vol3.md) / オリジナル。
@@ -27,7 +29,7 @@ debugdungeon, terrarium, musicbattle, 8bitme)→ **合計 83 件**。
 | 8. 音声・メディア | kotodama(P16) | 8 | ローカル音声/画像生成系の家族向け応用まで |
 | 9. 生活・家庭・IoT | hearthboard(P20) | 11 | 家庭のセルフホスト+古端末再生+IoT 化 |
 | 10. セキュリティ | — | 2 | 単独強打×2 |
-| 11. コミュニティ・遊び・学習・地図 | buildyourown(P22) | 12 | 「OSS 界隈が賑わう」を直接作る枠 |
+| 11. コミュニティ・遊び・学習・地図 | buildyourown(P22) | 13 | 「OSS 界隈が賑わう」を直接作る枠 |
 
 ---
 
@@ -153,7 +155,7 @@ debugdungeon, terrarium, musicbattle, 8bitme)→ **合計 83 件**。
 | P53 | trustlock | v3-51 | 依存追加前の信用調査 | 未着手 |
 | P54 | restoredrill | v3-52 | バックアップ復元の定期避難訓練 | 未着手 |
 
-## 11. コミュニティ・遊び・学習・地図(13)
+## 11. コミュニティ・遊び・学習・地図(14)
 
 | ID | 名称 | 出典 | 一言ピッチ | 状態 |
 |---|---|---|---|---|
@@ -170,6 +172,7 @@ debugdungeon, terrarium, musicbattle, 8bitme)→ **合計 83 件**。
 | P81 | terrarium | v4-84 | ターミナルに住む生き物。テストが通ると育つ | 未着手 |
 | P82 | musicbattle | v4-87 | 自分の音楽ライブラリからイントロクイズを生成して対戦 | 未着手 |
 | P83 | 8bitme | v4-88 | 家族写真をドット絵・レトロゲーム風アバターに変換 | 未着手 |
+| P84 | tinkerbox | v5-87 | 物理演算の砂場遊び場(水・砂・歯車。Algodoo 後継の空席) | 未着手 |
 
 ---
 
