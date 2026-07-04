@@ -27,13 +27,16 @@
       "const": "1"
     },
     "run_id": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
     },
     "task_id": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
     },
     "request_id": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
     },
     "workflow_id": {
       "type": "string"
@@ -88,6 +91,7 @@
         "approved_by",
         "approved_at",
         "workflow_selection",
+        "classification_provenance",
         "context_scope",
         "activation_scope",
         "next_action"
@@ -171,6 +175,46 @@
               "items": {
                 "type": "string"
               }
+            }
+          },
+          "additionalProperties": false
+        },
+        "classification_provenance": {
+          "type": "object",
+          "required": [
+            "source",
+            "confidence",
+            "evidence_refs",
+            "selector_threshold",
+            "tie_break"
+          ],
+          "properties": {
+            "source": {
+              "type": "string",
+              "enum": [
+                "human_supplied",
+                "deterministic_fixture",
+                "bounded_classifier_step"
+              ]
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0.85,
+              "maximum": 1
+            },
+            "evidence_refs": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "selector_threshold": {
+              "const": 0.85
+            },
+            "tie_break": {
+              "const": "deterministic_status_order:selected_waiting_human_blocked"
             }
           },
           "additionalProperties": false
@@ -340,6 +384,12 @@
         }
       },
       "additionalProperties": false
+    },
+    "transition_provenance": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
     }
   },
   "additionalProperties": false

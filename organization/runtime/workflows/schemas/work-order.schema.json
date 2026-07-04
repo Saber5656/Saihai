@@ -23,26 +23,31 @@
     "report_path",
     "policy_digest",
     "requester",
-    "activation_scope"
+    "activation_scope",
+    "work_order_authority"
   ],
   "properties": {
     "work_order_version": {
       "const": "1"
     },
     "task_id": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
     },
     "request_id": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
     },
     "run_id": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
     },
     "workflow_id": {
       "type": "string"
     },
     "step_id": {
-      "type": "string"
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
     },
     "from_role": {
       "type": "string"
@@ -180,6 +185,73 @@
         },
         "expires_at": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "work_order_authority": {
+      "type": "object",
+      "required": [
+        "issuer_principal",
+        "signature",
+        "runner_claim"
+      ],
+      "properties": {
+        "issuer_principal": {
+          "type": "object"
+        },
+        "signature": {
+          "type": "object",
+          "required": [
+            "algorithm",
+            "signature",
+            "signed_at"
+          ],
+          "properties": {
+            "algorithm": {
+              "const": "sha256-local-principal-key"
+            },
+            "signature": {
+              "type": "string",
+              "pattern": "^sha256:"
+            },
+            "signed_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "runner_claim": {
+          "type": "object",
+          "required": [
+            "claim_state",
+            "lease_expires_at"
+          ],
+          "properties": {
+            "claim_state": {
+              "type": "string",
+              "enum": [
+                "unclaimed",
+                "claimed"
+              ]
+            },
+            "lease_id": {
+              "type": "string"
+            },
+            "claimed_by": {
+              "type": "object"
+            },
+            "lease_expires_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "claim_signature": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
