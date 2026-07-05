@@ -117,6 +117,34 @@ REPOS=(
   "regexdojo|正規表現の対戦パズル・ゴルフ場"
   "nengajo|年賀状OSS(宛名印刷・喪中管理・デザインテンプレ)"
   "chronomap|現在地から過去を遡れるタイムトラベル地図アプリ"
+
+  # --- vol.4 採用(Agent Ops / 遊び) ---
+  "skillsmith|作業録画(画面・シェル・エディタ)からSKILL.mdを自動生成する"
+  "tracegit|エージェントのコミットに推論サマリを残すreasoning付きgit blame"
+  "gitquest|リポジトリがRPGダンジョンになる(コミットで経験値・デッドコード討伐)"
+  "debugdungeon|わざと壊れた環境を直して脱出するデバッグ脱出ゲーム"
+  "terrarium|ターミナルに住む生き物。テストが通ると育つ"
+  "musicbattle|自分の音楽ライブラリからイントロクイズを生成して対戦する"
+  "8bitme|家族写真をドット絵・レトロゲーム風アバターに変換する"
+
+  # --- vol.5 採用 ---
+  "tinkerbox|物理演算の砂場遊び場(水・砂・歯車)"
+
+  # --- vol.6 採用(MCP エコシステム / 遊び心) ---
+  "mcplay|MCPサーバーの対話playground(シナリオ録画・再生・共有)"
+  "create-mcp|ウィザードでMCPサーバー雛形生成+仕様適合テスト・バッジ発行"
+  "mcpsh|Unixパイプ哲学でMCPツールを合成するシェル"
+  "mcparcade|AIチャットから遊べるミニゲームMCP集(将棋・人狼・脱出)"
+  "learn-mcp|「MCPサーバーを自作する」課題駆動コース"
+  "duck|ラバーダック・デバッグ支援(聞いてくれる、相槌だけ)"
+
+  # --- オリジナル(vol.6 タイミングで追加) ---
+  "keycat|Enterを叩くと画面下から猫が出てきて一緒に叩いて祝うデスクトップ演出"
+
+  # --- vol.7 採用 ---
+  "notifybird|通知を鳥が咥えて届ける演出レイヤー"
+  "cursorpets|カーソルを追いかける古典onekoの現代版"
+  "pastecheck|ターミナル貼り付け事故ガード(改行・不可視文字・homoglyphを検知)"
 )
 
 if ! command -v gh >/dev/null 2>&1; then
