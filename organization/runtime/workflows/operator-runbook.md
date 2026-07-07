@@ -110,9 +110,10 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STAT
 
 7. Run the provider outside this harness.
 
-The provider must write only the typed report and normalized evidence files
-named in the adapter request. It must not select workflows, approve activation,
-mutate run state, edit the repo, commit, push, or publish.
+The provider must write the typed report, normalized evidence, and confined
+transcript files named in the adapter request. The transcript is signal-only
+provider evidence, not completion authority. It must not select workflows,
+approve activation, mutate run state, edit the repo, commit, push, or publish.
 
 8. Validate the report.
 
@@ -231,7 +232,8 @@ transcript, and audit JSONL files.
 | Unapproved run creation | `create-run` fails with `approved activation envelope required`. | Approve first; do not fabricate `approved_activation`. |
 | Run not queueable | `drain` returns `drained = false` and `reason = run_state_not_queueable`. | Inspect run state. If terminal, preserve artifacts and stop. If a future runner state is stuck, follow the future resume command once implemented. |
 | Adapter blocked | `prepare-claude-adapter` returns `work_order_not_adapter_safe`. | Inspect work order permission mode, allowed ops, context refs, and workflow id. Current P0 adapter supports only readonly `single_step_external_review` step `review`. |
-| Provider failure | Missing report/evidence, provider timeout, or provider-written `result = blocked` / `invalid`. | Preserve adapter request, transcript, partial report, and evidence. Re-run provider only if the work order and context refs are unchanged. Then rerun `validate-report`. |
+| Provider failure before validation | Missing report/evidence/transcript, provider timeout, or an incomplete provider attempt before `validate-report` terminalizes the run. | Preserve adapter request, transcript, partial report, and evidence. Re-run provider only if the work order and context refs are unchanged. Then run `validate-report`. |
+| Provider report terminalized blocked or invalid | `validate-report` has already set terminal `run_state = failed`, `goal_state = blocked`, and a `provider_report_blocked` / `provider_report_invalid` reason. | Preserve the terminal run and provider artifacts. Create a new request/run for a corrected attempt; rerunning `validate-report` on the terminal run only replays `terminal_run_already_set`. |
 | Invalid report | `validate-report` sets run `run_state = failed`, `goal_state = blocked`, terminal reason `invalid_report`. | Preserve the failed report and validation errors. Create a new request/run for a corrected attempt; do not hand-edit the failed run. |
 | Lock contention | Contract says `global_advisory_lock` and concurrency 1, but current P0 has no separate lock-inspection CLI. | Ensure only one operator drains/validates a state root at a time. If a future lock file/API is introduced, this runbook must be updated by that implementation issue. |
 | Resume required | Run is non-terminal and all canonical artifacts for the current step exist. | Current CLI has no `resume` command. Manual resume means rerun the idempotent next command (`drain`, `prepare-claude-adapter`, or `validate-report`) after inspecting state. Dedicated resume is planned in [#22](https://github.com/Saber5656/Saihai/issues/22). |
