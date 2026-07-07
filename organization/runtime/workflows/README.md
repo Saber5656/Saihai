@@ -34,6 +34,7 @@ any provider.
 | `scripts/frontdoor_server.py` | Local HTTP wrapper for Agent UI integration |
 | `tests/test_workflow_selector.py` | Unit/static contract tests |
 | `frontdoor-orchestrator-protocol.md` | Implementation boundary for Agent UI, host frontdoor, harness, and Claude adapter control |
+| `operator-runbook.md` | Day-1 operator workflow, legacy queue/tmux migration notes, stuck-run recovery, rollback, artifact, and validation guidance |
 
 The `.yaml` files in this directory are JSON-compatible by design, matching the
 existing runtime config convention in `organization/runtime/infra-team-bootstrap`.
@@ -139,6 +140,20 @@ The `human_action_id` is a proposal-digest challenge returned by `propose`.
 It is not arbitrary UI text. Execution commands accept `--principal-type`,
 `--principal-id`, and `--authn-method`; `main_agent_bridge` is rejected for
 execution-class transitions.
+
+## Day-1 Operator Workflow
+
+Use [operator-runbook.md](operator-runbook.md) for the supported day-1 flow:
+validate contracts, propose, approve, create run, drain, prepare adapter,
+validate report, inspect evidence, and recover or roll back stuck runs.
+
+The currently implemented workflow-frontdoor commands are `propose`, `approve`,
+`create-run`, `drain`, `adapter-capability`, `prepare-claude-adapter`,
+`validate-report`, `bridge-submit-request`, `bridge-read-projection`,
+`bridge-ack-output`, and `channel-token`. Dedicated `resume`, `abort`, raw run
+detail, and evidence inspection commands are not implemented yet; the runbook
+marks those paths as planned and uses canonical artifact inspection where
+needed.
 
 ## Main-Agent Bridge CLI
 
