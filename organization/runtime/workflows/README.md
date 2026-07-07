@@ -147,8 +147,8 @@ control:
 
 Commands from the target design whose backing implementations are not yet
 merged are intentionally absent from the parser. There are no dead stubs for
-`run-step`, `resume`, `abort`, `verify-completion`, `task-view`,
-`lock-status`, or `list`.
+`run-step`, `resume`, `abort`, `verify-completion`, `task-view`, or `list`.
+`lock-status` is currently exposed through the compatibility facade below.
 
 ```sh
 python3 scripts/saihai.py frontdoor --state-root /tmp/frontdoor-state propose \
@@ -208,6 +208,8 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
 
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state validate-report \
   --run-id <run_id>
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state lock-status
 ```
 
 The facade is compatibility-preserving and delegates to the same
@@ -219,6 +221,49 @@ It is not arbitrary UI text. Execution commands accept `--principal-type`,
 `--principal-id`, and `--authn-method`; `main_agent_bridge` is rejected for
 execution-class transitions.
 
+## Scheduler Lock And P0 Concurrency
+
+Workflow-run execution uses an invocation-drain scheduler with a per-state-root
+global advisory lock:
+
+```text
+<state_root>/locks/global-advisory.lock.d/owner.json
+```
+
+The lock serializes mutating harness operations (`create-run`, `drain`, and
+`validate-report`). Lock contention returns typed JSON and does not mutate the
+run record:
+
+```json
+{
+  "schema_version": 1,
+  "decision": "blocked",
+  "reason": "lock_contention",
+  "owner": {
+    "operation": "drain_run",
+    "run_id": "run-example"
+  }
+}
+```
+
+The P0 concurrency guard is separate from the filesystem lock. While holding
+the lock, `drain` refuses to advance a run when another run in the same state
+root is already in an in-flight state (`waiting_provider` or `validating`),
+returning `reason: "concurrency_limit_reached"` with the blocking run IDs.
+
+Operators can inspect the lock without changing state:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor \
+  --state-root /tmp/frontdoor-state lock-status
+```
+
+`lock-status` reports `locked`, the current `owner`, and stale-lock diagnostics.
+Stale locks are reclaimable by the next mutating operation only when the lock
+directory is older than the stale threshold and the recorded owner process is
+missing, unreadable, invalid, or no longer alive. A live owner is never
+reclaimed automatically.
+
 ## Day-1 Operator Workflow
 
 Use [operator-runbook.md](operator-runbook.md) for the supported day-1 flow:
@@ -228,10 +273,10 @@ validate report, inspect evidence, and recover or roll back stuck runs.
 The currently implemented workflow-frontdoor commands are `propose`, `approve`,
 `create-run`, `drain`, `adapter-capability`, `prepare-claude-adapter`,
 `validate-report`, `bridge-submit-request`, `bridge-read-projection`,
-`bridge-ack-output`, and `channel-token`. Dedicated `resume`, `abort`, raw run
-detail, and evidence inspection commands are not implemented yet; the runbook
-marks those paths as planned and uses canonical artifact inspection where
-needed.
+`bridge-ack-output`, `channel-token`, and `lock-status`. Dedicated `resume`,
+`abort`, raw run detail, and evidence inspection commands are not implemented
+yet; the runbook marks those paths as planned and uses canonical artifact
+inspection where needed.
 
 ## Main-Agent Bridge CLI
 
