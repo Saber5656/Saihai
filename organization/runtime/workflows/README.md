@@ -107,9 +107,56 @@ python3 scripts/configure_organization.py workflow-selector activation-envelope 
   --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
 ```
 
-## Frontdoor Harness CLI
+## Saihai CLI
 
-The host-owned frontdoor/harness is available through the organization facade:
+`scripts/saihai.py` is the operator command surface for the deterministic
+frontdoor/workflow split. It keeps frontdoor control separate from workflow-run
+control:
+
+| Group | Commands currently backed on main | Boundary |
+|---|---|---|
+| `frontdoor` | `propose`, `approve`, `status` | Propose and explicitly approve activation artifacts. Never creates workflow runs. |
+| `workflow` | `create-run`, `drain`, `validate-report` | Consumes approved activation/run artifacts. Does not accept raw prompt text as authority. |
+
+Commands from the target design whose backing implementations are not yet
+merged are intentionally absent from the parser. There are no dead stubs for
+`run-step`, `resume`, `abort`, `verify-completion`, `task-view`,
+`lock-status`, or `list`.
+
+```sh
+python3 scripts/saihai.py frontdoor --state-root /tmp/frontdoor-state propose \
+  --task-id TSK-example \
+  --request-id req-example \
+  --prompt "Run a readonly external review." \
+  --ref organization/runtime/workflows/README.md \
+  --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
+
+python3 scripts/saihai.py frontdoor --state-root /tmp/frontdoor-state status \
+  --request-id req-example
+
+python3 scripts/saihai.py frontdoor --state-root /tmp/frontdoor-state approve \
+  --request-id req-example \
+  --nonce <approval.human_action_id>
+
+python3 scripts/saihai.py workflow --state-root /tmp/frontdoor-state create-run \
+  --request-id req-example
+
+python3 scripts/saihai.py workflow --state-root /tmp/frontdoor-state drain \
+  --run-id <run_id>
+
+python3 scripts/saihai.py workflow --state-root /tmp/frontdoor-state validate-report \
+  --run-id <run_id>
+```
+
+`frontdoor approve` maps `--nonce` to the proposal challenge digest. `frontdoor
+status` reads the stored request record without mutating state. Workflow
+commands expose only typed artifact identifiers and report paths; they do not
+define `--prompt` or `--classification`.
+
+## Compatibility Facade
+
+The host-owned frontdoor/harness remains available through the organization
+facade for skills and automation:
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state propose \
@@ -135,6 +182,10 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state validate-report \
   --run-id <run_id>
 ```
+
+The facade is compatibility-preserving and delegates to the same
+`frontdoor_orchestrator.py` functions as `saihai`. New operator workflows should
+prefer `saihai`; existing automation can keep using `workflow-frontdoor`.
 
 The `human_action_id` is a proposal-digest challenge returned by `propose`.
 It is not arbitrary UI text. Execution commands accept `--principal-type`,

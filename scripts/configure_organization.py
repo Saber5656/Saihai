@@ -23,6 +23,7 @@ ITD_MONITOR = ORG_ROOT / "runtime" / "infra-task-dispatcher" / "scripts" / "itd_
 WORKFLOW_SELECTOR = ORG_ROOT / "runtime" / "workflows" / "scripts" / "workflow_selector.py"
 WORKFLOW_FRONTDOOR = ORG_ROOT / "runtime" / "workflows" / "scripts" / "frontdoor_orchestrator.py"
 WORKFLOW_FRONTDOOR_SERVER = ORG_ROOT / "runtime" / "workflows" / "scripts" / "frontdoor_server.py"
+SAIHAI_CLI = REPO_ROOT / "scripts" / "saihai.py"
 ITB_FACADE_COMMANDS = {
     "agent-call",
     "agent-switch",
@@ -139,6 +140,7 @@ def runtime_paths() -> dict[str, Any]:
         "workflow_selector": WORKFLOW_SELECTOR,
         "workflow_frontdoor": WORKFLOW_FRONTDOOR,
         "workflow_frontdoor_server": WORKFLOW_FRONTDOOR_SERVER,
+        "saihai_cli": SAIHAI_CLI,
         "role_root": ORG_ROOT / "roles",
         "runtime_registry": ITB_RUNTIME_ROOT / "config" / "role-agent-registry.yaml",
         "runtime_registry_mirror": ORG_ROOT / "runtime" / "role-agent-registry.yaml",

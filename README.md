@@ -86,6 +86,46 @@ python3 scripts/configure_organization.py workflow-selector validate-contracts
 ごく簡単な作業を main agent が軽量 task record と Vault 記録で処理する mode。
 `strict` は role dispatch / review / final evidence を要求する通常 mode。
 
+## Saihai CLI
+
+`scripts/saihai.py` は operator 向けの deterministic orchestrator CLI である。
+`frontdoor` と `workflow` を分け、提案・承認と workflow-run 操作を同じ
+namespace に混ぜない。
+
+```sh
+python3 scripts/saihai.py frontdoor --state-root /tmp/frontdoor-state propose \
+  --task-id TSK-example \
+  --request-id req-example \
+  --prompt "Run a readonly external review." \
+  --ref organization/runtime/workflows/README.md \
+  --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
+
+python3 scripts/saihai.py frontdoor --state-root /tmp/frontdoor-state status \
+  --request-id req-example
+
+python3 scripts/saihai.py frontdoor --state-root /tmp/frontdoor-state approve \
+  --request-id req-example \
+  --nonce <approval.human_action_id>
+
+python3 scripts/saihai.py workflow --state-root /tmp/frontdoor-state create-run \
+  --request-id req-example
+
+python3 scripts/saihai.py workflow --state-root /tmp/frontdoor-state drain \
+  --run-id <run_id>
+
+python3 scripts/saihai.py workflow --state-root /tmp/frontdoor-state validate-report \
+  --run-id <run_id>
+```
+
+`frontdoor propose` は approved artifact や workflow run を作らない。
+`frontdoor approve` は `--nonce` で明示確認を要求する。`workflow` commands は
+approved activation artifact や run id を入力に取り、raw prompt / prose を
+authority として読まない。
+
+`scripts/configure_organization.py workflow-frontdoor ...` は skills / automation
+向けの互換 facade として維持する。`saihai` と facade は同じ
+`frontdoor_orchestrator.py` functions を呼ぶ。
+
 ## Orchestrator P0 Workflow Contracts
 
 `organization/runtime/workflows/` は typed agent orchestrator の P0 contract
