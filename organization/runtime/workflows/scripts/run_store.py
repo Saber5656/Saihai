@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
+RESERVED_ARTIFACT_SUFFIX_RE = re.compile(r"(?:\.error|\.corrupt-\d+)$")
 
 RUN_STATES = {
     "created",
@@ -58,6 +59,8 @@ def validate_artifact_id(value: str, label: str) -> str:
         )
     if "/" in value or "\\" in value or value in {".", ".."} or ".." in value.split("."):
         raise RunStoreError("schema_invalid", [f"{label} cannot contain path traversal segments"])
+    if RESERVED_ARTIFACT_SUFFIX_RE.search(value):
+        raise RunStoreError("schema_invalid", [f"{label} cannot use reserved run-store artifact suffixes"])
     return value
 
 
@@ -65,8 +68,22 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except (TypeError, ValueError) as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RunStoreError("schema_invalid", [f"payload must be JSON serializable: {exc}"]) from exc
     except OSError as exc:
         try:
             tmp.unlink(missing_ok=True)
@@ -154,6 +171,28 @@ def validate_run_record(run: Any) -> list[str]:
                 errors.append("activation.workflow_selection.workflow_id must be non-empty")
             if not _non_empty_string(workflow_selection.get("initial_step")):
                 errors.append("activation.workflow_selection.initial_step must be non-empty")
+        context_scope = activation.get("context_scope")
+        if not isinstance(context_scope, dict):
+            errors.append("activation.context_scope must be a json object")
+        else:
+            refs = context_scope.get("refs")
+            if not isinstance(refs, list) or not refs or any(not isinstance(item, str) or not item for item in refs):
+                errors.append("activation.context_scope.refs must be a non-empty list of strings")
+            if context_scope.get("raw_transcript_sharing") != "forbidden":
+                errors.append("activation.context_scope.raw_transcript_sharing must be forbidden")
+        activation_scope = activation.get("activation_scope")
+        if not isinstance(activation_scope, dict):
+            errors.append("activation.activation_scope must be a json object")
+        else:
+            allowed_ops = activation_scope.get("allowed_ops")
+            if not isinstance(allowed_ops, dict):
+                errors.append("activation.activation_scope.allowed_ops must be a json object")
+            else:
+                for op in ("edit", "commit", "push", "network"):
+                    if not isinstance(allowed_ops.get(op), bool):
+                        errors.append(f"activation.activation_scope.allowed_ops.{op} must be boolean")
+            if not _is_int_at_least(activation_scope.get("step_budget"), 1):
+                errors.append("activation.activation_scope.step_budget must be an integer >= 1")
 
     scheduling = run.get("scheduling")
     if not isinstance(scheduling, dict):
@@ -253,7 +292,7 @@ def load_run(state_root: Path, run_id: str) -> dict[str, Any]:
     try:
         with path.open(encoding="utf-8") as handle:
             run = json.load(handle)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         errors = [str(exc)]
         quarantine_corrupt_run(state_root, run_id)
         write_error_artifact(state_root, run_id, reason_class="corrupt_json", errors=errors, operation="load")
@@ -262,6 +301,8 @@ def load_run(state_root: Path, run_id: str) -> dict[str, Any]:
         raise RunStoreError("io_error", [str(exc)]) from exc
 
     errors = validate_run_record(run)
+    if isinstance(run, dict) and run.get("run_id") != run_id:
+        errors.append(f"run_id must match requested run_id {run_id!r}")
     if errors:
         write_error_artifact(state_root, run_id, reason_class="schema_invalid", errors=errors, operation="load")
         raise RunStoreError("schema_invalid", errors)
@@ -299,7 +340,17 @@ def store_run(
     assert run_id is not None
 
     path = run_path(state_root, run_id)
-    if expected_current_state is not None and path.exists():
+    if expected_current_state is not None:
+        if not path.exists():
+            conflict_errors = [f"expected existing run_state {expected_current_state!r}, found missing run"]
+            write_error_artifact(
+                state_root,
+                run_id,
+                reason_class="state_conflict",
+                errors=conflict_errors,
+                operation="store",
+            )
+            raise RunStoreError("state_conflict", conflict_errors)
         on_disk = load_run(state_root, run_id)
         if on_disk.get("run_state") != expected_current_state:
             conflict_errors = [

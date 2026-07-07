@@ -304,6 +304,14 @@ def assert_allowed_principal(
     )
 
 
+def execution_principal_blocked_reason(principal: dict[str, Any]) -> str:
+    return (
+        "bridge principal cannot perform execution transition"
+        if principal.get("principal_type") == BRIDGE_PRINCIPAL_TYPE
+        else "unsupported execution principal"
+    )
+
+
 def assert_execution_principal(
     *,
     state_root: Path,
@@ -317,10 +325,30 @@ def assert_execution_principal(
         allowed_types=EXECUTION_PRINCIPAL_TYPES,
         transition=transition,
         subject=subject,
-        blocked_reason="bridge principal cannot perform execution transition"
-        if principal.get("principal_type") == BRIDGE_PRINCIPAL_TYPE
-        else "unsupported execution principal",
+        blocked_reason=execution_principal_blocked_reason(principal),
     )
+
+
+def precheck_execution_principal(
+    *,
+    state_root: Path,
+    principal: dict[str, Any],
+    transition: str,
+    subject: dict[str, Any],
+) -> None:
+    principal_type = str(principal.get("principal_type") or "")
+    if principal_type in EXECUTION_PRINCIPAL_TYPES:
+        return
+    blocked_reason = execution_principal_blocked_reason(principal)
+    append_audit_event(
+        state_root=state_root,
+        event_type=transition,
+        principal=principal,
+        subject=subject,
+        outcome="blocked",
+        details={"reason": blocked_reason, "principal_type": principal_type},
+    )
+    raise FrontdoorError(f"{blocked_reason}: {principal_type}")
 
 
 def assert_workflow_definition_principal(
@@ -1648,6 +1676,12 @@ def drain_run(
     validate_artifact_id(run_id, "run_id")
     actor = principal or default_manual_principal()
     path = run_store.run_path(state_root, run_id)
+    precheck_execution_principal(
+        state_root=state_root,
+        principal=actor,
+        transition="drain_run",
+        subject={"run_id": run_id},
+    )
     run = run_store.load_run(state_root, run_id)
     signature = assert_execution_principal(
         state_root=state_root,
@@ -1759,6 +1793,12 @@ def prepare_claude_adapter(
 ) -> dict[str, Any]:
     validate_artifact_id(run_id, "run_id")
     actor = principal or default_manual_principal()
+    precheck_execution_principal(
+        state_root=state_root,
+        principal=actor,
+        transition="prepare_claude_adapter",
+        subject={"run_id": run_id},
+    )
     run = run_store.load_run(state_root, run_id)
     signature = assert_execution_principal(
         state_root=state_root,
@@ -1894,6 +1934,12 @@ def validate_report(
     validate_artifact_id(run_id, "run_id")
     actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
     run_file = run_store.run_path(state_root, run_id)
+    precheck_execution_principal(
+        state_root=state_root,
+        principal=actor,
+        transition="validate_report",
+        subject={"run_id": run_id},
+    )
     run = run_store.load_run(state_root, run_id)
     loaded_run_state = str(run.get("run_state") or "")
     signature = assert_execution_principal(

@@ -124,6 +124,31 @@ def test_store_rejects_schema_invalid() -> None:
         assert "missing_required_field:activation" in error_payload["errors"]
 
 
+def test_rejects_reserved_artifact_suffix_ids() -> None:
+    for run_id in ("run.error", "run.corrupt-1"):
+        try:
+            run_store.validate_artifact_id(run_id, "run_id")
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "schema_invalid", f"reserved suffix class {run_id}")
+            assert "reserved run-store artifact suffixes" in exc.errors[0]
+        else:
+            raise AssertionError(f"reserved artifact suffix should be rejected: {run_id}")
+
+
+def test_store_wraps_json_serialization_failures() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run = valid_run(x_future={"not-json": object()})
+        try:
+            run_store.store_run(state_root, run)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "schema_invalid", "serialization schema class")
+            assert "payload must be JSON serializable" in exc.errors[0]
+        else:
+            raise AssertionError("non-serializable payload should be rejected")
+        assert not (state_root / "runs" / "run-store.json").exists()
+
+
 def test_load_missing_run() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -156,6 +181,39 @@ def test_load_corrupt_json_quarantines() -> None:
         assert_equal(error_payload["reason_class"], "corrupt_json", "corrupt error artifact")
 
 
+def test_load_non_utf8_payload_quarantines() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-non-utf8"
+        canonical = state_root / "runs" / f"{run_id}.json"
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_bytes(b"\xff\xfe\xfa")
+        try:
+            run_store.load_run(state_root, run_id)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "corrupt_json", "non-utf8 error class")
+        else:
+            raise AssertionError("non-UTF-8 run should be rejected")
+        assert (state_root / "runs" / f"{run_id}.corrupt-1.json").exists()
+        error_payload = json.loads((state_root / "runs" / f"{run_id}.error.json").read_text(encoding="utf-8"))
+        assert_equal(error_payload["reason_class"], "corrupt_json", "non-utf8 error artifact")
+
+
+def test_load_rejects_embedded_run_id_mismatch() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        canonical = state_root / "runs" / "run-requested.json"
+        canonical.parent.mkdir(parents=True, exist_ok=True)
+        canonical.write_text(json.dumps(valid_run(run_id="run-embedded")) + "\n", encoding="utf-8")
+        try:
+            run_store.load_run(state_root, "run-requested")
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "schema_invalid", "mismatched id class")
+            assert "run_id must match requested run_id 'run-requested'" in exc.errors
+        else:
+            raise AssertionError("embedded run_id mismatch should be rejected")
+
+
 def test_interrupted_write_preserves_previous_state() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -183,6 +241,21 @@ def test_state_conflict_guard() -> None:
         assert_equal(run_store.load_run(state_root, "run-conflict"), run, "unchanged canonical run")
 
 
+def test_state_conflict_guard_rejects_missing_canonical_file() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run = valid_run(run_id="run-missing-guard")
+        try:
+            run_store.store_run(state_root, run, expected_current_state="created")
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "state_conflict", "missing guarded file class")
+            assert "found missing run" in exc.errors[0]
+        else:
+            raise AssertionError("guarded store should reject missing canonical run")
+        error_payload = json.loads((state_root / "runs" / "run-missing-guard.error.json").read_text(encoding="utf-8"))
+        assert_equal(error_payload["reason_class"], "state_conflict", "missing guarded file artifact")
+
+
 def test_terminal_requires_terminal_status() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -201,6 +274,36 @@ def test_terminal_requires_terminal_status() -> None:
             raise AssertionError("terminal run without terminal status should be rejected")
 
 
+def test_activation_fields_used_by_drain_are_required() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run = valid_run(run_id="run-missing-context")
+        activation = dict(run["activation"])
+        activation.pop("context_scope")
+        run["activation"] = activation
+        try:
+            run_store.store_run(state_root, run)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "schema_invalid", "missing context class")
+            assert "activation.context_scope must be a json object" in exc.errors
+        else:
+            raise AssertionError("missing activation.context_scope should be rejected")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run = valid_run(run_id="run-missing-scope")
+        activation = dict(run["activation"])
+        activation.pop("activation_scope")
+        run["activation"] = activation
+        try:
+            run_store.store_run(state_root, run)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "schema_invalid", "missing activation scope class")
+            assert "activation.activation_scope must be a json object" in exc.errors
+        else:
+            raise AssertionError("missing activation.activation_scope should be rejected")
+
+
 def test_extra_keys_are_allowed() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -217,11 +320,17 @@ def main() -> None:
     tests = [
         test_store_and_reload_roundtrip,
         test_store_rejects_schema_invalid,
+        test_rejects_reserved_artifact_suffix_ids,
+        test_store_wraps_json_serialization_failures,
         test_load_missing_run,
         test_load_corrupt_json_quarantines,
+        test_load_non_utf8_payload_quarantines,
+        test_load_rejects_embedded_run_id_mismatch,
         test_interrupted_write_preserves_previous_state,
         test_state_conflict_guard,
+        test_state_conflict_guard_rejects_missing_canonical_file,
         test_terminal_requires_terminal_status,
+        test_activation_fields_used_by_drain_are_required,
         test_extra_keys_are_allowed,
     ]
     for test in tests:

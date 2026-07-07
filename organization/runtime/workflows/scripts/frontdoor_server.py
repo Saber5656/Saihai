@@ -611,6 +611,16 @@ class Handler(BaseHTTPRequestHandler):
                 {"schema_version": 1, "decision": "blocked", "reason": f"missing field: {exc.args[0]}"},
                 400,
             )
+        except frontdoor.run_store.RunStoreError as exc:
+            self._send_json(
+                {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": exc.reason_class,
+                    "errors": exc.errors,
+                },
+                400,
+            )
         except frontdoor.FrontdoorError as exc:
             self._send_json({"schema_version": 1, "decision": "blocked", "reason": str(exc)}, 400)
 

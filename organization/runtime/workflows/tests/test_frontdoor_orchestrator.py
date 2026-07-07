@@ -516,6 +516,67 @@ def test_drain_blocks_and_quarantines_corrupt_run_json() -> None:
         assert_equal(error_artifact["reason_class"], "corrupt_json", "corrupt run error class")
 
 
+def create_approved_run(state_root: Path, *, request_id: str, run_id: str) -> None:
+    proposed = load_payload(
+        run_frontdoor(
+            state_root,
+            "propose",
+            "--task-id",
+            f"TSK-{request_id}",
+            "--request-id",
+            request_id,
+            "--prompt",
+            "Run bounded external review",
+            "--classification",
+            json.dumps(external_review_classification()),
+            "--ref",
+            "organization/runtime/workflows/README.md",
+        )
+    )
+    load_payload(
+        run_frontdoor(
+            state_root,
+            "approve",
+            "--request-id",
+            request_id,
+            "--human-action-id",
+            proposed["approval"]["human_action_id"],
+        )
+    )
+    load_payload(run_frontdoor(state_root, "create-run", "--request-id", request_id, "--run-id", run_id))
+
+
+def test_execution_principal_precheck_does_not_quarantine_corrupt_runs() -> None:
+    cases = [
+        ("drain", ["drain", "--run-id", "run-precheck"]),
+        ("prepare", ["prepare-claude-adapter", "--run-id", "run-precheck"]),
+        ("validate", ["validate-report", "--run-id", "run-precheck"]),
+    ]
+    for label, command in cases:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            create_approved_run(state_root, request_id=f"req-precheck-{label}", run_id="run-precheck")
+            if label == "prepare":
+                load_payload(run_frontdoor(state_root, "drain", "--run-id", "run-precheck"))
+            canonical = state_root / "runs" / "run-precheck.json"
+            canonical.write_text('{"run_id": tru', encoding="utf-8")
+
+            blocked = run_frontdoor(
+                state_root,
+                *command,
+                "--principal-type",
+                "main_agent_bridge",
+                "--principal-id",
+                "codex:thread",
+                check=False,
+            )
+            payload = load_payload(blocked)
+            assert_equal(blocked.returncode, 2, f"{label} bridge precheck exit")
+            assert "bridge principal cannot perform execution transition" in payload["reason"]
+            assert not (state_root / "runs" / "run-precheck.corrupt-1.json").exists()
+            assert not (state_root / "runs" / "run-precheck.error.json").exists()
+
+
 def test_propose_updates_waiting_request_and_blocks_duplicate_overwrite() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -938,6 +999,16 @@ def test_http_frontdoor_api_flow() -> None:
                 operator_headers,
             )
             assert_equal(prepared["decision"], "ok", "http adapter prepared")
+
+            missing_status, missing_run = http_json_response(
+                "POST",
+                f"{base}/orchestrator/runs/missing-run/drain",
+                {},
+                operator_headers,
+            )
+            assert_equal(missing_status, 400, "http missing run store status")
+            assert_equal(missing_run["decision"], "blocked", "http missing run decision")
+            assert_equal(missing_run["reason"], "run_not_found", "http missing run reason")
 
             request_read = http_json("GET", f"{base}/frontdoor/requests/req-http")
             assert_equal(request_read["decision"], "blocked", "http raw request read blocked")
@@ -1757,6 +1828,7 @@ def main() -> None:
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
         test_drain_blocks_and_quarantines_corrupt_run_json,
+        test_execution_principal_precheck_does_not_quarantine_corrupt_runs,
         test_propose_updates_waiting_request_and_blocks_duplicate_overwrite,
         test_create_run_validates_resume_policy_and_binds_request,
         test_approval_uses_requested_ref_forms_without_leaking_original_paths,
