@@ -25,6 +25,24 @@ python3 server.py --port 8799
 
 依存は Python 3.9+ のみ（pip install 不要）。127.0.0.1 にのみ bind する。
 
+## Validation
+
+ローカルの offline validation suite は次の1コマンドで実行する。
+
+```sh
+python3 scripts/validate_all.py
+```
+
+組織設定 CLI の facade からも同じ suite を実行できる。
+
+```sh
+python3 scripts/configure_organization.py validate-all
+```
+
+この検証は stdlib の self-runner test、workflow contract validation、Python
+compile check をまとめて実行し、最後に summary JSON を1行出力する。子プロセスでは
+`SAIHAI_ALLOW_LIVE_PROVIDERS` を空にして、live provider token や network 前提に依存しない。
+
 ## データソース（正本）
 
 | ソース | 用途 |

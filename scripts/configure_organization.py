@@ -24,6 +24,7 @@ WORKFLOW_SELECTOR = ORG_ROOT / "runtime" / "workflows" / "scripts" / "workflow_s
 WORKFLOW_FRONTDOOR = ORG_ROOT / "runtime" / "workflows" / "scripts" / "frontdoor_orchestrator.py"
 WORKFLOW_FRONTDOOR_SERVER = ORG_ROOT / "runtime" / "workflows" / "scripts" / "frontdoor_server.py"
 SAIHAI_CLI = REPO_ROOT / "scripts" / "saihai.py"
+VALIDATE_ALL = REPO_ROOT / "scripts" / "validate_all.py"
 ITB_FACADE_COMMANDS = {
     "agent-call",
     "agent-switch",
@@ -141,6 +142,7 @@ def runtime_paths() -> dict[str, Any]:
         "workflow_frontdoor": WORKFLOW_FRONTDOOR,
         "workflow_frontdoor_server": WORKFLOW_FRONTDOOR_SERVER,
         "saihai_cli": SAIHAI_CLI,
+        "validate_all": VALIDATE_ALL,
         "role_root": ORG_ROOT / "roles",
         "runtime_registry": ITB_RUNTIME_ROOT / "config" / "role-agent-registry.yaml",
         "runtime_registry_mirror": ORG_ROOT / "runtime" / "role-agent-registry.yaml",
@@ -267,6 +269,8 @@ def main() -> None:
         raise SystemExit(run_runtime_script(WORKFLOW_FRONTDOOR, sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "workflow-frontdoor-server":
         raise SystemExit(run_runtime_script(WORKFLOW_FRONTDOOR_SERVER, sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "validate-all":
+        raise SystemExit(run_runtime_script(VALIDATE_ALL, sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] in ITB_FACADE_COMMANDS:
         raise SystemExit(run_runtime_script(ITB_BUILDER, sys.argv[1:]))
 
@@ -288,6 +292,8 @@ def main() -> None:
     workflow_frontdoor_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     workflow_frontdoor_server_parser = sub.add_parser("workflow-frontdoor-server", help="Run Orchestrator P0 frontdoor HTTP API")
     workflow_frontdoor_server_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
+    validate_all_parser = sub.add_parser("validate-all", help="Run all offline validation suites")
+    validate_all_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     for command in sorted(ITB_FACADE_COMMANDS):
         facade_parser = sub.add_parser(command, help=f"Run ITB facade command: {command}")
         facade_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
@@ -307,6 +313,8 @@ def main() -> None:
         raise SystemExit(run_runtime_script(WORKFLOW_FRONTDOOR, args.runtime_args))
     elif args.command == "workflow-frontdoor-server":
         raise SystemExit(run_runtime_script(WORKFLOW_FRONTDOOR_SERVER, args.runtime_args))
+    elif args.command == "validate-all":
+        raise SystemExit(run_runtime_script(VALIDATE_ALL, args.runtime_args))
     elif args.command in ITB_FACADE_COMMANDS:
         raise SystemExit(run_runtime_script(ITB_BUILDER, [args.command, *args.runtime_args]))
     else:
