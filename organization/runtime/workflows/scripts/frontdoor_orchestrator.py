@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import run_store
 import workflow_selector
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +82,7 @@ MAX_CONTEXT_REF_COUNT = 50
 MAX_ALLOWED_PATH_COUNT = 50
 MAX_CONTEXT_REF_FILE_BYTES = 1_000_000
 MAX_CONTEXT_REF_TOTAL_BYTES = 5_000_000
+# canonical copy lives in run_store.py
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
 REF_DENYLIST_NAMES = {
     ".git",
@@ -126,8 +128,7 @@ def load_json_arg(raw: str) -> Any:
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    run_store.atomic_write_json(path, payload)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -303,6 +304,14 @@ def assert_allowed_principal(
     )
 
 
+def execution_principal_blocked_reason(principal: dict[str, Any]) -> str:
+    return (
+        "bridge principal cannot perform execution transition"
+        if principal.get("principal_type") == BRIDGE_PRINCIPAL_TYPE
+        else "unsupported execution principal"
+    )
+
+
 def assert_execution_principal(
     *,
     state_root: Path,
@@ -316,10 +325,30 @@ def assert_execution_principal(
         allowed_types=EXECUTION_PRINCIPAL_TYPES,
         transition=transition,
         subject=subject,
-        blocked_reason="bridge principal cannot perform execution transition"
-        if principal.get("principal_type") == BRIDGE_PRINCIPAL_TYPE
-        else "unsupported execution principal",
+        blocked_reason=execution_principal_blocked_reason(principal),
     )
+
+
+def precheck_execution_principal(
+    *,
+    state_root: Path,
+    principal: dict[str, Any],
+    transition: str,
+    subject: dict[str, Any],
+) -> None:
+    principal_type = str(principal.get("principal_type") or "")
+    if principal_type in EXECUTION_PRINCIPAL_TYPES:
+        return
+    blocked_reason = execution_principal_blocked_reason(principal)
+    append_audit_event(
+        state_root=state_root,
+        event_type=transition,
+        principal=principal,
+        subject=subject,
+        outcome="blocked",
+        details={"reason": blocked_reason, "principal_type": principal_type},
+    )
+    raise FrontdoorError(f"{blocked_reason}: {principal_type}")
 
 
 def assert_workflow_definition_principal(
@@ -1556,9 +1585,9 @@ def create_run(
         transition="create_run",
         subject={"request_id": request_id, "run_id": effective_run_id},
     )
-    path = run_path(state_root, effective_run_id)
+    path = run_store.run_path(state_root, effective_run_id)
     if path.exists():
-        existing = read_json(path)
+        existing = run_store.load_run(state_root, effective_run_id)
         if existing.get("request_id") != request_id:
             raise FrontdoorError("run_id conflict for different request")
         if not bound_run_id:
@@ -1617,7 +1646,7 @@ def create_run(
             }
         ],
     }
-    write_json(path, run)
+    path = run_store.store_run(state_root, run)
     record["run_id"] = effective_run_id
     record["updated_at"] = now_iso()
     write_json(request_path(state_root, request_id), record)
@@ -1646,8 +1675,14 @@ def drain_run(
 ) -> dict[str, Any]:
     validate_artifact_id(run_id, "run_id")
     actor = principal or default_manual_principal()
-    path = run_path(state_root, run_id)
-    run = read_json(path)
+    path = run_store.run_path(state_root, run_id)
+    precheck_execution_principal(
+        state_root=state_root,
+        principal=actor,
+        transition="drain_run",
+        subject={"run_id": run_id},
+    )
+    run = run_store.load_run(state_root, run_id)
     signature = assert_execution_principal(
         state_root=state_root,
         principal=actor,
@@ -1713,7 +1748,7 @@ def drain_run(
                 "signature": signature,
             }
         )
-        write_json(path, run)
+        path = run_store.store_run(state_root, run, expected_current_state="created")
 
     append_audit_event(
         state_root=state_root,
@@ -1758,7 +1793,13 @@ def prepare_claude_adapter(
 ) -> dict[str, Any]:
     validate_artifact_id(run_id, "run_id")
     actor = principal or default_manual_principal()
-    run = read_json(run_path(state_root, run_id))
+    precheck_execution_principal(
+        state_root=state_root,
+        principal=actor,
+        transition="prepare_claude_adapter",
+        subject={"run_id": run_id},
+    )
+    run = run_store.load_run(state_root, run_id)
     signature = assert_execution_principal(
         state_root=state_root,
         principal=actor,
@@ -1892,8 +1933,15 @@ def validate_report(
 ) -> dict[str, Any]:
     validate_artifact_id(run_id, "run_id")
     actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
-    run_file = run_path(state_root, run_id)
-    run = read_json(run_file)
+    run_file = run_store.run_path(state_root, run_id)
+    precheck_execution_principal(
+        state_root=state_root,
+        principal=actor,
+        transition="validate_report",
+        subject={"run_id": run_id},
+    )
+    run = run_store.load_run(state_root, run_id)
+    loaded_run_state = str(run.get("run_state") or "")
     signature = assert_execution_principal(
         state_root=state_root,
         principal=actor,
@@ -1950,7 +1998,7 @@ def validate_report(
                 "result": "blocked",
             }
         )
-        write_json(run_file, run)
+        run_file = run_store.store_run(state_root, run, expected_current_state=loaded_run_state)
         append_audit_event(
             state_root=state_root,
             event_type="validate_report",
@@ -1999,7 +2047,7 @@ def validate_report(
             "result": terminal_status,
         }
     )
-    write_json(run_file, run)
+    run_file = run_store.store_run(state_root, run, expected_current_state=loaded_run_state)
     append_audit_event(
         state_root=state_root,
         event_type="validate_report",
@@ -2436,6 +2484,15 @@ def main() -> None:
             }
         else:
             raise FrontdoorError(f"unsupported command: {args.command}")
+    except run_store.RunStoreError as exc:
+        payload = {
+            "schema_version": 1,
+            "decision": "blocked",
+            "reason": exc.reason_class,
+            "errors": exc.errors,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(2)
     except FrontdoorError as exc:
         payload = {"schema_version": 1, "decision": "blocked", "reason": str(exc)}
         print(json.dumps(payload, ensure_ascii=False, indent=2))
