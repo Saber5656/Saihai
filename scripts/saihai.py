@@ -39,6 +39,10 @@ def print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def print_blocked(reason: str) -> None:
+    print_json({"schema_version": 1, "decision": "blocked", "reason": reason})
+
+
 def principal_from_args(frontdoor: Any, args: argparse.Namespace) -> dict[str, str]:
     return frontdoor.principal_from_cli(
         args.principal_type,
@@ -280,14 +284,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    frontdoor = frontdoor_module()
+    try:
+        frontdoor = frontdoor_module()
+    except (OSError, RuntimeError, ImportError) as exc:
+        print_blocked(str(exc))
+        return 2
+
     try:
         payload = args.handler(frontdoor, args)
     except frontdoor.FrontdoorError as exc:
-        print_json({"schema_version": 1, "decision": "blocked", "reason": str(exc)})
+        print_blocked(str(exc))
         return 2
-    except ValueError as exc:
-        print_json({"schema_version": 1, "decision": "blocked", "reason": str(exc)})
+    except (ValueError, KeyError, TypeError) as exc:
+        print_blocked(str(exc))
         return 2
 
     print_json(payload)

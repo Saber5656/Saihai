@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import io
 import hashlib
 import importlib.util
 import json
 import subprocess
 import sys
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -290,6 +292,34 @@ def test_exit_code_convention() -> None:
         assert load_payload(blocked)["decision"] == "blocked"
 
 
+def test_runtime_errors_use_json_contract() -> None:
+    module = load_saihai_module()
+    original_frontdoor_path = module.FRONTDOOR_PATH
+    try:
+        module.FRONTDOOR_PATH = ROOT / "organization" / "runtime" / "workflows" / "scripts" / "missing_frontdoor.py"
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = module.main(["frontdoor", "status", "--request-id", "req-missing"])
+        payload = json.loads(output.getvalue())
+        assert exit_code == 2
+        assert payload["decision"] == "blocked"
+        assert "missing_frontdoor.py" in payload["reason"]
+    finally:
+        module.FRONTDOOR_PATH = original_frontdoor_path
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        missing = run_frontdoor(
+            Path(raw_tmp),
+            "status",
+            "--request-id",
+            "req-missing",
+            check=False,
+        )
+        assert missing.returncode == 2
+        assert load_payload(missing)["decision"] == "blocked"
+        assert "Traceback" not in missing.stderr
+
+
 def main() -> None:
     tests = [
         test_group_separation_static,
@@ -301,6 +331,7 @@ def main() -> None:
         test_create_run_requires_approved_artifact,
         test_status_is_readonly,
         test_exit_code_convention,
+        test_runtime_errors_use_json_contract,
     ]
     for test in tests:
         test()
