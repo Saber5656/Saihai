@@ -38,7 +38,7 @@ FALSY = {"0", "false", "no", "off", "disabled"}
 MAINTENANCE_PATTERNS = [
     r"組織",
     r"organization",
-    r"Agent-Teams-Viewer",
+    r"Saihai",
     r"Agent-Org-Viewer",
     r"configure-organization",
     r"COMMON-AGENTS",
@@ -148,6 +148,8 @@ def runtime_paths() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "decision": "ok",
+        "saihai_root": str(REPO_ROOT),
+        # Legacy compatibility key for callers that have not renamed yet.
         "agent_teams_viewer_root": str(REPO_ROOT),
         "runtime_paths": {
             key: {"path": str(path), "exists": path.exists()}
@@ -249,6 +251,8 @@ def classify(prompt: str, *, requested_mode: str = "", organization_state: str =
         },
         "provider_transport_policy": provider_transport_policy,
         "performance_target_seconds": mode_config.get("performance_target_seconds"),
+        "saihai_root": str(REPO_ROOT),
+        # Legacy compatibility key for callers that have not renamed yet.
         "agent_teams_viewer_root": str(REPO_ROOT),
         "role_count": state["role_count"],
         "policy_count": state["policy_count"],
@@ -278,9 +282,9 @@ def main() -> None:
     classify_parser.add_argument("--prompt", default="")
     classify_parser.add_argument("--mode", choices=["fast", "strict"], default="")
     classify_parser.add_argument("--organization-state", choices=["enabled", "disabled", "maintenance"], default="")
-    itb_parser = sub.add_parser("itb", help="Run the Agent-Teams-Viewer ITB runtime builder")
+    itb_parser = sub.add_parser("itb", help="Run the Saihai ITB runtime builder")
     itb_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
-    itd_parser = sub.add_parser("itd-monitor", help="Run the Agent-Teams-Viewer ITD monitor runtime")
+    itd_parser = sub.add_parser("itd-monitor", help="Run the Saihai ITD monitor runtime")
     itd_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     workflow_parser = sub.add_parser("workflow-selector", help="Run Orchestrator P0 workflow selector")
     workflow_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)

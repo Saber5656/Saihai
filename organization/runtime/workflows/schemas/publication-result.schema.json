@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-teams-viewer.local/schemas/workflows/publication-result.schema.json",
+  "$id": "https://saihai.local/schemas/workflows/publication-result.schema.json",
   "title": "Publication Result",
   "type": "object",
   "required": [

@@ -1,8 +1,11 @@
 # Organization Knowledge
 
-Agent-Teams-Viewer is the canonical repository for AI organization operating
-knowledge. Agents-Vault remains the context, task, evidence, and work-history
-store.
+Saihai (formerly Agent-Teams-Viewer) is the canonical repository for AI
+organization operating knowledge. Agents-Vault remains the context, task,
+evidence, and work-history store.
+
+Rename note: historical migration records and legacy compatibility aliases may
+still use Agent-Teams-Viewer while new user-facing references use Saihai.
 
 ## Layout
 

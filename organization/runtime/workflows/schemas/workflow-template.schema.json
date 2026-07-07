@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-teams-viewer.local/schemas/workflows/workflow-template.schema.json",
+  "$id": "https://saihai.local/schemas/workflows/workflow-template.schema.json",
   "title": "Workflow Template",
   "description": "Reusable process definition. Process authority lives in the harness, not provider output.",
   "type": "object",

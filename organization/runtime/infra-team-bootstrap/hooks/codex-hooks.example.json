@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ITB_RUNTIME=codex ITB_STATE_ROOT=\"$HOME/.codex/state/itb\" \"$HOME/dev/Agent-Teams-Viewer/organization/runtime/infra-team-bootstrap/hooks/itb-session-start.sh\"",
+            "command": "ITB_RUNTIME=codex ITB_STATE_ROOT=\"$HOME/.codex/state/itb\" \"$HOME/dev/Saihai/organization/runtime/infra-team-bootstrap/hooks/itb-session-start.sh\"",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ITB_RUNTIME=codex ITB_STATE_ROOT=\"$HOME/.codex/state/itb\" \"$HOME/dev/Agent-Teams-Viewer/organization/runtime/infra-team-bootstrap/hooks/itb-final-response-guard.sh\"",
+            "command": "ITB_RUNTIME=codex ITB_STATE_ROOT=\"$HOME/.codex/state/itb\" \"$HOME/dev/Saihai/organization/runtime/infra-team-bootstrap/hooks/itb-final-response-guard.sh\"",
             "timeout": 10
           }
         ]

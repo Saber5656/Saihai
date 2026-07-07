@@ -10,8 +10,8 @@
     "main_agent_role": "orchestrator"
   },
   "knowledge": {
-    "canonical_repo": "Agent-Teams-Viewer",
-    "canonical_repo_path": "${AGENT_TEAMS_VIEWER_ROOT}",
+    "canonical_repo": "Saihai",
+    "canonical_repo_path": "${SAIHAI_ROOT}",
     "context_vault_path": "${AGENTS_VAULT_ROOT}",
     "legacy_skills_repo_path": "${SKILLS_REPO_ROOT}",
     "policy_location": "organization/policies",

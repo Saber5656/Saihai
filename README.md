@@ -1,7 +1,11 @@
-# Agent-Teams-Viewer
+# Saihai
 
-ITB Organization Instance（チャットセッションごとに扱う AI エージェント組織）の
+Saihai（formerly Agent-Teams-Viewer）は、ITB Organization Instance
+（チャットセッションごとに扱う AI エージェント組織）の
 状態、AI 組織運用の設定、Policy、Role 定義を管理するローカルダッシュボード。
+
+Rename note: pre-release documentation may still mention Agent-Teams-Viewer
+when referring to historical task records or compatibility aliases.
 
 ![dark theme dashboard]
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-teams-viewer.local/schemas/workflows/external-review-report.schema.json",
+  "$id": "https://saihai.local/schemas/workflows/external-review-report.schema.json",
   "title": "External Review Report",
   "description": "Authoritative typed report for single_step_external_review. Provider stdout/transcript is signal only.",
   "type": "object",
