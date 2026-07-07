@@ -1,0 +1,26 @@
+# Saihai orchestrator-frontend Codex profile example.
+# Verified against codex-cli 0.141.0 with `codex --help` and the official
+# Codex manual fetched on 2026-07-08.
+#
+# Install as:
+#   cp organization/runtime/workflows/profiles/codex-main-agent.config.example.toml \
+#      "$CODEX_HOME/saihai-main-agent.config.toml"
+#   mkdir -p "$CODEX_HOME/rules"
+#   cp organization/runtime/workflows/profiles/codex-main-agent.rules.example \
+#      "$CODEX_HOME/rules/saihai-main-agent.rules"
+#   codex --profile saihai-main-agent
+#
+# The launcher in this directory does not rely on the profile being installed:
+# it pins the same high-authority settings with CLI flags and -c overrides.
+
+approval_policy = "on-request"
+approvals_reviewer = "user"
+default_permissions = ":read-only"
+allow_login_shell = false
+web_search = "disabled"
+
+[features]
+hooks = true
+
+# Command-prefix auto-approval is a Codex rules concern, not a TOML key.
+# See codex-main-agent.rules.example for the allowed bridge/frontdoor prefixes.

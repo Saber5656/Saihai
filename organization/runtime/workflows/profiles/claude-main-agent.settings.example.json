@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "defaultMode": "default",
+    "disableBypassPermissionsMode": "disable",
+    "deny": [
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch"
+    ],
+    "allow": [
+      "Bash(python3 scripts/saihai.py frontdoor *)",
+      "Bash(python3 scripts/configure_organization.py workflow-frontdoor bridge-submit-request*)",
+      "Bash(python3 scripts/configure_organization.py workflow-frontdoor bridge-read-projection*)",
+      "Bash(python3 scripts/configure_organization.py workflow-frontdoor bridge-ack-output*)",
+      "Read(*)"
+    ]
+  }
+}
