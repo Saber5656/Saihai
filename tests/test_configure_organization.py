@@ -113,11 +113,13 @@ def main() -> None:
     assert paths["workflow_frontdoor_server"]["exists"] is True
     assert paths["sahai_cli"]["exists"] is True
     assert paths["saihai_cli"]["exists"] is True
+    assert paths["validate_all"]["exists"] is True
     assert "organization/runtime/infra-team-bootstrap/scripts/itb_bootstrap_builder.py" in paths["itb_builder"]["path"]
     assert "organization/runtime/workflows/scripts/workflow_selector.py" in paths["workflow_selector"]["path"]
     assert "organization/runtime/workflows/scripts/frontdoor_orchestrator.py" in paths["workflow_frontdoor"]["path"]
     assert "organization/runtime/workflows/scripts/frontdoor_server.py" in paths["workflow_frontdoor_server"]["path"]
     assert "scripts/saihai.py" in paths["saihai_cli"]["path"]
+    assert "scripts/validate_all.py" in paths["validate_all"]["path"]
     print(json.dumps({"result": "pass", "cases": 10}, ensure_ascii=False))
 
 

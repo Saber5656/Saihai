@@ -111,6 +111,7 @@ python3 scripts/configure_organization.py status
 python3 scripts/configure_organization.py runtime-paths
 python3 scripts/configure_organization.py classify --prompt "最近の天気予報を調べる"
 AGENT_ORG_MAINTENANCE=1 python3 scripts/configure_organization.py classify --prompt "Hookを直す"
+python3 scripts/configure_organization.py validate-all
 python3 scripts/configure_organization.py workflow-selector validate-contracts
 ```
 
@@ -121,10 +122,29 @@ python3 scripts/configure_organization.py workflow-selector validate-contracts
 | `status` | `organization/settings.json`、role count、policy count、repo root を JSON で出す |
 | `runtime-paths` | ITB runtime、workflow selector/frontdoor/server、Sahai CLI、registry mirror の存在確認 |
 | `classify` | prompt を `fast` / `strict` / `maintenance` に分類する |
+| `validate-all` | offline validation suite、workflow contract validation、Python compile check をまとめて実行する |
 | `workflow-selector` | workflow contract validation、selection、activation envelope helper |
 | `workflow-frontdoor` | frontdoor harness の full compatibility surface |
 | `workflow-frontdoor-server` | Agent UI / bridge 用の localhost HTTP API |
 | `itb`, `itd-monitor`, `agent-call`, `agent-switch`, `provider-failover` など | legacy / compatibility runtime の入口 |
+
+## Offline Validation
+
+ローカルの offline validation suite は次の1コマンドで実行します。
+
+```sh
+python3 scripts/validate_all.py
+```
+
+組織設定 CLI の facade からも同じ suite を実行できます。
+
+```sh
+python3 scripts/configure_organization.py validate-all
+```
+
+この検証は stdlib の self-runner test、workflow contract validation、Python
+compile check をまとめて実行し、最後に summary JSON を1行出力します。子プロセスでは
+`SAIHAI_ALLOW_LIVE_PROVIDERS` を空にして、live provider token や network 前提に依存しません。
 
 ## Frontdoor Harness
 
