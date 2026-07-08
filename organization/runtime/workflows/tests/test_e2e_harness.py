@@ -43,6 +43,7 @@ def load_validate_all_module():
 def test_happy_path_pre_runner() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         with OrchestratorHarness(Path(raw_tmp)) as harness:
+            runner_available = "provider_runner" in harness.optional_modules
             result = harness.happy_path()
             assert_equal(result["terminal"], {"status": "complete", "reason": "report_valid"}, "terminal state")
             tree = harness.artifact_tree()
@@ -50,9 +51,14 @@ def test_happy_path_pre_runner() -> None:
                 "requests/req-e2e.json",
                 "runs/run-e2e.json",
                 "work-orders/run-e2e/review.json",
-                "reports/run-e2e/review-external-review-report.json",
-                "provider-evidence/run-e2e/review-provider-evidence.json",
             }
+            if not runner_available:
+                required.update(
+                    {
+                        "reports/run-e2e/review-external-review-report.json",
+                        "provider-evidence/run-e2e/review-provider-evidence.json",
+                    }
+                )
             missing = sorted(required - set(tree))
             assert_equal(missing, [], "artifact tree")
             assert not any(path.endswith(".tmp") or ".tmp" in Path(path).name for path in tree)

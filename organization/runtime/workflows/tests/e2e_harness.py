@@ -156,11 +156,12 @@ class OrchestratorHarness:
         return challenge
 
     def approve(self, request_id: str, human_action_id: str | None = None) -> dict[str, Any]:
+        challenge = human_action_id or self.challenge(request_id)
         try:
             response = self.frontdoor.approve_request(
                 state_root=self.state_root,
                 request_id=request_id,
-                human_action_id=human_action_id or self.challenge(request_id),
+                human_action_id=challenge,
             )
         except Exception as exc:  # frontdoor can raise module-local FrontdoorError.
             raise HarnessAssertion("approval blocked", {"decision": "blocked", "reason": str(exc)}) from exc
