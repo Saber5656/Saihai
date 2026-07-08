@@ -31,7 +31,7 @@ typed report / evidence gate です。
 | Prompt 分類 | `scripts/configure_organization.py classify` と `/api/decide` が `fast` / `strict` / `maintenance` を判定する。どの mode でも task record と Vault 記録は必要 |
 | Workflow selection | `workflow_selector.py` が typed classification を deterministic に workflow template へ対応付ける。raw prompt は workflow 選択の authority ではない |
 | Frontdoor proposal | prompt 起点の request は `proposed` または `waiting_human` まで。`propose` は approved artifact や workflow run を作らない |
-| Approval | `approve` は proposal digest 由来の challenge id を要求する。approved envelope の `activation_source` は `human_ui` / `manual_cli` / `orchestrator-start` のみ。実行 principal は `human_operator` / `manual_operator` / `orchestrator_start` を許可し、Saihai CLI の `frontdoor approve` は `human_operator` / `human-ui` / `local_ui` を既定値にする |
+| Approval | `approve` は proposal digest 由来の challenge id を要求する。approved envelope の `activation_source` は `human_ui` / `manual_cli` / `orchestrator-start` のみ。実行 principal は `human_operator` / `manual_operator` / `orchestrator_start` を許可し、Sahai CLI の `frontdoor approve` は `human_operator` / `human-ui` / `local_ui` を既定値にする |
 | Workflow run | approved request から durable `runs/<run_id>.json` を作り、`drain` で bounded work order を作る |
 | Report validation | typed report と normalized provider evidence が canonical result。stdout、provider transcript、tmux pane output は signal only |
 | Main-agent bridge | main agent は request submit、redacted projection read、ack だけが可能。classification、approval、run 作成、adapter 準備、report path 指定は拒否される |
