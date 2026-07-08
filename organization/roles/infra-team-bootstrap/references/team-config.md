@@ -1,6 +1,6 @@
 # Headless Team Runtime Contract
 
-このファイルは ATV headless organization runtime の共通契約である。
+このファイルは Sahai headless organization runtime の共通契約である。
 
 ## Runtime Boundary
 

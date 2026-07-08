@@ -1,11 +1,11 @@
 # Organization Knowledge
 
-Saihai (formerly Agent-Teams-Viewer) is the canonical repository for AI
+Sahai (formerly Agent-Teams-Viewer) is the canonical repository for AI
 organization operating knowledge. Agents-Vault remains the context, task,
 evidence, and work-history store.
 
 Rename note: historical migration records and legacy compatibility aliases may
-still use Agent-Teams-Viewer while new user-facing references use Saihai.
+still use Agent-Teams-Viewer while new user-facing references use Sahai.
 
 ## Layout
 
@@ -24,7 +24,7 @@ still use Agent-Teams-Viewer while new user-facing references use Saihai.
 ## Migration Rule
 
 Do not delete existing skills during this migration. Team Role skills are kept as
-compatibility sources until all runtimes read this repository directly. ATV
+compatibility sources until all runtimes read this repository directly. Sahai
 role mirrors use a directory layout: `organization/roles/<role>/skill.md` is
 the skill entrypoint, and sibling directories preserve role-local references,
 evals, scripts, config, and tests.

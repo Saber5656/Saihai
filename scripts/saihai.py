@@ -273,7 +273,7 @@ def build_workflow_parser(sub: argparse._SubParsersAction[argparse.ArgumentParse
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Saihai deterministic frontdoor/workflow CLI",
+        description="Sahai deterministic frontdoor/workflow CLI",
     )
     sub = parser.add_subparsers(dest="group", required=True)
     build_frontdoor_parser(sub)

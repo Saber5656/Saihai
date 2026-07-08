@@ -1,6 +1,6 @@
-# Saihai
+# Sahai
 
-Saihai（formerly Agent-Teams-Viewer）は、ITB Organization Instance
+Sahai（formerly Agent-Teams-Viewer）は、ITB Organization Instance
 （チャットセッションごとに扱う AI エージェント組織）の
 状態、AI 組織運用の設定、Policy、Role 定義を管理するローカルダッシュボード。
 
@@ -90,7 +90,7 @@ python3 scripts/configure_organization.py workflow-selector validate-contracts
 ごく簡単な作業を main agent が軽量 task record と Vault 記録で処理する mode。
 `strict` は role dispatch / review / final evidence を要求する通常 mode。
 
-## Saihai CLI
+## Sahai CLI
 
 `scripts/saihai.py` は operator 向けの deterministic orchestrator CLI である。
 `frontdoor` と `workflow` を分け、提案・承認と workflow-run 操作を同じ

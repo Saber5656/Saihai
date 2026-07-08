@@ -134,7 +134,7 @@ python3 scripts/configure_organization.py workflow-selector activation-envelope 
   --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
 ```
 
-## Saihai CLI
+## Sahai CLI
 
 `scripts/saihai.py` is the operator command surface for the deterministic
 frontdoor/workflow split. It keeps frontdoor control separate from workflow-run

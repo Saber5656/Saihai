@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://saihai.local/schemas/workflows/research-report.schema.json",
+  "$id": "https://sahai.local/schemas/workflows/research-report.schema.json",
   "title": "Research Only Report",
   "type": "object",
   "required": [

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://saihai.local/schemas/workflows/audit-event.schema.json",
+  "$id": "https://sahai.local/schemas/workflows/audit-event.schema.json",
   "title": "Audit Event",
   "description": "Append-only provenance event for frontdoor, bridge, harness, and gate transitions.",
   "type": "object",

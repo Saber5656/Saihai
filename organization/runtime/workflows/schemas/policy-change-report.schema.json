@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://saihai.local/schemas/workflows/policy-change-report.schema.json",
+  "$id": "https://sahai.local/schemas/workflows/policy-change-report.schema.json",
   "title": "Policy Or Permission Change Report",
   "type": "object",
   "required": [

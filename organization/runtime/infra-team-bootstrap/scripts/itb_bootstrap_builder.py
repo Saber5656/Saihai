@@ -29,14 +29,19 @@ except ModuleNotFoundError:  # pragma: no cover - exercised when PyYAML is absen
 
 
 ITB_ROOT = Path(__file__).resolve().parents[1]
-AGENT_TEAMS_VIEWER_ROOT = Path(os.environ.get("AGENT_TEAMS_VIEWER_ROOT", str(ITB_ROOT.parents[2])))
-ATV_ROLE_ROOT = AGENT_TEAMS_VIEWER_ROOT / "organization" / "roles"
+SAHAI_ROOT = Path(
+    os.environ.get("SAHAI_ROOT")
+    or os.environ.get("SAIHAI_ROOT")
+    or os.environ.get("AGENT_TEAMS_VIEWER_ROOT")
+    or str(ITB_ROOT.parents[2])
+)
+SAHAI_ROLE_ROOT = SAHAI_ROOT / "organization" / "roles"
 SKILLS_ROOT = Path(
     os.environ.get("SKILLS_REPO_SKILLS_ROOT")
     or os.environ.get("SKILLS_ROOT")
     or str(Path.home() / "skills-repo" / "skills")
 ).expanduser()
-ATV_MIGRATED_ROLE_IDS = frozenset(
+SAHAI_MIGRATED_ROLE_IDS = frozenset(
     {
         "business-director",
         "business-information-strategy",
@@ -633,21 +638,21 @@ def allowed_tools_argument(value: Any) -> str:
     return ",".join(tools) if tools else "default"
 
 
-def atv_role_skill_path(role_id: str) -> Path:
-    return ATV_ROLE_ROOT / role_id / "skill.md"
+def sahai_role_skill_path(role_id: str) -> Path:
+    return SAHAI_ROLE_ROOT / role_id / "skill.md"
 
 
-def legacy_atv_role_skill_path(role_id: str) -> Path:
-    return ATV_ROLE_ROOT / f"{role_id}.md"
+def legacy_sahai_role_skill_path(role_id: str) -> Path:
+    return SAHAI_ROLE_ROOT / f"{role_id}.md"
 
 
 def role_definition_path(role_id: str) -> Path:
-    atv_path = atv_role_skill_path(role_id)
-    if atv_path.exists():
-        return atv_path
-    legacy_atv_path = legacy_atv_role_skill_path(role_id)
-    if legacy_atv_path.exists():
-        return legacy_atv_path
+    sahai_path = sahai_role_skill_path(role_id)
+    if sahai_path.exists():
+        return sahai_path
+    legacy_sahai_path = legacy_sahai_role_skill_path(role_id)
+    if legacy_sahai_path.exists():
+        return legacy_sahai_path
     skill_path = SKILLS_ROOT / role_id / "SKILL.md"
     if skill_path.exists():
         return skill_path
@@ -658,9 +663,9 @@ def role_skill_path(role_id: str) -> Path:
     return role_definition_path(role_id)
 
 
-def role_is_migrated_to_atv(role_id: str) -> bool:
-    return role_id in ATV_MIGRATED_ROLE_IDS and (
-        atv_role_skill_path(role_id).exists() or legacy_atv_role_skill_path(role_id).exists()
+def role_is_migrated_to_sahai(role_id: str) -> bool:
+    return role_id in SAHAI_MIGRATED_ROLE_IDS and (
+        sahai_role_skill_path(role_id).exists() or legacy_sahai_role_skill_path(role_id).exists()
     )
 
 
@@ -672,7 +677,7 @@ def same_filesystem_path(left: Path, right: Path) -> bool:
 
 
 def skill_allowed_tools(role_id: str) -> list[str]:
-    if role_is_migrated_to_atv(role_id):
+    if role_is_migrated_to_sahai(role_id):
         return []
     skill_path = role_skill_path(role_id)
     frontmatter = parse_skill_frontmatter(skill_path)
@@ -1168,7 +1173,7 @@ def role_agent_rows(*, organization_instance_id: str = "{org_instance_id}") -> l
             if not allowed_tools:
                 raise ValueError(f"role-agent registry allowed_tools missing for queue consumer: {role_id}")
             declared_allowed_tools = skill_allowed_tools(role_id)
-            if not declared_allowed_tools and not role_is_migrated_to_atv(role_id):
+            if not declared_allowed_tools and not role_is_migrated_to_sahai(role_id):
                 raise ValueError(f"role SKILL allowed-tools missing for queue consumer: {role_id}")
             if declared_allowed_tools and allowed_tools != declared_allowed_tools:
                 raise ValueError(
@@ -11220,7 +11225,7 @@ def session_start_config_digest() -> str:
         Path(__file__).resolve(),
         HOOK_BUNDLE_DIR / "codex-hooks.example.json",
         HOOK_BUNDLE_DIR / "claude-settings-hooks.example.json",
-        AGENT_TEAMS_VIEWER_ROOT / "organization" / "settings.json",
+        SAHAI_ROOT / "organization" / "settings.json",
     ):
         hasher.update(str(path).encode("utf-8"))
         hasher.update(b"\0")
@@ -16825,7 +16830,7 @@ def archive_shutdown(
         "dry_run": dry_run,
         "archived_at": now,
         "shutdown_scope": "state_only_headless",
-        "note": "No provider process shutdown is performed by ATV hooks; CLI orchestration owns worker lifecycle.",
+        "note": "No provider process shutdown is performed by Sahai hooks; CLI orchestration owns worker lifecycle.",
     }
     if not dry_run:
         write_shutdown_evidence(
@@ -16839,7 +16844,7 @@ def archive_shutdown(
             event_type="archive_shutdown",
             input_filename="archive-shutdown-input.json",
             evidence_prefix="archive_shutdown",
-            notes="State-only archive completed for headless ATV runtime.",
+            notes="State-only archive completed for headless Sahai runtime.",
         )
     return {"archiveShutdown": result}
 
@@ -16880,11 +16885,11 @@ def gate_skill_contract_lint_findings(skills_root: Path) -> tuple[list[dict[str,
             return None
         if relative.endswith("/SKILL.md"):
             role_id = relative.split("/", 1)[0]
-            if role_id in ATV_MIGRATED_ROLE_IDS:
-                path = atv_role_skill_path(role_id)
+            if role_id in SAHAI_MIGRATED_ROLE_IDS:
+                path = sahai_role_skill_path(role_id)
                 if path.exists():
                     return path
-                legacy_path = legacy_atv_role_skill_path(role_id)
+                legacy_path = legacy_sahai_role_skill_path(role_id)
                 return legacy_path if legacy_path.exists() else None
         if relative.startswith("infra-team-bootstrap/config/"):
             path = ITB_ROOT / "config" / relative.removeprefix("infra-team-bootstrap/config/")

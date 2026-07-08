@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://saihai.local/schemas/workflows/activation-envelope.schema.json",
+  "$id": "https://sahai.local/schemas/workflows/activation-envelope.schema.json",
   "title": "Activation Envelope",
   "description": "Typed gate state for moving a draft/proposed goal toward an approved workflow run.",
   "type": "object",

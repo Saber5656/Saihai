@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://saihai.local/schemas/workflows/orchestrator-projection.schema.json",
+  "$id": "https://sahai.local/schemas/workflows/orchestrator-projection.schema.json",
   "title": "Orchestrator Projection",
   "description": "Redacted output-confirmation projection safe for a main-agent bridge principal.",
   "type": "object",
