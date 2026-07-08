@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-teams-viewer.local/schemas/workflows/provider-adapter-capability.schema.json",
+  "$id": "https://sahai.local/schemas/workflows/provider-adapter-capability.schema.json",
   "title": "Provider Adapter Capability",
   "description": "Capability descriptor for headless CLI and future tmux interactive provider adapters.",
   "type": "object",

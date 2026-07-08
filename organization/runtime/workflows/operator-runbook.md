@@ -287,7 +287,7 @@ python3 scripts/configure_organization.py workflow-selector validate-contracts
 | [#10](https://github.com/Saber5656/Saihai/issues/10) | Headless provider adapter runner and normalized evidence. |
 | [#11](https://github.com/Saber5656/Saihai/issues/11) | Typed report validation and workflow transitions. |
 | [#12](https://github.com/Saber5656/Saihai/issues/12) | Existing queue, agent-call, final gate, and Vault evidence integration. |
-| [#13](https://github.com/Saber5656/Saihai/issues/13) | Agent-Teams-Viewer visibility for runs, work orders, evidence, and stuck states. |
+| [#13](https://github.com/Saber5656/Saihai/issues/13) | Sahai visibility for runs, work orders, evidence, and stuck states. |
 | [#14](https://github.com/Saber5656/Saihai/issues/14) | Template coverage beyond P0 external review. |
 | [#15](https://github.com/Saber5656/Saihai/issues/15) | End-to-end and failure-mode regression coverage. |
 | [#17](https://github.com/Saber5656/Saihai/issues/17) | Typed agent orchestrator implementation tracker. |

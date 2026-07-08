@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-teams-viewer.local/schemas/workflows/typed-classification.schema.json",
+  "$id": "https://sahai.local/schemas/workflows/typed-classification.schema.json",
   "title": "Typed Classification Candidate",
   "description": "LLM-assisted classification proposal. The deterministic selector is the authority for workflow_id.",
   "type": "object",

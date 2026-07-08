@@ -4,7 +4,7 @@ Updated: 2026-06-23
 
 ## Boundary
 
-Codex adapter is the OpenAI provider path for ATV headless runtime.
+Codex adapter is the OpenAI provider path for Sahai headless runtime.
 
 | Concern | Contract |
 |---|---|
