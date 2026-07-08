@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import shutil
+import subprocess
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -17,7 +20,7 @@ LOCK_DIRNAME = "locks"
 GLOBAL_LOCK_NAME = "global-advisory.lock.d"
 DEFAULT_TIMEOUT_SECONDS = 5.0
 DEFAULT_STALE_AFTER_SECONDS = 300.0
-INFLIGHT_RUN_STATES = {"waiting_provider", "validating"}
+INFLIGHT_RUN_STATES = {"step_queued", "waiting_provider", "validating"}
 
 
 class LockContentionError(RuntimeError):
@@ -51,6 +54,28 @@ def process_is_alive(pid: int) -> bool:
     return True
 
 
+def current_hostname() -> str:
+    return socket.gethostname()
+
+
+def process_start_token(pid: int) -> str:
+    if pid <= 0:
+        return ""
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
 def read_lock_owner(lock_path: Path) -> dict[str, Any]:
     try:
         with (lock_path / "owner.json").open(encoding="utf-8") as handle:
@@ -58,6 +83,21 @@ def read_lock_owner(lock_path: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def lock_snapshot(lock_path: Path) -> dict[str, Any] | None:
+    try:
+        stat = lock_path.stat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    return {
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+        "mtime_ns": stat.st_mtime_ns,
+        "owner": read_lock_owner(lock_path),
+    }
 
 
 def stale_lock_reason(lock_path: Path, *, stale_after_seconds: float) -> str:
@@ -80,20 +120,51 @@ def stale_lock_reason(lock_path: Path, *, stale_after_seconds: float) -> str:
     if not isinstance(pid, int) or isinstance(pid, bool):
         return f"lock_owner_pid_invalid:age_seconds={age:.3f}"
     if process_is_alive(pid):
+        owner_hostname = str(owner.get("hostname") or "")
+        if owner_hostname and owner_hostname != current_hostname():
+            return f"lock_owner_hostname_mismatch:{owner_hostname}:age_seconds={age:.3f}"
+        owner_start_token = str(owner.get("process_start_token") or "")
+        current_start_token = process_start_token(pid)
+        if owner_start_token and current_start_token:
+            if owner_start_token != current_start_token:
+                return f"lock_owner_pid_reused:{pid}:age_seconds={age:.3f}"
+            return ""
+        if not owner_start_token:
+            return f"lock_owner_process_start_token_missing:{pid}:age_seconds={age:.3f}"
         return ""
     return f"lock_owner_pid_not_alive:{pid}:age_seconds={age:.3f}"
 
 
 def try_reclaim_stale_lock(lock_path: Path, *, stale_after_seconds: float) -> bool:
-    if not stale_lock_reason(lock_path, stale_after_seconds=stale_after_seconds):
-        return False
-    reclaiming = lock_path.with_name(f"{lock_path.name}.reclaiming.{os.getpid()}")
+    reclaim_lock = lock_path.with_name(f"{lock_path.name}.reclaim.lock.d")
     try:
-        lock_path.rename(reclaiming)
-        shutil.rmtree(reclaiming)
+        reclaim_lock.mkdir()
     except OSError:
         return False
-    return True
+    try:
+        before = lock_snapshot(lock_path)
+        if before is None:
+            return False
+        if not stale_lock_reason(lock_path, stale_after_seconds=stale_after_seconds):
+            return False
+        if lock_snapshot(lock_path) != before:
+            return False
+        if not stale_lock_reason(lock_path, stale_after_seconds=stale_after_seconds):
+            return False
+        if lock_snapshot(lock_path) != before:
+            return False
+        reclaiming = lock_path.with_name(f"{lock_path.name}.reclaiming.{os.getpid()}")
+        try:
+            lock_path.rename(reclaiming)
+            shutil.rmtree(reclaiming)
+        except OSError:
+            return False
+        return True
+    finally:
+        try:
+            reclaim_lock.rmdir()
+        except OSError:
+            pass
 
 
 def acquire_global_lock(
@@ -112,6 +183,9 @@ def acquire_global_lock(
         "lock_version": "1",
         "lock_type": "workflow-run-global",
         "pid": os.getpid(),
+        "hostname": current_hostname(),
+        "process_start_token": process_start_token(os.getpid()),
+        "owner_nonce": uuid.uuid4().hex,
         "created_at": now_iso(),
         "stale_after_seconds": float(stale_after_seconds),
         "operation": operation,

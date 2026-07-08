@@ -101,22 +101,24 @@ def assert_equal(actual, expected, label: str) -> None:
     assert actual == expected, f"{label}: expected {expected!r}, got {actual!r}"
 
 
-def write_stale_lock(state_root: Path, *, pid: int) -> Path:
+def write_stale_lock(state_root: Path, *, pid: int, owner_overrides: dict | None = None) -> Path:
     lock_path = run_lock.global_lock_path(state_root)
     lock_path.mkdir(parents=True)
-    run_store.atomic_write_json(
-        lock_path / "owner.json",
-        {
-            "lock_version": "1",
-            "lock_type": "workflow-run-global",
-            "pid": pid,
-            "created_at": "2026-07-04T00:00:00+0900",
-            "stale_after_seconds": 300.0,
-            "operation": "test",
-            "run_id": "run-stale",
-            "principal_type": "manual_operator",
-        },
-    )
+    owner = {
+        "lock_version": "1",
+        "lock_type": "workflow-run-global",
+        "pid": pid,
+        "hostname": run_lock.current_hostname(),
+        "process_start_token": run_lock.process_start_token(pid),
+        "owner_nonce": "test-owner-nonce",
+        "created_at": "2026-07-04T00:00:00+0900",
+        "stale_after_seconds": 300.0,
+        "operation": "test",
+        "run_id": "run-stale",
+        "principal_type": "manual_operator",
+    }
+    owner.update(owner_overrides or {})
+    run_store.atomic_write_json(lock_path / "owner.json", owner)
     old = time.time() - 3600
     os.utime(lock_path, (old, old))
     return lock_path
@@ -169,6 +171,28 @@ def test_stale_lock_reclaim() -> None:
         run_lock.release_global_lock(state_root)
 
 
+def test_stale_reclaim_skips_changed_owner() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        lock_path = write_stale_lock(state_root, pid=999999999)
+        original_stale_lock_reason = run_lock.stale_lock_reason
+
+        def mutate_then_stale(path: Path, *, stale_after_seconds: float) -> str:
+            reason = original_stale_lock_reason(path, stale_after_seconds=stale_after_seconds)
+            owner = run_lock.read_lock_owner(path)
+            owner["owner_nonce"] = "changed-owner"
+            run_store.atomic_write_json(path / "owner.json", owner)
+            return reason
+
+        run_lock.stale_lock_reason = mutate_then_stale
+        try:
+            reclaimed = run_lock.try_reclaim_stale_lock(lock_path, stale_after_seconds=300)
+        finally:
+            run_lock.stale_lock_reason = original_stale_lock_reason
+        assert_equal(reclaimed, False, "changed owner reclaim")
+        assert_equal(run_lock.read_lock_owner(lock_path)["owner_nonce"], "changed-owner", "changed owner preserved")
+
+
 def test_live_lock_not_reclaimed() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -198,9 +222,44 @@ def test_inspect_reports_stale() -> None:
         assert status["stale_reason"], "stale reason should be non-empty"
 
 
+def test_pid_reuse_start_token_reports_stale() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        original_process_start_token = run_lock.process_start_token
+        run_lock.process_start_token = lambda pid: "current-start-token"
+        try:
+            lock_path = write_stale_lock(
+                state_root,
+                pid=os.getpid(),
+                owner_overrides={"process_start_token": "old-start-token"},
+            )
+            reason = run_lock.stale_lock_reason(lock_path, stale_after_seconds=300)
+        finally:
+            run_lock.process_start_token = original_process_start_token
+        assert "lock_owner_pid_reused" in reason, reason
+
+
 def test_concurrency_limit() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
+        run_store.store_run(
+            state_root,
+            valid_run(run_id="run-queued", request_id="req-queued", run_state="step_queued", goal_state="active"),
+        )
+        try:
+            run_lock.assert_p0_concurrency(state_root, target_run_id="run-target")
+        except run_lock.LockContentionError as exc:
+            assert_equal(exc.reason_class, "concurrency_limit_reached", "queued concurrency reason")
+            assert_equal(exc.owner["inflight_run_ids"], ["run-queued"], "queued inflight runs")
+        else:
+            raise AssertionError("queued run should block concurrency")
+
+        run_queued = run_store.load_run(state_root, "run-queued")
+        run_queued["run_state"] = "complete"
+        run_queued["goal_state"] = "complete"
+        run_queued["terminal"] = {"status": "complete", "reason": "report_valid"}
+        run_store.store_run(state_root, run_queued, expected_current_state="step_queued")
+
         run_store.store_run(
             state_root,
             valid_run(run_id="run-A", request_id="req-A", run_state="waiting_provider", goal_state="active"),
@@ -241,8 +300,10 @@ def main() -> None:
         test_contention_blocks_second_acquire,
         test_context_manager_releases_on_exception,
         test_stale_lock_reclaim,
+        test_stale_reclaim_skips_changed_owner,
         test_live_lock_not_reclaimed,
         test_inspect_reports_stale,
+        test_pid_reuse_start_token_reports_stale,
         test_concurrency_limit,
         test_safe_retry_after_release,
     ]
