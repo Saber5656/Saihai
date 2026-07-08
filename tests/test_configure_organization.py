@@ -68,6 +68,27 @@ def main() -> None:
         main_agent_can_execute=True,
     )
     assert_decision(
+        "Sahai の設定を直す",
+        organization_state="maintenance",
+        mode="fast",
+        organization_flow_enabled=False,
+        main_agent_can_execute=True,
+    )
+    assert_decision(
+        "Saihai の設定を直す",
+        organization_state="maintenance",
+        mode="fast",
+        organization_flow_enabled=False,
+        main_agent_can_execute=True,
+    )
+    assert_decision(
+        "Agent-Teams-Viewer の設定を直す",
+        organization_state="maintenance",
+        mode="fast",
+        organization_flow_enabled=False,
+        main_agent_can_execute=True,
+    )
+    assert_decision(
         "認証ロジックを変更してテストとレビューまで実行して",
         organization_state="enabled",
         mode="strict",
@@ -90,6 +111,7 @@ def main() -> None:
     assert paths["workflow_selector"]["exists"] is True
     assert paths["workflow_frontdoor"]["exists"] is True
     assert paths["workflow_frontdoor_server"]["exists"] is True
+    assert paths["sahai_cli"]["exists"] is True
     assert paths["saihai_cli"]["exists"] is True
     assert paths["validate_all"]["exists"] is True
     assert "organization/runtime/infra-team-bootstrap/scripts/itb_bootstrap_builder.py" in paths["itb_builder"]["path"]
@@ -98,7 +120,7 @@ def main() -> None:
     assert "organization/runtime/workflows/scripts/frontdoor_server.py" in paths["workflow_frontdoor_server"]["path"]
     assert "scripts/saihai.py" in paths["saihai_cli"]["path"]
     assert "scripts/validate_all.py" in paths["validate_all"]["path"]
-    print(json.dumps({"result": "pass", "cases": 7}, ensure_ascii=False))
+    print(json.dumps({"result": "pass", "cases": 10}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

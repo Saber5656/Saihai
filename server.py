@@ -45,7 +45,7 @@ STRICT_HINT_RE = re.compile(
     re.I,
 )
 MAINTENANCE_HINT_RE = re.compile(
-    r"(組織|organization|Agent-Teams-Viewer|Agent-Org-Viewer|configure-organization|COMMON-AGENTS|\bHook\b|\bITB\b|gate-prompt-formatter|infra-team-bootstrap)",
+    r"(組織|organization|Sahai|Saihai|Agent-Teams-Viewer|Agent-Org-Viewer|configure-organization|COMMON-AGENTS|\bHook\b|\bITB\b|gate-prompt-formatter|infra-team-bootstrap)",
     re.I,
 )
 WEATHER_RE = re.compile(r"(天気|天気予報|weather|forecast)", re.I)
@@ -616,7 +616,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"Agent-Teams-Viewer: http://127.0.0.1:{args.port}/  (Ctrl-C to stop)")
+    print(f"Sahai: http://127.0.0.1:{args.port}/  (Ctrl-C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

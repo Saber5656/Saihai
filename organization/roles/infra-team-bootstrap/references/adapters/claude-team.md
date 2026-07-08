@@ -4,7 +4,7 @@ Updated: 2026-06-23
 
 ## Boundary
 
-Claude adapter は ATV headless runtime の一 provider adapter であり、hook lifecycle の owner ではない。
+Claude adapter は Sahai headless runtime の一 provider adapter であり、hook lifecycle の owner ではない。
 
 | Concern | Contract |
 |---|---|

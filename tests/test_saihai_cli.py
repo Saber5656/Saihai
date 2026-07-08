@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the Saihai frontdoor/workflow CLI split."""
+"""Regression tests for the Sahai frontdoor/workflow CLI split."""
 
 from __future__ import annotations
 

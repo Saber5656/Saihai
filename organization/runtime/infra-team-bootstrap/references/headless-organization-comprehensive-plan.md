@@ -4,7 +4,7 @@ Updated: 2026-06-23
 
 ## Objective
 
-ATV organization runtime は Codex App / mobile remote-control の形を保ちつつ、組織運用の制御を main agent の任意判断から分離する。
+Sahai organization runtime は Codex App / mobile remote-control の形を保ちつつ、組織運用の制御を main agent の任意判断から分離する。
 
 Phase0/1 の repo 実装は hook を metadata observer と deterministic final gate に縮小し、role work は明示的な headless CLI worker と typed evidence で扱う。
 

@@ -1,6 +1,6 @@
 ---
 name: infra-team-bootstrap
-description: ATV headless runtime の SessionStart metadata pointer、Stop final gate、CLI role dispatch、Vault evidence を扱う Infrastructure ロール。
+description: Sahai headless runtime の SessionStart metadata pointer、Stop final gate、CLI role dispatch、Vault evidence を扱う Infrastructure ロール。
 user-invocable: false
 allowed-tools: Read, Grep, Glob, Bash, Write, Edit, Agent
 category: Team Role
@@ -16,7 +16,7 @@ agent_id: infra-team-bootstrap
 
 ## 役割
 
-`infra-team-bootstrap` は ATV headless runtime の制御面を担当する。
+`infra-team-bootstrap` は Sahai headless runtime の制御面を担当する。
 
 この role はユーザー依頼を直接解釈せず、Task Detail の成果物を手書きせず、実作業を開始しない。責務は session metadata、task-owned `execution_context` pointer、final gate verdict、queue / report / provider evidence の整合確認に限定する。
 

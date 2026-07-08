@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-teams-viewer.local/schemas/workflows/code-change-report.schema.json",
+  "$id": "https://sahai.local/schemas/workflows/code-change-report.schema.json",
   "title": "Code Change Report",
   "type": "object",
   "required": [

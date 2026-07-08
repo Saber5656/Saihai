@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-teams-viewer.local/schemas/workflows/workflow-run.schema.json",
+  "$id": "https://sahai.local/schemas/workflows/workflow-run.schema.json",
   "title": "Workflow Run State",
   "description": "Durable per-task execution instance. Queue messages are step artifacts under this run.",
   "type": "object",

@@ -23,7 +23,7 @@ ITD_MONITOR = ORG_ROOT / "runtime" / "infra-task-dispatcher" / "scripts" / "itd_
 WORKFLOW_SELECTOR = ORG_ROOT / "runtime" / "workflows" / "scripts" / "workflow_selector.py"
 WORKFLOW_FRONTDOOR = ORG_ROOT / "runtime" / "workflows" / "scripts" / "frontdoor_orchestrator.py"
 WORKFLOW_FRONTDOOR_SERVER = ORG_ROOT / "runtime" / "workflows" / "scripts" / "frontdoor_server.py"
-SAIHAI_CLI = REPO_ROOT / "scripts" / "saihai.py"
+SAHAI_CLI = REPO_ROOT / "scripts" / "saihai.py"
 VALIDATE_ALL = REPO_ROOT / "scripts" / "validate_all.py"
 ITB_FACADE_COMMANDS = {
     "agent-call",
@@ -39,6 +39,8 @@ FALSY = {"0", "false", "no", "off", "disabled"}
 MAINTENANCE_PATTERNS = [
     r"組織",
     r"organization",
+    r"Sahai",
+    r"Saihai",
     r"Agent-Teams-Viewer",
     r"Agent-Org-Viewer",
     r"configure-organization",
@@ -141,7 +143,8 @@ def runtime_paths() -> dict[str, Any]:
         "workflow_selector": WORKFLOW_SELECTOR,
         "workflow_frontdoor": WORKFLOW_FRONTDOOR,
         "workflow_frontdoor_server": WORKFLOW_FRONTDOOR_SERVER,
-        "saihai_cli": SAIHAI_CLI,
+        "sahai_cli": SAHAI_CLI,
+        "saihai_cli": SAHAI_CLI,
         "validate_all": VALIDATE_ALL,
         "role_root": ORG_ROOT / "roles",
         "runtime_registry": ITB_RUNTIME_ROOT / "config" / "role-agent-registry.yaml",
@@ -150,6 +153,9 @@ def runtime_paths() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "decision": "ok",
+        "sahai_root": str(REPO_ROOT),
+        # Legacy compatibility keys for callers that have not renamed yet.
+        "saihai_root": str(REPO_ROOT),
         "agent_teams_viewer_root": str(REPO_ROOT),
         "runtime_paths": {
             key: {"path": str(path), "exists": path.exists()}
@@ -251,6 +257,9 @@ def classify(prompt: str, *, requested_mode: str = "", organization_state: str =
         },
         "provider_transport_policy": provider_transport_policy,
         "performance_target_seconds": mode_config.get("performance_target_seconds"),
+        "sahai_root": str(REPO_ROOT),
+        # Legacy compatibility keys for callers that have not renamed yet.
+        "saihai_root": str(REPO_ROOT),
         "agent_teams_viewer_root": str(REPO_ROOT),
         "role_count": state["role_count"],
         "policy_count": state["policy_count"],
@@ -282,9 +291,9 @@ def main() -> None:
     classify_parser.add_argument("--prompt", default="")
     classify_parser.add_argument("--mode", choices=["fast", "strict"], default="")
     classify_parser.add_argument("--organization-state", choices=["enabled", "disabled", "maintenance"], default="")
-    itb_parser = sub.add_parser("itb", help="Run the Agent-Teams-Viewer ITB runtime builder")
+    itb_parser = sub.add_parser("itb", help="Run the Sahai ITB runtime builder")
     itb_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
-    itd_parser = sub.add_parser("itd-monitor", help="Run the Agent-Teams-Viewer ITD monitor runtime")
+    itd_parser = sub.add_parser("itd-monitor", help="Run the Sahai ITD monitor runtime")
     itd_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)
     workflow_parser = sub.add_parser("workflow-selector", help="Run Orchestrator P0 workflow selector")
     workflow_parser.add_argument("runtime_args", nargs=argparse.REMAINDER)

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import run_store
+import run_lock
 import workflow_selector
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
@@ -1564,6 +1565,7 @@ def create_run(
     if resume_policy not in {"manual", "daemon_future"}:
         raise FrontdoorError("resume_policy unsupported")
     actor = principal or default_manual_principal()
+
     record = read_json(request_path(state_root, request_id))
     envelope = record.get("approved_activation")
     if not isinstance(envelope, dict) or envelope.get("activation_status") != "approved":
@@ -1576,85 +1578,105 @@ def create_run(
 
     template = load_template(str(workflow_id))
     effective_run_id = run_id or stable_run_id(request_id, str(workflow_id))
-    bound_run_id = str(record.get("run_id") or "")
-    if bound_run_id and bound_run_id != effective_run_id:
-        raise FrontdoorError("request_id is already bound to a different run_id")
     signature = assert_execution_principal(
         state_root=state_root,
         principal=actor,
         transition="create_run",
         subject={"request_id": request_id, "run_id": effective_run_id},
     )
-    path = run_store.run_path(state_root, effective_run_id)
-    if path.exists():
-        existing = run_store.load_run(state_root, effective_run_id)
-        if existing.get("request_id") != request_id:
-            raise FrontdoorError("run_id conflict for different request")
-        if not bound_run_id:
+    subject = {"request_id": request_id, "run_id": effective_run_id}
+    try:
+        with run_lock.hold_global_lock(
+            state_root,
+            operation="create_run",
+            run_id=effective_run_id,
+            principal=actor,
+        ):
+            record = read_json(request_path(state_root, request_id))
+            bound_run_id = str(record.get("run_id") or "")
+            if bound_run_id and bound_run_id != effective_run_id:
+                raise FrontdoorError("request_id is already bound to a different run_id")
+            path = run_store.run_path(state_root, effective_run_id)
+            if path.exists():
+                existing = run_store.load_run(state_root, effective_run_id)
+                if existing.get("request_id") != request_id:
+                    raise FrontdoorError("run_id conflict for different request")
+                if not bound_run_id:
+                    record["run_id"] = effective_run_id
+                    record["updated_at"] = now_iso()
+                    write_json(request_path(state_root, request_id), record)
+                append_audit_event(
+                    state_root=state_root,
+                    event_type="create_run",
+                    principal=actor,
+                    subject=subject,
+                    outcome="replayed",
+                    details={"created": False},
+                )
+                return {
+                    "schema_version": 1,
+                    "decision": "ok",
+                    "created": False,
+                    "run_path": str(path),
+                    "workflow_run": existing,
+                }
+
+            run = {
+                "run_version": "1",
+                "run_id": effective_run_id,
+                "task_id": record["task_id"],
+                "request_id": request_id,
+                "workflow_id": workflow_id,
+                "goal_state": "approved",
+                "run_state": "created",
+                "current_step": initial_step,
+                "iteration": 1,
+                "max_steps": int(template.get("max_steps") or 1),
+                "step_history": [],
+                "activation": sanitize_activation_for_run(envelope),
+                "terminal": {"status": None, "reason": None},
+                "requester": record.get("requester") or requester("manual"),
+                "scheduling": {
+                    "scheduler_mode": "invocation-drain",
+                    "concurrency_group": "global",
+                    "state_persistence": "durable_state",
+                    "lock_policy": "global_advisory_lock",
+                    "concurrency": 1,
+                    "resume_policy": resume_policy,
+                },
+                "context_sharing": {
+                    "shared_run_state": "typed_durable_state",
+                    "step_local_snapshot": "immutable_step_attempt_snapshot",
+                    "provider_transcript": "confined_evidence_path_only",
+                },
+                "transition_provenance": [
+                    {
+                        "transition": "create_run",
+                        "principal": redacted_principal(actor),
+                        "signature": signature,
+                    }
+                ],
+            }
+            path = run_store.store_run(state_root, run)
             record["run_id"] = effective_run_id
             record["updated_at"] = now_iso()
             write_json(request_path(state_root, request_id), record)
+    except run_lock.LockContentionError as exc:
         append_audit_event(
             state_root=state_root,
             event_type="create_run",
             principal=actor,
-            subject={"request_id": request_id, "run_id": effective_run_id},
-            outcome="replayed",
-            details={"created": False},
+            subject=subject,
+            outcome="blocked",
+            details={"reason": exc.reason_class, "owner": exc.owner},
         )
-        return {
-            "schema_version": 1,
-            "decision": "ok",
-            "created": False,
-            "run_path": str(path),
-            "workflow_run": existing,
-        }
+        raise
 
-    run = {
-        "run_version": "1",
-        "run_id": effective_run_id,
-        "task_id": record["task_id"],
-        "request_id": request_id,
-        "workflow_id": workflow_id,
-        "goal_state": "approved",
-        "run_state": "created",
-        "current_step": initial_step,
-        "iteration": 1,
-        "max_steps": int(template.get("max_steps") or 1),
-        "step_history": [],
-        "activation": sanitize_activation_for_run(envelope),
-        "terminal": {"status": None, "reason": None},
-        "requester": record.get("requester") or requester("manual"),
-        "scheduling": {
-            "scheduler_mode": "invocation-drain",
-            "concurrency_group": "global",
-            "state_persistence": "durable_state",
-            "lock_policy": "global_advisory_lock",
-            "concurrency": 1,
-            "resume_policy": resume_policy,
-        },
-        "context_sharing": {
-            "shared_run_state": "typed_durable_state",
-            "step_local_snapshot": "immutable_step_attempt_snapshot",
-            "provider_transcript": "confined_evidence_path_only",
-        },
-        "transition_provenance": [
-            {
-                "transition": "create_run",
-                "principal": redacted_principal(actor),
-                "signature": signature,
-            }
-        ],
-    }
-    path = run_store.store_run(state_root, run)
-    record["run_id"] = effective_run_id
-    record["updated_at"] = now_iso()
-    write_json(request_path(state_root, request_id), record)
     append_audit_event(
         state_root=state_root,
         event_type="create_run",
         principal=actor,
-        subject={"request_id": request_id, "run_id": effective_run_id},
+        subject=subject,
         outcome="ok",
         details={"created": True},
     )
@@ -1676,85 +1698,105 @@ def drain_run(
     validate_artifact_id(run_id, "run_id")
     actor = principal or default_manual_principal()
     path = run_store.run_path(state_root, run_id)
+    subject = {"run_id": run_id}
     precheck_execution_principal(
         state_root=state_root,
         principal=actor,
         transition="drain_run",
-        subject={"run_id": run_id},
+        subject=subject,
     )
-    run = run_store.load_run(state_root, run_id)
-    signature = assert_execution_principal(
-        state_root=state_root,
-        principal=actor,
-        transition="drain_run",
-        subject={"run_id": run_id, "request_id": str(run.get("request_id") or "")},
-    )
-    if run.get("run_state") not in {"created", "step_queued"}:
+    try:
+        with run_lock.hold_global_lock(
+            state_root,
+            operation="drain_run",
+            run_id=run_id,
+            principal=actor,
+        ):
+            run = run_store.load_run(state_root, run_id)
+            subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
+            signature = assert_execution_principal(
+                state_root=state_root,
+                principal=actor,
+                transition="drain_run",
+                subject=subject,
+            )
+            if run.get("run_state") not in {"created", "step_queued"}:
+                append_audit_event(
+                    state_root=state_root,
+                    event_type="drain_run",
+                    principal=actor,
+                    subject=subject,
+                    outcome="replayed",
+                    details={"reason": "run_state_not_queueable", "run_state": run.get("run_state")},
+                )
+                return {
+                    "schema_version": 1,
+                    "decision": "ok",
+                    "drained": False,
+                    "reason": "run_state_not_queueable",
+                    "workflow_run": run,
+                }
+
+            run_lock.assert_p0_concurrency(state_root, target_run_id=run_id)
+            template = load_template(str(run["workflow_id"]))
+            step = next((item for item in template.get("steps", []) if item.get("id") == run["current_step"]), None)
+            if not isinstance(step, dict):
+                raise FrontdoorError(f"step not found in template: {run['current_step']}")
+
+            order_path = work_order_path(state_root, run_id, str(step["id"]))
+            if order_path.exists():
+                work_order = read_json(order_path)
+                drained = False
+            else:
+                request_record = read_json(request_path(state_root, str(run["request_id"])))
+                work_order = build_work_order(
+                    state_root=state_root,
+                    run=run,
+                    request_record=request_record,
+                    template=template,
+                    step=step,
+                    issuer_principal=actor,
+                )
+                write_json(order_path, work_order)
+                drained = True
+
+            if run["run_state"] == "created":
+                run["goal_state"] = "active"
+                run["run_state"] = "step_queued"
+                run["step_history"].append(
+                    {
+                        "step_id": step["id"],
+                        "status": "queued",
+                        "queued_at": now_iso(),
+                        "work_order_path": str(order_path),
+                        "principal": redacted_principal(actor),
+                        "signature": signature,
+                    }
+                )
+                run.setdefault("transition_provenance", []).append(
+                    {
+                        "transition": "drain_run",
+                        "principal": redacted_principal(actor),
+                        "signature": signature,
+                    }
+                )
+                path = run_store.store_run(state_root, run, expected_current_state="created")
+    except run_lock.LockContentionError as exc:
         append_audit_event(
             state_root=state_root,
             event_type="drain_run",
             principal=actor,
-            subject={"run_id": run_id, "request_id": str(run.get("request_id") or "")},
-            outcome="replayed",
-            details={"reason": "run_state_not_queueable", "run_state": run.get("run_state")},
+            subject=subject,
+            outcome="blocked",
+            details={"reason": exc.reason_class, "owner": exc.owner},
         )
-        return {
-            "schema_version": 1,
-            "decision": "ok",
-            "drained": False,
-            "reason": "run_state_not_queueable",
-            "workflow_run": run,
-        }
-
-    template = load_template(str(run["workflow_id"]))
-    step = next((item for item in template.get("steps", []) if item.get("id") == run["current_step"]), None)
-    if not isinstance(step, dict):
-        raise FrontdoorError(f"step not found in template: {run['current_step']}")
-
-    order_path = work_order_path(state_root, run_id, str(step["id"]))
-    if order_path.exists():
-        work_order = read_json(order_path)
-        drained = False
-    else:
-        request_record = read_json(request_path(state_root, str(run["request_id"])))
-        work_order = build_work_order(
-            state_root=state_root,
-            run=run,
-            request_record=request_record,
-            template=template,
-            step=step,
-            issuer_principal=actor,
-        )
-        write_json(order_path, work_order)
-        drained = True
-
-    if run["run_state"] == "created":
-        run["goal_state"] = "active"
-        run["run_state"] = "step_queued"
-        run["step_history"].append(
-            {
-                "step_id": step["id"],
-                "status": "queued",
-                "queued_at": now_iso(),
-                "work_order_path": str(order_path),
-                "principal": redacted_principal(actor),
-                "signature": signature,
-            }
-        )
-        run.setdefault("transition_provenance", []).append(
-            {
-                "transition": "drain_run",
-                "principal": redacted_principal(actor),
-                "signature": signature,
-            }
-        )
-        path = run_store.store_run(state_root, run, expected_current_state="created")
+        raise
 
     append_audit_event(
         state_root=state_root,
         event_type="drain_run",
         principal=actor,
-        subject={"run_id": run_id, "request_id": str(run.get("request_id") or "")},
+        subject=subject,
         outcome="ok" if drained else "replayed",
         details={"drained": drained},
     )
@@ -1934,125 +1976,145 @@ def validate_report(
     validate_artifact_id(run_id, "run_id")
     actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
     run_file = run_store.run_path(state_root, run_id)
+    subject = {"run_id": run_id}
     precheck_execution_principal(
         state_root=state_root,
         principal=actor,
         transition="validate_report",
-        subject={"run_id": run_id},
+        subject=subject,
     )
-    run = run_store.load_run(state_root, run_id)
-    loaded_run_state = str(run.get("run_state") or "")
-    signature = assert_execution_principal(
-        state_root=state_root,
-        principal=actor,
-        transition="validate_report",
-        subject={"run_id": run_id, "request_id": str(run.get("request_id") or "")},
-    )
-    if run.get("run_state") in {"complete", "failed", "aborted"}:
+    try:
+        with run_lock.hold_global_lock(
+            state_root,
+            operation="validate_report",
+            run_id=run_id,
+            principal=actor,
+        ):
+            run = run_store.load_run(state_root, run_id)
+            loaded_run_state = str(run.get("run_state") or "")
+            subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
+            signature = assert_execution_principal(
+                state_root=state_root,
+                principal=actor,
+                transition="validate_report",
+                subject=subject,
+            )
+            if run.get("run_state") in {"complete", "failed", "aborted"}:
+                append_audit_event(
+                    state_root=state_root,
+                    event_type="validate_report",
+                    principal=actor,
+                    subject=subject,
+                    outcome="replayed",
+                    details={"reason": "terminal_run_already_set", "run_state": run.get("run_state")},
+                )
+                return {
+                    "schema_version": 1,
+                    "decision": "ok",
+                    "validated": False,
+                    "reason": "terminal_run_already_set",
+                    "run_path": str(run_file),
+                    "workflow_run": run,
+                }
+            step_id = str(run["current_step"])
+            work_order = read_json(work_order_path(state_root, run_id, step_id))
+            canonical_report_path = Path(str(work_order["report_path"])).expanduser()
+            path = Path(report_path_arg).expanduser() if report_path_arg else canonical_report_path
+            if not path_is_within(path, state_paths(state_root)["reports"]):
+                raise FrontdoorError("report path must stay under orchestrator state reports directory")
+            if path.resolve() != canonical_report_path.resolve():
+                raise FrontdoorError("report path must match canonical work order report path")
+            report = read_json(path)
+            errors = validate_external_review_report(report, run=run, work_order=work_order, state_root=state_root)
+            if errors:
+                run["run_state"] = "failed"
+                run["goal_state"] = "blocked"
+                run["terminal"] = {"status": "blocked", "reason": "invalid_report"}
+                run["step_history"].append(
+                    {
+                        "step_id": step_id,
+                        "status": "blocked",
+                        "checked_at": now_iso(),
+                        "report_path": str(path),
+                        "errors": errors,
+                        "principal": redacted_principal(actor),
+                        "signature": signature,
+                    }
+                )
+                run.setdefault("transition_provenance", []).append(
+                    {
+                        "transition": "validate_report",
+                        "principal": redacted_principal(actor),
+                        "signature": signature,
+                        "result": "blocked",
+                    }
+                )
+                run_file = run_store.store_run(state_root, run, expected_current_state=loaded_run_state)
+                append_audit_event(
+                    state_root=state_root,
+                    event_type="validate_report",
+                    principal=actor,
+                    subject=subject,
+                    outcome="blocked",
+                    details={"reason": "invalid_report", "errors": errors},
+                )
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": "invalid_report",
+                    "errors": errors,
+                    "workflow_run": run,
+                }
+
+            result = report["result"]
+            if result in {"pass", "findings"}:
+                run["run_state"] = "complete"
+                run["goal_state"] = "complete"
+                terminal_status = "complete"
+                terminal_reason = "report_valid"
+            else:
+                run["run_state"] = "failed"
+                run["goal_state"] = "blocked"
+                terminal_status = "blocked"
+                terminal_reason = f"provider_report_{result}"
+
+            run["terminal"] = {"status": terminal_status, "reason": terminal_reason}
+            run["step_history"].append(
+                {
+                    "step_id": step_id,
+                    "status": terminal_status,
+                    "checked_at": now_iso(),
+                    "report_path": str(path),
+                    "result": result,
+                    "principal": redacted_principal(actor),
+                    "signature": signature,
+                }
+            )
+            run.setdefault("transition_provenance", []).append(
+                {
+                    "transition": "validate_report",
+                    "principal": redacted_principal(actor),
+                    "signature": signature,
+                    "result": terminal_status,
+                }
+            )
+            run_file = run_store.store_run(state_root, run, expected_current_state=loaded_run_state)
+    except run_lock.LockContentionError as exc:
         append_audit_event(
             state_root=state_root,
             event_type="validate_report",
             principal=actor,
-            subject={"run_id": run_id, "request_id": str(run.get("request_id") or "")},
-            outcome="replayed",
-            details={"reason": "terminal_run_already_set", "run_state": run.get("run_state")},
-        )
-        return {
-            "schema_version": 1,
-            "decision": "ok",
-            "validated": False,
-            "reason": "terminal_run_already_set",
-            "run_path": str(run_file),
-            "workflow_run": run,
-        }
-    step_id = str(run["current_step"])
-    work_order = read_json(work_order_path(state_root, run_id, step_id))
-    canonical_report_path = Path(str(work_order["report_path"])).expanduser()
-    path = Path(report_path_arg).expanduser() if report_path_arg else canonical_report_path
-    if not path_is_within(path, state_paths(state_root)["reports"]):
-        raise FrontdoorError("report path must stay under orchestrator state reports directory")
-    if path.resolve() != canonical_report_path.resolve():
-        raise FrontdoorError("report path must match canonical work order report path")
-    report = read_json(path)
-    errors = validate_external_review_report(report, run=run, work_order=work_order, state_root=state_root)
-    if errors:
-        run["run_state"] = "failed"
-        run["goal_state"] = "blocked"
-        run["terminal"] = {"status": "blocked", "reason": "invalid_report"}
-        run["step_history"].append(
-            {
-                "step_id": step_id,
-                "status": "blocked",
-                "checked_at": now_iso(),
-                "report_path": str(path),
-                "errors": errors,
-                "principal": redacted_principal(actor),
-                "signature": signature,
-            }
-        )
-        run.setdefault("transition_provenance", []).append(
-            {
-                "transition": "validate_report",
-                "principal": redacted_principal(actor),
-                "signature": signature,
-                "result": "blocked",
-            }
-        )
-        run_file = run_store.store_run(state_root, run, expected_current_state=loaded_run_state)
-        append_audit_event(
-            state_root=state_root,
-            event_type="validate_report",
-            principal=actor,
-            subject={"run_id": run_id, "request_id": str(run.get("request_id") or "")},
+            subject=subject,
             outcome="blocked",
-            details={"reason": "invalid_report", "errors": errors},
+            details={"reason": exc.reason_class, "owner": exc.owner},
         )
-        return {
-            "schema_version": 1,
-            "decision": "blocked",
-            "reason": "invalid_report",
-            "errors": errors,
-            "workflow_run": run,
-        }
+        raise
 
-    result = report["result"]
-    if result in {"pass", "findings"}:
-        run["run_state"] = "complete"
-        run["goal_state"] = "complete"
-        terminal_status = "complete"
-        terminal_reason = "report_valid"
-    else:
-        run["run_state"] = "failed"
-        run["goal_state"] = "blocked"
-        terminal_status = "blocked"
-        terminal_reason = f"provider_report_{result}"
-
-    run["terminal"] = {"status": terminal_status, "reason": terminal_reason}
-    run["step_history"].append(
-        {
-            "step_id": step_id,
-            "status": terminal_status,
-            "checked_at": now_iso(),
-            "report_path": str(path),
-            "result": result,
-            "principal": redacted_principal(actor),
-            "signature": signature,
-        }
-    )
-    run.setdefault("transition_provenance", []).append(
-        {
-            "transition": "validate_report",
-            "principal": redacted_principal(actor),
-            "signature": signature,
-            "result": terminal_status,
-        }
-    )
-    run_file = run_store.store_run(state_root, run, expected_current_state=loaded_run_state)
     append_audit_event(
         state_root=state_root,
         event_type="validate_report",
         principal=actor,
-        subject={"run_id": run_id, "request_id": str(run.get("request_id") or "")},
+        subject=subject,
         outcome="ok" if terminal_status == "complete" else "blocked",
         details={"report_status": terminal_status, "result": result},
     )
@@ -2355,6 +2417,8 @@ def parser() -> argparse.ArgumentParser:
     report.add_argument("--principal-id", default="local-harness")
     report.add_argument("--authn-method", default="local_cli")
 
+    sub.add_parser("lock-status")
+
     bridge_submit = sub.add_parser("bridge-submit-request")
     bridge_submit.add_argument("--task-id", required=True)
     bridge_submit.add_argument("--request-id", required=True)
@@ -2442,6 +2506,8 @@ def main() -> None:
                 report_path_arg=args.report_path,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
+        elif args.command == "lock-status":
+            payload = run_lock.inspect_global_lock(state_root)
         elif args.command == "bridge-submit-request":
             payload = bridge_submit_request(
                 state_root=state_root,
@@ -2490,6 +2556,15 @@ def main() -> None:
             "decision": "blocked",
             "reason": exc.reason_class,
             "errors": exc.errors,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(2)
+    except run_lock.LockContentionError as exc:
+        payload = {
+            "schema_version": 1,
+            "decision": "blocked",
+            "reason": exc.reason_class,
+            "owner": exc.owner,
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         raise SystemExit(2)

@@ -621,6 +621,16 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 400,
             )
+        except frontdoor.run_lock.LockContentionError as exc:
+            self._send_json(
+                {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": exc.reason_class,
+                    "owner": exc.owner,
+                },
+                409,
+            )
         except frontdoor.FrontdoorError as exc:
             self._send_json({"schema_version": 1, "decision": "blocked", "reason": str(exc)}, 400)
 

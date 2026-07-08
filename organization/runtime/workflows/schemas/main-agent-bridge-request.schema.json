@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://agent-teams-viewer.local/schemas/workflows/main-agent-bridge-request.schema.json",
+  "$id": "https://sahai.local/schemas/workflows/main-agent-bridge-request.schema.json",
   "title": "Main Agent Bridge Request",
   "description": "Restricted submit_request payload accepted from the main-agent confirmation surface.",
   "type": "object",
