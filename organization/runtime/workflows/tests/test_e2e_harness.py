@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import importlib.util
 from pathlib import Path
 
 from e2e_harness import HarnessAssertion, HarnessFeatureUnavailable, OrchestratorHarness
@@ -29,6 +30,14 @@ def load_last_json(stdout: str) -> dict:
         if isinstance(payload, dict):
             return payload
     raise AssertionError(f"no JSON object found in stdout: {stdout!r}")
+
+
+def load_validate_all_module():
+    spec = importlib.util.spec_from_file_location("validate_all", VALIDATE_ALL)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_happy_path_pre_runner() -> None:
@@ -93,6 +102,8 @@ def test_validate_all_list_and_run() -> None:
     listed_suites = [line for line in listed.stdout.splitlines() if line.strip()]
     assert len(listed_suites) >= 3, listed.stdout
     assert "organization/runtime/workflows/tests/test_e2e_harness.py" in listed_suites
+    assert "organization/runtime/infra-team-bootstrap/tests/test_itb_bootstrap_builder.py" in listed_suites
+    assert "organization/roles/infra-team-bootstrap/tests/test_itb_bootstrap_builder.py" in listed_suites
 
     if os.environ.get("SAIHAI_VALIDATE_ALL_CHILD"):
         return
@@ -124,6 +135,28 @@ def test_validate_all_fails_on_broken_suite() -> None:
     assert_equal(summary["detail"], "no_suites_matched", "empty filter detail")
 
 
+def test_validate_all_tail_decodes_timeout_bytes() -> None:
+    validate_all = load_validate_all_module()
+    assert_equal(validate_all.tail(b"prefix\nbytes-stderr"), "prefix\nbytes-stderr", "bytes tail")
+    assert_equal(validate_all.tail(None), "", "none tail")
+    assert_equal(
+        validate_all.parse_unittest_cases("", "Ran 19 tests in 2.0s\n\nOK"),
+        19,
+        "unittest case count",
+    )
+
+
+def test_validate_all_contract_timeout_is_reported() -> None:
+    validate_all = load_validate_all_module()
+    result = validate_all.run_contract(
+        [sys.executable, "-c", "import time; time.sleep(1)"],
+        timeout=0.01,
+    )
+    assert_equal(result["result"], "fail", "contract timeout result")
+    assert_equal(result["detail"], "timeout", "contract timeout detail")
+    json.dumps(result)
+
+
 def main() -> None:
     tests = [
         test_happy_path_pre_runner,
@@ -131,6 +164,8 @@ def main() -> None:
         test_harness_assertion_carries_response,
         test_validate_all_list_and_run,
         test_validate_all_fails_on_broken_suite,
+        test_validate_all_tail_decodes_timeout_bytes,
+        test_validate_all_contract_timeout_is_reported,
     ]
     for test in tests:
         test()

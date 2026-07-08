@@ -8,6 +8,7 @@ import glob
 import json
 import os
 import py_compile
+import re
 import subprocess
 import sys
 import time
@@ -17,6 +18,8 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SUITE_GLOBS = [
     "organization/runtime/workflows/tests/test_*.py",
+    "organization/runtime/infra-team-bootstrap/tests/test_*.py",
+    "organization/roles/infra-team-bootstrap/tests/test_*.py",
     "tests/test_*.py",
 ]
 CONTRACT_CMDS = [
@@ -70,7 +73,22 @@ def parse_json_stdout(stdout: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def tail(value: str, limit: int = 500) -> str:
+def parse_unittest_cases(*outputs: Any) -> int:
+    text = "\n".join(output_text(output) for output in outputs if output_text(output))
+    match = re.search(r"\bRan\s+(\d+)\s+tests?\b", text)
+    return int(match.group(1)) if match else 0
+
+
+def output_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def tail(value: Any, limit: int = 500) -> str:
+    value = output_text(value)
     compact = value.strip()
     if len(compact) <= limit:
         return compact
@@ -84,7 +102,7 @@ def child_env() -> dict[str, str]:
     return env
 
 
-def run_suite(path: Path) -> dict[str, Any]:
+def run_suite(path: Path, *, timeout: float = 300) -> dict[str, Any]:
     started = time.perf_counter()
     try:
         completed = subprocess.run(
@@ -92,7 +110,7 @@ def run_suite(path: Path) -> dict[str, Any]:
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=timeout,
             env=child_env(),
             check=False,
         )
@@ -103,7 +121,8 @@ def run_suite(path: Path) -> dict[str, Any]:
             "cases": 0,
             "duration_seconds": round(time.perf_counter() - started, 3),
             "detail": "timeout",
-            "stderr_tail": tail(exc.stderr or ""),
+            "stdout_tail": tail(exc.stdout),
+            "stderr_tail": tail(exc.stderr),
         }
     duration = round(time.perf_counter() - started, 3)
     payload = last_json_line(completed.stdout)
@@ -114,6 +133,14 @@ def run_suite(path: Path) -> dict[str, Any]:
             "cases": int(payload.get("cases") or 0),
             "duration_seconds": duration,
             "detail": "",
+        }
+    if completed.returncode == 0 and payload is None:
+        return {
+            "path": rel(path),
+            "result": "pass",
+            "cases": parse_unittest_cases(completed.stdout, completed.stderr),
+            "duration_seconds": duration,
+            "detail": "exit_zero_no_result_json",
         }
     detail = "missing_result_json" if payload is None else f"result:{payload.get('result')}"
     if completed.returncode != 0:
@@ -129,17 +156,27 @@ def run_suite(path: Path) -> dict[str, Any]:
     }
 
 
-def run_contract(command: list[str]) -> dict[str, Any]:
+def run_contract(command: list[str], *, timeout: float = 300) -> dict[str, Any]:
     started = time.perf_counter()
-    completed = subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=300,
-        env=child_env(),
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=child_env(),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "command": command,
+            "result": "fail",
+            "duration_seconds": round(time.perf_counter() - started, 3),
+            "detail": "timeout",
+            "stdout_tail": tail(exc.stdout),
+            "stderr_tail": tail(exc.stderr),
+        }
     duration = round(time.perf_counter() - started, 3)
     payload = parse_json_stdout(completed.stdout)
     passed = completed.returncode == 0 and payload is not None and payload.get("decision") == "ok"
