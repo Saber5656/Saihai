@@ -546,6 +546,79 @@ def create_approved_run(state_root: Path, *, request_id: str, run_id: str) -> No
     load_payload(run_frontdoor(state_root, "create-run", "--request-id", request_id, "--run-id", run_id))
 
 
+def test_drain_lock_contention_blocks_without_run_mutation() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        create_approved_run(state_root, request_id="req-lock", run_id="run-lock")
+        canonical = state_root / "runs" / "run-lock.json"
+        before = canonical.read_text(encoding="utf-8")
+        frontdoor_module.run_lock.acquire_global_lock(
+            state_root,
+            operation="test-prelock",
+            run_id="run-lock",
+            principal=frontdoor_module.default_manual_principal(),
+        )
+        try:
+            status = load_payload(run_frontdoor(state_root, "lock-status"))
+            assert_equal(status["locked"], True, "lock status locked")
+            assert_equal(status["owner"]["operation"], "test-prelock", "lock status owner operation")
+
+            blocked = run_frontdoor(state_root, "drain", "--run-id", "run-lock", check=False)
+            payload = load_payload(blocked)
+            assert_equal(blocked.returncode, 2, "lock contention exit")
+            assert_equal(payload["decision"], "blocked", "lock contention decision")
+            assert_equal(payload["reason"], "lock_contention", "lock contention reason")
+            assert "owner" in payload, "lock contention owner should be returned"
+        finally:
+            frontdoor_module.run_lock.release_global_lock(state_root)
+
+        after = canonical.read_text(encoding="utf-8")
+        assert_equal(after, before, "lock contention must not mutate run record")
+        events = [
+            event
+            for event in read_audit_events(state_root)
+            if event["event_type"] == "drain_run" and event["outcome"] == "blocked"
+        ]
+        assert events, "lock contention should write blocked audit event"
+        assert_equal(events[-1]["details"]["reason"], "lock_contention", "lock audit reason")
+
+
+def test_drain_enforces_p0_concurrency_without_run_mutation() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        create_approved_run(state_root, request_id="req-inflight", run_id="run-inflight")
+        create_approved_run(state_root, request_id="req-target", run_id="run-target")
+        inflight = frontdoor_module.run_store.load_run(state_root, "run-inflight")
+        inflight["goal_state"] = "active"
+        inflight["run_state"] = "waiting_provider"
+        frontdoor_module.run_store.store_run(
+            state_root,
+            inflight,
+            expected_current_state="created",
+        )
+        canonical = state_root / "runs" / "run-target.json"
+        before = canonical.read_text(encoding="utf-8")
+
+        blocked = run_frontdoor(state_root, "drain", "--run-id", "run-target", check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "concurrency blocked exit")
+        assert_equal(payload["decision"], "blocked", "concurrency decision")
+        assert_equal(payload["reason"], "concurrency_limit_reached", "concurrency reason")
+        assert_equal(payload["owner"]["inflight_run_ids"], ["run-inflight"], "concurrency owner")
+        after = canonical.read_text(encoding="utf-8")
+        assert_equal(after, before, "concurrency block must not mutate target run")
+
+        events = [
+            event
+            for event in read_audit_events(state_root)
+            if event["event_type"] == "drain_run" and event["outcome"] == "blocked"
+        ]
+        assert events, "concurrency block should write audit event"
+        assert_equal(events[-1]["details"]["reason"], "concurrency_limit_reached", "concurrency audit reason")
+
+
 def test_execution_principal_precheck_does_not_quarantine_corrupt_runs() -> None:
     cases = [
         ("drain", ["drain", "--run-id", "run-precheck"]),
@@ -981,6 +1054,27 @@ def test_http_frontdoor_api_flow() -> None:
                 operator_headers,
             )
             assert_equal(created["workflow_run"]["run_state"], "created", "http run created")
+
+            previous_lock_timeout = server_module.frontdoor.run_lock.DEFAULT_TIMEOUT_SECONDS
+            server_module.frontdoor.run_lock.DEFAULT_TIMEOUT_SECONDS = 0.2
+            server_module.frontdoor.run_lock.acquire_global_lock(
+                state_root,
+                operation="http-prelock",
+                run_id="run-http",
+                principal=server_module.frontdoor.default_manual_principal(),
+            )
+            try:
+                locked_status, locked_payload = http_json_response(
+                    "POST",
+                    f"{base}/orchestrator/runs/run-http/drain",
+                    {},
+                    operator_headers,
+                )
+                assert_equal(locked_status, 409, "http lock contention status")
+                assert_equal(locked_payload["reason"], "lock_contention", "http lock reason")
+            finally:
+                server_module.frontdoor.run_lock.release_global_lock(state_root)
+                server_module.frontdoor.run_lock.DEFAULT_TIMEOUT_SECONDS = previous_lock_timeout
 
             drained = http_json(
                 "POST",
@@ -1828,6 +1922,8 @@ def main() -> None:
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
         test_drain_blocks_and_quarantines_corrupt_run_json,
+        test_drain_lock_contention_blocks_without_run_mutation,
+        test_drain_enforces_p0_concurrency_without_run_mutation,
         test_execution_principal_precheck_does_not_quarantine_corrupt_runs,
         test_propose_updates_waiting_request_and_blocks_duplicate_overwrite,
         test_create_run_validates_resume_policy_and_binds_request,
