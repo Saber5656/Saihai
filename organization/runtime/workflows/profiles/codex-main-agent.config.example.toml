@@ -10,8 +10,9 @@
 #      "$CODEX_HOME/rules/saihai-main-agent.rules"
 #   codex --profile saihai-main-agent
 #
-# The launcher in this directory does not rely on the profile being installed:
-# it pins the same high-authority settings with CLI flags and -c overrides.
+# The launcher in this directory requires this profile and the matching rules
+# file to be installed, then also pins high-authority settings with CLI flags
+# and -c overrides.
 
 approval_policy = "on-request"
 approvals_reviewer = "user"

@@ -9,7 +9,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,18 +21,76 @@ VERIFY_DOC = PROFILE_ROOT / "verify_enforcement.md"
 RUNBOOK = ROOT / "docs/runbooks/main-agent-enforcement.md"
 
 APPROVED_CLAUDE_BASH_PREFIXES = (
-    "Bash(python3 scripts/saihai.py frontdoor *)",
     "Bash(python3 scripts/configure_organization.py workflow-frontdoor bridge-submit-request*)",
     "Bash(python3 scripts/configure_organization.py workflow-frontdoor bridge-read-projection*)",
     "Bash(python3 scripts/configure_organization.py workflow-frontdoor bridge-ack-output*)",
 )
+REQUIRED_CLAUDE_DENY_ENTRIES = {
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "Bash(git status)",
+    "Bash(python3 scripts/saihai.py frontdoor approve *)",
+    "Bash(python3 scripts/saihai.py frontdoor status *)",
+    "Bash(python3 scripts/configure_organization.py workflow-frontdoor approve *)",
+    "Bash(python3 scripts/configure_organization.py workflow-frontdoor status *)",
+    "Read(.env)",
+    "Read(**/.env)",
+    "Read(*credential*)",
+    "Read(**/*credential*)",
+    "Read(*secret*)",
+    "Read(**/*secret*)",
+    "Read(*token*)",
+    "Read(**/*token*)",
+    "Read(*key*)",
+    "Read(**/*key*)",
+    "Read(id_rsa*)",
+    "Read(**/id_rsa*)",
+    "Read(id_ed25519*)",
+    "Read(**/id_ed25519*)",
+    "Read(*.pem)",
+    "Read(**/*.pem)",
+}
 
 
 def load_claude_profile() -> dict:
     return json.loads(CLAUDE_PROFILE.read_text(encoding="utf-8"))
 
 
+def parse_scalar(value: str) -> object:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    if value.startswith('"') and value.endswith('"'):
+        return value[1:-1]
+    raise AssertionError(f"unsupported TOML scalar in test parser: {value!r}")
+
+
+def parse_simple_toml(text: str) -> dict:
+    parsed: dict[str, object] = {}
+    current: dict[str, object] = parsed
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            current = {}
+            parsed[section] = current
+            continue
+        if "=" not in line:
+            raise AssertionError(f"unsupported TOML line in test parser: {raw_line!r}")
+        key, value = (part.strip() for part in line.split("=", 1))
+        current[key] = parse_scalar(value)
+    return parsed
+
+
 def load_codex_profile() -> dict:
+    try:
+        import tomllib  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        return parse_simple_toml(CODEX_PROFILE.read_text(encoding="utf-8"))
     return tomllib.loads(CODEX_PROFILE.read_text(encoding="utf-8"))
 
 
@@ -54,9 +111,29 @@ def make_stub(bin_dir: Path, name: str, marker: Path) -> None:
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
 
 
-def run_launcher(args: list[str], marker: Path, bin_dir: Path) -> subprocess.CompletedProcess[str]:
+def install_codex_profile(codex_home: Path) -> None:
+    (codex_home / "rules").mkdir(parents=True, exist_ok=True)
+    (codex_home / "saihai-main-agent.config.toml").write_text(
+        CODEX_PROFILE.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (codex_home / "rules/saihai-main-agent.rules").write_text(
+        CODEX_RULES.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+
+def run_launcher(
+    args: list[str],
+    marker: Path,
+    bin_dir: Path,
+    *,
+    codex_home: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    if codex_home is not None:
+        env["CODEX_HOME"] = str(codex_home)
     return subprocess.run(
         [str(LAUNCHER), *args],
         cwd=ROOT,
@@ -76,7 +153,7 @@ def test_profiles_parse() -> None:
 def test_claude_deny_covers_mutation_tools() -> None:
     permissions = load_claude_profile()["permissions"]
     deny = set(permissions["deny"])
-    assert {"Edit", "Write", "NotebookEdit"}.issubset(deny)
+    assert REQUIRED_CLAUDE_DENY_ENTRIES.issubset(deny)
 
 
 def test_claude_allow_only_bridge_prefixes() -> None:
@@ -108,17 +185,29 @@ def test_codex_profile_pins_readonly_and_approval() -> None:
     assert_equal(profile["web_search"], "disabled", "Codex web search")
 
 
-def test_codex_rules_allow_only_frontdoor_prefixes() -> None:
+def test_codex_rules_allow_only_bridge_prefixes() -> None:
     rules = CODEX_RULES.read_text(encoding="utf-8")
-    assert_contains(rules, 'pattern = ["python3", "scripts/saihai.py", "frontdoor"]', "saihai frontdoor rule")
     assert_contains(
         rules,
         '["bridge-submit-request", "bridge-read-projection", "bridge-ack-output"]',
         "bridge command alternatives",
     )
     assert_contains(rules, 'decision = "allow"', "allow decision")
-    assert_contains(rules, "workflow create-run", "negative workflow example")
+    assert_contains(rules, '"--state-root", "*"', "state-root bridge rule")
+    assert "scripts/saihai.py\", \"frontdoor" not in rules
+    assert_contains(
+        rules,
+        "workflow-frontdoor --state-root /tmp/frontdoor-state bridge-read-projection",
+        "state-root bridge match",
+    )
+    assert_contains(rules, "frontdoor approve", "negative direct frontdoor approval example")
+    assert_contains(rules, "frontdoor status", "negative direct frontdoor status example")
     assert_contains(rules, "workflow-frontdoor create-run", "negative facade example")
+    assert_contains(
+        rules,
+        "workflow-frontdoor --state-root /tmp/frontdoor-state create-run",
+        "negative state-root facade example",
+    )
 
 
 def test_launcher_refuses_bypass_flags() -> None:
@@ -131,7 +220,14 @@ def test_launcher_refuses_bypass_flags() -> None:
             ["--dangerously-skip-permissions"],
             ["--allow-dangerously-skip-permissions"],
             ["--permission-mode", "bypassPermissions"],
+            ["--settings", "other.json"],
+            ["--settings=other.json"],
+            ["--allowedTools", "Bash(*)"],
+            ["--allowedTools=Bash(*)"],
+            ["--allowed-tools", "Bash(*)"],
+            ["--allowed-tools=Bash(*)"],
             ["--codex", "--dangerously-bypass-approvals-and-sandbox"],
+            ["--codex", "--yolo"],
             ["--codex", "--sandbox", "workspace-write"],
             ["--codex", "-a", "never"],
             ["--codex", "--config", "approval_policy='never'"],
@@ -148,6 +244,8 @@ def test_launcher_passes_clean_args() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         marker = tmp_path / "invoked.log"
+        codex_home = tmp_path / "codex-home"
+        install_codex_profile(codex_home)
         make_stub(tmp_path, "claude", marker)
         make_stub(tmp_path, "codex", marker)
 
@@ -157,12 +255,25 @@ def test_launcher_passes_clean_args() -> None:
         assert_contains(first, "claude --settings", "Claude settings arg")
         assert_contains(first, "claude-main-agent.settings.example.json", "Claude settings path")
 
-        codex = run_launcher(["--codex", "hello"], marker, tmp_path)
+        codex = run_launcher(["--codex", "hello"], marker, tmp_path, codex_home=codex_home)
         assert_equal(codex.returncode, 0, "Codex launcher clean args")
         second = marker.read_text(encoding="utf-8").splitlines()[-1]
-        assert_contains(second, "codex --sandbox read-only", "Codex sandbox arg")
+        assert_contains(second, "codex --profile saihai-main-agent", "Codex profile arg")
+        assert_contains(second, "--sandbox read-only", "Codex sandbox arg")
         assert_contains(second, "--ask-for-approval on-request", "Codex approval arg")
         assert_contains(second, 'default_permissions=":read-only"', "Codex permissions override")
+
+
+def test_launcher_requires_installed_codex_profile() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        marker = tmp_path / "invoked.log"
+        make_stub(tmp_path, "codex", marker)
+
+        missing = run_launcher(["--codex", "hello"], marker, tmp_path, codex_home=tmp_path / "missing-codex-home")
+        assert_equal(missing.returncode, 2, "Codex launcher without profile")
+        assert_contains(missing.stderr, "missing Codex profile", "missing profile message")
+        assert not marker.exists(), "missing profile invoked codex stub"
 
 
 def test_runbook_references_profiles_and_canary() -> None:
@@ -177,8 +288,9 @@ def test_runbook_references_profiles_and_canary() -> None:
         assert_contains(runbook, path, "runbook profile reference")
     for phrase in [
         "Ask the session to edit a scratch file",
-        "python3 scripts/saihai.py frontdoor --help",
+        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary bridge-read-projection --request-id req-canary",
         "git status",
+        "explicitly refused by the profile",
         "R57 action gateway",
     ]:
         assert_contains(runbook, phrase, "runbook canary/limits")
@@ -208,9 +320,10 @@ def main() -> None:
         test_claude_pins_default_mode,
         test_claude_disables_bypass_mode,
         test_codex_profile_pins_readonly_and_approval,
-        test_codex_rules_allow_only_frontdoor_prefixes,
+        test_codex_rules_allow_only_bridge_prefixes,
         test_launcher_refuses_bypass_flags,
         test_launcher_passes_clean_args,
+        test_launcher_requires_installed_codex_profile,
         test_runbook_references_profiles_and_canary,
         test_verify_doc_copy_pasteable,
         test_launcher_is_posix_sh,

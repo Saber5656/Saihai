@@ -13,6 +13,10 @@ elif [ "${1:-}" = "--claude" ]; then
 fi
 
 script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+codex_profile_name="saihai-main-agent"
+codex_profile_path="$codex_home/$codex_profile_name.config.toml"
+codex_rules_path="$codex_home/rules/$codex_profile_name.rules"
 
 refuse() {
   echo "refused: $1 is forbidden in orchestrator-frontend sessions" >&2
@@ -22,7 +26,7 @@ refuse() {
 if [ "$mode" = "claude" ]; then
   for arg in "$@"; do
     case "$arg" in
-      --dangerously*|--allow-dangerously-skip-permissions|--permission-mode|--permission-mode=*)
+      --dangerously*|--allow-dangerously-skip-permissions|--permission-mode|--permission-mode=*|--settings|--settings=*|--allowedTools|--allowedTools=*|--allowed-tools|--allowed-tools=*)
         refuse "$arg"
         ;;
     esac
@@ -32,13 +36,22 @@ fi
 
 for arg in "$@"; do
   case "$arg" in
-    --dangerously*|--sandbox|--sandbox=*|-s|--ask-for-approval|--ask-for-approval=*|-a|--config|--config=*|-c|--profile|--profile=*|-p)
+    --dangerously*|--yolo|--sandbox|--sandbox=*|-s|--ask-for-approval|--ask-for-approval=*|-a|--config|--config=*|-c|--profile|--profile=*|-p)
       refuse "$arg"
       ;;
   esac
 done
 
+if [ ! -r "$codex_profile_path" ]; then
+  refuse "missing Codex profile $codex_profile_path"
+fi
+
+if [ ! -r "$codex_rules_path" ]; then
+  refuse "missing Codex rules $codex_rules_path"
+fi
+
 exec codex \
+  --profile "$codex_profile_name" \
   --sandbox read-only \
   --ask-for-approval on-request \
   --config 'default_permissions=":read-only"' \

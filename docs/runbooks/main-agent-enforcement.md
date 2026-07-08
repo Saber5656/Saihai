@@ -52,9 +52,9 @@ upgrading either tool.
 
 | Tier | Behavior | Examples |
 |---|---|---|
-| Allow | Runs without an approval prompt | `python3 scripts/saihai.py frontdoor ...`, bridge submit/read/ack commands |
-| Ask | Human approval prompt appears | `git status`, non-bridge shell commands |
-| Deny | Refused without asking | Edit/write tools, bypass flags, direct sandbox/profile overrides |
+| Allow | Runs without an approval prompt | bridge submit/read/ack commands |
+| Ask | Human approval prompt appears | non-bridge shell commands not denied by profile |
+| Deny | Refused without asking | Edit/write tools, `git status`, sensitive reads, bypass flags, direct sandbox/profile overrides |
 
 The goal is low friction only on the supported bridge path. Deviations stop at
 the human approval boundary or are refused outright.
@@ -65,8 +65,8 @@ Never use these for enforced frontend sessions:
 
 | Surface | Forbidden |
 |---|---|
-| Claude | `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--permission-mode bypassPermissions`, `--permission-mode dontAsk` |
-| Codex | `--dangerously-bypass-approvals-and-sandbox`, `--sandbox` / `-s`, `--ask-for-approval never` / `-a never`, `--config` / `-c`, `--profile` / `-p` |
+| Claude | `--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--permission-mode bypassPermissions`, `--permission-mode dontAsk`, `--settings`, `--allowedTools` / `--allowed-tools` |
+| Codex | `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `--sandbox` / `-s`, `--ask-for-approval never` / `-a never`, `--config` / `-c`, `--profile` / `-p` |
 
 The launcher refuses those flags before starting the session. The canary then
 checks that the resulting session is not in a bypass mode.
@@ -78,8 +78,8 @@ Run the canary before submitting any bridge request:
 | Step | Action | Expected | If violated |
 |---|---|---|---|
 | 1 | Ask the session to edit a scratch file. | The mutation tool is refused. | Profile not loaded or bypass mode active. Terminate the session immediately. |
-| 2 | Ask the session to run `python3 scripts/saihai.py frontdoor --help`. | It runs without an approval prompt. | Allowlist is broken. Fix the profile/rules before use. |
-| 3 | Ask the session to run `git status`. | An approval prompt appears. | Default ask mode is not active. Terminate the session immediately. |
+| 2 | Ask the session to run `python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary bridge-read-projection --request-id req-canary`. | It reaches the bridge path without an approval prompt and returns a typed missing/blocked response if no projection exists. | Allowlist is broken. Fix the profile/rules before use. |
+| 3 | Ask the session to run `git status`. | An approval prompt appears or the command is explicitly refused by the profile. | Default ask/deny enforcement is not active. Terminate the session immediately. |
 
 Positive bypass detector: if step 1 succeeds silently, the session is not
 enforced.
@@ -88,6 +88,8 @@ enforced.
 
 - This profile does not grant edit, commit, push, provider-dispatch, or network
   authority.
+- This profile does not allow direct proposal approval/status polling or broad
+  sensitive file reads from frontend sessions.
 - This profile does not prove that every future CLI version preserves the same
   settings semantics. Re-run static tests and canary checks after upgrades.
 - This profile does not replace PR review, final-gate checks, Vault evidence,

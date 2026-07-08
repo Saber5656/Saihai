@@ -3,30 +3,35 @@
 # 2026-07-08.
 
 prefix_rule(
-    pattern = ["python3", "scripts/saihai.py", "frontdoor"],
-    decision = "allow",
-    justification = "Saihai frontdoor commands are the supported frontend bridge path.",
-    match = [
-        "python3 scripts/saihai.py frontdoor status --request-id req-example",
-        "python3 scripts/saihai.py frontdoor propose --task-id TSK --request-id req --prompt hello",
-    ],
-    not_match = [
-        "python3 scripts/saihai.py workflow create-run --request-id req-example",
-        "python3 scripts/configure_organization.py workflow-frontdoor create-run --request-id req-example",
-    ],
-)
-
-prefix_rule(
     pattern = ["python3", "scripts/configure_organization.py", "workflow-frontdoor", ["bridge-submit-request", "bridge-read-projection", "bridge-ack-output"]],
     decision = "allow",
-    justification = "Main-agent bridge commands are allowed; execution-class workflow commands are not.",
+    justification = "Main-agent bridge commands are allowed without --state-root; execution-class workflow commands are not.",
     match = [
         "python3 scripts/configure_organization.py workflow-frontdoor bridge-submit-request --request-json request.json",
         "python3 scripts/configure_organization.py workflow-frontdoor bridge-read-projection --request-id req-example",
         "python3 scripts/configure_organization.py workflow-frontdoor bridge-ack-output --request-id req-example",
     ],
     not_match = [
+        "python3 scripts/saihai.py frontdoor status --request-id req-example",
+        "python3 scripts/saihai.py frontdoor approve --request-id req-example --nonce nonce-example",
         "python3 scripts/configure_organization.py workflow-frontdoor create-run --request-id req-example",
         "python3 scripts/configure_organization.py workflow-frontdoor drain --run-id run-example",
+    ],
+)
+
+prefix_rule(
+    pattern = ["python3", "scripts/configure_organization.py", "workflow-frontdoor", "--state-root", "*", ["bridge-submit-request", "bridge-read-projection", "bridge-ack-output"]],
+    decision = "allow",
+    justification = "Main-agent bridge commands are allowed with an explicit state root; execution-class workflow commands are not.",
+    match = [
+        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state bridge-submit-request --request-json request.json",
+        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state bridge-read-projection --request-id req-example",
+        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state bridge-ack-output --request-id req-example",
+    ],
+    not_match = [
+        "python3 scripts/saihai.py frontdoor status --request-id req-example",
+        "python3 scripts/saihai.py frontdoor approve --request-id req-example --nonce nonce-example",
+        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state create-run --request-id req-example",
+        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state drain --run-id run-example",
     ],
 )
