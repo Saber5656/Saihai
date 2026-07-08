@@ -11,8 +11,10 @@ from pathlib import Path
 
 import frontdoor_orchestrator as frontdoor
 
+RUN_ABORT_RE = re.compile(r"^/orchestrator/runs/([^/]+)/abort$")
 RUN_DRAIN_RE = re.compile(r"^/orchestrator/runs/([^/]+)/drain$")
 RUN_READ_RE = re.compile(r"^/orchestrator/runs/([^/]+)$")
+RUN_RESUME_RE = re.compile(r"^/orchestrator/runs/([^/]+)/resume$")
 REQUEST_READ_RE = re.compile(r"^/frontdoor/requests/([^/]+)$")
 BRIDGE_PROJECTION_RE = re.compile(r"^/main-agent/projections/([^/]+)$")
 BODY_PRINCIPAL_FIELDS = {"principal_type", "principal_id", "authn_method"}
@@ -586,6 +588,27 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self._send_json(payload)
                 return
+            resume_match = RUN_RESUME_RE.match(self.path)
+            if resume_match:
+                payload = frontdoor.resume_run(
+                    state_root=self.state_root,
+                    run_id=resume_match.group(1),
+                    requeue=body.get("requeue") is True,
+                    principal=self._channel_principal(body, allowed_channels={"operator"}),
+                )
+                status = 200 if payload.get("decision") == "ok" else 400
+                self._send_json(payload, status)
+                return
+            abort_match = RUN_ABORT_RE.match(self.path)
+            if abort_match:
+                payload = frontdoor.abort_run(
+                    state_root=self.state_root,
+                    run_id=abort_match.group(1),
+                    reason=str(body.get("reason") or ""),
+                    principal=self._channel_principal(body, allowed_channels={"operator"}),
+                )
+                self._send_json(payload)
+                return
             if self.path == "/provider/claude/prepare":
                 payload = frontdoor.prepare_claude_adapter(
                     state_root=self.state_root,
@@ -630,6 +653,16 @@ class Handler(BaseHTTPRequestHandler):
                     "owner": exc.owner,
                 },
                 409,
+            )
+        except frontdoor.run_lifecycle.LifecycleError as exc:
+            self._send_json(
+                {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": exc.reason_class,
+                    "errors": exc.errors,
+                },
+                400,
             )
         except frontdoor.FrontdoorError as exc:
             self._send_json({"schema_version": 1, "decision": "blocked", "reason": str(exc)}, 400)

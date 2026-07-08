@@ -385,6 +385,12 @@
       },
       "additionalProperties": false
     },
+    "transitions": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
     "transition_provenance": {
       "type": "array",
       "items": {

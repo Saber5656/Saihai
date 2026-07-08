@@ -469,6 +469,14 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(validated["report_status"], "complete", "report validation status")
         assert_equal(validated["workflow_run"]["run_state"], "complete", "validated run state")
         assert_equal(validated["workflow_run"]["goal_state"], "complete", "validated goal state")
+        transitions = validated["workflow_run"]["transitions"]
+        assert_equal([item["seq"] for item in transitions], [1, 2, 3, 4], "lifecycle transition seq")
+        assert_equal(
+            [item["reason_class"] for item in transitions],
+            ["step_queued", "manual_provider_execution_assumed", "report_received", "report_valid"],
+            "lifecycle transition reasons",
+        )
+        assert_equal(transitions[-1]["to_state"], "complete", "terminal lifecycle state")
 
 
 def test_drain_blocks_and_quarantines_corrupt_run_json() -> None:
@@ -622,6 +630,8 @@ def test_drain_enforces_p0_concurrency_without_run_mutation() -> None:
 def test_execution_principal_precheck_does_not_quarantine_corrupt_runs() -> None:
     cases = [
         ("drain", ["drain", "--run-id", "run-precheck"]),
+        ("resume", ["resume", "--run-id", "run-precheck"]),
+        ("abort", ["abort", "--run-id", "run-precheck", "--reason", "operator cancelled"]),
         ("prepare", ["prepare-claude-adapter", "--run-id", "run-precheck"]),
         ("validate", ["validate-report", "--run-id", "run-precheck"]),
     ]
