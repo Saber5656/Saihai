@@ -34,7 +34,7 @@ SAHAI_ROOT = Path(
     or os.environ.get("SAIHAI_ROOT")
     or os.environ.get("AGENT_TEAMS_VIEWER_ROOT")
     or str(ITB_ROOT.parents[2])
-)
+).expanduser()
 SAHAI_ROLE_ROOT = SAHAI_ROOT / "organization" / "roles"
 SKILLS_ROOT = Path(
     os.environ.get("SKILLS_REPO_SKILLS_ROOT")
