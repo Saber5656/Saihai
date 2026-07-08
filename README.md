@@ -31,7 +31,7 @@ typed report / evidence gate です。
 | Prompt 分類 | `scripts/configure_organization.py classify` と `/api/decide` が `fast` / `strict` / `maintenance` を判定する。どの mode でも task record と Vault 記録は必要 |
 | Workflow selection | `workflow_selector.py` が typed classification を deterministic に workflow template へ対応付ける。raw prompt は workflow 選択の authority ではない |
 | Frontdoor proposal | prompt 起点の request は `proposed` または `waiting_human` まで。`propose` は approved artifact や workflow run を作らない |
-| Approval | `approve` は proposal digest 由来の challenge id を要求する。承認は `human_ui` / `manual_cli` / `orchestrator-start` など明示 source だけが authority になる |
+| Approval | `approve` は proposal digest 由来の challenge id を要求する。approved envelope の `activation_source` は `human_ui` / `manual_cli` / `orchestrator-start` のみ。実行 principal は `human_operator` / `manual_operator` / `orchestrator_start` を許可し、Saihai CLI の `frontdoor approve` は `human_operator` / `human-ui` / `local_ui` を既定値にする |
 | Workflow run | approved request から durable `runs/<run_id>.json` を作り、`drain` で bounded work order を作る |
 | Report validation | typed report と normalized provider evidence が canonical result。stdout、provider transcript、tmux pane output は signal only |
 | Main-agent bridge | main agent は request submit、redacted projection read、ack だけが可能。classification、approval、run 作成、adapter 準備、report path 指定は拒否される |
@@ -87,6 +87,12 @@ python3 scripts/saihai.py workflow --state-root "$STATE_ROOT" create-run \
 python3 scripts/saihai.py workflow --state-root "$STATE_ROOT" drain \
   --run-id <run_id>
 
+# `drain` は work order を作るだけです。validation の前に full harness で
+# adapter request を作り、provider が typed report / evidence を書く必要があります。
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" prepare-claude-adapter \
+  --run-id <run_id>
+
+# Provider は harness 外で実行し、adapter request に書かれた report / evidence path へ出力します。
 python3 scripts/saihai.py workflow --state-root "$STATE_ROOT" validate-report \
   --run-id <run_id>
 ```
@@ -168,12 +174,15 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
 | `POST /main-agent/ack-output` | verified no-op acknowledgement |
 | `POST /frontdoor/propose` | operator proposal |
 | `POST /frontdoor/approve` | human UI approval |
-| `GET /frontdoor/requests/{request_id}` | operator request read |
 | `POST /orchestrator/runs` | create workflow run |
-| `GET /orchestrator/runs/{run_id}` | operator run read |
 | `POST /orchestrator/runs/{run_id}/drain` | drain run into work order |
 | `POST /provider/claude/prepare` | prepare bounded Claude adapter request |
 | `POST /provider/reports/validate` | validate typed provider report |
+
+raw request / run read endpoints（`/frontdoor/requests/{request_id}` と
+`/orchestrator/runs/{run_id}`）は現在 403 を返します。main-agent には
+redacted projection を使い、operator は dedicated read API が実装されるまで
+`--state-root` 配下の canonical artifacts を直接確認します。
 
 channel token は次の command で作ります。
 
