@@ -35,6 +35,19 @@ def orch_root(root: Path):
             os.environ["SAIHAI_ORCH_STATE_ROOT"] = previous
 
 
+@contextmanager
+def orch_roots(server, roots: list[tuple[str, Path]]):
+    previous_env = os.environ.pop("SAIHAI_ORCH_STATE_ROOT", None)
+    previous_roots = server.ORCH_STATE_ROOTS
+    server.ORCH_STATE_ROOTS = roots
+    try:
+        yield
+    finally:
+        server.ORCH_STATE_ROOTS = previous_roots
+        if previous_env is not None:
+            os.environ["SAIHAI_ORCH_STATE_ROOT"] = previous_env
+
+
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -119,14 +132,24 @@ def test_detail_shapes() -> None:
         write_json(root / "work-orders" / "run-detail" / "review.json", {"work_order_version": "1", "step_id": "review"})
         write_json(
             root / "reports" / "run-detail" / "review-external-review-report.json",
-            {"result": "pass", "prompt": "redact me", "raw_transcript": "must not be served"},
+            {
+                "result": "pass",
+                "prompt": "redact me",
+                "raw_transcript": "must not be served",
+                "provider_transcript": "must not be served",
+            },
         )
         transcript = root / "provider-evidence" / "run-detail" / "transcript.txt"
         transcript.parent.mkdir(parents=True, exist_ok=True)
         transcript.write_text("transcript fixture content", encoding="utf-8")
         write_json(
             root / "provider-evidence" / "run-detail" / "review-provider-evidence.json",
-            {"provider": "fake", "transcript_path": str(transcript), "evidence_path": "evidence.json"},
+            {
+                "provider": "fake",
+                "transcript_path": str(transcript),
+                "evidence_path": "evidence.json",
+                "tmux_pane_output": "must not be served",
+            },
         )
         write_json(root / "transitions" / "run-detail" / "0001-report-gate.json", {"seq": 1, "outcome": "queued"})
         write_json(root / "transitions" / "run-detail" / "0002-report-gate.json", {"seq": 2, "outcome": "report_valid"})
@@ -146,6 +169,7 @@ def test_detail_shapes() -> None:
         assert detail["work_order"]["work_order_version"] == "1"
         assert detail["report"] == {"result": "pass"}
         assert detail["evidence"]["transcript_path"] == str(transcript)
+        assert "tmux_pane_output" not in detail["evidence"]
         assert [item["seq"] for item in detail["transitions"]] == [1, 2]
         assert detail["rejections"] == [{"outcome": "report_invalid"}]
         assert detail["lock"]["locked"] is False
@@ -176,6 +200,80 @@ def test_corrupt_run_row() -> None:
         rows = {row["run_id"]: row for row in payload["workflow_runs"]}
         assert rows["run-bad"]["view_error"] == "corrupt_json"
         assert rows["run-good"]["run_state"] == "step_queued"
+
+
+def test_fallback_rows_have_mtime_when_bridge_fails() -> None:
+    server = load_server()
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        make_run(root, "run-fallback")
+
+        class BrokenBridge:
+            @staticmethod
+            def run_task_view(*_args, **_kwargs):
+                raise RuntimeError("bridge unavailable")
+
+        original = server._task_state_bridge
+        server._task_state_bridge = lambda: BrokenBridge
+        try:
+            with orch_root(root):
+                payload, code = server.api_workflow_runs()
+        finally:
+            server._task_state_bridge = original
+        assert code == 200
+        row = payload["workflow_runs"][0]
+        assert row["view_version"] == "fallback"
+        assert row["updated_at"], "fallback row should include mtime"
+
+
+def test_staleness_honors_timezone_offsets() -> None:
+    server = load_server()
+    jst_epoch = server._iso_to_epoch("2026-07-09T00:00:00+0900")
+    utc_epoch = server._iso_to_epoch("2026-07-08T15:00:00+0000")
+    z_epoch = server._iso_to_epoch("2026-07-08T15:00:00Z")
+    assert jst_epoch == utc_epoch == z_epoch
+
+
+def test_duplicate_run_detail_can_select_root() -> None:
+    server = load_server()
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        base = Path(raw_tmp)
+        claude_root = base / "claude"
+        codex_root = base / "codex"
+        make_run(claude_root, "run-dup", task_id="TSK-claude", session_id="sess-claude")
+        make_run(codex_root, "run-dup", task_id="TSK-codex", session_id="sess-codex")
+        with orch_roots(server, [("claude", claude_root), ("codex", codex_root)]):
+            payload, code = server.api_workflow_runs()
+            codex_payload, codex_code = server.api_workflow_run("run-dup", runtime="codex")
+            root_payload, root_code = server.api_workflow_run("run-dup", orch_root=str(codex_root))
+            invalid_runtime, invalid_runtime_code = server.api_workflow_run("run-dup", runtime="missing")
+            invalid_root, invalid_root_code = server.api_workflow_run("run-dup", orch_root=str(base / "missing"))
+        assert code == 200
+        assert {(row["runtime"], row["task_id"]) for row in payload["workflow_runs"]} == {
+            ("claude", "TSK-claude"),
+            ("codex", "TSK-codex"),
+        }
+        assert codex_code == root_code == 200
+        assert codex_payload["workflow_run"]["runtime"] == "codex"
+        assert codex_payload["workflow_run"]["run"]["task_id"] == "TSK-codex"
+        assert root_payload["workflow_run"]["orch_root"] == str(codex_root)
+        assert invalid_runtime_code == 400
+        assert invalid_runtime == {"error": "invalid_runtime"}
+        assert invalid_root_code == 400
+        assert invalid_root == {"error": "invalid_orch_root"}
+
+
+def test_session_filters_use_session_id_rules() -> None:
+    server = load_server()
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        make_run(root, "run-session", session_id="codex:thread.001")
+        with orch_root(root):
+            list_payload, list_code = server.api_workflow_runs(session_id="codex:thread.001")
+            detail_payload, detail_code = server.api_workflow_run("run-session", session_id="codex:thread.001")
+        assert list_code == detail_code == 200
+        assert [row["run_id"] for row in list_payload["workflow_runs"]] == ["run-session"]
+        assert detail_payload["workflow_run"]["run"]["chat_session_id"] == "codex:thread.001"
 
 
 def test_invalid_params_rejected() -> None:
@@ -213,6 +311,10 @@ def main() -> None:
         test_detail_shapes,
         test_detail_missing_run,
         test_corrupt_run_row,
+        test_fallback_rows_have_mtime_when_bridge_fails,
+        test_staleness_honors_timezone_offsets,
+        test_duplicate_run_detail_can_select_root,
+        test_session_filters_use_session_id_rules,
         test_invalid_params_rejected,
         test_env_override_root,
     ]

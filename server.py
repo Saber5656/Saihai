@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -51,7 +52,18 @@ RUN_STATES = {
     "aborted",
 }
 MAX_RUN_FILE_BYTES = 1_000_000
-DENIED_ARTIFACT_KEYS = {"prompt", "raw_transcript", "transcript_content", "stdout", "pane_output"}
+DENIED_ARTIFACT_KEYS = {
+    "prompt",
+    "provider_transcript",
+    "raw_prompt",
+    "raw_transcript",
+    "raw_transcript_text",
+    "stdout",
+    "tmux_pane_output",
+    "transcript",
+    "transcript_content",
+    "pane_output",
+}
 TEAM_ORDER = ["gate", "tech", "contents", "business", "infra"]
 TEAM_LABELS = {
     "gate": "Gate",
@@ -202,6 +214,15 @@ def _read_json_limited(path: Path, *, root: Path | None = None, max_bytes: int |
     return _redact_artifact(payload) if isinstance(payload, (dict, list)) else payload
 
 
+def mtime_iso(path: Path | None) -> str:
+    if path is None:
+        return ""
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
+    except OSError:
+        return ""
+
+
 def _fallback_thin_view(run: dict, *, state_root: Path | None = None, run_path: Path | None = None) -> dict:
     run_id = str(run.get("run_id") or "")
     step_id = str(run.get("current_step") or "")
@@ -313,11 +334,15 @@ def _iso_to_epoch(value: str) -> float | None:
     value = str(value or "").strip()
     if not value:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%SZ"):
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z"):
         try:
-            return time.mktime(time.strptime(value, fmt))
+            return datetime.strptime(value, fmt).timestamp()
         except ValueError:
             continue
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        pass
     return None
 
 
@@ -383,8 +408,17 @@ def _lock_info(runtime: str, root: Path) -> dict:
     return {"runtime": runtime, "orch_root": str(root), **info}
 
 
-def workflow_run_detail(run_id: str, session_id: str = "") -> dict | None:
+def workflow_run_detail(
+    run_id: str,
+    session_id: str = "",
+    runtime_filter: str = "",
+    orch_root_filter: str = "",
+) -> dict | None:
     for runtime, root in orch_roots():
+        if runtime_filter and runtime != runtime_filter:
+            continue
+        if orch_root_filter and str(root) != orch_root_filter:
+            continue
         run_path = root / "runs" / f"{run_id}.json"
         if not run_path.is_file() or not _path_is_within(run_path, root):
             continue
@@ -424,15 +458,29 @@ def _validate_optional_id(value: str, error_name: str) -> dict | None:
     return None
 
 
+def _validate_optional_session_id(value: str) -> dict | None:
+    if value and not SESSION_ID_RE.fullmatch(value):
+        return {"error": "invalid_session_id"}
+    return None
+
+
+def _validate_root_filters(runtime: str = "", orch_root: str = "") -> tuple[dict | None, list[tuple[str, Path]]]:
+    roots = orch_roots()
+    if runtime and runtime not in {candidate_runtime for candidate_runtime, _ in roots}:
+        return {"error": "invalid_runtime"}, roots
+    if orch_root and orch_root not in {str(candidate_root) for _, candidate_root in roots}:
+        return {"error": "invalid_orch_root"}, roots
+    return None, roots
+
+
 def api_workflow_runs(task_id: str = "", session_id: str = "", state: str = "") -> tuple[dict, int]:
-    for value, error_name in (
-        (task_id, "invalid_task_id"),
-        (session_id, "invalid_session_id"),
-        (state, "invalid_run_state"),
-    ):
+    for value, error_name in ((task_id, "invalid_task_id"), (state, "invalid_run_state")):
         error = _validate_optional_id(value, error_name)
         if error:
             return error, 400
+    error = _validate_optional_session_id(session_id)
+    if error:
+        return error, 400
     if state and state not in RUN_STATES:
         return {"error": "invalid_run_state"}, 400
     roots = orch_roots()
@@ -443,13 +491,26 @@ def api_workflow_runs(task_id: str = "", session_id: str = "", state: str = "") 
     }, 200
 
 
-def api_workflow_run(run_id: str, session_id: str = "") -> tuple[dict, int]:
+def api_workflow_run(
+    run_id: str,
+    session_id: str = "",
+    runtime: str = "",
+    orch_root: str = "",
+) -> tuple[dict, int]:
     if not RUN_ID_RE.fullmatch(str(run_id or "")):
         return {"error": "invalid_run_id"}, 400
-    error = _validate_optional_id(session_id, "invalid_session_id")
+    error = _validate_optional_session_id(session_id)
     if error:
         return error, 400
-    detail = workflow_run_detail(run_id, session_id=session_id)
+    error, _ = _validate_root_filters(runtime, orch_root)
+    if error:
+        return error, 400
+    detail = workflow_run_detail(
+        run_id,
+        session_id=session_id,
+        runtime_filter=runtime,
+        orch_root_filter=orch_root,
+    )
     if detail is None:
         return {"error": "run_not_found"}, 404
     return {"workflow_run": detail, "generated_at": time.time()}, 200
@@ -967,7 +1028,12 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self._send_json(payload, code)
             elif url.path == "/api/workflow-run":
-                payload, code = api_workflow_run(query.get("run", ""), query.get("session", ""))
+                payload, code = api_workflow_run(
+                    query.get("run", ""),
+                    query.get("session", ""),
+                    query.get("runtime", ""),
+                    query.get("orch_root", ""),
+                )
                 self._send_json(payload, code)
             elif url.path == "/api/workflow-lock":
                 payload, code = api_workflow_lock()
