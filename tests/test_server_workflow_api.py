@@ -176,6 +176,38 @@ def test_detail_shapes() -> None:
         assert "transcript fixture content" not in json.dumps(detail, ensure_ascii=False)
 
 
+def test_workflow_lock_endpoint_reports_lock_states() -> None:
+    server = load_server()
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        base = Path(raw_tmp)
+        unlocked_root = base / "unlocked"
+        locked_root = base / "locked"
+        unlocked_root.mkdir()
+        lock_dir = locked_root / "locks" / "global-advisory.lock.d"
+        lock_dir.mkdir(parents=True)
+
+        original_run_lock = server._run_lock
+        server._run_lock = lambda: None
+        try:
+            with orch_roots(server, [("unlocked", unlocked_root), ("locked", locked_root)]):
+                payload, code = server.api_workflow_lock()
+        finally:
+            server._run_lock = original_run_lock
+
+        assert code == 200
+        assert isinstance(payload["generated_at"], float)
+        locks = {item["runtime"]: item for item in payload["locks"]}
+        assert set(locks) == {"unlocked", "locked"}
+        assert locks["unlocked"]["orch_root"] == str(unlocked_root)
+        assert locks["unlocked"]["decision"] == "ok"
+        assert locks["unlocked"]["locked"] is False
+        assert locks["unlocked"]["lock_path"] == str(unlocked_root / "locks" / "global-advisory.lock.d")
+        assert locks["locked"]["orch_root"] == str(locked_root)
+        assert locks["locked"]["decision"] == "ok"
+        assert locks["locked"]["locked"] is True
+        assert locks["locked"]["lock_path"] == str(lock_dir)
+
+
 def test_detail_missing_run() -> None:
     server = load_server()
     with tempfile.TemporaryDirectory() as raw_tmp:
@@ -309,6 +341,7 @@ def main() -> None:
         test_list_empty_root,
         test_list_and_filters,
         test_detail_shapes,
+        test_workflow_lock_endpoint_reports_lock_states,
         test_detail_missing_run,
         test_corrupt_run_row,
         test_fallback_rows_have_mtime_when_bridge_fails,

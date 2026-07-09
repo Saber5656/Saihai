@@ -96,6 +96,9 @@
         },
         "raw_transcript_sharing": {
           "const": "forbidden"
+        },
+        "context_mode_downgraded_from": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -492,35 +495,6 @@
             }
           }
         ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "permission_mode": {
-            "const": "readonly"
-          }
-        },
-        "required": [
-          "permission_mode",
-          "activation_scope"
-        ]
-      },
-      "then": {
-        "properties": {
-          "activation_scope": {
-            "properties": {
-              "allowed_ops": {
-                "properties": {
-                  "edit": { "const": false },
-                  "commit": { "const": false },
-                  "push": { "const": false },
-                  "network": { "const": false }
-                }
-              }
-            }
-          }
-        }
       }
     }
   ]

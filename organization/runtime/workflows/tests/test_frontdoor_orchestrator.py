@@ -20,6 +20,11 @@ FACADE = ROOT / "scripts" / "configure_organization.py"
 SCRIPT_DIR = ROOT / "organization/runtime/workflows/scripts"
 SERVER_SCRIPT = SCRIPT_DIR / "frontdoor_server.py"
 
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import work_order_builder
+
 
 def external_review_classification(**overrides):
     candidate = {
@@ -390,12 +395,19 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "work order resolved ref path",
         )
         assert work_order["context_refs"][0]["digest"].startswith("sha256:"), "work order ref digest missing"
+        assert "Claudeにreadonlyレビューを依頼する" not in json.dumps(work_order, ensure_ascii=False)
         assert_equal(
             work_order["work_order_authority"]["issuer_principal"]["principal_type"],
             "manual_operator",
             "work order issuer principal",
         )
         assert work_order["work_order_authority"]["signature"]["signature"].startswith("sha256:")
+        snapshot_path = Path(drained["step_snapshot_path"])
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        assert_equal(snapshot["run_id"], "run-frontdoor", "snapshot run")
+        assert_equal(snapshot["step_id"], "review", "snapshot step")
+        assert_equal(snapshot["iteration"], 1, "snapshot iteration")
+        assert_equal(snapshot["work_order_digest"], work_order_builder.sha256_digest(work_order), "snapshot digest")
 
         second_drain = load_payload(
             run_frontdoor(
@@ -406,6 +418,7 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             )
         )
         assert_equal(second_drain["drained"], False, "drain idempotence")
+        assert_equal(second_drain["step_snapshot_path"], str(snapshot_path), "snapshot replay path")
 
         capability = load_payload(run_frontdoor(state_root, "adapter-capability"))
         adapter = capability["adapter"]
@@ -484,6 +497,165 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "lifecycle transition reasons",
         )
         assert_equal(transitions[-1]["to_state"], "complete", "terminal lifecycle state")
+
+
+def test_drain_allows_edit_capable_code_change_gate() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        classification = external_review_classification(
+            task_kind="code_change",
+            permission_required="edit",
+            external_provider_required=False,
+            context_scope="diff_summary",
+            expected_artifacts=["code_change_report", "final_evidence"],
+        )
+        proposed = load_payload(
+            run_frontdoor(
+                state_root,
+                "propose",
+                "--task-id",
+                "TSK-code-change",
+                "--request-id",
+                "req-code-change",
+                "--prompt",
+                "Implement bounded code change",
+                "--classification",
+                json.dumps(classification),
+                "--ref",
+                "organization/runtime/workflows/README.md",
+                "--allowed-path",
+                "organization/runtime/workflows",
+            )
+        )
+        assert_equal(
+            proposed["activation"]["workflow_selection"]["workflow_id"],
+            "standard_code_change",
+            "code change workflow",
+        )
+        assert_equal(proposed["activation"]["activation_scope"]["allowed_ops"]["edit"], False, "prompt edit denied")
+        approved = load_payload(
+            run_frontdoor(
+                state_root,
+                "approve",
+                "--request-id",
+                "req-code-change",
+                "--human-action-id",
+                proposed["approval"]["human_action_id"],
+            )
+        )
+        assert_equal(approved["activation"]["activation_scope"]["allowed_ops"]["edit"], True, "approved edit allowed")
+        created = load_payload(
+            run_frontdoor(
+                state_root,
+                "create-run",
+                "--request-id",
+                "req-code-change",
+                "--run-id",
+                "run-code-change",
+            )
+        )
+        assert_equal(created["workflow_run"]["workflow_id"], "standard_code_change", "created workflow")
+
+        drained = load_payload(run_frontdoor(state_root, "drain", "--run-id", "run-code-change"))
+        work_order = drained["work_order"]
+        assert_equal(drained["workflow_run"]["run_state"], "step_queued", "code change drain run state")
+        assert_equal(work_order["step_id"], "implement", "code change step")
+        assert_equal(work_order["permission_mode"], "edit", "code change permission")
+        assert_equal(work_order["activation_scope"]["allowed_ops"]["edit"], True, "later edit allowance preserved")
+
+
+def test_drain_blocks_invalid_existing_work_order() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        proposed = load_payload(
+            run_frontdoor(
+                state_root,
+                "propose",
+                "--task-id",
+                "TSK-invalid-work-order",
+                "--request-id",
+                "req-invalid-work-order",
+                "--prompt",
+                "Run bounded external review",
+                "--classification",
+                json.dumps(external_review_classification()),
+                "--ref",
+                "organization/runtime/workflows/README.md",
+            )
+        )
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "approve",
+                "--request-id",
+                "req-invalid-work-order",
+                "--human-action-id",
+                proposed["approval"]["human_action_id"],
+            )
+        )
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "create-run",
+                "--request-id",
+                "req-invalid-work-order",
+                "--run-id",
+                "run-invalid-work-order",
+            )
+        )
+
+        order_dir = state_root / "work-orders" / "run-invalid-work-order"
+        order_dir.mkdir(parents=True)
+        invalid_order = {
+            "work_order_version": "1",
+            "task_id": "TSK-invalid-work-order",
+            "request_id": "req-invalid-work-order",
+            "run_id": "run-invalid-work-order",
+            "workflow_id": "single_step_external_review",
+            "step_id": "review",
+            "from_role": "frontdoor",
+            "to_role": "external_reviewer",
+            "assignment_role": "reviewer",
+            "instruction": "invalid",
+            "expected_output": "external_review_report",
+            "context_refs": [],
+            "context_scope": {"mode": "refs_only", "raw_transcript_sharing": "forbidden"},
+            "permission_mode": "readonly",
+            "external_provider_allowed": True,
+            "report_path": str(state_root / "reports" / "run-invalid-work-order" / "review-external-review-report.json"),
+            "policy_digest": "sha256:" + "1" * 64,
+            "requester": {"frontdoor": "codex"},
+            "activation_scope": {
+                "allowed_paths": ["organization/runtime/workflows"],
+                "allowed_ops": {"edit": False, "commit": False, "push": False, "network": False},
+                "step_budget": 1,
+                "expires_at": "run_terminal",
+            },
+            "work_order_authority": {
+                "issuer_principal": {
+                    "principal_type": "manual_operator",
+                    "principal_id": "manual-cli",
+                    "authn_method": "local_cli",
+                },
+                "signature": {
+                    "algorithm": "sha256-local-principal-key",
+                    "signature": "sha256:" + "2" * 64,
+                    "signed_at": "2026-07-09T00:00:00+0900",
+                },
+                "runner_claim": {"claim_state": "unclaimed", "lease_expires_at": None},
+            },
+        }
+        (order_dir / "review.json").write_text(json.dumps(invalid_order, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        blocked_run = run_frontdoor(state_root, "drain", "--run-id", "run-invalid-work-order", check=False)
+        assert_equal(blocked_run.returncode, 2, "blocked drain exit")
+        blocked = load_payload(blocked_run)
+        assert_equal(blocked["decision"], "blocked", "blocked decision")
+        assert_equal(blocked["reason"], "work_order_invalid", "blocked reason")
+        assert "context_refs must be non-empty" in blocked["errors"], blocked["errors"]
+        assert_equal(blocked["workflow_run"]["run_state"], "waiting_human", "blocked run state")
+        assert_equal(blocked["workflow_run"]["goal_state"], "blocked", "blocked goal state")
+        assert not (order_dir / "review-snapshot-1.json").exists()
 
 
 def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
@@ -1086,6 +1258,24 @@ def test_http_frontdoor_api_flow() -> None:
 
             health = http_json("GET", f"{base}/healthz")
             assert_equal(health["decision"], "ok", "health decision")
+
+            local_only_status, local_only_payload = http_json_response(
+                "POST",
+                f"{base}/frontdoor/orchestrator-start-approve",
+                {},
+                operator_headers,
+            )
+            assert_equal(local_only_status, 404, "http orchestrator-start approve not routable")
+            assert_equal(local_only_payload["reason"], "not_found", "http orchestrator-start reason")
+
+            manual_only_status, manual_only_payload = http_json_response(
+                "POST",
+                f"{base}/frontdoor/manual-approve",
+                {},
+                operator_headers,
+            )
+            assert_equal(manual_only_status, 404, "http manual approve not routable")
+            assert_equal(manual_only_payload["reason"], "not_found", "http manual approve reason")
 
             missing_channel = http_json(
                 "POST",
@@ -2062,6 +2252,8 @@ def main() -> None:
         test_channel_token_permissions_are_private,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
+        test_drain_allows_edit_capable_code_change_gate,
+        test_drain_blocks_invalid_existing_work_order,
         test_frontdoor_full_flow_updates_session_task_state_index,
         test_drain_blocks_and_quarantines_corrupt_run_json,
         test_drain_lock_contention_blocks_without_run_mutation,
