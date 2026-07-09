@@ -16,8 +16,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 import run_store
 import run_lock
+import task_state_bridge
 import workflow_selector
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
@@ -391,6 +396,39 @@ def state_paths(state_root: Path) -> dict[str, Path]:
         "signing_keys": state_root / "principal-keys",
         "channel_tokens": state_root / "channel-tokens",
     }
+
+
+def record_run_link_status(state_root: Path, run: dict[str, Any]) -> str:
+    try:
+        path = task_state_bridge.record_run_link(state_root, run)
+    except Exception as exc:  # defensive isolation: view refresh must not fail transitions
+        return f"error:{type(exc).__name__}:{exc}"
+    if path is None:
+        return "skipped:no_session"
+    return f"linked:{path}"
+
+
+def task_view(
+    *,
+    state_root: Path,
+    task_id: str,
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    validate_artifact_id(task_id, "task_id")
+    actor = principal or default_manual_principal()
+    payload = task_state_bridge.task_view_payload(state_root, task_id)
+    append_audit_event(
+        state_root=state_root,
+        event_type="task_view",
+        principal=actor,
+        subject={"task_id": task_id},
+        outcome="ok",
+        details={
+            "run_count": len(payload.get("runs") or []),
+            "queue_evidence_count": len(payload.get("queue_evidence") or []),
+        },
+    )
+    return payload
 
 
 def request_path(state_root: Path, request_id: str) -> Path:
@@ -1605,13 +1643,14 @@ def create_run(
                     record["run_id"] = effective_run_id
                     record["updated_at"] = now_iso()
                     write_json(request_path(state_root, request_id), record)
+                link_status = record_run_link_status(state_root, existing)
                 append_audit_event(
                     state_root=state_root,
                     event_type="create_run",
                     principal=actor,
                     subject=subject,
                     outcome="replayed",
-                    details={"created": False},
+                    details={"created": False, "run_link": link_status},
                 )
                 return {
                     "schema_version": 1,
@@ -1672,13 +1711,14 @@ def create_run(
         )
         raise
 
+    link_status = record_run_link_status(state_root, run)
     append_audit_event(
         state_root=state_root,
         event_type="create_run",
         principal=actor,
         subject=subject,
         outcome="ok",
-        details={"created": True},
+        details={"created": True, "run_link": link_status},
     )
     return {
         "schema_version": 1,
@@ -1721,13 +1761,18 @@ def drain_run(
                 subject=subject,
             )
             if run.get("run_state") not in {"created", "step_queued"}:
+                link_status = record_run_link_status(state_root, run)
                 append_audit_event(
                     state_root=state_root,
                     event_type="drain_run",
                     principal=actor,
                     subject=subject,
                     outcome="replayed",
-                    details={"reason": "run_state_not_queueable", "run_state": run.get("run_state")},
+                    details={
+                        "reason": "run_state_not_queueable",
+                        "run_state": run.get("run_state"),
+                        "run_link": link_status,
+                    },
                 )
                 return {
                     "schema_version": 1,
@@ -1792,13 +1837,14 @@ def drain_run(
         )
         raise
 
+    link_status = record_run_link_status(state_root, run)
     append_audit_event(
         state_root=state_root,
         event_type="drain_run",
         principal=actor,
         subject=subject,
         outcome="ok" if drained else "replayed",
-        details={"drained": drained},
+        details={"drained": drained, "run_link": link_status},
     )
     return {
         "schema_version": 1,
@@ -2000,13 +2046,18 @@ def validate_report(
                 subject=subject,
             )
             if run.get("run_state") in {"complete", "failed", "aborted"}:
+                link_status = record_run_link_status(state_root, run)
                 append_audit_event(
                     state_root=state_root,
                     event_type="validate_report",
                     principal=actor,
                     subject=subject,
                     outcome="replayed",
-                    details={"reason": "terminal_run_already_set", "run_state": run.get("run_state")},
+                    details={
+                        "reason": "terminal_run_already_set",
+                        "run_state": run.get("run_state"),
+                        "run_link": link_status,
+                    },
                 )
                 return {
                     "schema_version": 1,
@@ -2050,13 +2101,14 @@ def validate_report(
                     }
                 )
                 run_file = run_store.store_run(state_root, run, expected_current_state=loaded_run_state)
+                link_status = record_run_link_status(state_root, run)
                 append_audit_event(
                     state_root=state_root,
                     event_type="validate_report",
                     principal=actor,
                     subject=subject,
                     outcome="blocked",
-                    details={"reason": "invalid_report", "errors": errors},
+                    details={"reason": "invalid_report", "errors": errors, "run_link": link_status},
                 )
                 return {
                     "schema_version": 1,
@@ -2110,13 +2162,14 @@ def validate_report(
         )
         raise
 
+    link_status = record_run_link_status(state_root, run)
     append_audit_event(
         state_root=state_root,
         event_type="validate_report",
         principal=actor,
         subject=subject,
         outcome="ok" if terminal_status == "complete" else "blocked",
-        details={"report_status": terminal_status, "result": result},
+        details={"report_status": terminal_status, "result": result, "run_link": link_status},
     )
     return {
         "schema_version": 1,
@@ -2417,6 +2470,13 @@ def parser() -> argparse.ArgumentParser:
     report.add_argument("--principal-id", default="local-harness")
     report.add_argument("--authn-method", default="local_cli")
 
+    task = sub.add_parser("task-view")
+    task.add_argument("--task-id", required=True)
+    task.add_argument("--format", choices=["json"], default="json")
+    task.add_argument("--principal-type", default="manual_operator")
+    task.add_argument("--principal-id", default="manual-cli")
+    task.add_argument("--authn-method", default="local_cli")
+
     sub.add_parser("lock-status")
 
     bridge_submit = sub.add_parser("bridge-submit-request")
@@ -2504,6 +2564,12 @@ def main() -> None:
                 state_root=state_root,
                 run_id=args.run_id,
                 report_path_arg=args.report_path,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
+            )
+        elif args.command == "task-view":
+            payload = task_view(
+                state_root=state_root,
+                task_id=args.task_id,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "lock-status":
