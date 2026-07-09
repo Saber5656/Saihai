@@ -297,9 +297,9 @@ execution-class transitions.
 
 ### Activation Approval Sources
 
-Ordinary `frontdoor_prompt` activation can only create a `proposed`, `blocked`,
-or `waiting_human` envelope. A workflow run can be created only after one of
-the explicit local approval paths stores an approved activation envelope:
+Ordinary `frontdoor_prompt` activation can only create a `proposed` or
+`blocked` envelope. A workflow run can be created only after one of the
+explicit local approval paths stores an approved activation envelope:
 
 | Source | CLI path | Extra gate | Approved-by value |
 |---|---|---|---|
