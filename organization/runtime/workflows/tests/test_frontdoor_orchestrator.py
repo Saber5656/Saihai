@@ -1087,6 +1087,24 @@ def test_http_frontdoor_api_flow() -> None:
             health = http_json("GET", f"{base}/healthz")
             assert_equal(health["decision"], "ok", "health decision")
 
+            local_only_status, local_only_payload = http_json_response(
+                "POST",
+                f"{base}/frontdoor/orchestrator-start-approve",
+                {},
+                operator_headers,
+            )
+            assert_equal(local_only_status, 404, "http orchestrator-start approve not routable")
+            assert_equal(local_only_payload["reason"], "not_found", "http orchestrator-start reason")
+
+            manual_only_status, manual_only_payload = http_json_response(
+                "POST",
+                f"{base}/frontdoor/manual-approve",
+                {},
+                operator_headers,
+            )
+            assert_equal(manual_only_status, 404, "http manual approve not routable")
+            assert_equal(manual_only_payload["reason"], "not_found", "http manual approve reason")
+
             missing_channel = http_json(
                 "POST",
                 f"{base}/frontdoor/propose",
