@@ -151,8 +151,28 @@ def test_transcript_leak_is_scope_violation() -> None:
         assert_equal(payload["outcome"], "scope_violation", "transcript leak outcome")
         assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "transcript leak state")
         assert "raw_transcript_embedded:raw_transcript" in payload["errors"]
+        assert "report" not in payload
         rejection = json.loads(Path(payload["rejection_artifact_path"]).read_text(encoding="utf-8"))
         assert_equal(rejection["outcome"], "scope_violation", "rejection outcome")
+
+
+def test_nested_transcript_leak_is_scope_violation() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        adapter = prepare_review_handoff(state_root, request_id="req-nested-leak", run_id="run-nested-leak")
+        write_report(
+            adapter,
+            request_id="req-nested-leak",
+            run_id="run-nested-leak",
+            recommendations=[{"summary": "do not ship", "raw_transcript": "raw transcript text"}],
+        )
+
+        blocked = run_frontdoor(state_root, "validate-report", "--run-id", "run-nested-leak", check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "nested transcript leak exit")
+        assert_equal(payload["outcome"], "scope_violation", "nested transcript leak outcome")
+        assert "raw_transcript_embedded:recommendations[0].raw_transcript" in payload["errors"]
+        assert "report" not in payload
 
 
 def test_evidence_path_escape_is_scope_violation() -> None:
@@ -188,6 +208,23 @@ def test_identity_mismatch_is_scope_violation() -> None:
         assert "report_identity_mismatch" in payload["errors"]
 
 
+def test_missing_identity_is_invalid_report() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        adapter = prepare_review_handoff(state_root, request_id="req-missing-identity", run_id="run-missing-identity")
+        report = external_review_report(adapter, request_id="req-missing-identity", run_id="run-missing-identity")
+        del report["run_id"]
+        Path(adapter["report_path"]).write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        blocked = run_frontdoor(state_root, "validate-report", "--run-id", "run-missing-identity", check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "missing identity exit")
+        assert_equal(payload["outcome"], "report_invalid", "missing identity outcome")
+        assert "missing_required_fields:run_id" in payload["errors"]
+        assert "report_identity_mismatch" not in payload["errors"]
+        assert "report" not in payload
+
+
 def test_provider_blocked_waits_human() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -199,6 +236,11 @@ def test_provider_blocked_waits_human() -> None:
         assert_equal(payload["outcome"], "provider_reported_blocked", "provider blocked outcome")
         assert_equal(payload["report_status"], "waiting_human", "provider blocked status")
         assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "provider blocked run state")
+        replayed = load_payload(run_frontdoor(state_root, "validate-report", "--run-id", "run-provider-blocked"))
+        assert_equal(replayed["decision"], "ok", "provider blocked replay decision")
+        assert_equal(replayed["validated"], False, "provider blocked replay validated flag")
+        assert_equal(replayed["outcome"], "provider_reported_blocked", "provider blocked replay outcome")
+        assert_equal(replayed["workflow_run"]["run_state"], "waiting_human", "provider blocked replay run state")
 
 
 def test_result_invalid_fails() -> None:
@@ -237,8 +279,10 @@ def main() -> None:
         test_missing_provider_evidence_blocks_and_preserves_report,
         test_schema_violation_blocks_with_errors,
         test_transcript_leak_is_scope_violation,
+        test_nested_transcript_leak_is_scope_violation,
         test_evidence_path_escape_is_scope_violation,
         test_identity_mismatch_is_scope_violation,
+        test_missing_identity_is_invalid_report,
         test_provider_blocked_waits_human,
         test_result_invalid_fails,
         test_terminal_replay_does_not_write_new_transition_artifact,

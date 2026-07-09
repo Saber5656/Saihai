@@ -186,17 +186,21 @@ def precheck_execution_principal(
 
 def _raw_content_errors(report: Any) -> list[str]:
     errors: list[str] = []
-    if not isinstance(report, dict):
-        return errors
-    for key in sorted(RAW_TRANSCRIPT_KEYS & set(report)):
-        errors.append(f"raw_transcript_embedded:{key}")
-    findings = report.get("findings")
-    if isinstance(findings, list):
-        for finding in findings:
-            if isinstance(finding, dict):
-                for key in sorted(RAW_TRANSCRIPT_KEYS & set(finding)):
-                    errors.append(f"raw_transcript_embedded:{key}")
-    return errors
+
+    def walk(value: Any, path: str = "") -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_path = f"{path}.{key}" if path else str(key)
+                if key in RAW_TRANSCRIPT_KEYS:
+                    errors.append(f"raw_transcript_embedded:{key_path}")
+                walk(item, key_path)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                item_path = f"{path}[{index}]" if path else f"[{index}]"
+                walk(item, item_path)
+
+    walk(report)
+    return list(dict.fromkeys(errors))
 
 
 def _scope_violation_errors(report: Any, *, run: dict[str, Any], state_root: Path) -> list[str]:
@@ -215,10 +219,10 @@ def _scope_violation_errors(report: Any, *, run: dict[str, Any], state_root: Pat
     authority = report.get("authority")
     if isinstance(authority, dict) and authority.get("raw_transcript_shared") is True:
         errors.append("raw_transcript_shared_true")
-    if str(report.get("run_id")) != str(run.get("run_id")):
-        errors.append("report_identity_mismatch")
-    if str(report.get("request_id")) != str(run.get("request_id")):
-        errors.append("report_identity_mismatch")
+    for field in ("run_id", "request_id"):
+        value = report.get(field)
+        if value is not None and str(value) and str(value) != str(run.get(field)):
+            errors.append("report_identity_mismatch")
     return list(dict.fromkeys(errors))
 
 
@@ -566,6 +570,41 @@ def gate_report(
                 history_status = "waiting_human"
                 audit_outcome = "ok"
 
+            if run_state == "waiting_human" and to_state == "waiting_human":
+                link_status = record_run_link_status(state_root, run)
+                append_audit_event(
+                    state_root=state_root,
+                    event_type="validate_report",
+                    principal=actor,
+                    subject=subject,
+                    outcome="replayed",
+                    details={
+                        "reason": "waiting_human_replay",
+                        "report_status": report_status,
+                        "outcome": outcome,
+                        "errors": errors,
+                        "run_link": link_status,
+                    },
+                )
+                response = {
+                    "schema_version": 1,
+                    "decision": decision,
+                    "validated": False,
+                    "report_status": report_status,
+                    "reason": reason_class,
+                    "errors": errors,
+                    "outcome": outcome,
+                    "transition_artifact_path": None,
+                    "rejection_artifact_path": None,
+                    "run_path": str(run_file),
+                    "workflow_run": run,
+                }
+                if decision == "ok":
+                    response["report"] = report
+                if decision == "ok" and outcome == "provider_reported_blocked":
+                    response.pop("errors")
+                return response
+
             history = {
                 "step_id": step_id,
                 "status": history_status,
@@ -695,8 +734,9 @@ def gate_report(
         "rejection_artifact_path": str(rejection_artifact_path) if rejection_artifact_path else None,
         "run_path": str(run_file),
         "workflow_run": run,
-        "report": report,
     }
+    if decision == "ok":
+        response["report"] = report
     if decision == "ok" and outcome == "report_valid":
         response.pop("errors")
     return response
