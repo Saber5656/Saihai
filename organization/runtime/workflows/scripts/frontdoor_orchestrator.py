@@ -2166,6 +2166,8 @@ def validate_report(
             if path.resolve() != canonical_report_path.resolve():
                 raise FrontdoorError("report path must match canonical work order report path")
 
+            report = read_json(path)
+
             if run_state == "step_queued":
                 run_lifecycle.transition_run(
                     state_root,
@@ -2191,7 +2193,6 @@ def validate_report(
                 )
                 run_state = "validating"
 
-            report = read_json(path)
             errors = validate_external_review_report(report, run=run, work_order=work_order, state_root=state_root)
             if errors:
                 run["step_history"].append(

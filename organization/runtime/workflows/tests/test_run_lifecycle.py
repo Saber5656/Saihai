@@ -15,6 +15,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 run_store = importlib.import_module("run_store")
+run_lock = importlib.import_module("run_lock")
 run_lifecycle = importlib.import_module("run_lifecycle")
 frontdoor = importlib.import_module("frontdoor_orchestrator")
 
@@ -151,6 +152,50 @@ def test_transition_table_allows_p0_happy_path() -> None:
             ["step_queued", "provider_started", "report_received", "report_valid"],
             "transition reasons",
         )
+
+
+def test_transition_signature_covers_full_record_payload() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        store_run(state_root)
+
+        record = run_lifecycle.transition_run(
+            state_root,
+            "run-lifecycle",
+            to_state="step_queued",
+            reason_class="step_queued",
+            transition="test_transition",
+            principal=manual_principal(),
+            artifact_refs=["work-orders/run-lifecycle/review.json"],
+        )
+        unsigned_record = {key: value for key, value in record.items() if key != "signature"}
+        expected = run_lifecycle.sign_transition(
+            state_root=state_root,
+            principal=manual_principal(),
+            transition="test_transition",
+            subject=unsigned_record,
+        )
+        assert_equal(record["signature"]["signature"], expected["signature"], "full record signature")
+
+        tampered_reason = dict(unsigned_record)
+        tampered_reason["reason_class"] = "tampered_reason"
+        tampered_reason_signature = run_lifecycle.sign_transition(
+            state_root=state_root,
+            principal=manual_principal(),
+            transition="test_transition",
+            subject=tampered_reason,
+        )
+        assert record["signature"]["signature"] != tampered_reason_signature["signature"], "reason must be signed"
+
+        tampered_refs = dict(unsigned_record)
+        tampered_refs["artifact_refs"] = []
+        tampered_ref_signature = run_lifecycle.sign_transition(
+            state_root=state_root,
+            principal=manual_principal(),
+            transition="test_transition",
+            subject=tampered_refs,
+        )
+        assert record["signature"]["signature"] != tampered_ref_signature["signature"], "artifact refs must be signed"
 
 
 def test_terminal_rejects_further_transitions() -> None:
@@ -305,6 +350,75 @@ def test_resume_reclaims_expired_lease() -> None:
         )
 
 
+def test_resume_waiting_human_requeue_enforces_p0_concurrency() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        store_run(state_root, run_state="waiting_human", goal_state="blocked")
+        store_run(state_root, run_id="run-other", run_state="step_queued", goal_state="active")
+
+        try:
+            run_lifecycle.resume_run(
+                state_root,
+                "run-lifecycle",
+                principal=manual_principal(),
+                requeue=True,
+            )
+        except run_lock.LockContentionError as exc:
+            assert_equal(exc.reason_class, "concurrency_limit_reached", "waiting human concurrency reason")
+            assert_equal(exc.owner["inflight_run_ids"], ["run-other"], "waiting human competing runs")
+        else:
+            raise AssertionError("waiting human requeue must honor P0 concurrency")
+
+        run = run_store.load_run(state_root, "run-lifecycle")
+        assert_equal(run["run_state"], "waiting_human", "waiting human state unchanged")
+        assert_equal(run["transitions"], [], "waiting human transitions unchanged")
+
+
+def test_resume_expired_provider_lease_enforces_p0_concurrency_before_reset() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        store_run(state_root, run_state="waiting_provider", goal_state="active")
+        store_run(state_root, run_id="run-other", run_state="step_queued", goal_state="active")
+        order_path = run_lifecycle.work_order_path(state_root, "run-lifecycle", "review")
+        order_path.parent.mkdir(parents=True, exist_ok=True)
+        order_path.write_text(
+            json.dumps(
+                {
+                    "work_order_authority": {
+                        "runner_claim": {
+                            "claim_state": "claimed",
+                            "lease_expires_at": "2000-01-01T00:00:00+0000",
+                        }
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        try:
+            run_lifecycle.resume_run(
+                state_root,
+                "run-lifecycle",
+                principal=manual_principal(),
+            )
+        except run_lock.LockContentionError as exc:
+            assert_equal(exc.reason_class, "concurrency_limit_reached", "provider lease concurrency reason")
+            assert_equal(exc.owner["inflight_run_ids"], ["run-other"], "provider lease competing runs")
+        else:
+            raise AssertionError("expired provider lease resume must honor P0 concurrency")
+
+        run = run_store.load_run(state_root, "run-lifecycle")
+        assert_equal(run["run_state"], "waiting_provider", "provider lease state unchanged")
+        assert_equal(run["transitions"], [], "provider lease transitions unchanged")
+        work_order = json.loads(order_path.read_text(encoding="utf-8"))
+        assert_equal(
+            work_order["work_order_authority"]["runner_claim"]["claim_state"],
+            "claimed",
+            "runner claim remains claimed",
+        )
+
+
 def test_create_from_unapproved_activation_fails() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -358,6 +472,7 @@ def test_resume_does_not_duplicate_runs() -> None:
 def main() -> None:
     tests = [
         test_transition_table_allows_p0_happy_path,
+        test_transition_signature_covers_full_record_payload,
         test_terminal_rejects_further_transitions,
         test_illegal_transition_rejected,
         test_abort_non_terminal,
@@ -365,6 +480,8 @@ def main() -> None:
         test_resume_maps_states_to_next_action,
         test_resume_waiting_human_requires_flag,
         test_resume_reclaims_expired_lease,
+        test_resume_waiting_human_requeue_enforces_p0_concurrency,
+        test_resume_expired_provider_lease_enforces_p0_concurrency_before_reset,
         test_create_from_unapproved_activation_fails,
         test_resume_does_not_duplicate_runs,
     ]

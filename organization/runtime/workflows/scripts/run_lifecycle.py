@@ -209,18 +209,15 @@ def transition_run(
         "reason_class": reason_class,
         "occurred_at": now_iso(),
         "principal": redacted_principal(principal),
-        "signature": sign_transition(
-            state_root=state_root,
-            principal=principal,
-            transition=transition,
-            subject={
-                "run_id": effective_run_id,
-                "from_state": from_state,
-                "to_state": to_state,
-            },
-        ),
+        "run_id": effective_run_id,
         "artifact_refs": _normalized_artifact_refs(artifact_refs),
     }
+    record["signature"] = sign_transition(
+        state_root=state_root,
+        principal=principal,
+        transition=transition,
+        subject=record,
+    )
     transitions.append(record)
     run["run_state"] = to_state
     run["goal_state"] = GOAL_STATE_FOR_RUN_STATE[to_state]
@@ -355,6 +352,7 @@ def resume_run(
                     "reason": "waiting_human",
                     "workflow_run": run,
                 }
+            run_lock.assert_p0_concurrency(state_root, target_run_id=run_id)
             transition = transition_run(
                 state_root,
                 run_id,
@@ -385,6 +383,7 @@ def resume_run(
                     "reason": "provider_in_flight",
                     "workflow_run": run,
                 }
+            run_lock.assert_p0_concurrency(state_root, target_run_id=run_id)
             if order_path.exists():
                 _reset_runner_claim(work_order)
                 run_store.atomic_write_json(order_path, work_order)
