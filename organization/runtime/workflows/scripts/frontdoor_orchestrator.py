@@ -23,6 +23,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import run_store
 import run_lock
 import run_lifecycle
+import report_gate
 import task_state_bridge
 import workflow_selector
 
@@ -391,6 +392,7 @@ def state_paths(state_root: Path) -> dict[str, Path]:
         "adapter_requests": state_root / "adapter-requests",
         "provider_evidence": state_root / "provider-evidence",
         "reports": state_root / "reports",
+        "transitions": state_root / "transitions",
         "audit": state_root / "audit",
         "idempotency": state_root / "idempotency",
         "acks": state_root / "acks",
@@ -2156,213 +2158,16 @@ def validate_report(
     report_path_arg: str = "",
     principal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    validate_artifact_id(run_id, "run_id")
     actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
-    run_file = run_store.run_path(state_root, run_id)
-    subject = {"run_id": run_id}
-    precheck_execution_principal(
-        state_root=state_root,
-        principal=actor,
-        transition="validate_report",
-        subject=subject,
-    )
     try:
-        with run_lock.hold_global_lock(
+        return report_gate.gate_report(
             state_root,
-            operation="validate_report",
-            run_id=run_id,
+            run_id,
+            report_path_arg=report_path_arg,
             principal=actor,
-        ):
-            run = run_store.load_run(state_root, run_id)
-            run_state = str(run.get("run_state") or "")
-            subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
-            signature = assert_execution_principal(
-                state_root=state_root,
-                principal=actor,
-                transition="validate_report",
-                subject=subject,
-            )
-            if run_state in run_lifecycle.TERMINAL_RUN_STATES:
-                link_status = record_run_link_status(state_root, run)
-                append_audit_event(
-                    state_root=state_root,
-                    event_type="validate_report",
-                    principal=actor,
-                    subject=subject,
-                    outcome="replayed",
-                    details={
-                        "reason": "terminal_run_already_set",
-                        "run_state": run.get("run_state"),
-                        "run_link": link_status,
-                    },
-                )
-                return {
-                    "schema_version": 1,
-                    "decision": "ok",
-                    "validated": False,
-                    "reason": "terminal_run_already_set",
-                    "run_path": str(run_file),
-                    "workflow_run": run,
-                }
-            step_id = str(run["current_step"])
-            work_order = read_json(work_order_path(state_root, run_id, step_id))
-            canonical_report_path = Path(str(work_order["report_path"])).expanduser()
-            path = Path(report_path_arg).expanduser() if report_path_arg else canonical_report_path
-            if not path_is_within(path, state_paths(state_root)["reports"]):
-                raise FrontdoorError("report path must stay under orchestrator state reports directory")
-            if path.resolve() != canonical_report_path.resolve():
-                raise FrontdoorError("report path must match canonical work order report path")
-
-            report = read_json(path)
-
-            if run_state == "step_queued":
-                run_lifecycle.transition_run(
-                    state_root,
-                    run_id,
-                    to_state="waiting_provider",
-                    reason_class="manual_provider_execution_assumed",
-                    transition="validate_report",
-                    principal=actor,
-                    artifact_refs=[str(work_order_path(state_root, run_id, step_id)), str(path)],
-                    run=run,
-                )
-                run_state = "waiting_provider"
-            if run_state == "waiting_provider":
-                run_lifecycle.transition_run(
-                    state_root,
-                    run_id,
-                    to_state="validating",
-                    reason_class="report_received",
-                    transition="validate_report",
-                    principal=actor,
-                    artifact_refs=[str(path)],
-                    run=run,
-                )
-                run_state = "validating"
-
-            errors = validate_external_review_report(report, run=run, work_order=work_order, state_root=state_root)
-            if errors:
-                run["step_history"].append(
-                    {
-                        "step_id": step_id,
-                        "status": "blocked",
-                        "checked_at": now_iso(),
-                        "report_path": str(path),
-                        "errors": errors,
-                        "principal": redacted_principal(actor),
-                        "signature": signature,
-                    }
-                )
-                run.setdefault("transition_provenance", []).append(
-                    {
-                        "transition": "validate_report",
-                        "principal": redacted_principal(actor),
-                        "signature": signature,
-                        "result": "blocked",
-                    }
-                )
-                run_lifecycle.transition_run(
-                    state_root,
-                    run_id,
-                    to_state="failed",
-                    reason_class="invalid_report",
-                    transition="validate_report",
-                    principal=actor,
-                    artifact_refs=[str(path)],
-                    terminal_status="blocked",
-                    terminal_reason="invalid_report",
-                    run=run,
-                )
-                run_file = run_store.run_path(state_root, run_id)
-                link_status = record_run_link_status(state_root, run)
-                append_audit_event(
-                    state_root=state_root,
-                    event_type="validate_report",
-                    principal=actor,
-                    subject=subject,
-                    outcome="blocked",
-                    details={"reason": "invalid_report", "errors": errors, "run_link": link_status},
-                )
-                return {
-                    "schema_version": 1,
-                    "decision": "blocked",
-                    "reason": "invalid_report",
-                    "errors": errors,
-                    "workflow_run": run,
-                }
-
-            result = report["result"]
-            if result in {"pass", "findings"}:
-                to_state = "complete"
-                terminal_status = "complete"
-                terminal_reason = "report_valid"
-                reason_class = "report_valid"
-            else:
-                to_state = "failed"
-                terminal_status = "blocked"
-                terminal_reason = f"provider_report_{result}"
-                reason_class = terminal_reason
-
-            run["step_history"].append(
-                {
-                    "step_id": step_id,
-                    "status": terminal_status,
-                    "checked_at": now_iso(),
-                    "report_path": str(path),
-                    "result": result,
-                    "principal": redacted_principal(actor),
-                    "signature": signature,
-                }
-            )
-            run.setdefault("transition_provenance", []).append(
-                {
-                    "transition": "validate_report",
-                    "principal": redacted_principal(actor),
-                    "signature": signature,
-                    "result": terminal_status,
-                }
-            )
-            run_lifecycle.transition_run(
-                state_root,
-                run_id,
-                to_state=to_state,
-                reason_class=reason_class,
-                transition="validate_report",
-                principal=actor,
-                artifact_refs=[str(path)],
-                terminal_status=terminal_status,
-                terminal_reason=terminal_reason,
-                run=run,
-            )
-            run_file = run_store.run_path(state_root, run_id)
-    except run_lock.LockContentionError as exc:
-        append_audit_event(
-            state_root=state_root,
-            event_type="validate_report",
-            principal=actor,
-            subject=subject,
-            outcome="blocked",
-            details={"reason": exc.reason_class, "owner": exc.owner},
         )
-        raise
-
-    link_status = record_run_link_status(state_root, run)
-    append_audit_event(
-        state_root=state_root,
-        event_type="validate_report",
-        principal=actor,
-        subject=subject,
-        outcome="ok" if terminal_status == "complete" else "blocked",
-        details={"report_status": terminal_status, "result": result, "run_link": link_status},
-    )
-    return {
-        "schema_version": 1,
-        "decision": "ok",
-        "report_status": terminal_status,
-        "run_path": str(run_file),
-        "workflow_run": run,
-        "report": report,
-    }
+    except report_gate.ReportGateError as exc:
+        raise FrontdoorError(str(exc)) from exc
 
 
 def validate_external_review_report(
@@ -2372,46 +2177,12 @@ def validate_external_review_report(
     work_order: dict[str, Any],
     state_root: Path,
 ) -> list[str]:
-    errors: list[str] = []
-    required = {
-        "report_version",
-        "report_id",
-        "request_id",
-        "run_id",
-        "workflow_id",
-        "step_id",
-        "result",
-        "summary",
-        "provider_evidence",
-        "findings",
-        "authority",
-    }
-    allowed = required | {"recommendations"}
-    missing = sorted(required - set(report))
-    if missing:
-        errors.append("missing_required_fields:" + ",".join(missing))
-    extra = sorted(set(report) - allowed)
-    if extra:
-        errors.append("unexpected_fields:" + ",".join(extra))
-    if report.get("report_version") != "1":
-        errors.append("report_version must be '1'")
-    for field in ("request_id", "run_id", "workflow_id", "step_id"):
-        expected = str(run.get(field) if field != "step_id" else work_order.get("step_id"))
-        if str(report.get(field)) != expected:
-            errors.append(f"{field} mismatch: expected {expected!r}")
-    if report.get("workflow_id") != "single_step_external_review":
-        errors.append("workflow_id must be single_step_external_review")
-    if report.get("step_id") != "review":
-        errors.append("step_id must be review")
-    if report.get("result") not in {"pass", "findings", "blocked", "invalid"}:
-        errors.append("result unsupported")
-    if not isinstance(report.get("summary"), str) or not report.get("summary"):
-        errors.append("summary must be non-empty string")
-
-    errors.extend(validate_provider_evidence(report.get("provider_evidence"), run, work_order, state_root))
-    errors.extend(validate_findings(report.get("findings"), report.get("result")))
-    errors.extend(validate_authority(report.get("authority")))
-    return errors
+    return report_gate.validate_external_review_report(
+        report,
+        run=run,
+        work_order=work_order,
+        state_root=state_root,
+    )
 
 
 def validate_provider_evidence(
@@ -2420,103 +2191,15 @@ def validate_provider_evidence(
     work_order: dict[str, Any],
     state_root: Path,
 ) -> list[str]:
-    errors: list[str] = []
-    if not isinstance(value, dict):
-        return ["provider_evidence must be object"]
-    required = {
-        "provider",
-        "effective_model",
-        "request_id",
-        "provider_session_id",
-        "transcript_path",
-        "evidence_path",
-    }
-    missing = sorted(required - set(value))
-    if missing:
-        errors.append("provider_evidence missing:" + ",".join(missing))
-    extra = sorted(set(value) - required)
-    if extra:
-        errors.append("provider_evidence unexpected:" + ",".join(extra))
-    if str(value.get("request_id")) != str(run.get("request_id")):
-        errors.append("provider_evidence.request_id mismatch")
-    for field in ("provider", "effective_model", "provider_session_id", "transcript_path", "evidence_path"):
-        if not isinstance(value.get(field), str) or not value.get(field):
-            errors.append(f"provider_evidence.{field} must be non-empty string")
-    expected_paths = {
-        "transcript_path": provider_transcript_path(
-            state_root,
-            str(run.get("run_id") or ""),
-            str(work_order.get("step_id") or ""),
-        ),
-        "evidence_path": provider_evidence_path(
-            state_root,
-            str(run.get("run_id") or ""),
-            str(work_order.get("step_id") or ""),
-        ),
-    }
-    for field in ("transcript_path", "evidence_path"):
-        path = Path(str(value.get(field, ""))).expanduser()
-        if value.get(field) and not path.exists():
-            errors.append(f"provider_evidence.{field} does not exist: {path}")
-        if value.get(field) and not path_is_within(path, state_paths(state_root)["provider_evidence"]):
-            errors.append(f"provider_evidence.{field} must stay under provider evidence state directory")
-        if value.get(field) and path.resolve() != expected_paths[field].resolve():
-            errors.append(f"provider_evidence.{field} must match current run evidence path")
-    return errors
+    return report_gate.validate_provider_evidence(value, run, work_order, state_root)
 
 
 def validate_findings(value: Any, result: Any) -> list[str]:
-    errors: list[str] = []
-    if not isinstance(value, list):
-        return ["findings must be array"]
-    if result == "findings" and not value:
-        errors.append("findings result requires at least one finding")
-    required = {"finding_id", "severity", "status", "summary", "evidence_refs"}
-    allowed = required
-    for index, finding in enumerate(value):
-        if not isinstance(finding, dict):
-            errors.append(f"findings[{index}] must be object")
-            continue
-        missing = sorted(required - set(finding))
-        if missing:
-            errors.append(f"findings[{index}] missing:" + ",".join(missing))
-        extra = sorted(set(finding) - allowed)
-        if extra:
-            errors.append(f"findings[{index}] unexpected:" + ",".join(extra))
-        if finding.get("severity") not in {"critical", "high", "medium", "low", "info"}:
-            errors.append(f"findings[{index}].severity unsupported")
-        if finding.get("status") not in {"open", "closed", "waived", "informational"}:
-            errors.append(f"findings[{index}].status unsupported")
-        if not isinstance(finding.get("finding_id"), str) or not finding.get("finding_id"):
-            errors.append(f"findings[{index}].finding_id must be non-empty string")
-        if not isinstance(finding.get("summary"), str) or not finding.get("summary"):
-            errors.append(f"findings[{index}].summary must be non-empty string")
-        if not isinstance(finding.get("evidence_refs"), list):
-            errors.append(f"findings[{index}].evidence_refs must be array")
-        elif any(not isinstance(item, str) or not item for item in finding["evidence_refs"]):
-            errors.append(f"findings[{index}].evidence_refs entries must be non-empty strings")
-    return errors
+    return report_gate.validate_findings(value, result)
 
 
 def validate_authority(value: Any) -> list[str]:
-    if not isinstance(value, dict):
-        return ["authority must be object"]
-    errors: list[str] = []
-    expected = {
-        "canonical_result": "typed_report_file",
-        "stdout_is_signal_only": True,
-        "raw_transcript_shared": False,
-    }
-    missing = sorted(set(expected) - set(value))
-    if missing:
-        errors.append("authority missing:" + ",".join(missing))
-    extra = sorted(set(value) - set(expected))
-    if extra:
-        errors.append("authority unexpected:" + ",".join(extra))
-    for key, expected_value in expected.items():
-        if value.get(key) != expected_value:
-            errors.append(f"authority.{key} must be {expected_value!r}")
-    return errors
+    return report_gate.validate_authority(value)
 
 
 def build_work_order(
