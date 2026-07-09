@@ -119,7 +119,7 @@ Terminal runs are immutable.
 
 | From state | Allowed next states | Goal state mapping |
 |---|---|---|
-| `created` | `step_queued`, `aborted` | `approved` |
+| `created` | `step_queued`, `waiting_human`, `aborted` | `approved` |
 | `step_queued` | `waiting_provider`, `waiting_human`, `aborted` | `active` |
 | `waiting_provider` | `step_queued`, `validating`, `waiting_human`, `failed`, `aborted` | `active` |
 | `validating` | `complete`, `failed`, `waiting_human`, `aborted` | `active` |
@@ -165,6 +165,32 @@ and get an additional rejection artifact:
 The gate never copies transcript content into shared run state. Provider
 evidence and transcript paths remain references under `provider-evidence/`;
 stdout and transcript payloads are still signal-only.
+
+## Work Orders And Step Snapshots
+
+`drain` turns an approved run into a bounded work order for the current
+template step. The generated work order is validated before any provider
+adapter can consume it.
+
+```text
+<state_root>/
+  work-orders/
+    <run_id>/
+      <step_id>.json                         canonical work order
+      <step_id>-snapshot-<iteration>.json    immutable step inputs
+```
+
+The work order contains the deterministic instruction, role assignment,
+permission mode, typed context refs, canonical report path, activation scope,
+policy digest, requester metadata, and signed issuer authority. P0
+`single_step_external_review` work orders are forced to `readonly`, reviewer
+assignment, `external_provider_allowed: true`, `step_budget: 1`, and
+`edit`/`commit`/`push`/`network` all false.
+
+The snapshot records a stable digest of the work order plus the activation
+scope, context refs, and policy digest used for that step attempt. Replaying
+`drain` verifies the existing snapshot digest; a mismatch blocks the run as
+`work_order_invalid` instead of regenerating mutable provider inputs.
 
 ## Active Template Routes
 
@@ -279,6 +305,17 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
   --request-id req-example \
   --human-action-id <approval.human_action_id>
 
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state orchestrator-start-approve \
+  --request-id req-example \
+  --human-action-id <approval.human_action_id> \
+  --invoked-at 2026-07-09T00:00:00+0900 \
+  --chat-session-id thread-example
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state manual-approve \
+  --request-id req-example \
+  --human-action-id <approval.human_action_id> \
+  --confirm approve-req-example
+
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state create-run \
   --request-id req-example
 
@@ -313,6 +350,34 @@ The `human_action_id` is a proposal-digest challenge returned by `propose`.
 It is not arbitrary UI text. Execution commands accept `--principal-type`,
 `--principal-id`, and `--authn-method`; `main_agent_bridge` is rejected for
 execution-class transitions.
+
+### Activation Approval Sources
+
+Ordinary `frontdoor_prompt` activation can only create a `proposed` or
+`blocked` envelope. A workflow run can be created only after one of the
+explicit local approval paths stores an approved activation envelope:
+
+| Source | CLI path | Extra gate | Approved-by value |
+|---|---|---|---|
+| `human_ui` | `approve` | `human_action_id` challenge | `human_ui_action` |
+| `orchestrator-start` | `orchestrator-start-approve` | `human_action_id` challenge plus invocation evidence (`skill`, `invoked_at`, `chat_session_id`) | `human_explicit_skill_invocation` |
+| `manual_cli` | `manual-approve` | `human_action_id` challenge plus `--confirm approve-<request_id>` | `manual_operator` |
+
+Approval revalidates bounded context refs before changing request state. If a
+resolved ref digest changes after proposal, approval is blocked with
+`context_refs_changed_since_proposal`. Destructive work is blocked. Publication
+and policy-change work remain `waiting_human` for their separate gates and do
+not store `approved_activation`.
+
+Activation envelope snapshots are written under:
+
+```text
+<state_root>/envelopes/<request_id>/<seq>-<activation_status>.json
+```
+
+`create-run` returns the request record path and the snapshot list. It also
+updates the request record's `linked_runs` list without duplicating replayed
+run IDs.
 
 ## Scheduler Lock And P0 Concurrency
 
@@ -365,9 +430,10 @@ validate report, inspect evidence, and recover or roll back stuck runs with
 `resume` / `abort`.
 
 The currently implemented workflow-frontdoor commands are `propose`, `approve`,
-`create-run`, `drain`, `adapter-capability`, `prepare-claude-adapter`,
-`validate-report`, `resume`, `abort`, `task-view`, `bridge-submit-request`,
-`bridge-read-projection`, `bridge-ack-output`, `channel-token`, and
+`orchestrator-start-approve`, `manual-approve`, `create-run`, `drain`,
+`adapter-capability`, `prepare-claude-adapter`, `validate-report`, `resume`,
+`abort`, `task-view`, `bridge-submit-request`, `bridge-read-projection`,
+`bridge-ack-output`, `channel-token`, and
 `lock-status`. Dedicated raw run detail and evidence inspection commands are
 still planned; the runbook uses canonical artifact inspection where needed.
 
@@ -432,6 +498,11 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
 | `GET /orchestrator/tasks/{task_id}/runs` | Operator path for derived `task-view`; returns thin run links and queue-shaped evidence without raw run state |
 | `POST /provider/claude/prepare` | Operator path for `workflow-frontdoor prepare-claude-adapter`; derives principal from authenticated `operator` channel headers |
 | `POST /provider/reports/validate` | Harness gate path for `workflow-frontdoor validate-report`; derives principal from authenticated `harness` channel headers |
+
+There are intentionally no HTTP routes for `orchestrator-start-approve` or
+`manual-approve`. Those approval sources are local-only skill invocation and
+operator shell paths; HTTP `POST /frontdoor/approve` remains the `human_ui`
+path.
 
 Generate a local channel token with:
 
