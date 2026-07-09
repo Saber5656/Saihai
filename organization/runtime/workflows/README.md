@@ -119,7 +119,7 @@ Terminal runs are immutable.
 
 | From state | Allowed next states | Goal state mapping |
 |---|---|---|
-| `created` | `step_queued`, `aborted` | `approved` |
+| `created` | `step_queued`, `waiting_human`, `aborted` | `approved` |
 | `step_queued` | `waiting_provider`, `waiting_human`, `aborted` | `active` |
 | `waiting_provider` | `step_queued`, `validating`, `waiting_human`, `failed`, `aborted` | `active` |
 | `validating` | `complete`, `failed`, `waiting_human`, `aborted` | `active` |
@@ -135,6 +135,32 @@ requeue `waiting_human` only with `--requeue`; and it reclaims an expired or
 missing provider lease by resetting the work-order runner claim and moving the
 run back to `step_queued`. `abort` moves any non-terminal run to terminal
 `aborted`; terminal aborts replay without mutation.
+
+## Work Orders And Step Snapshots
+
+`drain` turns an approved run into a bounded work order for the current
+template step. The generated work order is validated before any provider
+adapter can consume it.
+
+```text
+<state_root>/
+  work-orders/
+    <run_id>/
+      <step_id>.json                         canonical work order
+      <step_id>-snapshot-<iteration>.json    immutable step inputs
+```
+
+The work order contains the deterministic instruction, role assignment,
+permission mode, typed context refs, canonical report path, activation scope,
+policy digest, requester metadata, and signed issuer authority. P0
+`single_step_external_review` work orders are forced to `readonly`, reviewer
+assignment, `external_provider_allowed: true`, `step_budget: 1`, and
+`edit`/`commit`/`push`/`network` all false.
+
+The snapshot records a stable digest of the work order plus the activation
+scope, context refs, and policy digest used for that step attempt. Replaying
+`drain` verifies the existing snapshot digest; a mismatch blocks the run as
+`work_order_invalid` instead of regenerating mutable provider inputs.
 
 ## Active Template Routes
 
