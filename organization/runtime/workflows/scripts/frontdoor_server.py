@@ -8,6 +8,7 @@ import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 
 import frontdoor_orchestrator as frontdoor
 
@@ -15,6 +16,7 @@ RUN_ABORT_RE = re.compile(r"^/orchestrator/runs/([^/]+)/abort$")
 RUN_DRAIN_RE = re.compile(r"^/orchestrator/runs/([^/]+)/drain$")
 RUN_READ_RE = re.compile(r"^/orchestrator/runs/([^/]+)$")
 RUN_RESUME_RE = re.compile(r"^/orchestrator/runs/([^/]+)/resume$")
+TASK_RUNS_RE = re.compile(r"^/orchestrator/tasks/([^/]+)/runs$")
 REQUEST_READ_RE = re.compile(r"^/frontdoor/requests/([^/]+)$")
 BRIDGE_PROJECTION_RE = re.compile(r"^/main-agent/projections/([^/]+)$")
 BODY_PRINCIPAL_FIELDS = {"principal_type", "principal_id", "authn_method"}
@@ -473,6 +475,16 @@ class Handler(BaseHTTPRequestHandler):
                     chat_session_id="frontdoor-ui",
                     principal=principal,
                     peer=self._peer_details(),
+                )
+                self._send_json(payload)
+                return
+            task_runs_match = TASK_RUNS_RE.match(self.path)
+            if task_runs_match:
+                principal = self._authenticated_channel_principal(allowed_channels={"operator"})
+                payload = frontdoor.task_view(
+                    state_root=self.state_root,
+                    task_id=unquote(task_runs_match.group(1)),
+                    principal=principal,
                 )
                 self._send_json(payload)
                 return

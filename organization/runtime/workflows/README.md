@@ -32,7 +32,9 @@ any provider.
 | `scripts/workflow_selector.py` | Deterministic selector and activation-envelope helper |
 | `scripts/frontdoor_orchestrator.py` | Host-owned frontdoor and invocation-drain P0 harness |
 | `scripts/frontdoor_server.py` | Local HTTP wrapper for Agent UI integration |
+| `scripts/task_state_bridge.py` | Derived task/session run views and session-local orchestrator run index writer |
 | `tests/test_workflow_selector.py` | Unit/static contract tests |
+| `tests/test_task_state_bridge.py` | Task/session bridge and queue-shaped derived view regression tests |
 | `frontdoor-orchestrator-protocol.md` | Implementation boundary for Agent UI, host frontdoor, harness, and Claude adapter control |
 | `operator-runbook.md` | Day-1 operator workflow, legacy queue/tmux migration notes, stuck-run recovery, rollback, artifact, and validation guidance |
 
@@ -83,7 +85,29 @@ Naming rules:
 - `run_id` must match `^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$` and must not contain path separators or traversal segments.
 - Linkage is embedded in the run record through `task_id` and `request_id`.
 - The request record lives at `requests/<request_id>.json`.
-- No extra run index files are maintained by this workflow-run store.
+- No extra canonical run index files are maintained by this workflow-run store.
+
+## Canonical State vs Compatibility Views
+
+| Artifact | Status | Owner |
+|---|---|---|
+| `<orch_root>/runs/<run_id>.json` | **canonical** run state | orchestrator (#20) |
+| `<orch_root>/transitions/<run_id>/*` | **canonical** transition evidence | report gate (#11) |
+| `<orch_root>/provider-evidence/...` | **canonical** provider evidence | runner (#42) |
+| `<session_dir>/orchestrator-runs.json` | **view/index** (rebuildable) | this issue |
+| `task-view` CLI / HTTP output | **derived view** (never stored) | this issue |
+| `queue/inbox|tasks|reports` | canonical for role-queue work — orchestrator NEVER writes here | ITB |
+
+Role-queue files are owned by `agent-call`/ITB workers. The orchestrator exposes
+queue-shaped evidence rows for viewer/task-detail consumption, but it does not
+write synthetic rows into `queue/inbox`, `queue/tasks`, or `queue/reports`.
+
+The session-local `orchestrator-runs.json` file is a pointer/index for viewers
+that enumerate ITB session directories. It is rebuilt from canonical
+orchestrator runs whenever a linked run is created, drained, replayed, or
+terminally validated. If no matching ITB session directory exists, the
+orchestrator silently skips the index write and leaves the run transition
+unchanged.
 
 ## Workflow Run Lifecycle
 
@@ -174,8 +198,8 @@ control:
 
 Commands from the target design whose backing implementations are not yet
 merged are intentionally absent from the parser. There are no dead stubs for
-`run-step`, `verify-completion`, `task-view`, or `list`. `resume`, `abort`,
-and `lock-status` are currently exposed through the compatibility facade below
+`run-step`, `verify-completion`, or `list`. `resume`, `abort`, `task-view`, and
+`lock-status` are currently exposed through the compatibility facade below
 until #19 re-exposes takt-style workflow commands.
 
 ```sh
@@ -245,6 +269,9 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
   --run-id <run_id> \
   --reason "operator cancelled"
 
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state task-view \
+  --task-id TSK-example
+
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state lock-status
 ```
 
@@ -309,7 +336,7 @@ validate report, inspect evidence, and recover or roll back stuck runs with
 
 The currently implemented workflow-frontdoor commands are `propose`, `approve`,
 `create-run`, `drain`, `adapter-capability`, `prepare-claude-adapter`,
-`validate-report`, `resume`, `abort`, `bridge-submit-request`,
+`validate-report`, `resume`, `abort`, `task-view`, `bridge-submit-request`,
 `bridge-read-projection`, `bridge-ack-output`, `channel-token`, and
 `lock-status`. Dedicated raw run detail and evidence inspection commands are
 still planned; the runbook uses canonical artifact inspection where needed.
@@ -370,8 +397,9 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
 | `POST /frontdoor/approve` | Human UI path for `workflow-frontdoor approve`; derives principal from authenticated `human_ui` channel headers and challenge id |
 | `POST /orchestrator/runs` | Operator path for `workflow-frontdoor create-run`; derives principal from authenticated `operator` channel headers |
 | `POST /orchestrator/runs/{run_id}/drain` | Operator path for `workflow-frontdoor drain`; derives principal from authenticated `operator` channel headers |
-| `POST /orchestrator/runs/{run_id}/resume` | Operator path for `workflow-frontdoor resume`; body accepts `{"requeue": true}` |
-| `POST /orchestrator/runs/{run_id}/abort` | Operator path for `workflow-frontdoor abort`; body accepts `{"reason": "..."}` |
+| `POST /orchestrator/runs/{run_id}/resume` | Operator path for `workflow-frontdoor resume`; derives principal from authenticated `operator` channel headers; body accepts `{"requeue": true}` |
+| `POST /orchestrator/runs/{run_id}/abort` | Operator path for `workflow-frontdoor abort`; derives principal from authenticated `operator` channel headers; body accepts `{"reason": "..."}` |
+| `GET /orchestrator/tasks/{task_id}/runs` | Operator path for derived `task-view`; returns thin run links and queue-shaped evidence without raw run state |
 | `POST /provider/claude/prepare` | Operator path for `workflow-frontdoor prepare-claude-adapter`; derives principal from authenticated `operator` channel headers |
 | `POST /provider/reports/validate` | Harness gate path for `workflow-frontdoor validate-report`; derives principal from authenticated `harness` channel headers |
 

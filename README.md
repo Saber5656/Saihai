@@ -263,6 +263,9 @@ Viewer の status 判定:
 | Adapter request | `<state_root>/adapter-requests/<run_id>/<step_id>-claude_headless_p0.json` | provider prompt、evidence path、transcript path、authority boundary |
 | Typed report | `<state_root>/reports/<run_id>/<step_id>-external-review-report.json` | P0 external review の canonical provider result |
 | Provider evidence | `<state_root>/provider-evidence/<run_id>/*` | normalized evidence と signal-only transcript |
+| Session run index | `<session_dir>/orchestrator-runs.json` | viewer 向け rebuildable view。canonical run state ではない |
+| Task-view output | `workflow-frontdoor task-view` / `GET /orchestrator/tasks/{task_id}/runs` | derived view。thin links/status と queue-shaped evidence のみ |
+| Role queue files | `<session_dir>/queue/inbox|tasks|reports` | ITB role-queue の canonical evidence。orchestrator は書き込まない |
 | Audit log | `<state_root>/audit/*.jsonl` | principal-scoped transition / replay / rejection / ack evidence |
 
 ## Workflow Contracts
@@ -305,6 +308,7 @@ python3 tests/test_configure_organization.py
 python3 tests/test_saihai_cli.py
 python3 organization/runtime/workflows/tests/test_workflow_selector.py
 python3 organization/runtime/workflows/tests/test_run_store.py
+python3 organization/runtime/workflows/tests/test_task_state_bridge.py
 python3 organization/runtime/workflows/tests/test_frontdoor_orchestrator.py
 ```
 

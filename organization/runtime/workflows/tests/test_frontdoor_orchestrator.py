@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import http.client
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -39,7 +40,12 @@ def external_review_classification(**overrides):
     return candidate
 
 
-def run_frontdoor(state_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run_frontdoor(
+    state_root: Path,
+    *args: str,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             sys.executable,
@@ -52,6 +58,7 @@ def run_frontdoor(state_root: Path, *args: str, check: bool = True) -> subproces
         cwd=ROOT,
         capture_output=True,
         text=True,
+        env=env,
         check=check,
     )
 
@@ -477,6 +484,103 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "lifecycle transition reasons",
         )
         assert_equal(transitions[-1]["to_state"], "complete", "terminal lifecycle state")
+
+
+def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        state_root = root / "frontdoor"
+        itb_root = root / "itb"
+        session_dir = itb_root / "thread-linked"
+        session_dir.mkdir(parents=True)
+        (session_dir / "active-execution-context.json").write_text(
+            json.dumps({"session_id": "thread-linked"}) + "\n",
+            encoding="utf-8",
+        )
+        (session_dir / "active-task.json").write_text(
+            json.dumps({"task_id": "TSK-linked"}) + "\n",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env["SAIHAI_ITB_STATE_ROOTS"] = str(itb_root)
+
+        proposed = load_payload(
+            run_frontdoor(
+                state_root,
+                "propose",
+                "--task-id",
+                "TSK-linked",
+                "--request-id",
+                "req-linked",
+                "--prompt",
+                "Run bounded external review",
+                "--classification",
+                json.dumps(external_review_classification()),
+                "--ref",
+                "organization/runtime/workflows/README.md",
+                "--frontdoor",
+                "codex",
+                "--chat-session-id",
+                "thread-linked",
+                env=env,
+            )
+        )
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "approve",
+                "--request-id",
+                "req-linked",
+                "--human-action-id",
+                proposed["approval"]["human_action_id"],
+                env=env,
+            )
+        )
+        created = load_payload(
+            run_frontdoor(
+                state_root,
+                "create-run",
+                "--request-id",
+                "req-linked",
+                "--run-id",
+                "run-linked",
+                env=env,
+            )
+        )
+        assert_equal(created["workflow_run"]["run_state"], "created", "linked run created")
+        index_path = session_dir / "orchestrator-runs.json"
+        assert index_path.exists(), "create-run should write session index"
+        assert_equal(json.loads(index_path.read_text(encoding="utf-8"))["runs"][0]["run_state"], "created", "created index")
+
+        load_payload(run_frontdoor(state_root, "drain", "--run-id", "run-linked", env=env))
+        prepared = load_payload(run_frontdoor(state_root, "prepare-claude-adapter", "--run-id", "run-linked", env=env))
+        adapter_request = prepared["adapter_request"]
+        evidence_path = Path(adapter_request["evidence_path"])
+        transcript_path = Path(adapter_request["transcript_path"])
+        report_path = Path(adapter_request["report_path"])
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text(json.dumps({"normalized": True}) + "\n", encoding="utf-8")
+        transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+        report_path.write_text(
+            json.dumps(
+                external_review_report(adapter_request, request_id="req-linked", run_id="run-linked"),
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        validated = load_payload(run_frontdoor(state_root, "validate-report", "--run-id", "run-linked", env=env))
+        assert_equal(validated["workflow_run"]["run_state"], "complete", "linked run complete")
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        assert_equal(index["runs"][0]["run_state"], "complete", "complete index")
+        assert_equal(index["runs"][0]["report_path"], str(report_path), "index report path")
+        assert_equal(index["runs"][0]["evidence_path"], str(evidence_path), "index evidence path")
+
+        task_view = load_payload(run_frontdoor(state_root, "task-view", "--task-id", "TSK-linked", env=env))
+        assert_equal(task_view["runs"][0]["run_id"], "run-linked", "task-view run")
+        assert_equal(task_view["queue_evidence"][0]["message_status"], "done", "task-view queue status")
 
 
 def test_drain_blocks_and_quarantines_corrupt_run_json() -> None:
@@ -1103,6 +1207,16 @@ def test_http_frontdoor_api_flow() -> None:
                 operator_headers,
             )
             assert_equal(prepared["decision"], "ok", "http adapter prepared")
+
+            task_runs = http_json(
+                "GET",
+                f"{base}/orchestrator/tasks/TSK-http/runs",
+                None,
+                operator_headers,
+            )
+            assert_equal(task_runs["decision"], "ok", "http task-view decision")
+            assert_equal(task_runs["runs"][0]["run_id"], "run-http", "http task-view run")
+            assert_equal(task_runs["queue_evidence"][0]["message_id"], "wo-run-http-review", "http task-view evidence")
 
             missing_status, missing_run = http_json_response(
                 "POST",
@@ -1948,6 +2062,7 @@ def main() -> None:
         test_channel_token_permissions_are_private,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
+        test_frontdoor_full_flow_updates_session_task_state_index,
         test_drain_blocks_and_quarantines_corrupt_run_json,
         test_drain_lock_contention_blocks_without_run_mutation,
         test_drain_enforces_p0_concurrency_without_run_mutation,
