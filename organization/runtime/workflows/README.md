@@ -50,7 +50,7 @@ existing runtime config convention in `organization/runtime/infra-team-bootstrap
 | Workflow selection is deterministic | The selector consumes typed classification; it does not read free-form prompt text. |
 | Classification has provenance | A classification must include source, confidence, and evidence. `frontdoor_llm_proposal` is not an authority source. |
 | Main agent is a confirmation bridge | The main-agent bridge can submit a typed request, read a redacted projection, and ack output only. |
-| Execution requires a signed non-bridge principal | Run creation, drain, adapter preparation, report validation, and workflow-definition changes reject `main_agent_bridge`. |
+| Execution requires a signed non-bridge principal | Run creation, drain, resume, abort, adapter preparation, report validation, and workflow-definition changes reject `main_agent_bridge`. |
 | Audit is append-only | Frontdoor, bridge, approval, execution, replay, and rejection decisions write principal-scoped audit events. |
 | Agent output is not authoritative | `typed_report_file` and normalized evidence are canonical. stdout, tmux pane output, and provider transcript are signals only. |
 | Context sharing is typed | Shared run state is durable typed state; step snapshots are immutable; provider transcripts remain confined evidence paths. |
@@ -108,6 +108,33 @@ orchestrator runs whenever a linked run is created, drained, replayed, or
 terminally validated. If no matching ITB session directory exists, the
 orchestrator silently skips the index write and leaves the run transition
 unchanged.
+
+## Workflow Run Lifecycle
+
+`scripts/run_lifecycle.py` is the single source of truth for host-owned
+workflow-run state transitions. Each accepted transition appends a normalized
+record to `workflow_run.transitions` with `seq`, `from_state`, `to_state`,
+`reason_class`, `occurred_at`, principal, signature, and artifact references.
+Terminal runs are immutable.
+
+| From state | Allowed next states | Goal state mapping |
+|---|---|---|
+| `created` | `step_queued`, `aborted` | `approved` |
+| `step_queued` | `waiting_provider`, `waiting_human`, `aborted` | `active` |
+| `waiting_provider` | `step_queued`, `validating`, `waiting_human`, `failed`, `aborted` | `active` |
+| `validating` | `complete`, `failed`, `waiting_human`, `aborted` | `active` |
+| `waiting_human` | `step_queued`, `failed`, `aborted` | `blocked` |
+| `remediating` | `step_queued`, `failed`, `aborted` | `active` |
+| `complete` | none | `complete` |
+| `failed` | none | `blocked` |
+| `aborted` | none | `aborted` |
+
+`resume` reuses durable run state and never creates a duplicate run. It returns
+the next operator action for `created`, `step_queued`, and `validating`; it can
+requeue `waiting_human` only with `--requeue`; and it reclaims an expired or
+missing provider lease by resetting the work-order runner claim and moving the
+run back to `step_queued`. `abort` moves any non-terminal run to terminal
+`aborted`; terminal aborts replay without mutation.
 
 ## Active Template Routes
 
@@ -171,8 +198,9 @@ control:
 
 Commands from the target design whose backing implementations are not yet
 merged are intentionally absent from the parser. There are no dead stubs for
-`run-step`, `resume`, `abort`, `verify-completion`, or `list`. `task-view` and
-`lock-status` are currently exposed through the compatibility facade below.
+`run-step`, `verify-completion`, or `list`. `resume`, `abort`, `task-view`, and
+`lock-status` are currently exposed through the compatibility facade below
+until #19 re-exposes takt-style workflow commands.
 
 ```sh
 python3 scripts/saihai.py frontdoor --state-root /tmp/frontdoor-state propose \
@@ -233,6 +261,14 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state validate-report \
   --run-id <run_id>
 
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state resume \
+  --run-id <run_id> \
+  --requeue
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state abort \
+  --run-id <run_id> \
+  --reason "operator cancelled"
+
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state task-view \
   --task-id TSK-example
 
@@ -257,9 +293,9 @@ global advisory lock:
 <state_root>/locks/global-advisory.lock.d/owner.json
 ```
 
-The lock serializes mutating harness operations (`create-run`, `drain`, and
-`validate-report`). Lock contention returns typed JSON and does not mutate the
-run record:
+The lock serializes mutating harness operations (`create-run`, `drain`,
+`resume`, `abort`, and `validate-report`). Lock contention returns typed JSON
+and does not mutate the run record:
 
 ```json
 {
@@ -295,15 +331,15 @@ reclaimed automatically.
 
 Use [operator-runbook.md](operator-runbook.md) for the supported day-1 flow:
 validate contracts, propose, approve, create run, drain, prepare adapter,
-validate report, inspect evidence, and recover or roll back stuck runs.
+validate report, inspect evidence, and recover or roll back stuck runs with
+`resume` / `abort`.
 
 The currently implemented workflow-frontdoor commands are `propose`, `approve`,
 `create-run`, `drain`, `adapter-capability`, `prepare-claude-adapter`,
-`validate-report`, `task-view`, `bridge-submit-request`, `bridge-read-projection`,
-`bridge-ack-output`, `channel-token`, and `lock-status`. Dedicated `resume`,
-`abort`, raw run detail, and evidence inspection commands are not implemented
-yet; the runbook marks those paths as planned and uses canonical artifact
-inspection where needed.
+`validate-report`, `resume`, `abort`, `task-view`, `bridge-submit-request`,
+`bridge-read-projection`, `bridge-ack-output`, `channel-token`, and
+`lock-status`. Dedicated raw run detail and evidence inspection commands are
+still planned; the runbook uses canonical artifact inspection where needed.
 
 ## Main-Agent Bridge CLI
 
@@ -361,6 +397,8 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
 | `POST /frontdoor/approve` | Human UI path for `workflow-frontdoor approve`; derives principal from authenticated `human_ui` channel headers and challenge id |
 | `POST /orchestrator/runs` | Operator path for `workflow-frontdoor create-run`; derives principal from authenticated `operator` channel headers |
 | `POST /orchestrator/runs/{run_id}/drain` | Operator path for `workflow-frontdoor drain`; derives principal from authenticated `operator` channel headers |
+| `POST /orchestrator/runs/{run_id}/resume` | Operator path for `workflow-frontdoor resume`; derives principal from authenticated `operator` channel headers; body accepts `{"requeue": true}` |
+| `POST /orchestrator/runs/{run_id}/abort` | Operator path for `workflow-frontdoor abort`; derives principal from authenticated `operator` channel headers; body accepts `{"reason": "..."}` |
 | `GET /orchestrator/tasks/{task_id}/runs` | Operator path for derived `task-view`; returns thin run links and queue-shaped evidence without raw run state |
 | `POST /provider/claude/prepare` | Operator path for `workflow-frontdoor prepare-claude-adapter`; derives principal from authenticated `operator` channel headers |
 | `POST /provider/reports/validate` | Harness gate path for `workflow-frontdoor validate-report`; derives principal from authenticated `harness` channel headers |

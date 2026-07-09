@@ -476,6 +476,14 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(validated["report_status"], "complete", "report validation status")
         assert_equal(validated["workflow_run"]["run_state"], "complete", "validated run state")
         assert_equal(validated["workflow_run"]["goal_state"], "complete", "validated goal state")
+        transitions = validated["workflow_run"]["transitions"]
+        assert_equal([item["seq"] for item in transitions], [1, 2, 3, 4], "lifecycle transition seq")
+        assert_equal(
+            [item["reason_class"] for item in transitions],
+            ["step_queued", "manual_provider_execution_assumed", "report_received", "report_valid"],
+            "lifecycle transition reasons",
+        )
+        assert_equal(transitions[-1]["to_state"], "complete", "terminal lifecycle state")
 
 
 def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
@@ -726,6 +734,8 @@ def test_drain_enforces_p0_concurrency_without_run_mutation() -> None:
 def test_execution_principal_precheck_does_not_quarantine_corrupt_runs() -> None:
     cases = [
         ("drain", ["drain", "--run-id", "run-precheck"]),
+        ("resume", ["resume", "--run-id", "run-precheck"]),
+        ("abort", ["abort", "--run-id", "run-precheck", "--reason", "operator cancelled"]),
         ("prepare", ["prepare-claude-adapter", "--run-id", "run-precheck"]),
         ("validate", ["validate-report", "--run-id", "run-precheck"]),
     ]
@@ -1820,6 +1830,23 @@ def test_validate_report_rejects_noncanonical_report_and_stale_evidence() -> Non
         assert any("must match current run evidence path" in item for item in payload["errors"])
 
 
+def test_validate_report_missing_report_does_not_record_report_received() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        prepare_review_handoff(state_root, request_id="req-missing-report", run_id="run-missing-report")
+        run_path = state_root / "runs" / "run-missing-report.json"
+        before = json.loads(run_path.read_text(encoding="utf-8"))
+
+        missing = run_frontdoor(state_root, "validate-report", "--run-id", "run-missing-report", check=False)
+        payload = load_payload(missing)
+        assert_equal(missing.returncode, 2, "missing report exit")
+        assert "missing file:" in payload["reason"]
+
+        after = json.loads(run_path.read_text(encoding="utf-8"))
+        assert_equal(after["run_state"], before["run_state"], "missing report run state unchanged")
+        assert_equal(after["transitions"], before["transitions"], "missing report transitions unchanged")
+
+
 def test_validate_report_rejects_malformed_findings() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -2054,6 +2081,7 @@ def main() -> None:
         test_context_ref_boundary_blocks_exfiltration_paths,
         test_work_order_revalidates_refs_before_provider_handoff,
         test_validate_report_rejects_noncanonical_report_and_stale_evidence,
+        test_validate_report_missing_report_does_not_record_report_received,
         test_validate_report_rejects_malformed_findings,
         test_bridge_rejects_path_unsafe_ids_and_missing_refs,
         test_bridge_principal_cannot_execute_or_change_workflow_definitions,

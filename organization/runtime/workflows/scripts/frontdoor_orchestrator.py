@@ -22,6 +22,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import run_store
 import run_lock
+import run_lifecycle
 import task_state_bridge
 import workflow_selector
 
@@ -1688,6 +1689,7 @@ def create_run(
                     "step_local_snapshot": "immutable_step_attempt_snapshot",
                     "provider_transcript": "confined_evidence_path_only",
                 },
+                "transitions": [],
                 "transition_provenance": [
                     {
                         "transition": "create_run",
@@ -1806,8 +1808,6 @@ def drain_run(
                 drained = True
 
             if run["run_state"] == "created":
-                run["goal_state"] = "active"
-                run["run_state"] = "step_queued"
                 run["step_history"].append(
                     {
                         "step_id": step["id"],
@@ -1825,7 +1825,17 @@ def drain_run(
                         "signature": signature,
                     }
                 )
-                path = run_store.store_run(state_root, run, expected_current_state="created")
+                run_lifecycle.transition_run(
+                    state_root,
+                    run_id,
+                    to_state="step_queued",
+                    reason_class="step_queued",
+                    transition="drain_run",
+                    principal=actor,
+                    artifact_refs=[str(order_path)],
+                    run=run,
+                )
+                path = run_store.run_path(state_root, run_id)
     except run_lock.LockContentionError as exc:
         append_audit_event(
             state_root=state_root,
@@ -1855,6 +1865,133 @@ def drain_run(
         "workflow_run": run,
         "work_order": work_order,
     }
+
+
+def resume_run(
+    *,
+    state_root: Path,
+    run_id: str,
+    requeue: bool = False,
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    validate_artifact_id(run_id, "run_id")
+    actor = principal or default_manual_principal()
+    subject = {"run_id": run_id}
+    precheck_execution_principal(
+        state_root=state_root,
+        principal=actor,
+        transition="resume_run",
+        subject=subject,
+    )
+    try:
+        payload = run_lifecycle.resume_run(
+            state_root,
+            run_id,
+            principal=actor,
+            requeue=requeue,
+        )
+    except run_lock.LockContentionError as exc:
+        append_audit_event(
+            state_root=state_root,
+            event_type="resume_run",
+            principal=actor,
+            subject=subject,
+            outcome="blocked",
+            details={"reason": exc.reason_class, "owner": exc.owner},
+        )
+        raise
+    except run_lifecycle.LifecycleError as exc:
+        append_audit_event(
+            state_root=state_root,
+            event_type="resume_run",
+            principal=actor,
+            subject=subject,
+            outcome="blocked",
+            details={"reason": exc.reason_class, "errors": exc.errors},
+        )
+        raise
+
+    workflow_run = payload.get("workflow_run") if isinstance(payload.get("workflow_run"), dict) else {}
+    subject = {"run_id": run_id, "request_id": str(workflow_run.get("request_id") or "")}
+    outcome = "ok"
+    if payload.get("decision") == "blocked":
+        outcome = "blocked"
+    elif payload.get("reason") == "terminal_run_already_set":
+        outcome = "replayed"
+    append_audit_event(
+        state_root=state_root,
+        event_type="resume_run",
+        principal=actor,
+        subject=subject,
+        outcome=outcome,
+        details={
+            "resumed": bool(payload.get("resumed")),
+            "reason": payload.get("reason"),
+            "next_action": payload.get("next_action"),
+            "requeue": requeue,
+        },
+    )
+    return payload
+
+
+def abort_run(
+    *,
+    state_root: Path,
+    run_id: str,
+    reason: str,
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    validate_artifact_id(run_id, "run_id")
+    actor = principal or default_manual_principal()
+    subject = {"run_id": run_id}
+    precheck_execution_principal(
+        state_root=state_root,
+        principal=actor,
+        transition="abort_run",
+        subject=subject,
+    )
+    try:
+        payload = run_lifecycle.abort_run(
+            state_root,
+            run_id,
+            reason=reason,
+            principal=actor,
+        )
+    except run_lock.LockContentionError as exc:
+        append_audit_event(
+            state_root=state_root,
+            event_type="abort_run",
+            principal=actor,
+            subject=subject,
+            outcome="blocked",
+            details={"reason": exc.reason_class, "owner": exc.owner},
+        )
+        raise
+    except run_lifecycle.LifecycleError as exc:
+        append_audit_event(
+            state_root=state_root,
+            event_type="abort_run",
+            principal=actor,
+            subject=subject,
+            outcome="blocked",
+            details={"reason": exc.reason_class, "errors": exc.errors},
+        )
+        raise
+
+    workflow_run = payload.get("workflow_run") if isinstance(payload.get("workflow_run"), dict) else {}
+    subject = {"run_id": run_id, "request_id": str(workflow_run.get("request_id") or "")}
+    append_audit_event(
+        state_root=state_root,
+        event_type="abort_run",
+        principal=actor,
+        subject=subject,
+        outcome="ok" if payload.get("aborted") else "replayed",
+        details={
+            "aborted": bool(payload.get("aborted")),
+            "reason": payload.get("reason"),
+        },
+    )
+    return payload
 
 
 def claude_headless_capability() -> dict[str, Any]:
@@ -2037,7 +2174,7 @@ def validate_report(
             principal=actor,
         ):
             run = run_store.load_run(state_root, run_id)
-            loaded_run_state = str(run.get("run_state") or "")
+            run_state = str(run.get("run_state") or "")
             subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
             signature = assert_execution_principal(
                 state_root=state_root,
@@ -2045,7 +2182,7 @@ def validate_report(
                 transition="validate_report",
                 subject=subject,
             )
-            if run.get("run_state") in {"complete", "failed", "aborted"}:
+            if run_state in run_lifecycle.TERMINAL_RUN_STATES:
                 link_status = record_run_link_status(state_root, run)
                 append_audit_event(
                     state_root=state_root,
@@ -2075,12 +2212,36 @@ def validate_report(
                 raise FrontdoorError("report path must stay under orchestrator state reports directory")
             if path.resolve() != canonical_report_path.resolve():
                 raise FrontdoorError("report path must match canonical work order report path")
+
             report = read_json(path)
+
+            if run_state == "step_queued":
+                run_lifecycle.transition_run(
+                    state_root,
+                    run_id,
+                    to_state="waiting_provider",
+                    reason_class="manual_provider_execution_assumed",
+                    transition="validate_report",
+                    principal=actor,
+                    artifact_refs=[str(work_order_path(state_root, run_id, step_id)), str(path)],
+                    run=run,
+                )
+                run_state = "waiting_provider"
+            if run_state == "waiting_provider":
+                run_lifecycle.transition_run(
+                    state_root,
+                    run_id,
+                    to_state="validating",
+                    reason_class="report_received",
+                    transition="validate_report",
+                    principal=actor,
+                    artifact_refs=[str(path)],
+                    run=run,
+                )
+                run_state = "validating"
+
             errors = validate_external_review_report(report, run=run, work_order=work_order, state_root=state_root)
             if errors:
-                run["run_state"] = "failed"
-                run["goal_state"] = "blocked"
-                run["terminal"] = {"status": "blocked", "reason": "invalid_report"}
                 run["step_history"].append(
                     {
                         "step_id": step_id,
@@ -2100,7 +2261,19 @@ def validate_report(
                         "result": "blocked",
                     }
                 )
-                run_file = run_store.store_run(state_root, run, expected_current_state=loaded_run_state)
+                run_lifecycle.transition_run(
+                    state_root,
+                    run_id,
+                    to_state="failed",
+                    reason_class="invalid_report",
+                    transition="validate_report",
+                    principal=actor,
+                    artifact_refs=[str(path)],
+                    terminal_status="blocked",
+                    terminal_reason="invalid_report",
+                    run=run,
+                )
+                run_file = run_store.run_path(state_root, run_id)
                 link_status = record_run_link_status(state_root, run)
                 append_audit_event(
                     state_root=state_root,
@@ -2120,17 +2293,16 @@ def validate_report(
 
             result = report["result"]
             if result in {"pass", "findings"}:
-                run["run_state"] = "complete"
-                run["goal_state"] = "complete"
+                to_state = "complete"
                 terminal_status = "complete"
                 terminal_reason = "report_valid"
+                reason_class = "report_valid"
             else:
-                run["run_state"] = "failed"
-                run["goal_state"] = "blocked"
+                to_state = "failed"
                 terminal_status = "blocked"
                 terminal_reason = f"provider_report_{result}"
+                reason_class = terminal_reason
 
-            run["terminal"] = {"status": terminal_status, "reason": terminal_reason}
             run["step_history"].append(
                 {
                     "step_id": step_id,
@@ -2150,7 +2322,19 @@ def validate_report(
                     "result": terminal_status,
                 }
             )
-            run_file = run_store.store_run(state_root, run, expected_current_state=loaded_run_state)
+            run_lifecycle.transition_run(
+                state_root,
+                run_id,
+                to_state=to_state,
+                reason_class=reason_class,
+                transition="validate_report",
+                principal=actor,
+                artifact_refs=[str(path)],
+                terminal_status=terminal_status,
+                terminal_reason=terminal_reason,
+                run=run,
+            )
+            run_file = run_store.run_path(state_root, run_id)
     except run_lock.LockContentionError as exc:
         append_audit_event(
             state_root=state_root,
@@ -2455,6 +2639,20 @@ def parser() -> argparse.ArgumentParser:
     drain.add_argument("--principal-id", default="manual-cli")
     drain.add_argument("--authn-method", default="local_cli")
 
+    resume = sub.add_parser("resume")
+    resume.add_argument("--run-id", required=True)
+    resume.add_argument("--requeue", action="store_true")
+    resume.add_argument("--principal-type", default="manual_operator")
+    resume.add_argument("--principal-id", default="manual-cli")
+    resume.add_argument("--authn-method", default="local_cli")
+
+    abort = sub.add_parser("abort")
+    abort.add_argument("--run-id", required=True)
+    abort.add_argument("--reason", required=True)
+    abort.add_argument("--principal-type", default="manual_operator")
+    abort.add_argument("--principal-id", default="manual-cli")
+    abort.add_argument("--authn-method", default="local_cli")
+
     sub.add_parser("adapter-capability")
 
     adapter = sub.add_parser("prepare-claude-adapter")
@@ -2547,6 +2745,20 @@ def main() -> None:
                 run_id=args.run_id,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
+        elif args.command == "resume":
+            payload = resume_run(
+                state_root=state_root,
+                run_id=args.run_id,
+                requeue=args.requeue,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
+            )
+        elif args.command == "abort":
+            payload = abort_run(
+                state_root=state_root,
+                run_id=args.run_id,
+                reason=args.reason,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
+            )
         elif args.command == "adapter-capability":
             payload = {
                 "schema_version": 1,
@@ -2631,6 +2843,15 @@ def main() -> None:
             "decision": "blocked",
             "reason": exc.reason_class,
             "owner": exc.owner,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        raise SystemExit(2)
+    except run_lifecycle.LifecycleError as exc:
+        payload = {
+            "schema_version": 1,
+            "decision": "blocked",
+            "reason": exc.reason_class,
+            "errors": exc.errors,
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         raise SystemExit(2)

@@ -148,6 +148,8 @@ def validate_run_record(run: Any) -> list[str]:
         errors.append("max_steps must be an integer >= 1")
     if not isinstance(run.get("step_history"), list):
         errors.append("step_history must be a list")
+    if "transitions" in run and not isinstance(run.get("transitions"), list):
+        errors.append("transitions must be a list")
     if not isinstance(run.get("requester"), dict):
         errors.append("requester must be a json object")
 
