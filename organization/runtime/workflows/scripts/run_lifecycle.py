@@ -20,7 +20,7 @@ RUN_STATES = run_store.RUN_STATES
 TERMINAL_RUN_STATES = run_store.TERMINAL_RUN_STATES
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    "created": {"step_queued", "aborted"},
+    "created": {"step_queued", "waiting_human", "aborted"},
     "step_queued": {"waiting_provider", "waiting_human", "aborted"},
     "waiting_provider": {"step_queued", "validating", "waiting_human", "failed", "aborted"},
     "validating": {"complete", "failed", "waiting_human", "aborted"},

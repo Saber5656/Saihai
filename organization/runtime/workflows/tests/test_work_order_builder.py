@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Tests for work-order construction, validation, and snapshots."""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[4]
+SCRIPT_DIR = ROOT / "organization/runtime/workflows/scripts"
+TEMPLATE_PATH = ROOT / "organization/runtime/workflows/templates/single_step_external_review.yaml"
+SCHEMA_PATH = ROOT / "organization/runtime/workflows/schemas/work-order.schema.json"
+
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import work_order_builder
+
+
+def assert_equal(actual, expected, label: str) -> None:
+    assert actual == expected, f"{label}: expected {expected!r}, got {actual!r}"
+
+
+def template() -> dict:
+    return json.loads(TEMPLATE_PATH.read_text(encoding="utf-8"))
+
+
+def step() -> dict:
+    return template()["steps"][0]
+
+
+def activation_scope(**overrides) -> dict:
+    candidate = {
+        "allowed_paths": ["organization/runtime/workflows"],
+        "allowed_ops": {"edit": False, "commit": False, "push": False, "network": False},
+        "step_budget": 1,
+        "expires_at": "run_terminal",
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+def run_record(**overrides) -> dict:
+    candidate = {
+        "task_id": "TSK-work-order",
+        "request_id": "req-work-order",
+        "run_id": "run-work-order",
+        "workflow_id": "single_step_external_review",
+        "current_step": "review",
+        "activation": {
+            "context_scope": {
+                "mode": "bounded_refs",
+                "refs": ["organization/runtime/workflows/README.md"],
+                "raw_transcript_sharing": "forbidden",
+            },
+            "activation_scope": activation_scope(),
+        },
+        "requester": {"frontdoor": "codex", "chat_session_id": "test-session"},
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+def request_record(**overrides) -> dict:
+    candidate = {
+        "classification": {"context_scope": "refs_only"},
+        "approved_activation": {
+            "policy": {},
+            "activation_scope": activation_scope(),
+            "context_scope": {
+                "mode": "bounded_refs",
+                "refs": ["organization/runtime/workflows/README.md"],
+                "raw_transcript_sharing": "forbidden",
+            },
+            "workflow_selection": {"workflow_id": "single_step_external_review", "initial_step": "review"},
+        },
+    }
+    candidate.update(overrides)
+    return candidate
+
+
+def refs() -> list[dict]:
+    return [
+        {
+            "type": "repo_file",
+            "path": "organization/runtime/workflows/README.md",
+            "size_bytes": 123,
+            "digest": "sha256:" + "1" * 64,
+        }
+    ]
+
+
+def build(state_root: Path, **overrides) -> dict:
+    tpl = overrides.pop("template", template())
+    stp = overrides.pop("step", tpl["steps"][0])
+    return work_order_builder.build_work_order(
+        run=overrides.pop("run", run_record()),
+        request_record=overrides.pop("request", request_record()),
+        template=tpl,
+        step=stp,
+        issuer_principal_redacted={
+            "principal_type": "manual_operator",
+            "principal_id": "manual-cli",
+            "authn_method": "local_cli",
+        },
+        resolved_refs=overrides.pop("resolved_refs", refs()),
+        policy_digest_value=overrides.pop("policy_digest", "sha256:" + "2" * 64),
+        signature=overrides.pop(
+            "signature",
+            {
+                "algorithm": "sha256-local-principal-key",
+                "signature": "sha256:" + "3" * 64,
+                "signed_at": "2026-07-09T00:00:00+0900",
+            },
+        ),
+        report_path_value=overrides.pop(
+            "report_path",
+            str(state_root / "reports" / "run-work-order" / "review-external-review-report.json"),
+        ),
+    )
+
+
+def test_build_valid_p0_order() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        order = build(state_root)
+        assert_equal(
+            work_order_builder.validate_work_order(order, template=template(), step=step(), state_root=state_root),
+            [],
+            "valid order errors",
+        )
+        assert_equal(order["permission_mode"], "readonly", "permission")
+        assert_equal(order["assignment_role"], "reviewer", "assignment")
+        assert_equal(order["external_provider_allowed"], True, "external provider")
+        assert_equal(order["activation_scope"]["step_budget"], 1, "step budget")
+        assert_equal(order["activation_scope"]["allowed_ops"], {"edit": False, "commit": False, "push": False, "network": False}, "ops")
+        assert "Step 'review'" in order["instruction"], "instruction includes step id"
+        assert "external_review_report" in order["instruction"], "instruction includes output contract"
+        assert_equal(order["work_order_authority"]["runner_claim"]["claim_state"], "unclaimed", "claim")
+
+
+def test_required_field_list_matches_schema() -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert_equal(sorted(work_order_builder.REQUIRED_WORK_ORDER_FIELDS), sorted(schema["required"]), "required fields")
+
+
+def test_validate_rejects_missing_refs() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        order = build(state_root, resolved_refs=[])
+        errors = work_order_builder.validate_work_order(order, template=template(), step=step(), state_root=state_root)
+        assert "context_refs must be non-empty" in errors
+
+
+def test_validate_rejects_report_path_escape() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        order = build(state_root, report_path="/tmp/evil.json")
+        errors = work_order_builder.validate_work_order(order, template=template(), step=step(), state_root=state_root)
+        assert "report_path must stay under reports" in errors
+
+
+def test_validate_rejects_bridge_issuer() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        order = build(state_root)
+        order["work_order_authority"]["issuer_principal"]["principal_type"] = "main_agent_bridge"
+        errors = work_order_builder.validate_work_order(order, template=template(), step=step(), state_root=state_root)
+        assert "bridge principal cannot issue work orders" in errors
+
+
+def test_validate_rejects_schema_extra_raw_transcript_field() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        order = build(state_root)
+        order["raw_transcript"] = "do not embed raw prompt material"
+        errors = work_order_builder.validate_work_order(order, template=template(), step=step(), state_root=state_root)
+        assert "schema:$.raw_transcript:additional_property" in errors
+        assert "forbidden_raw_transcript_field:$.raw_transcript" in errors
+
+
+def test_validate_rejects_p0_mutations() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        cases = [
+            ("permission_mode", "edit", "permission_mode must match template step"),
+            ("external_provider_allowed", False, "external_provider_allowed must be True"),
+        ]
+        for field, value, expected_error in cases:
+            order = build(state_root)
+            order[field] = value
+            errors = work_order_builder.validate_work_order(order, template=template(), step=step(), state_root=state_root)
+            assert expected_error in errors, f"{field} should be rejected: {errors}"
+        for op in ("edit", "commit", "push", "network"):
+            order = build(state_root)
+            order["activation_scope"]["allowed_ops"][op] = True
+            errors = work_order_builder.validate_work_order(order, template=template(), step=step(), state_root=state_root)
+            assert f"activation_scope.allowed_ops.{op} must be false" in errors
+        order = build(state_root)
+        order["activation_scope"]["step_budget"] = 2
+        errors = work_order_builder.validate_work_order(order, template=template(), step=step(), state_root=state_root)
+        assert "activation_scope.step_budget must be 1" in errors
+
+
+def test_context_mode_downgrade_is_deterministic() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        order = build(state_root, request={"classification": {}, "approved_activation": request_record()["approved_activation"]})
+        assert_equal(order["context_scope"]["mode"], "refs_only", "downgraded mode")
+        assert_equal(order["context_scope"]["context_mode_downgraded_from"], "bounded_refs", "downgrade source")
+
+
+def test_snapshot_freeze_and_conflict() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        order = build(state_root)
+        first = work_order_builder.freeze_step_snapshot(state_root, order, iteration=1)
+        second = work_order_builder.freeze_step_snapshot(state_root, order, iteration=1)
+        assert_equal(second, first, "snapshot replay path")
+        mutated = {**order, "instruction": "mutated"}
+        try:
+            work_order_builder.freeze_step_snapshot(state_root, mutated, iteration=1)
+        except work_order_builder.WorkOrderError as exc:
+            assert_equal(str(exc), "step_snapshot_conflict", "snapshot conflict")
+        else:
+            raise AssertionError("mutated order should conflict with frozen snapshot")
+
+
+def main() -> None:
+    tests = [
+        test_build_valid_p0_order,
+        test_required_field_list_matches_schema,
+        test_validate_rejects_missing_refs,
+        test_validate_rejects_report_path_escape,
+        test_validate_rejects_bridge_issuer,
+        test_validate_rejects_schema_extra_raw_transcript_field,
+        test_validate_rejects_p0_mutations,
+        test_context_mode_downgrade_is_deterministic,
+        test_snapshot_freeze_and_conflict,
+    ]
+    for test in tests:
+        test()
+    print(json.dumps({"result": "pass", "cases": len(tests)}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
