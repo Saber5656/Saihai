@@ -162,6 +162,28 @@ def test_validate_rejects_report_path_escape() -> None:
         assert "report_path must stay under reports" in errors
 
 
+def test_validate_rejects_foreign_current_run() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        order = build(state_root)
+        current_run = run_record(
+            task_id="TSK-current",
+            request_id="req-current",
+            run_id="run-current",
+        )
+        errors = work_order_builder.validate_work_order(
+            order,
+            template=template(),
+            step=step(),
+            state_root=state_root,
+            run=current_run,
+        )
+        assert "task_id must match current run" in errors
+        assert "request_id must match current run" in errors
+        assert "run_id must match current run" in errors
+        assert "report_path must match current run report path" in errors
+
+
 def test_validate_rejects_bridge_issuer() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -228,17 +250,42 @@ def test_snapshot_freeze_and_conflict() -> None:
             raise AssertionError("mutated order should conflict with frozen snapshot")
 
 
+def test_snapshot_rejects_malformed_existing_file() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        order = build(state_root)
+        path = work_order_builder.snapshot_path(state_root, "run-work-order", "review", 1)
+        path.parent.mkdir(parents=True)
+        path.write_text("{", encoding="utf-8")
+        try:
+            work_order_builder.freeze_step_snapshot(state_root, order, iteration=1)
+        except work_order_builder.WorkOrderError as exc:
+            assert_equal(str(exc), "step_snapshot_invalid", "malformed snapshot")
+        else:
+            raise AssertionError("malformed snapshot should be invalid")
+
+        path.write_text("[]", encoding="utf-8")
+        try:
+            work_order_builder.freeze_step_snapshot(state_root, order, iteration=1)
+        except work_order_builder.WorkOrderError as exc:
+            assert_equal(str(exc), "step_snapshot_invalid", "non-object snapshot")
+        else:
+            raise AssertionError("non-object snapshot should be invalid")
+
+
 def main() -> None:
     tests = [
         test_build_valid_p0_order,
         test_required_field_list_matches_schema,
         test_validate_rejects_missing_refs,
         test_validate_rejects_report_path_escape,
+        test_validate_rejects_foreign_current_run,
         test_validate_rejects_bridge_issuer,
         test_validate_rejects_schema_extra_raw_transcript_field,
         test_validate_rejects_p0_mutations,
         test_context_mode_downgrade_is_deterministic,
         test_snapshot_freeze_and_conflict,
+        test_snapshot_rejects_malformed_existing_file,
     ]
     for test in tests:
         test()

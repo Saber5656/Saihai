@@ -1831,6 +1831,7 @@ def drain_run(
                             template=template,
                             step=step,
                             state_root=state_root,
+                            run=run,
                         )
                     )
                 if not errors and not order_exists:

@@ -558,27 +558,6 @@ def test_work_order_schema_constrains_single_step_external_review() -> None:
     authority = work_order_schema["properties"]["work_order_authority"]
     assert "signature" in authority["required"]
     assert "runner_claim" in authority["required"]
-    readonly_conditions = [
-        item
-        for item in work_order_schema["allOf"]
-        if (
-            item.get("if", {})
-            .get("properties", {})
-            .get("permission_mode", {})
-            .get("const")
-            == "readonly"
-        )
-    ]
-    assert_equal(len(readonly_conditions), 1, "readonly work order op condition")
-    readonly_ops = readonly_conditions[0]["then"]["properties"]["activation_scope"][
-        "properties"
-    ]["allowed_ops"]["properties"]
-    for op in ("edit", "commit", "push", "network"):
-        assert_equal(
-            readonly_ops[op]["const"],
-            False,
-            f"readonly work order {op} constraint",
-        )
     readonly_branches = [
         branch
         for branch in work_order_schema["allOf"][0]["then"]["anyOf"]

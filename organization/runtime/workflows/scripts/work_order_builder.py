@@ -296,6 +296,7 @@ def validate_work_order(
     template: dict[str, Any],
     step: dict[str, Any],
     state_root: Path,
+    run: dict[str, Any] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     missing = [field for field in REQUIRED_WORK_ORDER_FIELDS if field not in work_order]
@@ -369,6 +370,21 @@ def validate_work_order(
         errors.append("step_id must match template step")
     if workflow_id != template.get("workflow_id"):
         errors.append("workflow_id must match template")
+    if run is not None:
+        for field in ("task_id", "request_id", "run_id"):
+            if str(work_order.get(field) or "") != str(run.get(field) or ""):
+                errors.append(f"{field} must match current run")
+        expected_report_path = report_path(
+            state_root,
+            str(run.get("run_id") or ""),
+            str(step.get("id") or ""),
+        )
+        if isinstance(report_value, str) and report_value:
+            try:
+                if Path(report_value).expanduser().resolve() != expected_report_path.resolve():
+                    errors.append("report_path must match current run report path")
+            except OSError:
+                errors.append("report_path must match current run report path")
 
     if workflow_id == "single_step_external_review":
         expected = {
@@ -392,13 +408,23 @@ def validate_work_order(
     return errors
 
 
+def read_existing_snapshot(path: Path) -> dict[str, Any]:
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkOrderError("step_snapshot_invalid") from exc
+    if not isinstance(existing, dict):
+        raise WorkOrderError("step_snapshot_invalid")
+    return existing
+
+
 def freeze_step_snapshot(state_root: Path, work_order: dict[str, Any], *, iteration: int) -> Path:
     run_id = str(work_order.get("run_id") or "")
     step_id = str(work_order.get("step_id") or "")
     path = snapshot_path(state_root, run_id, step_id, iteration)
     digest = sha256_digest(work_order)
     if path.exists():
-        existing = json.loads(path.read_text(encoding="utf-8"))
+        existing = read_existing_snapshot(path)
         if existing.get("work_order_digest") != digest:
             raise WorkOrderError("step_snapshot_conflict")
         return path
