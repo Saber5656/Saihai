@@ -11,8 +11,11 @@ Usage:  python3 server.py [--port 8765]
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import os
 import re
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,8 +31,27 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 ORG_DIR = Path(__file__).resolve().parent / "organization"
 ROLE_REGISTRY = ORG_DIR / "runtime" / "infra-team-bootstrap" / "config" / "role-agent-registry.yaml"
 MODEL_REGISTRY = ORG_DIR / "runtime" / "model-registry.md"
+WORKFLOW_SCRIPTS_DIR = ORG_DIR / "runtime" / "workflows" / "scripts"
+ORCH_STATE_ROOTS = [
+    ("claude", HOME / ".claude" / "state" / "itb" / "frontdoor-orchestrator"),
+    ("codex", HOME / ".codex" / "state" / "itb" / "frontdoor-orchestrator"),
+]
 
 SESSION_ID_RE = re.compile(r"^[0-9a-zA-Z_.:-]{3,128}$")
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
+RUN_STATES = {
+    "created",
+    "step_queued",
+    "waiting_provider",
+    "validating",
+    "waiting_human",
+    "remediating",
+    "complete",
+    "failed",
+    "aborted",
+}
+MAX_RUN_FILE_BYTES = 1_000_000
+DENIED_ARTIFACT_KEYS = {"prompt", "raw_transcript", "transcript_content", "stdout", "pane_output"}
 TEAM_ORDER = ["gate", "tech", "contents", "business", "infra"]
 TEAM_LABELS = {
     "gate": "Gate",
@@ -72,6 +94,40 @@ def read_json(path: Path):
         return None
 
 
+def _load_workflow_module(module_name: str, filename: str):
+    path = WORKFLOW_SCRIPTS_DIR / filename
+    if not path.is_file():
+        return None
+    scripts_dir = str(WORKFLOW_SCRIPTS_DIR)
+    inserted = False
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+        inserted = True
+    try:
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(scripts_dir)
+            except ValueError:
+                pass
+
+
+def _task_state_bridge():
+    return _load_workflow_module("saihai_task_state_bridge", "task_state_bridge.py")
+
+
+def _run_lock():
+    return _load_workflow_module("saihai_run_lock", "run_lock.py")
+
+
 def truthy(value) -> bool:
     if isinstance(value, bool):
         return value
@@ -99,6 +155,311 @@ def jsonish_file(path: Path):
         if key:
             out[key] = value
     return out or {"raw": raw}
+
+
+def orch_roots() -> list[tuple[str, Path]]:
+    env_root = os.environ.get("SAIHAI_ORCH_STATE_ROOT", "").strip()
+    candidates: list[tuple[str, Path]]
+    if env_root:
+        candidates = [("env", Path(env_root).expanduser())]
+    else:
+        candidates = [(runtime, path.expanduser()) for runtime, path in ORCH_STATE_ROOTS]
+    return [(runtime, root) for runtime, root in candidates if root.exists()]
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _safe_artifact_id(value: str) -> bool:
+    return bool(RUN_ID_RE.fullmatch(str(value or "")))
+
+
+def _redact_artifact(value):
+    if isinstance(value, dict):
+        return {key: _redact_artifact(item) for key, item in value.items() if key not in DENIED_ARTIFACT_KEYS}
+    if isinstance(value, list):
+        return [_redact_artifact(item) for item in value]
+    return value
+
+
+def _read_json_limited(path: Path, *, root: Path | None = None, max_bytes: int | None = None):
+    if root is not None and not _path_is_within(path, root):
+        return None
+    try:
+        if path.stat().st_size > (MAX_RUN_FILE_BYTES if max_bytes is None else max_bytes):
+            return {"view_error": "oversize"}
+        with path.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, UnicodeDecodeError):
+        return None
+    except ValueError:
+        return {"view_error": "corrupt_json"}
+    return _redact_artifact(payload) if isinstance(payload, (dict, list)) else payload
+
+
+def _fallback_thin_view(run: dict, *, state_root: Path | None = None, run_path: Path | None = None) -> dict:
+    run_id = str(run.get("run_id") or "")
+    step_id = str(run.get("current_step") or "")
+    transitions = run.get("transitions") if isinstance(run.get("transitions"), list) else []
+    last_transition = next(
+        (
+            str(item.get("occurred_at"))
+            for item in reversed(transitions)
+            if isinstance(item, dict) and item.get("occurred_at")
+        ),
+        "",
+    )
+    requester = run.get("requester") if isinstance(run.get("requester"), dict) else {}
+    terminal = run.get("terminal") if isinstance(run.get("terminal"), dict) else {}
+    report = ""
+    evidence = ""
+    if state_root is not None and run_id and step_id:
+        report_path = state_root / "reports" / run_id / f"{step_id}-external-review-report.json"
+        evidence_path = state_root / "provider-evidence" / run_id / f"{step_id}-provider-evidence.json"
+        report = str(report_path) if report_path.exists() else ""
+        evidence = str(evidence_path) if evidence_path.exists() else ""
+    return {
+        "view_version": "fallback",
+        "run_id": run_id,
+        "task_id": str(run.get("task_id") or ""),
+        "request_id": str(run.get("request_id") or ""),
+        "workflow_id": str(run.get("workflow_id") or ""),
+        "run_state": str(run.get("run_state") or ""),
+        "goal_state": str(run.get("goal_state") or ""),
+        "terminal": {"status": terminal.get("status"), "reason": terminal.get("reason")},
+        "current_step": step_id,
+        "iteration": run.get("iteration"),
+        "chat_session_id": str(requester.get("chat_session_id") or ""),
+        "frontdoor": str(requester.get("frontdoor") or ""),
+        "report_path": report,
+        "evidence_path": evidence,
+        "last_transition_at": last_transition,
+        "updated_at": mtime_iso(run_path),
+    }
+
+
+def _run_activation_status(run: dict) -> str:
+    activation = run.get("activation")
+    if isinstance(activation, dict):
+        return str(activation.get("activation_status") or "")
+    return ""
+
+
+def _derived_run_status(row: dict) -> str:
+    if row.get("view_error"):
+        return "invalid"
+    state = str(row.get("run_state") or "")
+    if state == "complete":
+        return "complete"
+    if state in {"failed", "aborted"}:
+        return "terminal"
+    if state == "waiting_human":
+        return "blocked"
+    if state in {"waiting_provider", "validating", "remediating"}:
+        return "working"
+    if state in {"created", "step_queued"}:
+        return "active"
+    return "unknown"
+
+
+def load_thin_run(path: Path, *, state_root: Path, run_path: Path | None = None) -> dict:
+    payload = _read_json_limited(path, root=state_root)
+    if not isinstance(payload, dict):
+        row = {"run_id": path.stem, "view_error": "invalid_run_json"}
+        return {**row, "activation_status": "", "derived_status": _derived_run_status(row)}
+    if payload.get("view_error"):
+        row = {"run_id": path.stem, "view_error": payload["view_error"]}
+        return {**row, "activation_status": "", "derived_status": _derived_run_status(row)}
+    bridge = _task_state_bridge()
+    if bridge is not None and hasattr(bridge, "run_task_view"):
+        try:
+            row = bridge.run_task_view(payload, state_root=state_root, run_path=run_path or path)
+            return {
+                **row,
+                "activation_status": _run_activation_status(payload),
+                "derived_status": _derived_run_status(row),
+            }
+        except Exception:
+            pass
+    row = _fallback_thin_view(payload, state_root=state_root, run_path=run_path or path)
+    return {
+        **row,
+        "activation_status": _run_activation_status(payload),
+        "derived_status": _derived_run_status(row),
+    }
+
+
+def _run_files(state_root: Path) -> list[Path]:
+    runs_dir = state_root / "runs"
+    if not runs_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for path in runs_dir.iterdir():
+        name = path.name
+        if name.startswith(".") or not name.endswith(".json"):
+            continue
+        if ".error." in name or ".corrupt-" in name:
+            continue
+        out.append(path)
+    return sorted(out)
+
+
+def _iso_to_epoch(value: str) -> float | None:
+    value = str(value or "").strip()
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return time.mktime(time.strptime(value, fmt))
+        except ValueError:
+            continue
+    return None
+
+
+def _stale_seconds(value: str) -> int | None:
+    epoch = _iso_to_epoch(value)
+    if epoch is None:
+        return None
+    return max(0, int(time.time() - epoch))
+
+
+def workflow_runs(task_id: str = "", session_id: str = "", state: str = "") -> list[dict]:
+    rows: list[dict] = []
+    for runtime, root in orch_roots():
+        for path in _run_files(root):
+            row = load_thin_run(path, state_root=root, run_path=path)
+            if task_id and str(row.get("task_id") or "") != task_id:
+                continue
+            if session_id and str(row.get("chat_session_id") or "") != session_id:
+                continue
+            if state and str(row.get("run_state") or "") != state:
+                continue
+            row = {
+                **row,
+                "runtime": runtime,
+                "orch_root": str(root),
+                "stale_seconds": _stale_seconds(str(row.get("last_transition_at") or "")),
+            }
+            rows.append(row)
+    rows.sort(key=lambda item: (str(item.get("last_transition_at") or ""), str(item.get("run_id") or "")), reverse=True)
+    return rows
+
+
+def _read_artifact(path: Path, root: Path):
+    if not path.exists() or not _path_is_within(path, root):
+        return None
+    payload = _read_json_limited(path, root=root)
+    return payload if isinstance(payload, (dict, list)) else None
+
+
+def _artifact_list(directory: Path, pattern: str, root: Path) -> list:
+    if not directory.is_dir() or not _path_is_within(directory, root):
+        return []
+    out = []
+    for path in sorted(directory.glob(pattern)):
+        if not path.is_file() or not _path_is_within(path, root):
+            continue
+        payload = _read_json_limited(path, root=root)
+        if isinstance(payload, (dict, list)):
+            out.append(payload)
+    return out
+
+
+def _lock_info(runtime: str, root: Path) -> dict:
+    run_lock = _run_lock()
+    if run_lock is not None and hasattr(run_lock, "inspect_global_lock"):
+        try:
+            info = run_lock.inspect_global_lock(root)
+        except Exception as exc:
+            info = {"decision": "error", "error": str(exc), "locked": False, "stale": False, "owner": None}
+    else:
+        lock_path = root / "locks" / "global-advisory.lock.d"
+        info = {"decision": "ok", "locked": lock_path.exists(), "stale": False, "owner": None, "lock_path": str(lock_path)}
+    return {"runtime": runtime, "orch_root": str(root), **info}
+
+
+def workflow_run_detail(run_id: str, session_id: str = "") -> dict | None:
+    for runtime, root in orch_roots():
+        run_path = root / "runs" / f"{run_id}.json"
+        if not run_path.is_file() or not _path_is_within(run_path, root):
+            continue
+        run_record = _read_json_limited(run_path, root=root)
+        if not isinstance(run_record, dict):
+            run_record = {"run_id": run_id, "view_error": "invalid_run_json"}
+        thin = load_thin_run(run_path, state_root=root, run_path=run_path)
+        if session_id and str(thin.get("chat_session_id") or "") != session_id:
+            continue
+        step_id = str(run_record.get("current_step") or thin.get("current_step") or "")
+        safe_step = _safe_artifact_id(step_id)
+        work_order = None
+        report = None
+        evidence = None
+        if safe_step:
+            work_order = _read_artifact(root / "work-orders" / run_id / f"{step_id}.json", root)
+            report = _read_artifact(root / "reports" / run_id / f"{step_id}-external-review-report.json", root)
+            evidence = _read_artifact(root / "provider-evidence" / run_id / f"{step_id}-provider-evidence.json", root)
+        return {
+            "runtime": runtime,
+            "orch_root": str(root),
+            "run": thin,
+            "run_record": run_record,
+            "work_order": work_order,
+            "report": report,
+            "evidence": evidence,
+            "transitions": _artifact_list(root / "transitions" / run_id, "*.json", root),
+            "rejections": _artifact_list(root / "reports" / run_id, "*-rejection-*.json", root),
+            "lock": _lock_info(runtime, root),
+        }
+    return None
+
+
+def _validate_optional_id(value: str, error_name: str) -> dict | None:
+    if value and not RUN_ID_RE.fullmatch(value):
+        return {"error": error_name}
+    return None
+
+
+def api_workflow_runs(task_id: str = "", session_id: str = "", state: str = "") -> tuple[dict, int]:
+    for value, error_name in (
+        (task_id, "invalid_task_id"),
+        (session_id, "invalid_session_id"),
+        (state, "invalid_run_state"),
+    ):
+        error = _validate_optional_id(value, error_name)
+        if error:
+            return error, 400
+    if state and state not in RUN_STATES:
+        return {"error": "invalid_run_state"}, 400
+    roots = orch_roots()
+    return {
+        "workflow_runs": workflow_runs(task_id=task_id, session_id=session_id, state=state),
+        "roots": [str(root) for _, root in roots],
+        "generated_at": time.time(),
+    }, 200
+
+
+def api_workflow_run(run_id: str, session_id: str = "") -> tuple[dict, int]:
+    if not RUN_ID_RE.fullmatch(str(run_id or "")):
+        return {"error": "invalid_run_id"}, 400
+    error = _validate_optional_id(session_id, "invalid_session_id")
+    if error:
+        return error, 400
+    detail = workflow_run_detail(run_id, session_id=session_id)
+    if detail is None:
+        return {"error": "run_not_found"}, 404
+    return {"workflow_run": detail, "generated_at": time.time()}, 200
+
+
+def api_workflow_lock() -> tuple[dict, int]:
+    return {
+        "locks": [_lock_info(runtime, root) for runtime, root in orch_roots()],
+        "generated_at": time.time(),
+    }, 200
 
 
 def read_inbox(path: Path) -> list[dict]:
@@ -598,6 +959,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(api_config())
             elif url.path == "/api/decide":
                 self._send_json(api_decide(query.get("prompt", ""), query.get("mode", ""), query.get("state", "")))
+            elif url.path == "/api/workflow-runs":
+                payload, code = api_workflow_runs(
+                    query.get("task", ""),
+                    query.get("session", ""),
+                    query.get("state", ""),
+                )
+                self._send_json(payload, code)
+            elif url.path == "/api/workflow-run":
+                payload, code = api_workflow_run(query.get("run", ""), query.get("session", ""))
+                self._send_json(payload, code)
+            elif url.path == "/api/workflow-lock":
+                payload, code = api_workflow_lock()
+                self._send_json(payload, code)
             elif url.path.startswith("/static/"):
                 self._send_static(url.path[len("/static/"):])
             else:
