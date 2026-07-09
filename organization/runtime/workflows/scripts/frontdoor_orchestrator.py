@@ -391,6 +391,7 @@ def state_paths(state_root: Path) -> dict[str, Path]:
         "adapter_requests": state_root / "adapter-requests",
         "provider_evidence": state_root / "provider-evidence",
         "reports": state_root / "reports",
+        "envelopes": state_root / "envelopes",
         "audit": state_root / "audit",
         "idempotency": state_root / "idempotency",
         "acks": state_root / "acks",
@@ -434,6 +435,40 @@ def task_view(
 
 def request_path(state_root: Path, request_id: str) -> Path:
     return state_paths(state_root)["requests"] / f"{validate_artifact_id(request_id, 'request_id')}.json"
+
+
+def envelope_dir(state_root: Path, request_id: str) -> Path:
+    return state_paths(state_root)["envelopes"] / validate_artifact_id(request_id, "request_id")
+
+
+def list_envelope_snapshots(state_root: Path, request_id: str) -> list[str]:
+    directory = envelope_dir(state_root, request_id)
+    if not directory.exists():
+        return []
+    return [str(path) for path in sorted(directory.glob("*.json"))]
+
+
+def snapshot_envelope(state_root: Path, request_id: str, envelope: dict[str, Any]) -> Path:
+    directory = envelope_dir(state_root, request_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    existing = sorted(directory.glob("*.json"))
+    if existing:
+        try:
+            latest = read_json(existing[-1])
+        except FrontdoorError:
+            latest = {}
+        if isinstance(latest.get("envelope"), dict) and stable_digest(latest["envelope"]) == stable_digest(envelope):
+            return existing[-1]
+    status = safe_id(str(envelope.get("activation_status") or envelope.get("request_status") or "unknown"))
+    path = directory / f"{len(existing) + 1:04d}-{status}.json"
+    payload = {
+        "snapshot_version": "1",
+        "request_id": request_id,
+        "written_at": now_iso(),
+        "envelope": envelope,
+    }
+    write_json(path, payload)
+    return path
 
 
 def run_path(state_root: Path, run_id: str) -> Path:
@@ -906,6 +941,7 @@ def proposed_request(
     )
     attach_approval_summary(record)
     write_json(path, record)
+    snapshot_path = snapshot_envelope(state_root, request_id, envelope)
     append_audit_event(
         state_root=state_root,
         event_type="request_proposed",
@@ -922,6 +958,7 @@ def proposed_request(
         "decision": "blocked" if envelope["activation_status"] == "blocked" else "ok",
         "request_status": envelope["activation_status"],
         "request_path": str(path),
+        "envelope_snapshot_path": str(snapshot_path),
         "activation": envelope,
         "approval": record.get("approval"),
     }
@@ -1471,36 +1508,19 @@ def principal_from_cli(principal_type: str, principal_id: str, authn_method: str
     )
 
 
-def approve_request(
-    *,
-    state_root: Path,
-    request_id: str,
-    human_action_id: str,
-    principal: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    validate_artifact_id(request_id, "request_id")
-    actor = principal or make_principal("human_operator", "human-ui", authn_method="local_ui")
-    path = request_path(state_root, request_id)
-    record = read_json(path)
-    signature = assert_allowed_principal(
-        state_root=state_root,
-        principal=actor,
-        allowed_types={"human_operator", "manual_operator", "orchestrator_start"},
-        transition="approve_request",
-        subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
-        blocked_reason="unsupported approval principal",
-    )
-    classification = record.get("classification")
-    if not isinstance(classification, dict):
-        raise FrontdoorError("typed classification is required before approval")
+def refresh_approval_context_refs(record: dict[str, Any]) -> dict[str, Any]:
     record.setdefault("requested_context_refs", list(record.get("context_refs") or []))
     record.setdefault("requested_allowed_paths", list(record.get("allowed_paths") or []))
     requested_refs = list(record.get("requested_context_refs") or record.get("context_refs") or [])
     requested_allowed_paths = list(record.get("requested_allowed_paths") or record.get("allowed_paths") or [])
+    previous_refs = record.get("resolved_context_refs")
     refreshed = bounded_context(
         requested_refs,
         requested_allowed_paths,
     )
+    if isinstance(previous_refs, list) and previous_refs:
+        if ref_integrity_view(refreshed["resolved_context_refs"]) != ref_integrity_view(previous_refs):
+            raise FrontdoorError("context_refs_changed_since_proposal")
     for key in (
         "requested_context_refs",
         "requested_allowed_paths",
@@ -1510,52 +1530,23 @@ def approve_request(
         "resolved_allowed_paths",
     ):
         record[key] = refreshed[key]
-    attach_approval_summary(record)
-    expected_action_id = approval_action_id(record)
-    if human_action_id != expected_action_id:
-        rate = record.setdefault("approval_rate_limit", {"failed_attempts": 0})
-        rate["failed_attempts"] = int(rate.get("failed_attempts") or 0) + 1
-        record["updated_at"] = now_iso()
-        record["approval"] = approval_summary(record)
-        write_json(path, record)
-        append_audit_event(
-            state_root=state_root,
-            event_type="approve_request",
-            principal=actor,
-            subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
-            outcome="blocked",
-            details={"reason": "approval_challenge_mismatch", "failed_attempts": rate["failed_attempts"]},
-        )
-        raise FrontdoorError("approval challenge mismatch")
-    failed_attempts = int((record.get("approval_rate_limit") or {}).get("failed_attempts") or 0)
-    if failed_attempts >= MAX_APPROVAL_FAILURES:
-        append_audit_event(
-            state_root=state_root,
-            event_type="approve_request",
-            principal=actor,
-            subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
-            outcome="blocked",
-            details={"reason": "approval_rate_limited", "failed_attempts": failed_attempts},
-        )
-        raise FrontdoorError("approval challenge rate limit exceeded")
-    envelope = workflow_selector.activation_envelope(
-        classification,
-        activation_source="human_ui",
-        task_id=record["task_id"],
-        request_id=record["request_id"],
-        refs=list(record.get("context_refs") or []),
-        allowed_paths=list(record.get("allowed_paths") or []),
-        expires_at=str(record.get("expires_at") or "run_terminal"),
-    )
-    record["updated_at"] = now_iso()
-    record["status"] = envelope["activation_status"]
-    record["human_action_id"] = human_action_id
-    record["approved_activation"] = envelope
-    record["approval_record"] = {
+    return record
+
+
+def approval_record_for(
+    *,
+    record: dict[str, Any],
+    human_action_id: str,
+    principal: dict[str, Any],
+    signature: dict[str, Any],
+    activation_source: str,
+) -> dict[str, Any]:
+    return {
         "approval_record_version": "1",
+        "activation_source": activation_source,
         "human_action_id": human_action_id,
         "approved_at": now_iso(),
-        "approved_by_principal": redacted_principal(actor),
+        "approved_by_principal": redacted_principal(principal),
         "proposal_digest": "sha256:" + stable_digest(record.get("proposal") or {}),
         "request_digest": record.get("request_digest") or "sha256:" + stable_digest(
             {
@@ -1571,23 +1562,251 @@ def approve_request(
         "display_digest": "sha256:" + stable_digest(record.get("approval") or {}),
         "signature": signature,
     }
+
+
+def enforce_frontdoor_approval_gate(envelope: dict[str, Any], classification: dict[str, Any]) -> dict[str, Any]:
+    if envelope.get("activation_status") != "approved":
+        return envelope
+    task_kind = classification.get("task_kind")
+    if classification.get("publication_required") or task_kind == "publication":
+        reason = "publication_requires_separate_human_gate"
+    elif task_kind == "policy_change":
+        reason = "policy_change_requires_separate_human_gate"
+    else:
+        return envelope
+    gated = dict(envelope)
+    gated["activation_status"] = "waiting_human"
+    gated["approval_required_reason"] = reason
+    gated["next_action"] = "ask_human"
+    gated.pop("approved_by", None)
+    gated.pop("approved_at", None)
+    gated.pop("goal_state_transition", None)
+    return gated
+
+
+def _approve_core(
+    *,
+    state_root: Path,
+    request_id: str,
+    human_action_id: str,
+    activation_source: str,
+    approved_by_expected: str,
+    principal: dict[str, Any],
+    audit_event_type: str,
+    allowed_principal_types: set[str],
+    record_updates: dict[str, Any] | None = None,
+    audit_details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    validate_artifact_id(request_id, "request_id")
+    actor = principal
+    path = request_path(state_root, request_id)
+    record = read_json(path)
+    signature = assert_allowed_principal(
+        state_root=state_root,
+        principal=actor,
+        allowed_types=allowed_principal_types,
+        transition=audit_event_type,
+        subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
+        blocked_reason="unsupported approval principal",
+    )
+    classification = record.get("classification")
+    if not isinstance(classification, dict):
+        raise FrontdoorError("typed classification is required before approval")
+    try:
+        refresh_approval_context_refs(record)
+    except FrontdoorError as exc:
+        append_audit_event(
+            state_root=state_root,
+            event_type=audit_event_type,
+            principal=actor,
+            subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
+            outcome="blocked",
+            details={"reason": str(exc)},
+        )
+        raise
+    attach_approval_summary(record)
+    expected_action_id = approval_action_id(record)
+    if human_action_id != expected_action_id:
+        rate = record.setdefault("approval_rate_limit", {"failed_attempts": 0})
+        rate["failed_attempts"] = int(rate.get("failed_attempts") or 0) + 1
+        record["updated_at"] = now_iso()
+        record["approval"] = approval_summary(record)
+        write_json(path, record)
+        append_audit_event(
+            state_root=state_root,
+            event_type=audit_event_type,
+            principal=actor,
+            subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
+            outcome="blocked",
+            details={"reason": "approval_challenge_mismatch", "failed_attempts": rate["failed_attempts"]},
+        )
+        raise FrontdoorError("approval challenge mismatch")
+    failed_attempts = int((record.get("approval_rate_limit") or {}).get("failed_attempts") or 0)
+    if failed_attempts >= MAX_APPROVAL_FAILURES:
+        append_audit_event(
+            state_root=state_root,
+            event_type=audit_event_type,
+            principal=actor,
+            subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
+            outcome="blocked",
+            details={"reason": "approval_rate_limited", "failed_attempts": failed_attempts},
+        )
+        raise FrontdoorError("approval challenge rate limit exceeded")
+    envelope = workflow_selector.activation_envelope(
+        classification,
+        activation_source=activation_source,
+        task_id=record["task_id"],
+        request_id=record["request_id"],
+        refs=list(record.get("context_refs") or []),
+        allowed_paths=list(record.get("allowed_paths") or []),
+        expires_at=str(record.get("expires_at") or "run_terminal"),
+    )
+    envelope = enforce_frontdoor_approval_gate(envelope, classification)
+    if envelope.get("activation_status") == "approved" and envelope.get("approved_by") != approved_by_expected:
+        raise FrontdoorError("approved_by mapping mismatch")
+    record["updated_at"] = now_iso()
+    record["status"] = envelope["activation_status"]
+    record["human_action_id"] = human_action_id
+    if envelope["activation_status"] == "approved":
+        record["approved_activation"] = envelope
+    else:
+        record.pop("approved_activation", None)
+    if record_updates:
+        record.update(record_updates)
+    record["approval_record"] = approval_record_for(
+        record=record,
+        human_action_id=human_action_id,
+        principal=actor,
+        signature=signature,
+        activation_source=activation_source,
+    )
     write_json(path, record)
+    snapshot_path = snapshot_envelope(state_root, request_id, envelope)
+    details = {"request_status": envelope["activation_status"]}
+    if audit_details:
+        details.update(audit_details)
     append_audit_event(
         state_root=state_root,
-        event_type="approve_request",
+        event_type=audit_event_type,
         principal=actor,
         subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
         outcome="ok" if envelope["activation_status"] == "approved" else "blocked",
-        details={"request_status": envelope["activation_status"]},
+        details=details,
     )
     return {
         "schema_version": 1,
         "decision": "ok" if envelope["activation_status"] == "approved" else "blocked",
         "request_status": envelope["activation_status"],
         "request_path": str(path),
+        "envelope_snapshot_path": str(snapshot_path),
         "activation": envelope,
         "approval_record": record["approval_record"],
     }
+
+
+def approve_request(
+    *,
+    state_root: Path,
+    request_id: str,
+    human_action_id: str,
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return _approve_core(
+        state_root=state_root,
+        request_id=request_id,
+        human_action_id=human_action_id,
+        activation_source="human_ui",
+        approved_by_expected="human_ui_action",
+        principal=principal or make_principal("human_operator", "human-ui", authn_method="local_ui"),
+        audit_event_type="approve_request",
+        allowed_principal_types={"human_operator", "manual_operator"},
+    )
+
+
+def validate_orchestrator_start_invocation(invocation: dict[str, Any]) -> dict[str, str]:
+    required = {"skill", "invoked_at", "chat_session_id"}
+    missing = sorted(key for key in required if not str(invocation.get(key) or "").strip())
+    if missing:
+        raise FrontdoorError("orchestrator_start_invocation_missing:" + ",".join(missing))
+    if invocation.get("skill") != "orchestrator-start":
+        raise FrontdoorError("orchestrator_start_invocation_skill_mismatch")
+    return {key: str(invocation[key]) for key in sorted(required)}
+
+
+def orchestrator_start_approve(
+    *,
+    state_root: Path,
+    request_id: str,
+    human_action_id: str,
+    invocation: dict[str, Any],
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    invocation_evidence = validate_orchestrator_start_invocation(invocation)
+    return _approve_core(
+        state_root=state_root,
+        request_id=request_id,
+        human_action_id=human_action_id,
+        activation_source="orchestrator-start",
+        approved_by_expected="human_explicit_skill_invocation",
+        principal=principal
+        or make_principal(
+            "orchestrator_start",
+            "orchestrator-start-skill",
+            authn_method="local_cli",
+        ),
+        audit_event_type="orchestrator_start_approve",
+        allowed_principal_types={"orchestrator_start"},
+        record_updates={"orchestrator_start_invocation": invocation_evidence},
+        audit_details={"orchestrator_start_invocation": invocation_evidence},
+    )
+
+
+def manual_cli_approve(
+    *,
+    state_root: Path,
+    request_id: str,
+    human_action_id: str,
+    confirm_nonce: str,
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    validate_artifact_id(request_id, "request_id")
+    actor = principal or default_manual_principal()
+    expected_confirm = f"approve-{request_id}"
+    if confirm_nonce != expected_confirm:
+        append_audit_event(
+            state_root=state_root,
+            event_type="manual_cli_approve",
+            principal=actor,
+            subject={"request_id": request_id},
+            outcome="blocked",
+            details={
+                "reason": "manual_confirmation_mismatch",
+                "expected_confirm": expected_confirm,
+            },
+        )
+        raise FrontdoorError("manual_confirmation_mismatch")
+    return _approve_core(
+        state_root=state_root,
+        request_id=request_id,
+        human_action_id=human_action_id,
+        activation_source="manual_cli",
+        approved_by_expected="manual_operator",
+        principal=actor,
+        audit_event_type="manual_cli_approve",
+        allowed_principal_types={"manual_operator", "human_operator"},
+        audit_details={"confirm_nonce": confirm_nonce},
+    )
+
+
+def link_request_run(record: dict[str, Any], run_id: str) -> bool:
+    linked_runs = record.setdefault("linked_runs", [])
+    if not isinstance(linked_runs, list):
+        linked_runs = []
+        record["linked_runs"] = linked_runs
+    if run_id in linked_runs:
+        return False
+    linked_runs.append(run_id)
+    return True
 
 
 def create_run(
@@ -1640,7 +1859,8 @@ def create_run(
                 existing = run_store.load_run(state_root, effective_run_id)
                 if existing.get("request_id") != request_id:
                     raise FrontdoorError("run_id conflict for different request")
-                if not bound_run_id:
+                link_changed = link_request_run(record, effective_run_id)
+                if not bound_run_id or link_changed:
                     record["run_id"] = effective_run_id
                     record["updated_at"] = now_iso()
                     write_json(request_path(state_root, request_id), record)
@@ -1658,6 +1878,8 @@ def create_run(
                     "decision": "ok",
                     "created": False,
                     "run_path": str(path),
+                    "request_record_path": str(request_path(state_root, request_id)),
+                    "envelope_snapshots": list_envelope_snapshots(state_root, request_id),
                     "workflow_run": existing,
                 }
 
@@ -1700,6 +1922,7 @@ def create_run(
             }
             path = run_store.store_run(state_root, run)
             record["run_id"] = effective_run_id
+            link_request_run(record, effective_run_id)
             record["updated_at"] = now_iso()
             write_json(request_path(state_root, request_id), record)
     except run_lock.LockContentionError as exc:
@@ -1727,6 +1950,8 @@ def create_run(
         "decision": "ok",
         "created": True,
         "run_path": str(path),
+        "request_record_path": str(request_path(state_root, request_id)),
+        "envelope_snapshots": list_envelope_snapshots(state_root, request_id),
         "workflow_run": run,
     }
 
@@ -2625,6 +2850,20 @@ def parser() -> argparse.ArgumentParser:
     approve.add_argument("--principal-id", default="human-ui")
     approve.add_argument("--authn-method", default="local_ui")
 
+    orchestrator_start = sub.add_parser("orchestrator-start-approve")
+    orchestrator_start.add_argument("--request-id", required=True)
+    orchestrator_start.add_argument("--human-action-id", required=True)
+    orchestrator_start.add_argument("--invoked-at", required=True)
+    orchestrator_start.add_argument("--chat-session-id", required=True)
+
+    manual = sub.add_parser("manual-approve")
+    manual.add_argument("--request-id", required=True)
+    manual.add_argument("--human-action-id", required=True)
+    manual.add_argument("--confirm", required=True)
+    manual.add_argument("--principal-type", default="manual_operator")
+    manual.add_argument("--principal-id", default="manual-cli")
+    manual.add_argument("--authn-method", default="local_cli")
+
     create = sub.add_parser("create-run")
     create.add_argument("--request-id", required=True)
     create.add_argument("--run-id", default="")
@@ -2729,6 +2968,25 @@ def main() -> None:
                 state_root=state_root,
                 request_id=args.request_id,
                 human_action_id=args.human_action_id,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
+            )
+        elif args.command == "orchestrator-start-approve":
+            payload = orchestrator_start_approve(
+                state_root=state_root,
+                request_id=args.request_id,
+                human_action_id=args.human_action_id,
+                invocation={
+                    "skill": "orchestrator-start",
+                    "invoked_at": args.invoked_at,
+                    "chat_session_id": args.chat_session_id,
+                },
+            )
+        elif args.command == "manual-approve":
+            payload = manual_cli_approve(
+                state_root=state_root,
+                request_id=args.request_id,
+                human_action_id=args.human_action_id,
+                confirm_nonce=args.confirm,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "create-run":
