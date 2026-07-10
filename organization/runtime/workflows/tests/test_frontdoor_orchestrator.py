@@ -499,25 +499,26 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(transitions[-1]["to_state"], "complete", "terminal lifecycle state")
 
 
-def test_drain_allows_edit_capable_policy_review_gate() -> None:
+def test_drain_allows_edit_capable_code_change_gate() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         classification = external_review_classification(
-            task_kind="policy_change",
+            task_kind="code_change",
             permission_required="edit",
             external_provider_required=False,
-            expected_artifacts=["policy_change_report", "final_evidence"],
+            context_scope="diff_summary",
+            expected_artifacts=["code_change_report", "final_evidence"],
         )
         proposed = load_payload(
             run_frontdoor(
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-policy-review",
+                "TSK-code-change",
                 "--request-id",
-                "req-policy-review",
+                "req-code-change",
                 "--prompt",
-                "Update workflow permission policy",
+                "Implement bounded code change",
                 "--classification",
                 json.dumps(classification),
                 "--ref",
@@ -528,8 +529,8 @@ def test_drain_allows_edit_capable_policy_review_gate() -> None:
         )
         assert_equal(
             proposed["activation"]["workflow_selection"]["workflow_id"],
-            "policy_or_permission_change",
-            "policy workflow",
+            "standard_code_change",
+            "code change workflow",
         )
         assert_equal(proposed["activation"]["activation_scope"]["allowed_ops"]["edit"], False, "prompt edit denied")
         approved = load_payload(
@@ -537,7 +538,7 @@ def test_drain_allows_edit_capable_policy_review_gate() -> None:
                 state_root,
                 "approve",
                 "--request-id",
-                "req-policy-review",
+                "req-code-change",
                 "--human-action-id",
                 proposed["approval"]["human_action_id"],
             )
@@ -548,18 +549,18 @@ def test_drain_allows_edit_capable_policy_review_gate() -> None:
                 state_root,
                 "create-run",
                 "--request-id",
-                "req-policy-review",
+                "req-code-change",
                 "--run-id",
-                "run-policy-review",
+                "run-code-change",
             )
         )
-        assert_equal(created["workflow_run"]["workflow_id"], "policy_or_permission_change", "created workflow")
+        assert_equal(created["workflow_run"]["workflow_id"], "standard_code_change", "created workflow")
 
-        drained = load_payload(run_frontdoor(state_root, "drain", "--run-id", "run-policy-review"))
+        drained = load_payload(run_frontdoor(state_root, "drain", "--run-id", "run-code-change"))
         work_order = drained["work_order"]
-        assert_equal(drained["workflow_run"]["run_state"], "step_queued", "policy drain run state")
-        assert_equal(work_order["step_id"], "policy_review", "policy review step")
-        assert_equal(work_order["permission_mode"], "readonly", "policy review permission")
+        assert_equal(drained["workflow_run"]["run_state"], "step_queued", "code change drain run state")
+        assert_equal(work_order["step_id"], "implement", "code change step")
+        assert_equal(work_order["permission_mode"], "edit", "code change permission")
         assert_equal(work_order["activation_scope"]["allowed_ops"]["edit"], True, "later edit allowance preserved")
 
 
@@ -2251,7 +2252,7 @@ def main() -> None:
         test_channel_token_permissions_are_private,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
-        test_drain_allows_edit_capable_policy_review_gate,
+        test_drain_allows_edit_capable_code_change_gate,
         test_drain_blocks_invalid_existing_work_order,
         test_frontdoor_full_flow_updates_session_task_state_index,
         test_drain_blocks_and_quarantines_corrupt_run_json,
