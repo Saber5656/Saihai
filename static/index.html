@@ -93,7 +93,9 @@
     padding: 6px 8px;
   }
   #decision-form button,
-  #detail-head button {
+  #detail-head button,
+  #workflow-runs button,
+  #workflow-runs select {
     background: var(--card);
     border: 1px solid var(--border);
     color: var(--fg);
@@ -240,6 +242,175 @@
   .swatch.deferred { opacity: .45; }
   .swatch.offline { border-color: rgba(248,81,73,.45); }
   #empty { color: var(--dim); padding: 40px; text-align: center; }
+  #workflow-runs {
+    border-top: 1px solid var(--border);
+    margin-top: 18px;
+    padding-top: 16px;
+  }
+  #workflow-runs h2 {
+    font-size: 13px;
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--dim);
+  }
+  .wf-head,
+  .wf-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .wf-head { justify-content: space-between; margin-bottom: 10px; }
+  .wf-controls label {
+    color: var(--dim);
+    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #wf-lock-banner,
+  #wf-error {
+    border: 1px solid var(--border);
+    background: rgba(139,148,158,.08);
+    border-radius: 6px;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    color: var(--dim);
+    font-size: 12px;
+  }
+  #wf-lock-banner.stale,
+  #wf-error {
+    border-color: rgba(248,81,73,.55);
+    color: var(--red);
+    background: rgba(248,81,73,.08);
+  }
+  #wf-lock-banner.locked {
+    border-color: rgba(242,204,96,.45);
+    color: var(--yellow);
+    background: rgba(242,204,96,.08);
+  }
+  .wf-table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  #wf-run-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 760px;
+    background: var(--panel);
+  }
+  #wf-run-table th,
+  #wf-run-table td {
+    border-bottom: 1px solid var(--border);
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+  }
+  #wf-run-table th {
+    color: var(--dim);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .8px;
+    background: #11161d;
+  }
+  #wf-run-table tbody tr {
+    cursor: pointer;
+    transition: background .15s;
+  }
+  #wf-run-table tbody tr:hover,
+  #wf-run-table tbody tr.selected {
+    background: rgba(88,166,255,.08);
+  }
+  #wf-run-table .mono,
+  #wf-run-detail .mono {
+    font-family: var(--mono);
+    font-size: 11px;
+    word-break: break-all;
+  }
+  .wf-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1px 7px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .wf-badge-created { color: var(--dim); background: transparent; }
+  .wf-badge-queued { color: var(--fg); background: rgba(139,148,158,.18); }
+  .wf-badge-provider { color: #1c2128; background: var(--yellow); border-color: var(--yellow); animation: wf-pulse 1.5s ease-in-out infinite; }
+  .wf-badge-validating { color: var(--yellow); border-color: var(--yellow); border-style: dashed; background: rgba(242,204,96,.08); }
+  .wf-badge-human { color: var(--yellow); border-color: rgba(242,204,96,.55); background: rgba(248,151,31,.10); }
+  .wf-badge-human::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #f0883e;
+  }
+  .wf-badge-complete { color: #1c2128; background: var(--green); border-color: var(--green); }
+  .wf-badge-failed { color: var(--red); border-color: rgba(248,81,73,.7); background: rgba(248,81,73,.12); }
+  .wf-badge-aborted { color: #ffa198; border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.05); }
+  .wf-badge-unknown { color: var(--faint); background: rgba(84,93,104,.16); }
+  .wf-stuck {
+    box-shadow: 0 0 0 1px var(--red);
+  }
+  @keyframes wf-pulse {
+    0%, 100% { box-shadow: 0 0 0 rgba(242,204,96,0); }
+    50% { box-shadow: 0 0 10px rgba(242,204,96,.45); }
+  }
+  #wf-run-detail {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    margin-top: 12px;
+    padding: 12px;
+  }
+  #wf-run-detail h3 {
+    font-size: 13px;
+    margin: 0 0 10px;
+  }
+  #wf-run-detail h4 {
+    color: var(--dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .8px;
+    margin: 14px 0 8px;
+  }
+  #wf-run-detail dl {
+    display: grid;
+    grid-template-columns: minmax(120px, 180px) 1fr;
+    gap: 6px 10px;
+    margin: 0;
+  }
+  #wf-run-detail dt { color: var(--dim); }
+  #wf-run-detail dd { margin: 0; min-width: 0; word-break: break-word; }
+  .wf-mini-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .wf-mini-table th,
+  .wf-mini-table td {
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+  .wf-mini-table th {
+    color: var(--dim);
+    background: #11161d;
+  }
+  .wf-empty {
+    color: var(--dim);
+    padding: 14px;
+    text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -252,6 +423,48 @@
   <div id="workspace">
     <section id="control-panel"></section>
     <div id="board"><div id="empty">セッションを読み込み中...</div></div>
+    <section id="workflow-runs" data-panel="workflow-runs">
+      <div class="wf-head">
+        <h2>Workflow Runs</h2>
+        <div class="wf-controls">
+          <select id="wf-state-filter" title="workflow run state filter">
+            <option value="">All</option>
+            <option value="created">created</option>
+            <option value="step_queued">step_queued</option>
+            <option value="waiting_provider">waiting_provider</option>
+            <option value="validating">validating</option>
+            <option value="remediating">remediating</option>
+            <option value="waiting_human">waiting_human</option>
+            <option value="complete">complete</option>
+            <option value="failed">failed</option>
+            <option value="aborted">aborted</option>
+          </select>
+          <label><input type="checkbox" id="wf-session-only" checked> current session only</label>
+          <button id="wf-refresh" type="button">refresh</button>
+        </div>
+      </div>
+      <div id="wf-lock-banner" data-role="lock-banner" hidden></div>
+      <div id="wf-error" data-role="wf-error" hidden></div>
+      <div class="wf-table-wrap">
+        <table id="wf-run-table">
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Task</th>
+              <th>Workflow</th>
+              <th>State</th>
+              <th>Reason</th>
+              <th>Age</th>
+              <th>Runtime</th>
+            </tr>
+          </thead>
+          <tbody id="wf-run-table-body">
+            <tr><td colspan="7" class="wf-empty">loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="wf-run-detail" data-role="run-detail" hidden></div>
+    </section>
   </div>
   <aside id="detail">
     <div id="detail-head">
@@ -278,10 +491,14 @@
 <script>
 const POLL_MS = 2000;
 const DETAIL_POLL_MS = 2500;
+const WORKFLOW_POLL_MS = 15000;
+const WF_STUCK_SECONDS = 1800;
 let currentSession = null;
 let selectedRole = null;
+let selectedWorkflowRun = null;
 let orgTimer = null;
 let detailTimer = null;
+let workflowTimer = null;
 let orgConfig = null;
 
 const $ = (id) => document.getElementById(id);
@@ -302,6 +519,23 @@ function relTime(sec) {
   if (sec < 3600) return `${Math.floor(sec / 60)}m前`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}h前`;
   return `${Math.floor(sec / 86400)}d前`;
+}
+
+function truncateText(value, limit = 400) {
+  const text = String(value ?? "");
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function fieldValue(value) {
+  if (value == null || value === "") return "-";
+  if (typeof value === "object") return truncateText(JSON.stringify(value));
+  return truncateText(value);
+}
+
+function definitionList(rows) {
+  return `<dl>${rows.map(([key, value, cls = ""]) =>
+    `<dt>${esc(key)}</dt><dd class="${cls}">${esc(fieldValue(value))}</dd>`
+  ).join("")}</dl>`;
 }
 
 async function loadConfig() {
@@ -366,7 +600,9 @@ async function loadSessions() {
     sel.appendChild(opt);
   }
   if (data.sessions.length === 0) {
+    currentSession = null;
     $("board").innerHTML = '<div id="empty">ITB セッションが見つかりません</div>';
+    startWorkflowPolling();
     return;
   }
   if (prev && data.sessions.some(s => s.session_id === prev)) {
@@ -376,12 +612,15 @@ async function loadSessions() {
     sel.value = currentSession;
   }
   startOrgPolling();
+  startWorkflowPolling();
 }
 
 $("session-select").addEventListener("change", (e) => {
   currentSession = e.target.value;
   closeDetail();
+  clearRunDetail();
   startOrgPolling();
+  startWorkflowPolling();
 });
 
 function startOrgPolling() {
@@ -455,6 +694,253 @@ function card(a) {
   return el;
 }
 
+function workflowBadgeClass(state) {
+  return ({
+    created: "wf-badge-created",
+    step_queued: "wf-badge-queued",
+    waiting_provider: "wf-badge-provider",
+    validating: "wf-badge-validating",
+    waiting_human: "wf-badge-human",
+    complete: "wf-badge-complete",
+    failed: "wf-badge-failed",
+    aborted: "wf-badge-aborted",
+  })[state] || "wf-badge-unknown";
+}
+
+function workflowBadge(run) {
+  const state = String(run.run_state || "unknown");
+  const stuck = state === "waiting_provider" && Number(run.stale_seconds || 0) > WF_STUCK_SECONDS;
+  const title = stuck ? ' title="provider silent > 30 min - see recovery runbook"' : "";
+  const cls = `wf-badge ${workflowBadgeClass(state)}${stuck ? " wf-stuck" : ""}`;
+  return `<span class="${cls}"${title}>${esc(state)}</span>`;
+}
+
+function workflowQuery() {
+  const params = new URLSearchParams();
+  const state = $("wf-state-filter").value || "";
+  if (state) params.set("state", state);
+  if ($("wf-session-only").checked && currentSession) params.set("session", currentSession);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+function startWorkflowPolling() {
+  if (workflowTimer) clearInterval(workflowTimer);
+  loadWorkflowRuns();
+  workflowTimer = setInterval(loadWorkflowRuns, WORKFLOW_POLL_MS);
+}
+
+function clearRunDetail() {
+  selectedWorkflowRun = null;
+  const detail = $("wf-run-detail");
+  detail.hidden = true;
+  detail.innerHTML = "";
+  for (const row of $("wf-run-table-body").querySelectorAll("tr[data-run-id]")) {
+    row.classList.remove("selected");
+  }
+}
+
+function workflowFilterChanged() {
+  clearRunDetail();
+  loadWorkflowRuns();
+}
+
+function workflowError(message) {
+  const el = $("wf-error");
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = message;
+}
+
+async function loadWorkflowRuns() {
+  try {
+    const [runsData, lockData] = await Promise.all([
+      fetchJSON(`/api/workflow-runs${workflowQuery()}`),
+      fetchJSON("/api/workflow-lock"),
+    ]);
+    workflowError("");
+    renderWorkflowLock(lockData.locks || []);
+    renderWorkflowRuns(runsData.workflow_runs || []);
+  } catch (e) {
+    workflowError(`workflow runs unavailable: ${e.message || e}`);
+  }
+}
+
+function renderWorkflowLock(locks) {
+  const banner = $("wf-lock-banner");
+  const stale = locks.find(lock => lock.locked && lock.stale);
+  const locked = locks.find(lock => lock.locked);
+  if (stale) {
+    banner.hidden = false;
+    banner.className = "stale";
+    banner.textContent = `stale global lock detected (${stale.runtime || "runtime"})`;
+    return;
+  }
+  if (locked) {
+    banner.hidden = false;
+    banner.className = "locked";
+    banner.textContent = `run in progress (${locked.runtime || "runtime"})`;
+    return;
+  }
+  banner.hidden = true;
+  banner.className = "";
+  banner.textContent = "";
+}
+
+function renderWorkflowRuns(runs) {
+  const tbody = $("wf-run-table-body");
+  if (!runs.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="wf-empty">no workflow runs yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = "";
+  for (const run of runs) {
+    const tr = document.createElement("tr");
+    tr.dataset.runId = run.run_id || "";
+    tr.dataset.runtime = run.runtime || "";
+    tr.dataset.orchRoot = run.orch_root || "";
+    if (selectedWorkflowRun && selectedWorkflowRun.run_id === run.run_id) {
+      tr.classList.add("selected");
+    }
+    const reason = (run.terminal && (run.terminal.reason || run.terminal.status)) || run.derived_status || "-";
+    tr.innerHTML =
+      `<td class="mono">${esc(run.run_id || "-")}</td>` +
+      `<td class="mono">${esc(run.task_id || "-")}</td>` +
+      `<td>${esc(run.workflow_id || "-")}</td>` +
+      `<td>${workflowBadge(run)}</td>` +
+      `<td>${esc(reason)}</td>` +
+      `<td>${esc(relTime(run.stale_seconds))}</td>` +
+      `<td>${esc(run.runtime || "-")}</td>`;
+    tr.addEventListener("click", () => loadRunDetail(run));
+    tbody.appendChild(tr);
+  }
+}
+
+function detailSection(name, title, body) {
+  if (!body) return "";
+  return `<section data-detail-section="${esc(name)}"><h4>${esc(title)}</h4>${body}</section>`;
+}
+
+function renderFindings(report) {
+  const findings = Array.isArray(report.findings) ? report.findings : [];
+  if (!findings.length) return "";
+  const rows = findings.map(finding =>
+    `<tr><td>${esc(fieldValue(finding.severity))}</td>` +
+    `<td>${esc(fieldValue(finding.status))}</td>` +
+    `<td>${esc(fieldValue(finding.summary))}</td></tr>`
+  ).join("");
+  return `<table class="wf-mini-table"><thead><tr><th>Severity</th><th>Status</th><th>Summary</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderTransitions(transitions) {
+  if (!Array.isArray(transitions) || !transitions.length) return "";
+  const rows = transitions.map((item, index) =>
+    `<tr><td>${esc(item.seq ?? index + 1)}</td>` +
+    `<td>${esc(fieldValue(item.previous_state || item.from_state || item.from))}</td>` +
+    `<td>${esc(fieldValue(item.next_state || item.to_state || item.to))}</td>` +
+    `<td>${esc(fieldValue(item.reason || item.reason_class || item.outcome))}</td>` +
+    `<td class="mono">${esc(fieldValue(item.occurred_at || item.created_at || item.checked_at))}</td></tr>`
+  ).join("");
+  return `<table class="wf-mini-table"><thead><tr><th>Seq</th><th>From</th><th>To</th><th>Reason</th><th>At</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderRejections(rejections) {
+  if (!Array.isArray(rejections) || !rejections.length) return "";
+  const rows = rejections.map(item =>
+    `<tr><td>${esc(fieldValue(item.outcome || item.decision || item.result))}</td>` +
+    `<td>${esc(fieldValue(item.errors || item.reason || item.reasons))}</td></tr>`
+  ).join("");
+  return `<table class="wf-mini-table"><thead><tr><th>Outcome</th><th>Errors</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+async function loadRunDetail(run) {
+  selectedWorkflowRun = run;
+  const detail = $("wf-run-detail");
+  detail.hidden = false;
+  detail.innerHTML = `<h3>${esc(run.run_id || "workflow run")}</h3><div class="wf-empty">loading...</div>`;
+  for (const row of $("wf-run-table-body").querySelectorAll("tr[data-run-id]")) {
+    row.classList.toggle("selected", row.dataset.runId === run.run_id);
+  }
+  const params = new URLSearchParams({ run: run.run_id || "" });
+  if ($("wf-session-only").checked && currentSession) params.set("session", currentSession);
+  if (run.runtime) params.set("runtime", run.runtime);
+  if (run.orch_root) params.set("orch_root", run.orch_root);
+  try {
+    const payload = await fetchJSON(`/api/workflow-run?${params.toString()}`);
+    renderRunDetail(payload.workflow_run || {});
+    await loadWorkflowRuns();
+  } catch (e) {
+    detail.innerHTML = `<h3>${esc(run.run_id || "workflow run")}</h3><div class="wf-empty err">${esc(e.message || e)}</div>`;
+  }
+}
+
+function renderRunDetail(payload) {
+  const run = payload.run || {};
+  const record = payload.run_record || {};
+  const terminal = run.terminal || {};
+  const workOrder = payload.work_order || null;
+  const report = payload.report || null;
+  const evidence = payload.evidence || null;
+  const detail = $("wf-run-detail");
+  const summary = definitionList([
+    ["Run", run.run_id, "mono"],
+    ["Task", run.task_id, "mono"],
+    ["Request", run.request_id, "mono"],
+    ["Workflow", run.workflow_id],
+    ["State", run.run_state],
+    ["Activation", run.activation_status || record.activation?.activation_status],
+    ["Current step", run.current_step],
+    ["Runtime", payload.runtime],
+    ["State root", payload.orch_root, "mono"],
+  ]);
+  const terminalBody = definitionList([
+    ["Status", terminal.status],
+    ["Reason", terminal.reason],
+    ["Goal state", run.goal_state],
+    ["Last transition", run.last_transition_at, "mono"],
+  ]);
+  const workOrderBody = workOrder ? definitionList([
+    ["To role", workOrder.to_role],
+    ["Assignment role", workOrder.assignment_role],
+    ["Permission mode", workOrder.permission_mode],
+    ["Expected output", workOrder.expected_output],
+    ["Instruction", workOrder.instruction],
+    ["Refs", Array.isArray(workOrder.refs) ? workOrder.refs.length : workOrder.refs],
+  ]) : "";
+  const reportBody = report ? (
+    definitionList([
+      ["Result", report.result],
+      ["Summary", report.summary],
+      ["Finding count", Array.isArray(report.findings) ? report.findings.length : 0],
+    ]) + renderFindings(report)
+  ) : "";
+  const provider = evidence || (report && report.provider_evidence) || null;
+  const evidenceBody = provider ? definitionList([
+    ["Provider", provider.provider],
+    ["Effective model", provider.effective_model],
+    ["Session id", provider.provider_session_id],
+    ["Request id", provider.request_id || provider.provider_request_id],
+    ["Duration", provider.duration_seconds],
+    ["Usage", provider.usage],
+    ["Evidence path", provider.evidence_path || run.evidence_path, "mono"],
+    ["Transcript path", provider.transcript_path, "mono"],
+    ["Outcome", provider.outcome],
+  ]) : "";
+  detail.innerHTML =
+    `<h3>${esc(run.run_id || "workflow run")}</h3>` +
+    detailSection("summary", "Summary", summary) +
+    detailSection("terminal", "Terminal", terminalBody) +
+    detailSection("work-order", "Work Order", workOrderBody) +
+    detailSection("report", "Report", reportBody) +
+    detailSection("evidence", "Evidence", evidenceBody) +
+    detailSection("transitions", "Transitions", renderTransitions(payload.transitions)) +
+    detailSection("rejections", "Rejections", renderRejections(payload.rejections));
+}
+
 function openDetail(role) {
   selectedRole = role;
   $("detail").classList.add("open");
@@ -503,6 +989,9 @@ async function loadRoleDetail() {
 
 $("d-close").addEventListener("click", closeDetail);
 $("d-refresh").addEventListener("click", loadRoleDetail);
+$("wf-refresh").addEventListener("click", loadWorkflowRuns);
+$("wf-state-filter").addEventListener("change", workflowFilterChanged);
+$("wf-session-only").addEventListener("change", workflowFilterChanged);
 
 loadConfig();
 loadSessions();
