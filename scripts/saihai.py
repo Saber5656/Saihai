@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FRONTDOOR_PATH = REPO_ROOT / "organization" / "runtime" / "workflows" / "scripts" / "frontdoor_orchestrator.py"
 
 FRONTDOOR_COMMANDS = {"propose", "approve", "status"}
-WORKFLOW_COMMANDS = {"create-run", "drain", "validate-report"}
+WORKFLOW_COMMANDS = {"create-run", "drain", "run-provider", "validate-report"}
 assert not (FRONTDOOR_COMMANDS & WORKFLOW_COMMANDS)
 
 PROPOSE_ALLOWED_STATUSES = {"proposed", "blocked", "waiting_human"}
@@ -191,6 +191,17 @@ def handle_workflow_validate_report(frontdoor: Any, args: argparse.Namespace) ->
     )
 
 
+def handle_workflow_run_provider(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    return frontdoor.run_provider(
+        state_root=state_root_from_args(frontdoor, args),
+        run_id=args.run_id,
+        adapter_id=args.adapter_id,
+        timeout_seconds=args.timeout_seconds,
+        fake_provider_mode=args.fake_provider_mode,
+        principal=principal_from_args(frontdoor, args),
+    )
+
+
 def add_state_root(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-root", default="", help="orchestrator state root")
 
@@ -259,6 +270,22 @@ def build_workflow_parser(sub: argparse._SubParsersAction[argparse.ArgumentParse
     add_execution_principal(drain)
     drain.set_defaults(handler=handle_workflow_drain)
 
+    provider = workflow_sub.add_parser("run-provider", help="run a bounded headless provider adapter")
+    provider.add_argument("--run-id", required=True)
+    provider.add_argument("--adapter-id", default="claude_headless_p0")
+    provider.add_argument("--timeout-seconds", type=int, default=60)
+    provider.add_argument(
+        "--fake-provider-mode",
+        choices=["", "success", "findings", "blocked", "timeout", "nonzero", "malformed", "unavailable"],
+        default="",
+    )
+    add_execution_principal(
+        provider,
+        principal_type="harness_runner",
+        principal_id="local-harness",
+    )
+    provider.set_defaults(handler=handle_workflow_run_provider)
+
     report = workflow_sub.add_parser("validate-report", help="validate a typed workflow report")
     report.add_argument("--run-id", required=True)
     report.add_argument("--report-path", default="")
@@ -290,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         print_blocked(str(exc))
         return 2
 
+    run_store_error = frontdoor.run_store.RunStoreError
     try:
         payload = args.handler(frontdoor, args)
     except frontdoor.FrontdoorError as exc:
@@ -297,6 +325,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except (ValueError, KeyError, TypeError) as exc:
         print_blocked(str(exc))
+        return 2
+    except run_store_error as exc:
+        payload = {
+            "schema_version": 1,
+            "decision": "blocked",
+            "reason": exc.reason_class,
+            "errors": exc.errors,
+        }
+        print_json(payload)
         return 2
 
     print_json(payload)

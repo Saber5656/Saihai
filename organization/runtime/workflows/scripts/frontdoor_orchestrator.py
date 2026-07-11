@@ -28,6 +28,7 @@ import report_gate
 import task_state_bridge
 import work_order_builder
 import workflow_selector
+import provider_runner
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -517,7 +518,7 @@ def provider_transcript_path(state_root: Path, run_id: str, step_id: str) -> Pat
     return (
         state_paths(state_root)["provider_evidence"]
         / validate_artifact_id(run_id, "run_id")
-        / f"{validate_artifact_id(step_id, 'step_id')}-claude-transcript.json"
+        / f"{validate_artifact_id(step_id, 'step_id')}-provider-transcript.json"
     )
 
 
@@ -2723,9 +2724,14 @@ def abort_run(
 
 
 def claude_headless_capability() -> dict[str, Any]:
+    adapters = provider_runner.load_provider_adapters()
+    adapter = adapters.get("claude_headless_p0")
+    if adapter:
+        return adapter
     return {
         "adapter_contract_version": "1",
         "provider_adapter_id": "claude_headless_p0",
+        "provider_target": "claude_headless",
         "transport": "headless_cli",
         "sync_mode": "sync",
         "context_freshness": "fresh_process",
@@ -2893,6 +2899,29 @@ def validate_report(
             principal=actor,
         )
     except report_gate.ReportGateError as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
+def run_provider(
+    *,
+    state_root: Path,
+    run_id: str,
+    adapter_id: str = provider_runner.DEFAULT_ADAPTER_ID,
+    timeout_seconds: int = 60,
+    fake_provider_mode: str = "",
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
+    try:
+        return provider_runner.run_provider(
+            state_root=state_root,
+            run_id=run_id,
+            adapter_id=adapter_id,
+            timeout_seconds=timeout_seconds,
+            fake_provider_mode=fake_provider_mode,
+            principal=actor,
+        )
+    except provider_runner.ProviderRunnerError as exc:
         raise FrontdoorError(str(exc)) from exc
 
 
@@ -3087,6 +3116,19 @@ def parser() -> argparse.ArgumentParser:
     report.add_argument("--principal-id", default="local-harness")
     report.add_argument("--authn-method", default="local_cli")
 
+    run_provider_parser = sub.add_parser("run-provider")
+    run_provider_parser.add_argument("--run-id", required=True)
+    run_provider_parser.add_argument("--adapter-id", default=provider_runner.DEFAULT_ADAPTER_ID)
+    run_provider_parser.add_argument("--timeout-seconds", type=int, default=60)
+    run_provider_parser.add_argument(
+        "--fake-provider-mode",
+        choices=["", "success", "findings", "blocked", "timeout", "nonzero", "malformed", "unavailable"],
+        default="",
+    )
+    run_provider_parser.add_argument("--principal-type", default="harness_runner")
+    run_provider_parser.add_argument("--principal-id", default="local-harness")
+    run_provider_parser.add_argument("--authn-method", default="local_cli")
+
     completion = sub.add_parser("verify-completion")
     completion.add_argument("--run-id", required=True)
     completion.add_argument("--format", choices=["json", "markdown"], default="json")
@@ -3228,6 +3270,15 @@ def main() -> None:
                 state_root=state_root,
                 run_id=args.run_id,
                 report_path_arg=args.report_path,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
+            )
+        elif args.command == "run-provider":
+            payload = run_provider(
+                state_root=state_root,
+                run_id=args.run_id,
+                adapter_id=args.adapter_id,
+                timeout_seconds=args.timeout_seconds,
+                fake_provider_mode=args.fake_provider_mode,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "verify-completion":

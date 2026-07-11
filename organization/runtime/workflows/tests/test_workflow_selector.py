@@ -144,6 +144,37 @@ def test_registry_gate_profiles_and_active_templates() -> None:
             assert gate_id in template["mandatory_gates"], f"{entry['workflow_id']} missing {gate_id}"
 
 
+def test_registry_provider_adapters_are_data_driven() -> None:
+    registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    adapters = {item["provider_adapter_id"]: item for item in registry["provider_adapters"]}
+    assert_equal(
+        set(adapters),
+        {
+            "claude_headless_p0",
+            "codex_cli_openai_p0",
+            "hermes_agent_oneshot_p0",
+            "cursor_cli_p0",
+            "grok_build_cli_candidate_p0",
+        },
+        "provider adapter ids",
+    )
+    assert_equal(adapters["hermes_agent_oneshot_p0"]["bridge_pattern"], "oneshot", "Hermes bridge")
+    assert_equal(
+        adapters["hermes_agent_oneshot_p0"]["surface_metadata"]["async_callback_supported"],
+        False,
+        "Hermes async callback claim",
+    )
+    assert_equal(
+        registry["grok_model_routing"]["candidate_provider_adapter_ids"],
+        [
+            "hermes_agent_oneshot_p0",
+            "grok_build_cli_candidate_p0",
+            "cursor_cli_p0",
+        ],
+        "Grok candidate routing",
+    )
+
+
 def test_single_step_external_review_template() -> None:
     template = json.loads(
         (TEMPLATE_ROOT / "single_step_external_review.yaml").read_text(encoding="utf-8")
@@ -714,6 +745,7 @@ def main() -> None:
     tests = [
         test_contract_validation,
         test_registry_gate_profiles_and_active_templates,
+        test_registry_provider_adapters_are_data_driven,
         test_single_step_external_review_template,
         test_selector_external_review,
         test_selector_active_template_routes,

@@ -116,7 +116,7 @@ def test_group_separation_static() -> None:
     module = load_saihai_module()
     assert module.FRONTDOOR_COMMANDS & module.WORKFLOW_COMMANDS == set()
     assert module.FRONTDOOR_COMMANDS == {"propose", "approve", "status"}
-    assert module.WORKFLOW_COMMANDS == {"create-run", "drain", "validate-report"}
+    assert module.WORKFLOW_COMMANDS == {"create-run", "drain", "run-provider", "validate-report"}
 
     frontdoor_help = run_cli("frontdoor", "--help").stdout
     workflow_help = run_cli("workflow", "--help").stdout
@@ -320,6 +320,24 @@ def test_runtime_errors_use_json_contract() -> None:
         assert "Traceback" not in missing.stderr
 
 
+def test_workflow_run_provider_store_errors_use_blocked_json() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        missing = run_workflow(
+            Path(raw_tmp),
+            "run-provider",
+            "--run-id",
+            "run-missing",
+            "--fake-provider-mode",
+            "success",
+            check=False,
+        )
+        payload = load_payload(missing)
+        assert missing.returncode == 2
+        assert payload["decision"] == "blocked"
+        assert payload["reason"] == "run_not_found"
+        assert "Traceback" not in missing.stderr
+
+
 def main() -> None:
     tests = [
         test_group_separation_static,
@@ -332,6 +350,7 @@ def main() -> None:
         test_status_is_readonly,
         test_exit_code_convention,
         test_runtime_errors_use_json_contract,
+        test_workflow_run_provider_store_errors_use_blocked_json,
     ]
     for test in tests:
         test()

@@ -7,6 +7,7 @@
   "required": [
     "adapter_contract_version",
     "provider_adapter_id",
+    "provider_target",
     "transport",
     "sync_mode",
     "context_freshness",
@@ -22,6 +23,19 @@
       "const": "1"
     },
     "provider_adapter_id": {
+      "type": "string"
+    },
+    "provider_target": {
+      "type": "string",
+      "enum": [
+        "claude_headless",
+        "codex_cli_openai",
+        "hermes_agent",
+        "cursor_cli",
+        "grok_build_cli"
+      ]
+    },
+    "default_model": {
       "type": "string"
     },
     "transport": {
@@ -84,6 +98,23 @@
     },
     "report_authority": {
       "const": "typed_report_and_evidence_file"
+    },
+    "bridge_pattern": {
+      "type": "string",
+      "enum": [
+        "none",
+        "oneshot",
+        "mcp"
+      ]
+    },
+    "surface_metadata": {
+      "type": "object"
+    },
+    "command_argv": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     }
   },
   "additionalProperties": false

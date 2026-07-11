@@ -223,5 +223,118 @@
       "tmux_pane_output",
       "provider_transcript"
     ]
+  },
+  "provider_adapters": [
+    {
+      "adapter_contract_version": "1",
+      "provider_adapter_id": "claude_headless_p0",
+      "provider_target": "claude_headless",
+      "default_model": "claude-sonnet-operator-selected",
+      "transport": "headless_cli",
+      "sync_mode": "sync",
+      "context_freshness": "fresh_process",
+      "concurrency_unit": "process",
+      "permission_enforcement": "harness",
+      "supports_structured_output": true,
+      "requires_marker": false,
+      "reset_strategy": "new_session",
+      "report_authority": "typed_report_and_evidence_file",
+      "bridge_pattern": "none",
+      "surface_metadata": {
+        "surface": "claude_headless_cli",
+        "async_callback_supported": false
+      }
+    },
+    {
+      "adapter_contract_version": "1",
+      "provider_adapter_id": "codex_cli_openai_p0",
+      "provider_target": "codex_cli_openai",
+      "default_model": "operator-selected-openai",
+      "transport": "headless_cli",
+      "sync_mode": "sync",
+      "context_freshness": "fresh_process",
+      "concurrency_unit": "process",
+      "permission_enforcement": "harness",
+      "supports_structured_output": true,
+      "requires_marker": false,
+      "reset_strategy": "new_session",
+      "report_authority": "typed_report_and_evidence_file",
+      "bridge_pattern": "none",
+      "surface_metadata": {
+        "surface": "codex_cli",
+        "async_callback_supported": false
+      }
+    },
+    {
+      "adapter_contract_version": "1",
+      "provider_adapter_id": "hermes_agent_oneshot_p0",
+      "provider_target": "hermes_agent",
+      "default_model": "operator-selected-hermes",
+      "transport": "headless_cli",
+      "sync_mode": "sync",
+      "context_freshness": "fresh_process",
+      "concurrency_unit": "process",
+      "permission_enforcement": "harness",
+      "supports_structured_output": true,
+      "requires_marker": false,
+      "reset_strategy": "new_session",
+      "report_authority": "typed_report_and_evidence_file",
+      "bridge_pattern": "oneshot",
+      "surface_metadata": {
+        "surface": "hermes_agent_bridge",
+        "async_callback_supported": false,
+        "domain_ownership": "sahai"
+      }
+    },
+    {
+      "adapter_contract_version": "1",
+      "provider_adapter_id": "cursor_cli_p0",
+      "provider_target": "cursor_cli",
+      "default_model": "operator-selected-cursor",
+      "transport": "headless_cli",
+      "sync_mode": "sync",
+      "context_freshness": "fresh_process",
+      "concurrency_unit": "process",
+      "permission_enforcement": "harness",
+      "supports_structured_output": true,
+      "requires_marker": false,
+      "reset_strategy": "new_session",
+      "report_authority": "typed_report_and_evidence_file",
+      "bridge_pattern": "none",
+      "surface_metadata": {
+        "surface": "cursor_cli",
+        "async_callback_supported": false
+      }
+    },
+    {
+      "adapter_contract_version": "1",
+      "provider_adapter_id": "grok_build_cli_candidate_p0",
+      "provider_target": "grok_build_cli",
+      "default_model": "operator-selected-grok",
+      "transport": "headless_cli",
+      "sync_mode": "sync",
+      "context_freshness": "fresh_process",
+      "concurrency_unit": "process",
+      "permission_enforcement": "harness",
+      "supports_structured_output": true,
+      "requires_marker": false,
+      "reset_strategy": "new_session",
+      "report_authority": "typed_report_and_evidence_file",
+      "bridge_pattern": "none",
+      "surface_metadata": {
+        "surface": "grok_build_cli",
+        "async_callback_supported": false,
+        "routing_candidate_for": "grok"
+      }
+    }
+  ],
+  "grok_model_routing": {
+    "status": "data_driven_candidate_selection",
+    "candidate_provider_adapter_ids": [
+      "hermes_agent_oneshot_p0",
+      "grok_build_cli_candidate_p0",
+      "cursor_cli_p0"
+    ],
+    "runner_core_change_required_after_selection": false
   }
 }

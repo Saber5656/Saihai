@@ -90,6 +90,14 @@ def provider_transcript_path(state_root: Path, run_id: str, step_id: str) -> Pat
     return (
         state_paths(state_root)["provider_evidence"]
         / run_store.validate_artifact_id(run_id, "run_id")
+        / f"{run_store.validate_artifact_id(step_id, 'step_id')}-provider-transcript.json"
+    )
+
+
+def legacy_provider_transcript_path(state_root: Path, run_id: str, step_id: str) -> Path:
+    return (
+        state_paths(state_root)["provider_evidence"]
+        / run_store.validate_artifact_id(run_id, "run_id")
         / f"{run_store.validate_artifact_id(step_id, 'step_id')}-claude-transcript.json"
     )
 
@@ -325,17 +333,14 @@ def validate_provider_evidence(
     for field in ("provider", "effective_model", "provider_session_id", "transcript_path", "evidence_path"):
         if not isinstance(value.get(field), str) or not value.get(field):
             errors.append(f"provider_evidence.{field} must be non-empty string")
+    run_id = str(run.get("run_id") or "")
+    step_id = str(work_order.get("step_id") or "")
     expected_paths = {
-        "transcript_path": provider_transcript_path(
-            state_root,
-            str(run.get("run_id") or ""),
-            str(work_order.get("step_id") or ""),
-        ),
-        "evidence_path": provider_evidence_path(
-            state_root,
-            str(run.get("run_id") or ""),
-            str(work_order.get("step_id") or ""),
-        ),
+        "transcript_path": [
+            provider_transcript_path(state_root, run_id, step_id),
+            legacy_provider_transcript_path(state_root, run_id, step_id),
+        ],
+        "evidence_path": [provider_evidence_path(state_root, run_id, step_id)],
     }
     for field in ("transcript_path", "evidence_path"):
         path = Path(str(value.get(field, ""))).expanduser()
@@ -343,7 +348,7 @@ def validate_provider_evidence(
             errors.append(f"provider_evidence.{field} does not exist: {path}")
         if value.get(field) and not path_is_within(path, state_paths(state_root)["provider_evidence"]):
             errors.append(f"provider_evidence.{field} must stay under provider evidence state directory")
-        if value.get(field) and path.resolve() != expected_paths[field].resolve():
+        if value.get(field) and path.resolve() not in {expected.resolve() for expected in expected_paths[field]}:
             errors.append(f"provider_evidence.{field} must match current run evidence path")
     return errors
 
