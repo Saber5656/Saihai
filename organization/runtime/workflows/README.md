@@ -412,9 +412,10 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
   --adapter-id claude_headless_p0 \
   --fake-provider-mode success
 
-P0 runner は fake provider mode で adapter dispatch と evidence/report path を検証します。live
-`command_argv` adapter は harness-enforced readonly を sandbox/snapshot なしに保証しないため、
-sandbox/snapshot support が入るまで `provider_unavailable` として拒否します。
+The P0 runner uses fake provider mode to validate adapter dispatch and
+evidence/report paths. Live `command_argv` adapters are rejected as
+`provider_unavailable` until sandbox/snapshot support can enforce
+harness-owned readonly constraints.
 
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state validate-report \
   --run-id <run_id>
