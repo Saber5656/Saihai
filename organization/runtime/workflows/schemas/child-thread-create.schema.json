@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sahai.local/schemas/workflows/child-thread-create.schema.json",
+  "title": "Child Thread Create Request And Result",
+  "description": "Action-gateway contract for recording a validated child thread/worktree creation result. Main-agent bridge principals must not call this directly.",
+  "type": "object",
+  "required": [
+    "plan",
+    "result"
+  ],
+  "properties": {
+    "plan": {
+      "$ref": "child-thread-plan.schema.json"
+    },
+    "result": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "reused",
+            "pending"
+          ]
+        },
+        "thread_id": {
+          "type": "string"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "reused": {
+          "type": "boolean"
+        },
+        "pending_worktree_id": {
+          "type": "string"
+        },
+        "worktree_path": {
+          "type": "string"
+        },
+        "branch_name": {
+          "type": "string"
+        },
+        "instruction_ref": {
+          "type": "string"
+        },
+        "instruction_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "not": {
+    "anyOf": [
+      {
+        "required": [
+          "prompt"
+        ]
+      },
+      {
+        "required": [
+          "shell_command"
+        ]
+      },
+      {
+        "required": [
+          "git_command"
+        ]
+      },
+      {
+        "required": [
+          "principal_type"
+        ]
+      }
+    ]
+  },
+  "additionalProperties": false
+}
