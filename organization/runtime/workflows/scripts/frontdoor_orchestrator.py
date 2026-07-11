@@ -38,6 +38,7 @@ HTTP_CHANNEL_PRINCIPALS = {
     "operator": ("manual_operator", "http-operator", "local_http_channel"),
     "human_ui": ("human_operator", "human-ui", "local_http_channel"),
     "harness": ("harness_runner", "local-harness", "local_http_channel"),
+    "action_gateway": ("action_gateway_executor", "child-thread-gateway", "local_http_channel"),
 }
 EXECUTION_PRINCIPAL_TYPES = {
     "human_operator",
@@ -46,6 +47,7 @@ EXECUTION_PRINCIPAL_TYPES = {
     "orchestrator_start",
 }
 WORKFLOW_DEFINITION_PRINCIPAL_TYPES = {"human_deploy_review"}
+ACTION_GATEWAY_PRINCIPAL_TYPES = {"action_gateway_executor"}
 BRIDGE_REQUEST_KINDS = {"external_review_request", "orchestrator_status_request"}
 BRIDGE_ALLOWED_ACTIONS = ["submit_request", "read_projection", "ack_output"]
 BRIDGE_SUBMIT_ALLOWED_FIELDS = {
@@ -75,9 +77,16 @@ BRIDGE_FORBIDDEN_FIELDS = {
     "template",
     "work_order",
     "adapter_request",
+    "child_thread_create",
+    "child_thread_plan",
+    "create_thread",
+    "fork_thread",
+    "git_command",
     "report_path",
+    "shell_command",
     "evidence_path",
     "transcript_path",
+    "worktree_path",
     "token",
     "api_key",
     "secret",
@@ -401,6 +410,7 @@ def state_paths(state_root: Path) -> dict[str, Path]:
         "acks": state_root / "acks",
         "signing_keys": state_root / "principal-keys",
         "channel_tokens": state_root / "channel-tokens",
+        "child_thread_actions": state_root / "child-thread-actions",
     }
 
 
@@ -1042,6 +1052,417 @@ def idempotency_path(state_root: Path, key: str) -> Path:
     return state_paths(state_root)["idempotency"] / f"key-{digest}.json"
 
 
+def child_thread_idempotency_path(state_root: Path, key: str) -> Path:
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return state_paths(state_root)["child_thread_actions"] / "idempotency" / f"key-{digest}.json"
+
+
+def child_thread_action_path(state_root: Path, action_id: str) -> Path:
+    return state_paths(state_root)["child_thread_actions"] / f"{validate_artifact_id(action_id, 'action_id')}.json"
+
+
+def normalize_sha256_digest(value: Any, label: str) -> str:
+    text = str(value or "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", text):
+        raise FrontdoorError(f"{label} must be sha256:<64 lowercase hex>")
+    return text
+
+
+def validate_safe_branch_name(value: Any) -> str:
+    branch = str(value or "")
+    if not branch or branch.startswith(("-", "/", ".")) or branch.endswith(("/", ".")):
+        raise FrontdoorError("branch_name must be a non-empty safe git branch")
+    if any(part in {"", ".", ".."} for part in branch.split("/")):
+        raise FrontdoorError("branch_name cannot contain empty or traversal segments")
+    if any(marker in branch for marker in ("..", "\\", " ", "~", "^", ":", "?", "*", "[", "@{")):
+        raise FrontdoorError("branch_name contains unsupported characters")
+    return branch
+
+
+def normalize_issue_id(value: Any) -> str:
+    text = str(value or "")
+    if not re.fullmatch(r"#?[0-9]{1,10}", text):
+        raise FrontdoorError("issue_id must be a GitHub issue number")
+    return text.lstrip("#")
+
+
+def validate_child_thread_path(raw_path: Any, *, repo_root: Path, label: str, must_exist: bool = False) -> str:
+    text = str(raw_path or "")
+    if not text:
+        raise FrontdoorError(f"{label} must be non-empty")
+    if "\x00" in text:
+        raise FrontdoorError(f"{label} cannot contain NUL bytes")
+    candidate = Path(text).expanduser()
+    resolved = candidate if candidate.is_absolute() else repo_root / candidate
+    resolved = resolved.resolve(strict=False)
+    if not path_is_within(resolved, repo_root):
+        raise FrontdoorError(f"{label} must stay within repo_root")
+    if must_exist and not resolved.is_file():
+        raise FrontdoorError(f"{label} must exist as a file")
+    return str(resolved)
+
+
+def validate_child_pending_worktree_id(value: Any) -> str:
+    text = str(value or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", text):
+        raise FrontdoorError("pending_worktree_id must be an opaque safe identifier")
+    return text
+
+
+def validate_child_thread_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(plan, dict):
+        raise FrontdoorError("child_thread_plan must be object")
+    required = {
+        "task_id",
+        "issue_id",
+        "repo_full_name",
+        "repo_root",
+        "base_branch",
+        "branch_name",
+        "worktree_path",
+        "child_chat_kind",
+        "model_assignment",
+        "initial_instruction_ref",
+        "instruction_digest",
+        "idempotency_key",
+    }
+    missing = sorted(key for key in required if key not in plan)
+    if missing:
+        raise FrontdoorError("child_thread_plan missing fields:" + ",".join(missing))
+    allowed = required | {"issue_url", "instruction_ref_digest", "expected_pr_title"}
+    extra = sorted(set(plan) - allowed)
+    if extra:
+        raise FrontdoorError("child_thread_plan unexpected fields:" + ",".join(extra))
+    repo_full_name = str(plan["repo_full_name"])
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_full_name):
+        raise FrontdoorError("repo_full_name must be owner/repo")
+    repo_root = Path(str(plan["repo_root"])).expanduser().resolve(strict=False)
+    if repo_root.name != "Saihai" or not path_is_within(repo_root, REPO_ROOT.parent):
+        raise FrontdoorError("repo_root must identify the approved Saihai checkout family")
+    instruction_ref = validate_child_thread_path(
+        plan["initial_instruction_ref"],
+        repo_root=repo_root,
+        label="initial_instruction_ref",
+        must_exist=True,
+    )
+    instruction_digest = normalize_sha256_digest(plan["instruction_digest"], "instruction_digest")
+    if file_sha256(Path(instruction_ref)) != instruction_digest:
+        raise FrontdoorError("instruction_digest does not match initial_instruction_ref")
+    worktree_path = validate_child_thread_path(
+        plan["worktree_path"],
+        repo_root=repo_root,
+        label="worktree_path",
+    )
+    child_chat_kind = str(plan["child_chat_kind"])
+    if child_chat_kind not in {"create", "fork"}:
+        raise FrontdoorError("child_chat_kind must be create or fork")
+    model_assignment = plan["model_assignment"]
+    if not isinstance(model_assignment, dict):
+        raise FrontdoorError("model_assignment must be object")
+    model_surface = str(model_assignment.get("surface") or "")
+    model_id = str(model_assignment.get("model_id") or "")
+    if not model_surface or not model_id:
+        raise FrontdoorError("model_assignment.surface and model_assignment.model_id are required")
+    return {
+        "plan_version": "1",
+        "task_id": validate_artifact_id(str(plan["task_id"]), "task_id"),
+        "issue_id": normalize_issue_id(plan["issue_id"]),
+        "issue_url": str(
+            plan.get("issue_url")
+            or f"https://github.com/{repo_full_name}/issues/{normalize_issue_id(plan['issue_id'])}"
+        ),
+        "repo_full_name": repo_full_name,
+        "repo_root": str(repo_root),
+        "base_branch": validate_safe_branch_name(plan["base_branch"]),
+        "branch_name": validate_safe_branch_name(plan["branch_name"]),
+        "worktree_path": worktree_path,
+        "child_chat_kind": child_chat_kind,
+        "model_assignment": {
+            "surface": model_surface,
+            "model_id": model_id,
+            "reason": str(model_assignment.get("reason") or ""),
+        },
+        "initial_instruction_ref": instruction_ref,
+        "instruction_digest": instruction_digest,
+        "instruction_ref_digest": normalize_sha256_digest(
+            plan.get("instruction_ref_digest") or plan["instruction_digest"],
+            "instruction_ref_digest",
+        ),
+        "expected_pr_title": str(
+            plan.get("expected_pr_title") or f"[issue #{normalize_issue_id(plan['issue_id'])}] Implement child work"
+        ),
+        "idempotency_key": normalize_child_thread_idempotency_key(plan["idempotency_key"]),
+    }
+
+
+def normalize_child_thread_idempotency_key(value: Any) -> str:
+    text = str(value or "")
+    if not text.strip():
+        raise FrontdoorError("child_thread idempotency_key must be non-empty")
+    return text
+
+
+def child_thread_plan_digest(plan: dict[str, Any]) -> str:
+    material = {key: value for key, value in plan.items() if key != "idempotency_key"}
+    return "sha256:" + stable_digest(material)
+
+
+def child_thread_result_digest(result: dict[str, Any]) -> str:
+    return "sha256:" + stable_digest(result)
+
+
+def validate_child_thread_result(result: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise FrontdoorError("child_thread_result must be object")
+    allowed = {
+        "status",
+        "thread_id",
+        "host_id",
+        "created",
+        "reused",
+        "pending_worktree_id",
+        "worktree_path",
+        "branch_name",
+        "instruction_ref",
+        "instruction_digest",
+    }
+    extra = sorted(set(result) - allowed)
+    if extra:
+        raise FrontdoorError("child_thread_result unexpected fields:" + ",".join(extra))
+    status = str(result.get("status") or "")
+    if status not in {"created", "reused", "pending"}:
+        raise FrontdoorError("child_thread_result.status must be created, reused, or pending")
+    thread_id = str(result.get("thread_id") or "")
+    pending_worktree_id = str(result.get("pending_worktree_id") or "")
+    if status in {"created", "reused"} and not thread_id:
+        raise FrontdoorError("thread_id is required when child thread is created or reused")
+    if status == "pending" and not pending_worktree_id:
+        raise FrontdoorError("pending_worktree_id is required when child thread is pending")
+    if pending_worktree_id:
+        pending_worktree_id = validate_child_pending_worktree_id(pending_worktree_id)
+    worktree_path = str(result.get("worktree_path") or plan["worktree_path"])
+    if worktree_path != plan["worktree_path"]:
+        raise FrontdoorError("child_thread_result.worktree_path must match validated plan")
+    branch_name = str(result.get("branch_name") or plan["branch_name"])
+    if branch_name != plan["branch_name"]:
+        raise FrontdoorError("child_thread_result.branch_name must match validated plan")
+    instruction_digest = str(result.get("instruction_digest") or plan["instruction_digest"])
+    if instruction_digest != plan["instruction_digest"]:
+        raise FrontdoorError("child_thread_result.instruction_digest must match validated plan")
+    instruction_ref = str(result.get("instruction_ref") or plan["initial_instruction_ref"])
+    if instruction_ref != plan["initial_instruction_ref"]:
+        raise FrontdoorError("child_thread_result.instruction_ref must match validated plan")
+    created = result.get("created")
+    reused = result.get("reused")
+    if created is not None and not isinstance(created, bool):
+        raise FrontdoorError("child_thread_result.created must be boolean")
+    if reused is not None and not isinstance(reused, bool):
+        raise FrontdoorError("child_thread_result.reused must be boolean")
+    effective_created = created if created is not None else status == "created"
+    effective_reused = reused if reused is not None else status == "reused"
+    expected_created = status == "created"
+    expected_reused = status == "reused"
+    if effective_created is not expected_created:
+        raise FrontdoorError("child_thread_result.created must match status")
+    if effective_reused is not expected_reused:
+        raise FrontdoorError("child_thread_result.reused must match status")
+    return {
+        "status": status,
+        "thread_id": thread_id or None,
+        "host_id": str(result.get("host_id") or "") or None,
+        "created": effective_created,
+        "reused": effective_reused,
+        "pending_worktree_id": pending_worktree_id or None,
+        "worktree_path": worktree_path,
+        "branch_name": branch_name,
+        "instruction_ref": instruction_ref,
+        "instruction_digest": instruction_digest,
+    }
+
+
+def child_thread_redacted_summary(record: dict[str, Any]) -> dict[str, Any]:
+    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    worktree_path = str(plan.get("worktree_path") or "")
+    return {
+        "action_id": record.get("action_id"),
+        "issue_id": plan.get("issue_id"),
+        "repo_full_name": plan.get("repo_full_name"),
+        "branch_name": plan.get("branch_name"),
+        "child_chat_kind": plan.get("child_chat_kind"),
+        "status": result.get("status"),
+        "thread_id": result.get("thread_id"),
+        "host_id": result.get("host_id"),
+        "pending_worktree_id_digest": "sha256:" + stable_digest(result.get("pending_worktree_id") or ""),
+        "worktree_label": Path(worktree_path).name if worktree_path else None,
+        "worktree_path_digest": "sha256:" + stable_digest(worktree_path),
+        "instruction_digest": plan.get("instruction_digest"),
+        "plan_digest": record.get("plan_digest"),
+        "idempotency_replayed": bool(record.get("idempotency_replayed")),
+    }
+
+
+def list_child_thread_summaries(state_root: Path, task_id: str) -> list[dict[str, Any]]:
+    directory = state_paths(state_root)["child_thread_actions"]
+    if not directory.exists():
+        return []
+    summaries: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("child-thread-*.json")):
+        try:
+            record = read_json(path)
+        except FrontdoorError:
+            continue
+        plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+        if str(plan.get("task_id") or "") == task_id:
+            summaries.append(child_thread_redacted_summary(record))
+    return summaries
+
+
+def child_thread_create_action(
+    *,
+    state_root: Path,
+    plan: dict[str, Any],
+    result: dict[str, Any],
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    actor = principal or make_principal(
+        "action_gateway_executor",
+        "child-thread-gateway",
+        authn_method="local_cli",
+    )
+    normalized_plan = validate_child_thread_plan(plan)
+    plan_digest = child_thread_plan_digest(normalized_plan)
+    normalized_result = validate_child_thread_result(result, normalized_plan)
+    result_digest = child_thread_result_digest(normalized_result)
+    idempotency_key = normalized_plan["idempotency_key"]
+    idempotency_file = child_thread_idempotency_path(state_root, idempotency_key)
+    subject = {
+        "task_id": normalized_plan["task_id"],
+        "issue_id": normalized_plan["issue_id"],
+        "plan_digest": plan_digest,
+    }
+    signature = assert_allowed_principal(
+        state_root=state_root,
+        principal=actor,
+        allowed_types=ACTION_GATEWAY_PRINCIPAL_TYPES,
+        transition="child_thread_create",
+        subject=subject,
+        blocked_reason="child_thread_create requires action gateway executor",
+    )
+    if idempotency_file.exists():
+        replay = read_json(idempotency_file)
+        action_id = str(replay["action_id"])
+        record = read_json(child_thread_action_path(state_root, action_id))
+        replay_result_digest = replay.get("result_digest") or record.get("result_digest")
+        if not replay_result_digest and isinstance(record.get("result"), dict):
+            replay_result_digest = child_thread_result_digest(record["result"])
+        if replay.get("plan_digest") != plan_digest or replay_result_digest != result_digest:
+            append_audit_event(
+                state_root=state_root,
+                event_type="child_thread_create",
+                principal=actor,
+                subject=subject,
+                outcome="blocked",
+                details={"reason": "idempotency_conflict"},
+            )
+            raise FrontdoorError("idempotency conflict for child_thread_create")
+        record["idempotency_replayed"] = True
+        append_audit_event(
+            state_root=state_root,
+            event_type="child_thread_create",
+            principal=actor,
+            subject=subject,
+            outcome="replayed",
+            details={"action_id": action_id, "plan_digest": plan_digest},
+        )
+        return {
+            "schema_version": 1,
+            "decision": "ok",
+            "action_id": action_id,
+            "action_path": str(child_thread_action_path(state_root, action_id)),
+            "plan_digest": plan_digest,
+            "result_digest": result_digest,
+            "idempotency_replayed": True,
+            "child_thread": child_thread_redacted_summary(record),
+        }
+
+    action_id = "child-thread-" + stable_digest(
+        {
+            "plan_digest": plan_digest,
+            "result_digest": result_digest,
+        }
+    )[:20]
+    action_path = child_thread_action_path(state_root, action_id)
+    if action_path.exists():
+        existing = read_json(action_path)
+        if existing.get("plan_digest") != plan_digest or existing.get("result_digest") != result_digest:
+            append_audit_event(
+                state_root=state_root,
+                event_type="child_thread_create",
+                principal=actor,
+                subject=subject,
+                outcome="blocked",
+                details={"reason": "action_id_conflict", "action_id": action_id},
+            )
+            raise FrontdoorError("child_thread action_id conflict")
+    record = {
+        "action_version": "1",
+        "action_id": action_id,
+        "created_at": now_iso(),
+        "principal": redacted_principal(actor),
+        "plan_digest": plan_digest,
+        "result_digest": result_digest,
+        "plan": normalized_plan,
+        "result": normalized_result,
+        "authority": {
+            "orchestrator_role": "validated_action_plan_only",
+            "executor_principal_required": "action_gateway_executor",
+            "raw_thread_tools_exposed_to_main_agent": False,
+            "raw_shell_git_exposed_to_main_agent": False,
+            "instruction_authority": "artifact_ref_and_digest",
+        },
+        "signature": signature,
+    }
+    write_json(action_path, record)
+    write_json(
+        idempotency_file,
+        {
+            "idempotency_version": "1",
+            "idempotency_key": idempotency_key,
+            "action_id": action_id,
+            "plan_digest": plan_digest,
+            "result_digest": result_digest,
+            "created_at": record["created_at"],
+        },
+    )
+    append_audit_event(
+        state_root=state_root,
+        event_type="child_thread_create",
+        principal=actor,
+        subject=subject,
+        outcome="ok",
+        details={
+            "action_id": action_id,
+            "plan_digest": plan_digest,
+            "result_digest": result_digest,
+            "thread_id": normalized_result.get("thread_id"),
+            "pending_worktree_id_digest": "sha256:" + stable_digest(normalized_result.get("pending_worktree_id") or ""),
+            "created": normalized_result.get("created"),
+            "reused": normalized_result.get("reused"),
+        },
+    )
+    return {
+        "schema_version": 1,
+        "decision": "ok",
+        "action_id": action_id,
+        "action_path": str(action_path),
+        "plan_digest": plan_digest,
+        "result_digest": result_digest,
+        "idempotency_replayed": False,
+        "child_thread": child_thread_redacted_summary(record),
+    }
+
+
 def request_digest(payload: dict[str, Any]) -> str:
     material = {
         "task_id": payload.get("task_id"),
@@ -1368,6 +1789,10 @@ def build_bridge_projection(
             "refs_digest": "sha256:" + stable_digest(record.get("context_refs") or []),
         },
         "approval": redacted_approval_summary(record.get("approval")),
+        "child_thread_summaries": list_child_thread_summaries(
+            state_root,
+            str(record.get("task_id") or ""),
+        ),
         "redacted_fields": [
             "user_prompt",
             "request_path",
@@ -1379,6 +1804,9 @@ def build_bridge_projection(
             "transcript_path",
             "provider_session_id",
             "principal_keys",
+            "worktree_path",
+            "repo_root",
+            "initial_instruction_ref",
         ],
         "transition_effect": "none",
     }, record
@@ -2698,6 +3126,13 @@ def parser() -> argparse.ArgumentParser:
     bridge_ack.add_argument("--frontdoor", choices=["codex", "claude", "manual"], default="codex")
     bridge_ack.add_argument("--chat-session-id", default="")
 
+    child_thread = sub.add_parser("child-thread-create")
+    child_thread.add_argument("--plan-json", required=True)
+    child_thread.add_argument("--result-json", required=True)
+    child_thread.add_argument("--principal-type", default="action_gateway_executor")
+    child_thread.add_argument("--principal-id", default="child-thread-gateway")
+    child_thread.add_argument("--authn-method", default="local_cli")
+
     channel = sub.add_parser("channel-token")
     channel.add_argument("--channel", choices=sorted(HTTP_CHANNEL_PRINCIPALS), required=True)
     return parser
@@ -2842,6 +3277,13 @@ def main() -> None:
                 projection_digest=args.projection_digest,
                 frontdoor=args.frontdoor,
                 chat_session_id=args.chat_session_id,
+            )
+        elif args.command == "child-thread-create":
+            payload = child_thread_create_action(
+                state_root=state_root,
+                plan=load_json_arg(args.plan_json),
+                result=load_json_arg(args.result_json),
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "channel-token":
             token = channel_token(state_root, args.channel)

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sahai.local/schemas/workflows/child-thread-plan.schema.json",
+  "title": "Child Thread Plan",
+  "description": "Deterministic plan for an issue-scoped child thread/worktree action. This is a plan, not the side-effect executor.",
+  "type": "object",
+  "required": [
+    "task_id",
+    "issue_id",
+    "repo_full_name",
+    "repo_root",
+    "base_branch",
+    "branch_name",
+    "worktree_path",
+    "child_chat_kind",
+    "model_assignment",
+    "initial_instruction_ref",
+    "instruction_digest",
+    "idempotency_key"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    },
+    "issue_id": {
+      "type": "string",
+      "pattern": "^#?[0-9]{1,10}$"
+    },
+    "issue_url": {
+      "type": "string"
+    },
+    "repo_full_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "repo_root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base_branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "branch_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "worktree_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "child_chat_kind": {
+      "type": "string",
+      "enum": [
+        "create",
+        "fork"
+      ]
+    },
+    "model_assignment": {
+      "type": "object",
+      "required": [
+        "surface",
+        "model_id"
+      ],
+      "properties": {
+        "surface": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "initial_instruction_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "instruction_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "instruction_ref_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "expected_pr_title": {
+      "type": "string"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}

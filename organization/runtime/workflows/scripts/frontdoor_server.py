@@ -20,6 +20,7 @@ RUN_VERIFY_COMPLETION_RE = re.compile(r"^/orchestrator/runs/([^/]+)/verify-compl
 TASK_RUNS_RE = re.compile(r"^/orchestrator/tasks/([^/]+)/runs$")
 REQUEST_READ_RE = re.compile(r"^/frontdoor/requests/([^/]+)$")
 BRIDGE_PROJECTION_RE = re.compile(r"^/main-agent/projections/([^/]+)$")
+CHILD_THREAD_CREATE_PATH = "/action-gateway/child-thread-create"
 BODY_PRINCIPAL_FIELDS = {"principal_type", "principal_id", "authn_method"}
 MAX_BODY_BYTES = 2_000_000
 
@@ -681,6 +682,15 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 status = 200 if payload.get("decision") == "ok" else 400
                 self._send_json(payload, status)
+                return
+            if self.path == CHILD_THREAD_CREATE_PATH:
+                payload = frontdoor.child_thread_create_action(
+                    state_root=self.state_root,
+                    plan=body.get("plan") if isinstance(body.get("plan"), dict) else {},
+                    result=body.get("result") if isinstance(body.get("result"), dict) else {},
+                    principal=self._channel_principal(body, allowed_channels={"action_gateway"}),
+                )
+                self._send_json(payload)
                 return
             self._send_json({"schema_version": 1, "decision": "blocked", "reason": "not_found"}, 404)
         except KeyError as exc:

@@ -35,6 +35,7 @@ typed report / evidence gate です。
 | Workflow run | approved request から durable `runs/<run_id>.json` を作り、`drain` で bounded work order を作る |
 | Report validation | typed report と normalized provider evidence が canonical result。stdout、provider transcript、tmux pane output は signal only |
 | Main-agent bridge | main agent は request submit、redacted projection read、ack だけが可能。classification、approval、run 作成、adapter 準備、report path 指定は拒否される |
+| Child-thread action gateway | issue-scoped child worktree chat は `child-thread-create` action gateway で記録する。main-agent は raw `create_thread` / `fork_thread` / shell / git 権限を持たず、projection の redacted summary だけを読む |
 | Status viewer | ITB session state、queue inbox、reports、role metadata、organization settings を read-only に表示する |
 
 ## 明示的な非スコープ
@@ -169,6 +170,7 @@ python3 scripts/configure_organization.py workflow-frontdoor --help
 | `bridge-submit-request` | main-agent bridge から request を submit する |
 | `bridge-read-projection` | redacted orchestrator projection を読む |
 | `bridge-ack-output` | projection digest 一致時だけ inert ack を記録する |
+| `child-thread-create` | action gateway executor が検証済み child-thread plan と作成/再利用結果を記録する |
 | `channel-token` | local HTTP channel token を生成する |
 
 default state root は `~/.codex/state/itb/frontdoor-orchestrator` です。
@@ -192,6 +194,7 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
 | `POST /main-agent/submit-request` | bridge request submit |
 | `GET /main-agent/projections/{request_id}` | redacted projection read |
 | `POST /main-agent/ack-output` | verified no-op acknowledgement |
+| `POST /action-gateway/child-thread-create` | validated child-thread plan/result の記録。`action_gateway` channel 専用 |
 | `POST /frontdoor/propose` | operator proposal |
 | `POST /frontdoor/approve` | human UI approval |
 | `POST /orchestrator/runs` | create workflow run |

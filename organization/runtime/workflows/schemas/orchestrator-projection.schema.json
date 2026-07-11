@@ -196,6 +196,113 @@
         }
       },
       "additionalProperties": false
+    },
+    "child_thread_summary": {
+      "type": "object",
+      "required": [
+        "action_id",
+        "issue_id",
+        "repo_full_name",
+        "branch_name",
+        "child_chat_kind",
+        "status",
+        "worktree_label",
+        "worktree_path_digest",
+        "instruction_digest",
+        "plan_digest",
+        "idempotency_replayed"
+      ],
+      "properties": {
+        "action_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issue_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo_full_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "branch_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "child_chat_kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "create",
+            "fork",
+            null
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "created",
+            "reused",
+            "pending",
+            null
+          ]
+        },
+        "thread_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pending_worktree_id_digest": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "worktree_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worktree_path_digest": {
+          "type": "string",
+          "pattern": "^sha256:"
+        },
+        "instruction_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plan_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idempotency_replayed": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "required": [
@@ -306,6 +413,12 @@
           "type": "null"
         }
       ]
+    },
+    "child_thread_summaries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/child_thread_summary"
+      }
     },
     "redacted_fields": {
       "type": "array",

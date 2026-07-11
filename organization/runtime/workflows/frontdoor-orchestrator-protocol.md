@@ -26,6 +26,7 @@ side effects.
 | Component | Authority | May Use LLM | Writes Durable State |
 |---|---|---:|---:|
 | Main-agent bridge | Submits typed request, reads projection, acks output | No | Request and ack only |
+| Action gateway | Executes validated side-effect actions such as child thread creation | No | Action evidence only |
 | Human UI | Shows orchestrator-owned approval challenge and captures human approval | No | No |
 | Frontdoor service | Validates typed input, calls selector, creates activation envelope | Optional bounded classifier step only | Yes |
 | Deterministic selector | Maps typed classification to workflow decision | No | No |
@@ -82,6 +83,7 @@ side effects.
 | Workflow definitions are deploy-owned | Bridge and ordinary execution principals cannot edit workflow templates, gates, steps, or `max_steps` |
 | Bridge projection is redacted | Main-agent reads do not expose raw prompt, internal absolute paths, credentials, work-order paths, report paths, or provider sessions |
 | `ack_output` is inert | Ack writes an acknowledgement/audit event only and has `transition_effect = none` |
+| Child chat spawning is gateway-owned | Main-agent can see redacted child-thread summaries only; `child-thread-create` requires the `action_gateway_executor` principal |
 | Idempotency is required | Bridge submit uses idempotency key + request digest; conflicting replays are rejected |
 | Execution principal is verified | Execution-class transitions require a signed non-bridge principal |
 | No unbounded context sharing | `raw_transcript_sharing = forbidden` |
@@ -119,6 +121,11 @@ POST /main-agent/ack-output
   input: X-Orchestrator-Channel=bridge, request_id, projection_digest
   output: acknowledgement with transition_effect = none
 
+POST /action-gateway/child-thread-create
+  input: X-Orchestrator-Channel=action_gateway, child-thread-plan, child-thread-create result
+  forbidden: raw prompt text, shell_command, git_command, request-body principal fields
+  output: durable child-thread action evidence and redacted summary
+
 POST /frontdoor/propose
   input: X-Orchestrator-Channel=operator, user_prompt, selected_context_refs, typed_classification
   output: proposed activation envelope or blocked/waiting_human reason
@@ -149,6 +156,7 @@ POST /provider/reports/validate
 | `POST /main-agent/submit-request` | `workflow-frontdoor bridge-submit-request` | Implemented |
 | `GET /main-agent/projections/{request_id}` | `workflow-frontdoor bridge-read-projection` | Implemented |
 | `POST /main-agent/ack-output` | `workflow-frontdoor bridge-ack-output` | Implemented |
+| `POST /action-gateway/child-thread-create` | `workflow-frontdoor child-thread-create` | Implemented |
 | `POST /frontdoor/propose` | `workflow-frontdoor propose` | Implemented |
 | `POST /frontdoor/approve` | `workflow-frontdoor approve` | Implemented |
 | `POST /orchestrator/runs` | `workflow-frontdoor create-run` | Implemented |
@@ -166,6 +174,16 @@ then stamps `approved_by = human_ui_action`.
 Bridge output acknowledgement verifies `projection_digest` against the current
 redacted projection before writing an ack record. A mismatch is blocked and
 records only an audit event with `ack_verified = false`.
+
+Child-thread spawning is intentionally outside the bridge authority. The
+orchestrator may produce or store a deterministic `child-thread-plan`, but only
+the `action_gateway` channel can record `child-thread-create` evidence. The
+recorded result includes the created/reused thread id or pending worktree id,
+branch, worktree digest, instruction artifact ref/digest, executor principal,
+and idempotency replay status. Main-agent projections expose only redacted
+summaries and never expose raw worktree paths, repo roots, arbitrary prompts,
+shell commands, git commands, or raw Codex App `create_thread` / `fork_thread`
+tools.
 
 Raw request/run HTTP reads are not exposed to principal-less main-agent reads.
 The bridge projection is the supported main-agent read surface.
@@ -219,3 +237,8 @@ For edit-capable deterministic control, the next required contract is a
 host-owned action gateway that withholds write, shell, commit, push, network,
 and provider-dispatch tools from the LLM unless an approved work order grants
 that exact operation.
+
+The first narrow action gateway path is `child-thread-create`. It exists only
+for issue-scoped child worktree chat spawning and does not give the main-agent
+bridge general implementation, worktree, shell, git, or thread-control
+authority.
