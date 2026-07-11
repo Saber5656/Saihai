@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import http.client
 import importlib.util
 import os
@@ -155,6 +156,35 @@ def read_audit_events(state_root: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def sha256_text(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def child_thread_plan(state_root: Path, **overrides) -> dict:
+    instruction_ref = ROOT / "organization/runtime/workflows/README.md"
+    plan = {
+        "task_id": "TSK-child-thread",
+        "issue_id": "67",
+        "issue_url": "https://github.com/Saber5656/Saihai/issues/67",
+        "repo_full_name": "Saber5656/Saihai",
+        "repo_root": str(ROOT),
+        "base_branch": "origin/main",
+        "branch_name": "codex/issue-67-child-thread-create",
+        "worktree_path": str(ROOT / ".codex-project-worktrees/issue-67-child-thread-create/Saihai"),
+        "child_chat_kind": "fork",
+        "model_assignment": {
+            "surface": "codex_app",
+            "model_id": "gpt-5.6-terra",
+            "reason": "issue-scoped implementation worktree",
+        },
+        "initial_instruction_ref": str(instruction_ref),
+        "instruction_digest": sha256_text(instruction_ref.read_text(encoding="utf-8")),
+        "idempotency_key": "child-thread-key-67",
+    }
+    plan.update(overrides)
+    return plan
 
 
 def prepare_review_handoff(state_root: Path, *, request_id: str, run_id: str) -> dict:
@@ -2247,6 +2277,207 @@ def test_bridge_principal_cannot_execute_or_change_workflow_definitions() -> Non
                 ), "bridge principal must not own successful execution events"
 
 
+def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        plan = child_thread_plan(state_root)
+        result = {
+            "status": "created",
+            "thread_id": "thread-child-67",
+            "host_id": "host-local",
+            "worktree_path": plan["worktree_path"],
+            "branch_name": plan["branch_name"],
+            "instruction_ref": plan["initial_instruction_ref"],
+            "instruction_digest": plan["instruction_digest"],
+        }
+        created = load_payload(
+            run_frontdoor(
+                state_root,
+                "child-thread-create",
+                "--plan-json",
+                json.dumps(plan),
+                "--result-json",
+                json.dumps(result),
+            )
+        )
+        assert_equal(created["decision"], "ok", "child action decision")
+        assert_equal(created["idempotency_replayed"], False, "first child action replay")
+        assert_equal(created["child_thread"]["thread_id"], "thread-child-67", "child thread id")
+        assert_equal(created["child_thread"]["worktree_label"], "Saihai", "redacted worktree label")
+        assert "worktree_path" not in created["child_thread"], "projection summary must not expose absolute worktree path"
+        assert Path(created["action_path"]).exists(), "child action record should be durable"
+
+        replayed = load_payload(
+            run_frontdoor(
+                state_root,
+                "child-thread-create",
+                "--plan-json",
+                json.dumps(plan),
+                "--result-json",
+                json.dumps(result),
+            )
+        )
+        assert_equal(replayed["idempotency_replayed"], True, "child action replay")
+        assert_equal(replayed["action_id"], created["action_id"], "child action replay id")
+
+        conflict = dict(plan)
+        conflict["branch_name"] = "codex/issue-67-conflict"
+        blocked = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(conflict),
+            "--result-json",
+            json.dumps({**result, "branch_name": "codex/issue-67-conflict"}),
+            check=False,
+        )
+        assert_equal(blocked.returncode, 2, "child action conflict exit")
+        assert "idempotency conflict" in load_payload(blocked)["reason"]
+
+        projection_request = {
+            "task_id": plan["task_id"],
+            "request_id": "req-child-summary",
+            "request_kind": "orchestrator_status_request",
+            "prompt": "Show child worktree status",
+            "refs": ["organization/runtime/workflows/README.md"],
+            "idempotency_key": "summary-key",
+        }
+        projection = load_payload(
+            run_frontdoor(
+                state_root,
+                "bridge-submit-request",
+                "--task-id",
+                projection_request["task_id"],
+                "--request-id",
+                projection_request["request_id"],
+                "--request-kind",
+                projection_request["request_kind"],
+                "--prompt",
+                projection_request["prompt"],
+                "--ref",
+                projection_request["refs"][0],
+                "--idempotency-key",
+                projection_request["idempotency_key"],
+            )
+        )
+        summaries = projection["child_thread_summaries"]
+        assert_equal(len(summaries), 1, "projection child thread summary count")
+        assert_equal(summaries[0]["issue_id"], "67", "projection issue id")
+        assert_equal(summaries[0]["branch_name"], plan["branch_name"], "projection branch")
+        assert "worktree_path" not in summaries[0], "projection must redact worktree path value"
+        assert "repo_root" in projection["redacted_fields"], "repo root redaction marker"
+        assert "worktree_path" in projection["redacted_fields"], "worktree path redaction marker"
+
+
+def test_child_thread_create_blocks_bridge_and_arbitrary_paths() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        plan = child_thread_plan(state_root)
+        result = {
+            "status": "created",
+            "thread_id": "thread-child-67",
+            "worktree_path": plan["worktree_path"],
+            "branch_name": plan["branch_name"],
+            "instruction_ref": plan["initial_instruction_ref"],
+            "instruction_digest": plan["instruction_digest"],
+        }
+
+        bridge_cli = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(plan),
+            "--result-json",
+            json.dumps(result),
+            "--principal-type",
+            "main_agent_bridge",
+            "--principal-id",
+            "codex:thread",
+            check=False,
+        )
+        assert_equal(bridge_cli.returncode, 2, "bridge child action exit")
+        assert "child_thread_create requires action gateway executor" in load_payload(bridge_cli)["reason"]
+
+        unsafe_plan = dict(plan)
+        unsafe_plan["idempotency_key"] = "child-thread-key-unsafe"
+        unsafe_plan["worktree_path"] = "/tmp/outside-saihai-worktree"
+        unsafe = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(unsafe_plan),
+            "--result-json",
+            json.dumps({**result, "worktree_path": "/tmp/outside-saihai-worktree"}),
+            check=False,
+        )
+        assert_equal(unsafe.returncode, 2, "unsafe path exit")
+        assert "worktree_path must stay within repo_root" in load_payload(unsafe)["reason"]
+
+        frontdoor_module = load_server_module()
+        api = frontdoor_module.FrontdoorServer(("127.0.0.1", 0), frontdoor_module.Handler, state_root=state_root)
+        thread = threading.Thread(target=api.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{api.server_port}"
+        try:
+            bridge_headers = channel_headers(frontdoor_module, state_root, "bridge")
+            status, payload = http_json_response(
+                "POST",
+                base + "/action-gateway/child-thread-create",
+                {"plan": plan, "result": result},
+                bridge_headers,
+            )
+            assert_equal(status, 400, "bridge channel child action status")
+            assert "channel not allowed" in payload["reason"]
+
+            gateway_headers = channel_headers(frontdoor_module, state_root, "action_gateway")
+            status, payload = http_json_response(
+                "POST",
+                base + "/action-gateway/child-thread-create",
+                {
+                    "plan": {**plan, "idempotency_key": "child-thread-key-http"},
+                    "result": result,
+                },
+                gateway_headers,
+            )
+            assert_equal(status, 200, "gateway channel child action status")
+            assert_equal(payload["decision"], "ok", "gateway action decision")
+        finally:
+            api.shutdown()
+            thread.join(timeout=5)
+
+
+def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        frontdoor_module = load_server_module().frontdoor
+        payload = {
+            "task_id": "TSK-smuggle-child",
+            "request_id": "req-smuggle-child",
+            "request_kind": "orchestrator_status_request",
+            "prompt": "Spawn a child thread",
+            "refs": ["organization/runtime/workflows/README.md"],
+            "idempotency_key": "smuggle-child",
+            "child_thread_plan": child_thread_plan(state_root),
+            "create_thread": {"environment": {"type": "worktree"}},
+            "fork_thread": True,
+            "worktree_path": "/tmp/unsafe",
+            "shell_command": "git status",
+            "git_command": "git switch main",
+        }
+        try:
+            frontdoor_module.bridge_submit_request(state_root=state_root, payload=payload)
+        except frontdoor_module.FrontdoorError as exc:
+            reason = str(exc)
+            assert "forbidden_fields:" in reason, reason
+            assert "child_thread_plan" in reason, reason
+            assert "create_thread" in reason, reason
+            assert "fork_thread" in reason, reason
+            assert "shell_command" in reason, reason
+            assert "git_command" in reason, reason
+        else:
+            raise AssertionError("bridge should reject child-thread/raw tool smuggling")
+
+
 def main() -> None:
     tests = [
         test_channel_token_permissions_are_private,
@@ -2277,6 +2508,9 @@ def main() -> None:
         test_validate_report_rejects_malformed_findings,
         test_bridge_rejects_path_unsafe_ids_and_missing_refs,
         test_bridge_principal_cannot_execute_or_change_workflow_definitions,
+        test_child_thread_create_gateway_records_redacted_summary_and_replays,
+        test_child_thread_create_blocks_bridge_and_arbitrary_paths,
+        test_bridge_rejects_child_thread_and_raw_tool_smuggling,
     ]
     for test in tests:
         test()
