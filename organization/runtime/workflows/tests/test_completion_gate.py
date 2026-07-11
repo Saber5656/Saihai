@@ -233,6 +233,69 @@ def test_evidence_path_escape_blocks() -> None:
         assert "evidence_path_escape" in reason_classes(blocked)
 
 
+def test_tampered_report_digest_blocks() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        artifacts = prepare_terminal_run(state_root)
+        report = json.loads(artifacts["report_path"].read_text(encoding="utf-8"))
+        report["result"] = "findings"
+        report["findings"] = [
+            {
+                "finding_id": "finding-after-gate",
+                "severity": "low",
+                "status": "open",
+                "summary": "Tampered after report gate.",
+                "evidence_refs": ["post-gate-edit"],
+            }
+        ]
+        artifacts["report_path"].write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        blocked = verify(state_root, check=False)
+        assert "transition_artifact_mismatch" in reason_classes(blocked)
+        run = json.loads((state_root / "runs/run-completion.json").read_text(encoding="utf-8"))
+        assert "completion_verification" not in run
+
+
+def test_tampered_evidence_digest_blocks() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        artifacts = prepare_terminal_run(state_root)
+        evidence = json.loads(artifacts["evidence_path"].read_text(encoding="utf-8"))
+        evidence["usage"] = {"input_tokens": 999, "output_tokens": 1}
+        artifacts["evidence_path"].write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
+        blocked = verify(state_root, check=False)
+        assert "transition_artifact_mismatch" in reason_classes(blocked)
+
+
+def test_incomplete_provider_evidence_metadata_blocks() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        artifacts = prepare_terminal_run(state_root)
+        truncated = {
+            "evidence_version": "1",
+            "run_id": "run-completion",
+            "step_id": "review",
+        }
+        artifacts["evidence_path"].write_text(json.dumps(truncated, ensure_ascii=False) + "\n", encoding="utf-8")
+        blocked = verify(state_root, check=False)
+        assert "missing_provider_evidence" in reason_classes(blocked)
+
+
+def test_escaped_transcript_path_is_not_hashed() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        artifacts = prepare_terminal_run(state_root)
+        with tempfile.TemporaryDirectory() as outside_tmp:
+            escaped = Path(outside_tmp) / "outside-transcript.json"
+            escaped.write_text(json.dumps({"outside": True}) + "\n", encoding="utf-8")
+            report = json.loads(artifacts["report_path"].read_text(encoding="utf-8"))
+            report["provider_evidence"]["transcript_path"] = str(escaped)
+            artifacts["report_path"].write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+            blocked = verify(state_root, check=False)
+            classes = reason_classes(blocked)
+            assert "evidence_path_escape" in classes
+            assert "digest_mismatch" not in classes
+
+
 def test_digest_mismatch_blocks() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -301,12 +364,19 @@ def test_http_verify_completion_route() -> None:
                 f"http://127.0.0.1:{server.server_port}/orchestrator/runs/run-completion/verify-completion",
                 {"X-Orchestrator-Channel": "harness", "X-Orchestrator-Token": token},
             )
+            bad_status, bad_payload = http_json_response(
+                "GET",
+                f"http://127.0.0.1:{server.server_port}/orchestrator/runs/bad!/verify-completion",
+                {"X-Orchestrator-Channel": "harness", "X-Orchestrator-Token": token},
+            )
         finally:
             server.shutdown()
             thread.join(timeout=5)
             server.server_close()
         assert_equal(status, 200, "http status")
         assert_equal(payload["decision"], "complete", "http decision")
+        assert_equal(bad_status, 400, "invalid id http status")
+        assert_equal(bad_payload["decision"], "blocked", "invalid id decision")
 
 
 def run_all() -> None:
@@ -315,6 +385,10 @@ def run_all() -> None:
         test_non_terminal_blocks_without_annotation,
         test_missing_report_and_evidence_are_all_reported,
         test_evidence_path_escape_blocks,
+        test_tampered_report_digest_blocks,
+        test_tampered_evidence_digest_blocks,
+        test_incomplete_provider_evidence_metadata_blocks,
+        test_escaped_transcript_path_is_not_hashed,
         test_digest_mismatch_blocks,
         test_markdown_render_has_no_verbose_output,
         test_http_verify_completion_route,
