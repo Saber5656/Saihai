@@ -136,6 +136,36 @@ missing provider lease by resetting the work-order runner claim and moving the
 run back to `step_queued`. `abort` moves any non-terminal run to terminal
 `aborted`; terminal aborts replay without mutation.
 
+## Report Gate
+
+`scripts/report_gate.py` owns typed external-review report validation and the
+state transition from provider signal to canonical workflow result. The
+frontdoor `validate-report` command is a thin wrapper over this gate.
+
+| Outcome | Run transition | Canonical effect |
+|---|---|---|
+| `report_valid` | `validating -> complete` | `pass` or valid `findings` becomes the terminal workflow result. |
+| `report_invalid` | `validating -> failed` | Schema/evidence failures block completion with terminal `blocked / invalid_report`. |
+| `scope_violation` | `validating -> waiting_human` | Raw transcript leakage, evidence path escape, or cross-run identity mismatch requires human review. |
+| `provider_reported_blocked` | `validating -> waiting_human` | A schema-valid provider `blocked` result is treated as a human decision point, not terminal failure. |
+
+Every report-gate evaluation writes a normalized transition artifact:
+
+```text
+<state_root>/transitions/<run_id>/<seq>-report-gate.json
+```
+
+Invalid or scope-violating reports are preserved at the submitted report path
+and get an additional rejection artifact:
+
+```text
+<state_root>/reports/<run_id>/<step_id>-rejection-<n>.json
+```
+
+The gate never copies transcript content into shared run state. Provider
+evidence and transcript paths remain references under `provider-evidence/`;
+stdout and transcript payloads are still signal-only.
+
 ## Work Orders And Step Snapshots
 
 `drain` turns an approved run into a bounded work order for the current
