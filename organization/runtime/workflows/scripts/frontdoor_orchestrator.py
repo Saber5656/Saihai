@@ -23,6 +23,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import run_store
 import run_lock
 import run_lifecycle
+import completion_gate
 import report_gate
 import task_state_bridge
 import work_order_builder
@@ -2467,6 +2468,44 @@ def validate_report(
         raise FrontdoorError(str(exc)) from exc
 
 
+def verify_completion(
+    *,
+    state_root: Path,
+    run_id: str,
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
+    precheck_execution_principal(
+        state_root=state_root,
+        principal=actor,
+        transition="verify_completion",
+        subject={"run_id": run_id},
+    )
+    payload = completion_gate.verify_completion(
+        state_root,
+        run_id,
+        principal=actor,
+        annotate=True,
+    )
+    append_audit_event(
+        state_root=state_root,
+        event_type="verify_completion",
+        principal=actor,
+        subject={"run_id": run_id, "task_id": str(payload.get("task_id") or "")},
+        outcome="ok" if payload.get("decision") == "complete" else "blocked",
+        details={
+            "decision": payload.get("decision"),
+            "reasons": payload.get("reasons") or [],
+            "skipped": payload.get("skipped") or [],
+        },
+    )
+    return payload
+
+
+def render_vault_evidence_markdown(block: dict[str, Any]) -> str:
+    return completion_gate.render_vault_evidence_markdown(block)
+
+
 def validate_external_review_report(
     report: dict[str, Any],
     *,
@@ -2620,6 +2659,13 @@ def parser() -> argparse.ArgumentParser:
     report.add_argument("--principal-id", default="local-harness")
     report.add_argument("--authn-method", default="local_cli")
 
+    completion = sub.add_parser("verify-completion")
+    completion.add_argument("--run-id", required=True)
+    completion.add_argument("--format", choices=["json", "markdown"], default="json")
+    completion.add_argument("--principal-type", default="harness_runner")
+    completion.add_argument("--principal-id", default="local-harness")
+    completion.add_argument("--authn-method", default="local_cli")
+
     task = sub.add_parser("task-view")
     task.add_argument("--task-id", required=True)
     task.add_argument("--format", choices=["json"], default="json")
@@ -2749,6 +2795,15 @@ def main() -> None:
                 report_path_arg=args.report_path,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
+        elif args.command == "verify-completion":
+            payload = verify_completion(
+                state_root=state_root,
+                run_id=args.run_id,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
+            )
+            if args.format == "markdown" and payload.get("decision") == "complete":
+                print(render_vault_evidence_markdown(payload["evidence"]), end="")
+                return
         elif args.command == "task-view":
             payload = task_view(
                 state_root=state_root,
