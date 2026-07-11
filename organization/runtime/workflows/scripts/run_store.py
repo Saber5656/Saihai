@@ -150,6 +150,31 @@ def validate_run_record(run: Any) -> list[str]:
         errors.append("step_history must be a list")
     if "transitions" in run and not isinstance(run.get("transitions"), list):
         errors.append("transitions must be a list")
+    completion_verification = run.get("completion_verification")
+    if completion_verification is not None:
+        if not isinstance(completion_verification, dict):
+            errors.append("completion_verification must be a json object")
+        else:
+            required_completion_fields = {
+                "verified_at",
+                "decision",
+                "report_sha256",
+                "evidence_sha256",
+                "verifier",
+            }
+            missing_completion_fields = sorted(required_completion_fields - set(completion_verification))
+            errors.extend(
+                f"completion_verification.{field} is required"
+                for field in missing_completion_fields
+            )
+            if completion_verification.get("decision") != "complete":
+                errors.append("completion_verification.decision must be complete")
+            for field in ("report_sha256", "evidence_sha256"):
+                value = completion_verification.get(field)
+                if not isinstance(value, str) or not value.startswith("sha256:"):
+                    errors.append(f"completion_verification.{field} must start with sha256:")
+            if not isinstance(completion_verification.get("verifier"), dict):
+                errors.append("completion_verification.verifier must be a json object")
     if not isinstance(run.get("requester"), dict):
         errors.append("requester must be a json object")
 

@@ -16,6 +16,7 @@ RUN_ABORT_RE = re.compile(r"^/orchestrator/runs/([^/]+)/abort$")
 RUN_DRAIN_RE = re.compile(r"^/orchestrator/runs/([^/]+)/drain$")
 RUN_READ_RE = re.compile(r"^/orchestrator/runs/([^/]+)$")
 RUN_RESUME_RE = re.compile(r"^/orchestrator/runs/([^/]+)/resume$")
+RUN_VERIFY_COMPLETION_RE = re.compile(r"^/orchestrator/runs/([^/]+)/verify-completion$")
 TASK_RUNS_RE = re.compile(r"^/orchestrator/tasks/([^/]+)/runs$")
 REQUEST_READ_RE = re.compile(r"^/frontdoor/requests/([^/]+)$")
 BRIDGE_PROJECTION_RE = re.compile(r"^/main-agent/projections/([^/]+)$")
@@ -488,6 +489,17 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self._send_json(payload)
                 return
+            verify_completion_match = RUN_VERIFY_COMPLETION_RE.match(self.path)
+            if verify_completion_match:
+                principal = self._authenticated_channel_principal(allowed_channels={"operator", "harness"})
+                payload = frontdoor.verify_completion(
+                    state_root=self.state_root,
+                    run_id=unquote(verify_completion_match.group(1)),
+                    principal=principal,
+                )
+                status = 200 if payload.get("decision") == "complete" else 400
+                self._send_json(payload, status)
+                return
             request_match = REQUEST_READ_RE.match(self.path)
             if request_match:
                 self._send_json(
@@ -511,6 +523,36 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json({"schema_version": 1, "decision": "blocked", "reason": "not_found"}, 404)
+        except frontdoor.run_store.RunStoreError as exc:
+            self._send_json(
+                {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": exc.reason_class,
+                    "errors": exc.errors,
+                },
+                400,
+            )
+        except frontdoor.run_lock.LockContentionError as exc:
+            self._send_json(
+                {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": exc.reason_class,
+                    "owner": exc.owner,
+                },
+                409,
+            )
+        except frontdoor.run_lifecycle.LifecycleError as exc:
+            self._send_json(
+                {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": exc.reason_class,
+                    "errors": exc.errors,
+                },
+                400,
+            )
         except frontdoor.FrontdoorError as exc:
             self._send_json({"schema_version": 1, "decision": "blocked", "reason": str(exc)}, 400)
 
