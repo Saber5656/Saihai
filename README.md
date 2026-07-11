@@ -33,7 +33,7 @@ typed report / evidence gate です。
 | Frontdoor proposal | prompt 起点の request は `proposed` または `waiting_human` まで。`propose` は approved artifact や workflow run を作らない |
 | Approval | `approve` は proposal digest 由来の challenge id を要求する。approved envelope の `activation_source` は `human_ui` / `manual_cli` / `orchestrator-start` のみ。実行 principal は `human_operator` / `manual_operator` / `orchestrator_start` を許可し、Sahai CLI の `frontdoor approve` は `human_operator` / `human-ui` / `local_ui` を既定値にする |
 | Workflow run | approved request から durable `runs/<run_id>.json` を作り、`drain` で bounded work order を作る |
-| Provider runner | `run-provider` が validated work order と adapter descriptor から headless CLI provider を実行し、typed report と normalized provider evidence を書く。offline 検証は fake provider mode を使う |
+| Provider runner | `run-provider` が validated work order と adapter descriptor から fake headless provider を dispatch し、typed report と normalized provider evidence を書く。live `command_argv` adapter は sandbox/snapshot support が入るまで拒否する |
 | Report validation | typed report と normalized provider evidence が canonical result。stdout、provider transcript、tmux pane output は signal only |
 | Main-agent bridge | main agent は request submit、redacted projection read、ack だけが可能。classification、approval、run 作成、adapter 準備、report path 指定は拒否される |
 | Status viewer | ITB session state、queue inbox、reports、role metadata、organization settings を read-only に表示する |
@@ -42,7 +42,7 @@ typed report / evidence gate です。
 
 | 非スコープ | 理由 |
 |---|---|
-| live provider credential setup | runner は provider descriptor から headless CLI を呼び出せるが、credential 生成・登録・検査は operator 側の手動設定に限定する |
+| live provider credential setup | runner は provider descriptor を読めるが、live `command_argv` 実行は sandbox/snapshot support が入るまで拒否する。credential 生成・登録・検査は operator 側の手動設定に限定する |
 | tmux worker execution | `tmux_interactive` は compatibility model として残るが、この repo の P0 実行 path では使わない |
 | daemon / LaunchAgent | 現在の scheduler は invocation-drain、durable state、concurrency 1 |
 | commit / push / PR automation | publication は別 gate。P0 workflow は publish を直接実行しない |
@@ -147,7 +147,8 @@ python3 scripts/configure_organization.py validate-all
 
 この検証は stdlib の self-runner test、workflow contract validation、Python
 compile check をまとめて実行し、最後に summary JSON を1行出力します。子プロセスでは
-`SAIHAI_ALLOW_LIVE_PROVIDERS` を空にして、live provider token や network 前提に依存しません。
+`SAIHAI_ALLOW_LIVE_PROVIDERS` を空にして、live provider token や network 前提に依存しません。P0 runner は live
+`command_argv` adapter を sandbox/snapshot support が入るまで拒否し、fake provider mode だけで検証します。
 
 ## Frontdoor Harness
 
@@ -168,7 +169,7 @@ python3 scripts/configure_organization.py workflow-frontdoor --help
 | `drain` | run から work order を作る |
 | `adapter-capability` | provider adapter capability descriptor を出す |
 | `prepare-claude-adapter` | bounded Claude adapter request、prompt、report/evidence/transcript path を作る |
-| `run-provider` | validated work order と provider adapter descriptor から headless provider を実行し、normalized evidence と typed report を書いて report gate に渡す |
+| `run-provider` | validated work order と provider adapter descriptor から fake headless provider を実行し、normalized evidence と typed report を書いて report gate に渡す。live `command_argv` adapter は sandbox/snapshot support まで拒否する |
 | `validate-report` | typed report と evidence を検証して run を terminal state へ進める |
 | `bridge-submit-request` | main-agent bridge から request を submit する |
 | `bridge-read-projection` | redacted orchestrator projection を読む |
