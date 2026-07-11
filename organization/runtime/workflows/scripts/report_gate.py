@@ -90,7 +90,7 @@ def provider_transcript_path(state_root: Path, run_id: str, step_id: str) -> Pat
     return (
         state_paths(state_root)["provider_evidence"]
         / run_store.validate_artifact_id(run_id, "run_id")
-        / f"{run_store.validate_artifact_id(step_id, 'step_id')}-claude-transcript.json"
+        / f"{run_store.validate_artifact_id(step_id, 'step_id')}-provider-transcript.json"
     )
 
 

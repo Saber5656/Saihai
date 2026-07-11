@@ -116,7 +116,7 @@ def test_group_separation_static() -> None:
     module = load_saihai_module()
     assert module.FRONTDOOR_COMMANDS & module.WORKFLOW_COMMANDS == set()
     assert module.FRONTDOOR_COMMANDS == {"propose", "approve", "status"}
-    assert module.WORKFLOW_COMMANDS == {"create-run", "drain", "validate-report"}
+    assert module.WORKFLOW_COMMANDS == {"create-run", "drain", "run-provider", "validate-report"}
 
     frontdoor_help = run_cli("frontdoor", "--help").stdout
     workflow_help = run_cli("workflow", "--help").stdout
