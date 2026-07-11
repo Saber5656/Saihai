@@ -240,6 +240,14 @@ Viewer API:
 | `GET /api/workflow-run?session=<id>&run=<id>` | workflow-run detail、work order、report、provider evidence、transition metadata を read-only に返す |
 | `GET /api/workflow-lock` | orchestrator state root ごとの global workflow lock 状態を read-only に返す |
 
+Viewer UI:
+
+| Panel | 表示内容 | 境界 |
+|---|---|---|
+| Organization Control | organization mode / hook policy / prompt decision | read-only status と `/api/decide` の判定のみ |
+| Team board | session ごとの role cards、inbox、latest report、provider evidence | role detail は既存 queue/report の thin view |
+| Workflow Runs | run list、state badge、lock banner、work order / report / evidence / transition detail | read-only。provider 実行、config 変更、state mutation は行わない |
+
 Viewer の status 判定:
 
 | status | 条件 |
