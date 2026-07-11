@@ -660,6 +660,7 @@ def gate_report(
                 "report_path": str(path),
                 "report_sha256": report_digest,
                 "evidence_path": evidence_path,
+                "evidence_sha256": file_sha256(Path(evidence_path)) if evidence_path and Path(evidence_path).exists() else None,
                 "occurred_at": now_iso(),
                 "principal": run_lifecycle.redacted_principal(actor),
             }

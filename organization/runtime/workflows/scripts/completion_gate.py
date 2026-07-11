@@ -15,6 +15,18 @@ import run_lock
 import run_store
 import work_order_builder
 
+REQUIRED_EVIDENCE_FIELDS = {
+    "evidence_version",
+    "provider",
+    "effective_model",
+    "provider_request_id",
+    "provider_session_id",
+    "run_id",
+    "step_id",
+    "duration_ms",
+    "usage",
+}
+
 
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
@@ -105,27 +117,87 @@ def _verify_snapshot(
         )
 
 
-def _transition_artifact_complete(state_root: Path, run_id: str, skipped: list[str]) -> bool:
+def _approved_transition_artifact(state_root: Path, run_id: str, skipped: list[str]) -> dict[str, Any] | None:
     directory = state_paths(state_root)["transitions"] / run_id
     if not directory.exists():
         skipped.append("transition")
-        return True
+        return {}
     artifacts = sorted(directory.glob("*.json"))
     if not artifacts:
         skipped.append("transition")
-        return True
+        return {}
     for path in artifacts:
         try:
             payload = read_json(path)
         except (OSError, ValueError, json.JSONDecodeError):
             continue
         if payload.get("outcome") == "report_valid" and payload.get("to_state") == "complete":
-            return True
-    return False
+            payload["_transition_artifact_path"] = str(path)
+            return payload
+    return None
+
+
+def _verify_approved_transition_binding(
+    *,
+    transition_artifact: dict[str, Any] | None,
+    report_path: Path,
+    evidence_path: Path | None,
+    reasons: list[dict[str, str]],
+) -> None:
+    if transition_artifact is None:
+        reasons.append(reason("missing_transition_artifact", "no report_valid transition artifact found"))
+        return
+    if not transition_artifact:
+        return
+    approved_report_path = Path(str(transition_artifact.get("report_path") or "")).expanduser()
+    if approved_report_path.resolve() != report_path.resolve():
+        reasons.append(
+            reason(
+                "transition_artifact_mismatch",
+                f"report_path differs from report-gate artifact {transition_artifact.get('_transition_artifact_path')}",
+            )
+        )
+    approved_report_sha = transition_artifact.get("report_sha256")
+    current_report_sha = file_sha256(report_path)
+    if approved_report_sha != current_report_sha:
+        reasons.append(
+            reason(
+                "transition_artifact_mismatch",
+                f"report_sha256 differs from report gate: expected {approved_report_sha!r}, found {current_report_sha}",
+            )
+        )
+    approved_evidence_raw = transition_artifact.get("evidence_path")
+    if evidence_path is not None and approved_evidence_raw:
+        approved_evidence_path = Path(str(approved_evidence_raw)).expanduser()
+        if approved_evidence_path.resolve() != evidence_path.resolve():
+            reasons.append(
+                reason(
+                    "transition_artifact_mismatch",
+                    f"evidence_path differs from report-gate artifact {transition_artifact.get('_transition_artifact_path')}",
+                )
+            )
+    approved_evidence_sha = transition_artifact.get("evidence_sha256")
+    if evidence_path is not None and evidence_path.exists() and not approved_evidence_sha:
+        reasons.append(
+            reason(
+                "transition_artifact_mismatch",
+                f"evidence_sha256 missing from report-gate artifact {transition_artifact.get('_transition_artifact_path')}",
+            )
+        )
+    if evidence_path is not None and evidence_path.exists() and approved_evidence_sha:
+        current_evidence_sha = file_sha256(evidence_path)
+        if approved_evidence_sha != current_evidence_sha:
+            reasons.append(
+                reason(
+                    "transition_artifact_mismatch",
+                    f"evidence_sha256 differs from report gate: expected {approved_evidence_sha!r}, found {current_evidence_sha}",
+                )
+            )
 
 
 def _verify_evidence_digest(
     *,
+    state_root: Path,
     evidence: dict[str, Any] | None,
     report: dict[str, Any] | None,
     reasons: list[dict[str, str]],
@@ -143,6 +215,9 @@ def _verify_evidence_digest(
         reasons.append(reason("digest_mismatch", "stdout_sha256 is present but transcript_path is missing"))
         return
     transcript_path = Path(transcript_raw).expanduser()
+    if not path_is_within(transcript_path, state_root):
+        reasons.append(reason("evidence_path_escape", f"transcript_path escapes state root: {transcript_path}"))
+        return
     if not transcript_path.exists():
         reasons.append(reason("digest_mismatch", f"transcript file missing: {transcript_path}"))
         return
@@ -153,8 +228,17 @@ def _verify_evidence_digest(
 
 def _evidence_identity_errors(evidence: dict[str, Any], *, run: dict[str, Any], step_id: str) -> list[str]:
     errors: list[str] = []
+    missing = sorted(REQUIRED_EVIDENCE_FIELDS - set(evidence))
+    errors.extend(f"evidence missing:{field}" for field in missing)
     if evidence.get("evidence_version") != "1":
         errors.append("evidence_version must be '1'")
+    for field in ("provider", "effective_model", "provider_request_id", "provider_session_id"):
+        if not isinstance(evidence.get(field), str) or not evidence.get(field):
+            errors.append(f"evidence.{field} must be a non-empty string")
+    if not isinstance(evidence.get("usage"), dict):
+        errors.append("evidence.usage must be a json object")
+    if not isinstance(evidence.get("duration_ms"), int | float) or isinstance(evidence.get("duration_ms"), bool):
+        errors.append("evidence.duration_ms must be a number")
     for field in ("run_id", "step_id"):
         expected = str(run.get(field) if field != "step_id" else step_id)
         if str(evidence.get(field) or "") != expected:
@@ -248,6 +332,7 @@ def verify_completion(
     skipped: list[str] = []
     report: dict[str, Any] | None = None
     evidence: dict[str, Any] | None = None
+    evidence_path: Path | None = None
     work_order: dict[str, Any] | None = None
 
     try:
@@ -341,10 +426,22 @@ def verify_completion(
                     if evidence is not None:
                         for item in _evidence_identity_errors(evidence, run=run, step_id=str(work_order.get("step_id") or "")):
                             reasons.append(reason("missing_provider_evidence", item))
-                    _verify_evidence_digest(evidence=evidence, report=report, reasons=reasons, skipped=skipped)
+                    _verify_evidence_digest(
+                        state_root=state_root,
+                        evidence=evidence,
+                        report=report,
+                        reasons=reasons,
+                        skipped=skipped,
+                    )
 
-            if not _transition_artifact_complete(state_root, run_id, skipped):
-                reasons.append(reason("missing_transition_artifact", "no report_valid transition artifact found"))
+            transition_artifact = _approved_transition_artifact(state_root, run_id, skipped)
+            if report is not None:
+                _verify_approved_transition_binding(
+                    transition_artifact=transition_artifact,
+                    report_path=report_file,
+                    evidence_path=evidence_path,
+                    reasons=reasons,
+                )
 
             if reasons:
                 return {
