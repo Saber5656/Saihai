@@ -433,6 +433,7 @@
             <option value="step_queued">step_queued</option>
             <option value="waiting_provider">waiting_provider</option>
             <option value="validating">validating</option>
+            <option value="remediating">remediating</option>
             <option value="waiting_human">waiting_human</option>
             <option value="complete">complete</option>
             <option value="failed">failed</option>
@@ -599,7 +600,9 @@ async function loadSessions() {
     sel.appendChild(opt);
   }
   if (data.sessions.length === 0) {
+    currentSession = null;
     $("board").innerHTML = '<div id="empty">ITB セッションが見つかりません</div>';
+    startWorkflowPolling();
     return;
   }
   if (prev && data.sessions.some(s => s.session_id === prev)) {
@@ -615,6 +618,7 @@ async function loadSessions() {
 $("session-select").addEventListener("change", (e) => {
   currentSession = e.target.value;
   closeDetail();
+  clearRunDetail();
   startOrgPolling();
   startWorkflowPolling();
 });
@@ -724,6 +728,21 @@ function startWorkflowPolling() {
   if (workflowTimer) clearInterval(workflowTimer);
   loadWorkflowRuns();
   workflowTimer = setInterval(loadWorkflowRuns, WORKFLOW_POLL_MS);
+}
+
+function clearRunDetail() {
+  selectedWorkflowRun = null;
+  const detail = $("wf-run-detail");
+  detail.hidden = true;
+  detail.innerHTML = "";
+  for (const row of $("wf-run-table-body").querySelectorAll("tr[data-run-id]")) {
+    row.classList.remove("selected");
+  }
+}
+
+function workflowFilterChanged() {
+  clearRunDetail();
+  loadWorkflowRuns();
 }
 
 function workflowError(message) {
@@ -971,8 +990,8 @@ async function loadRoleDetail() {
 $("d-close").addEventListener("click", closeDetail);
 $("d-refresh").addEventListener("click", loadRoleDetail);
 $("wf-refresh").addEventListener("click", loadWorkflowRuns);
-$("wf-state-filter").addEventListener("change", loadWorkflowRuns);
-$("wf-session-only").addEventListener("change", loadWorkflowRuns);
+$("wf-state-filter").addEventListener("change", workflowFilterChanged);
+$("wf-session-only").addEventListener("change", workflowFilterChanged);
 
 loadConfig();
 loadSessions();
