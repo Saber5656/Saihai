@@ -236,6 +236,9 @@ Viewer API:
 | `GET /api/role?session=<id>&role=<role_id>` | role metadata、inbox、latest report、provider evidence を返す |
 | `GET /api/config` | organization settings、role count、policy count、policy index を返す |
 | `GET /api/decide?prompt=<text>` | prompt を `fast` / `strict` / `maintenance` に判定する |
+| `GET /api/workflow-runs?session=<id>&task=<id>&state=<state>` | workflow-run の thin summary を read-only に列挙する |
+| `GET /api/workflow-run?session=<id>&run=<id>` | workflow-run detail、work order、report、provider evidence、transition metadata を read-only に返す |
+| `GET /api/workflow-lock` | orchestrator state root ごとの global workflow lock 状態を read-only に返す |
 
 Viewer の status 判定:
 
