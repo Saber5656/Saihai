@@ -1085,7 +1085,7 @@ def normalize_issue_id(value: Any) -> str:
     return text.lstrip("#")
 
 
-def validate_child_thread_path(raw_path: Any, *, repo_root: Path, label: str) -> str:
+def validate_child_thread_path(raw_path: Any, *, repo_root: Path, label: str, must_exist: bool = False) -> str:
     text = str(raw_path or "")
     if not text:
         raise FrontdoorError(f"{label} must be non-empty")
@@ -1096,7 +1096,16 @@ def validate_child_thread_path(raw_path: Any, *, repo_root: Path, label: str) ->
     resolved = resolved.resolve(strict=False)
     if not path_is_within(resolved, repo_root):
         raise FrontdoorError(f"{label} must stay within repo_root")
+    if must_exist and not resolved.is_file():
+        raise FrontdoorError(f"{label} must exist as a file")
     return str(resolved)
+
+
+def validate_child_pending_worktree_id(value: Any) -> str:
+    text = str(value or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", text):
+        raise FrontdoorError("pending_worktree_id must be an opaque safe identifier")
+    return text
 
 
 def validate_child_thread_plan(plan: dict[str, Any]) -> dict[str, Any]:
@@ -1133,7 +1142,11 @@ def validate_child_thread_plan(plan: dict[str, Any]) -> dict[str, Any]:
         plan["initial_instruction_ref"],
         repo_root=repo_root,
         label="initial_instruction_ref",
+        must_exist=True,
     )
+    instruction_digest = normalize_sha256_digest(plan["instruction_digest"], "instruction_digest")
+    if file_sha256(Path(instruction_ref)) != instruction_digest:
+        raise FrontdoorError("instruction_digest does not match initial_instruction_ref")
     worktree_path = validate_child_thread_path(
         plan["worktree_path"],
         repo_root=repo_root,
@@ -1169,7 +1182,7 @@ def validate_child_thread_plan(plan: dict[str, Any]) -> dict[str, Any]:
             "reason": str(model_assignment.get("reason") or ""),
         },
         "initial_instruction_ref": instruction_ref,
-        "instruction_digest": normalize_sha256_digest(plan["instruction_digest"], "instruction_digest"),
+        "instruction_digest": instruction_digest,
         "instruction_ref_digest": normalize_sha256_digest(
             plan.get("instruction_ref_digest") or plan["instruction_digest"],
             "instruction_ref_digest",
@@ -1177,13 +1190,24 @@ def validate_child_thread_plan(plan: dict[str, Any]) -> dict[str, Any]:
         "expected_pr_title": str(
             plan.get("expected_pr_title") or f"[issue #{normalize_issue_id(plan['issue_id'])}] Implement child work"
         ),
-        "idempotency_key": str(plan["idempotency_key"]),
+        "idempotency_key": normalize_child_thread_idempotency_key(plan["idempotency_key"]),
     }
+
+
+def normalize_child_thread_idempotency_key(value: Any) -> str:
+    text = str(value or "")
+    if not text.strip():
+        raise FrontdoorError("child_thread idempotency_key must be non-empty")
+    return text
 
 
 def child_thread_plan_digest(plan: dict[str, Any]) -> str:
     material = {key: value for key, value in plan.items() if key != "idempotency_key"}
     return "sha256:" + stable_digest(material)
+
+
+def child_thread_result_digest(result: dict[str, Any]) -> str:
+    return "sha256:" + stable_digest(result)
 
 
 def validate_child_thread_result(result: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
@@ -1213,6 +1237,8 @@ def validate_child_thread_result(result: dict[str, Any], plan: dict[str, Any]) -
         raise FrontdoorError("thread_id is required when child thread is created or reused")
     if status == "pending" and not pending_worktree_id:
         raise FrontdoorError("pending_worktree_id is required when child thread is pending")
+    if pending_worktree_id:
+        pending_worktree_id = validate_child_pending_worktree_id(pending_worktree_id)
     worktree_path = str(result.get("worktree_path") or plan["worktree_path"])
     if worktree_path != plan["worktree_path"]:
         raise FrontdoorError("child_thread_result.worktree_path must match validated plan")
@@ -1227,12 +1253,24 @@ def validate_child_thread_result(result: dict[str, Any], plan: dict[str, Any]) -
         raise FrontdoorError("child_thread_result.instruction_ref must match validated plan")
     created = result.get("created")
     reused = result.get("reused")
+    if created is not None and not isinstance(created, bool):
+        raise FrontdoorError("child_thread_result.created must be boolean")
+    if reused is not None and not isinstance(reused, bool):
+        raise FrontdoorError("child_thread_result.reused must be boolean")
+    effective_created = created if created is not None else status == "created"
+    effective_reused = reused if reused is not None else status == "reused"
+    expected_created = status == "created"
+    expected_reused = status == "reused"
+    if effective_created is not expected_created:
+        raise FrontdoorError("child_thread_result.created must match status")
+    if effective_reused is not expected_reused:
+        raise FrontdoorError("child_thread_result.reused must match status")
     return {
         "status": status,
         "thread_id": thread_id or None,
         "host_id": str(result.get("host_id") or "") or None,
-        "created": bool(created) if created is not None else status == "created",
-        "reused": bool(reused) if reused is not None else status == "reused",
+        "created": effective_created,
+        "reused": effective_reused,
         "pending_worktree_id": pending_worktree_id or None,
         "worktree_path": worktree_path,
         "branch_name": branch_name,
@@ -1254,7 +1292,7 @@ def child_thread_redacted_summary(record: dict[str, Any]) -> dict[str, Any]:
         "status": result.get("status"),
         "thread_id": result.get("thread_id"),
         "host_id": result.get("host_id"),
-        "pending_worktree_id": result.get("pending_worktree_id"),
+        "pending_worktree_id_digest": "sha256:" + stable_digest(result.get("pending_worktree_id") or ""),
         "worktree_label": Path(worktree_path).name if worktree_path else None,
         "worktree_path_digest": "sha256:" + stable_digest(worktree_path),
         "instruction_digest": plan.get("instruction_digest"),
@@ -1294,6 +1332,7 @@ def child_thread_create_action(
     normalized_plan = validate_child_thread_plan(plan)
     plan_digest = child_thread_plan_digest(normalized_plan)
     normalized_result = validate_child_thread_result(result, normalized_plan)
+    result_digest = child_thread_result_digest(normalized_result)
     idempotency_key = normalized_plan["idempotency_key"]
     idempotency_file = child_thread_idempotency_path(state_root, idempotency_key)
     subject = {
@@ -1311,7 +1350,12 @@ def child_thread_create_action(
     )
     if idempotency_file.exists():
         replay = read_json(idempotency_file)
-        if replay.get("plan_digest") != plan_digest:
+        action_id = str(replay["action_id"])
+        record = read_json(child_thread_action_path(state_root, action_id))
+        replay_result_digest = replay.get("result_digest") or record.get("result_digest")
+        if not replay_result_digest and isinstance(record.get("result"), dict):
+            replay_result_digest = child_thread_result_digest(record["result"])
+        if replay.get("plan_digest") != plan_digest or replay_result_digest != result_digest:
             append_audit_event(
                 state_root=state_root,
                 event_type="child_thread_create",
@@ -1321,8 +1365,6 @@ def child_thread_create_action(
                 details={"reason": "idempotency_conflict"},
             )
             raise FrontdoorError("idempotency conflict for child_thread_create")
-        action_id = str(replay["action_id"])
-        record = read_json(child_thread_action_path(state_root, action_id))
         record["idempotency_replayed"] = True
         append_audit_event(
             state_root=state_root,
@@ -1338,6 +1380,7 @@ def child_thread_create_action(
             "action_id": action_id,
             "action_path": str(child_thread_action_path(state_root, action_id)),
             "plan_digest": plan_digest,
+            "result_digest": result_digest,
             "idempotency_replayed": True,
             "child_thread": child_thread_redacted_summary(record),
         }
@@ -1345,16 +1388,29 @@ def child_thread_create_action(
     action_id = "child-thread-" + stable_digest(
         {
             "plan_digest": plan_digest,
-            "thread_id": normalized_result.get("thread_id"),
-            "pending_worktree_id": normalized_result.get("pending_worktree_id"),
+            "result_digest": result_digest,
         }
     )[:20]
+    action_path = child_thread_action_path(state_root, action_id)
+    if action_path.exists():
+        existing = read_json(action_path)
+        if existing.get("plan_digest") != plan_digest or existing.get("result_digest") != result_digest:
+            append_audit_event(
+                state_root=state_root,
+                event_type="child_thread_create",
+                principal=actor,
+                subject=subject,
+                outcome="blocked",
+                details={"reason": "action_id_conflict", "action_id": action_id},
+            )
+            raise FrontdoorError("child_thread action_id conflict")
     record = {
         "action_version": "1",
         "action_id": action_id,
         "created_at": now_iso(),
         "principal": redacted_principal(actor),
         "plan_digest": plan_digest,
+        "result_digest": result_digest,
         "plan": normalized_plan,
         "result": normalized_result,
         "authority": {
@@ -1366,7 +1422,6 @@ def child_thread_create_action(
         },
         "signature": signature,
     }
-    action_path = child_thread_action_path(state_root, action_id)
     write_json(action_path, record)
     write_json(
         idempotency_file,
@@ -1375,6 +1430,7 @@ def child_thread_create_action(
             "idempotency_key": idempotency_key,
             "action_id": action_id,
             "plan_digest": plan_digest,
+            "result_digest": result_digest,
             "created_at": record["created_at"],
         },
     )
@@ -1387,8 +1443,9 @@ def child_thread_create_action(
         details={
             "action_id": action_id,
             "plan_digest": plan_digest,
+            "result_digest": result_digest,
             "thread_id": normalized_result.get("thread_id"),
-            "pending_worktree_id": normalized_result.get("pending_worktree_id"),
+            "pending_worktree_id_digest": "sha256:" + stable_digest(normalized_result.get("pending_worktree_id") or ""),
             "created": normalized_result.get("created"),
             "reused": normalized_result.get("reused"),
         },
@@ -1399,6 +1456,7 @@ def child_thread_create_action(
         "action_id": action_id,
         "action_path": str(action_path),
         "plan_digest": plan_digest,
+        "result_digest": result_digest,
         "idempotency_replayed": False,
         "child_thread": child_thread_redacted_summary(record),
     }

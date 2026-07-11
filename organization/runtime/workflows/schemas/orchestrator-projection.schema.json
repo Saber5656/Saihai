@@ -272,11 +272,9 @@
             "null"
           ]
         },
-        "pending_worktree_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "pending_worktree_id_digest": {
+          "type": "string",
+          "pattern": "^sha256:"
         },
         "worktree_label": {
           "type": [
