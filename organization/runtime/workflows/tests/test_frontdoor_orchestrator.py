@@ -187,6 +187,42 @@ def child_thread_plan(state_root: Path, **overrides) -> dict:
     return plan
 
 
+def write_normalized_provider_evidence(
+    adapter_request: dict,
+    *,
+    request_id: str,
+    run_id: str,
+    provider_session_id: str = "",
+) -> dict:
+    evidence_path = Path(adapter_request["evidence_path"])
+    transcript_path = Path(adapter_request["transcript_path"])
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+    adapter = adapter_request["adapter"]
+    evidence = {
+        "evidence_version": "1",
+        "provider_adapter_id": adapter["provider_adapter_id"],
+        "provider_target": adapter["provider_target"],
+        "provider": adapter["provider_target"],
+        "effective_model": adapter.get("default_model") or "claude-sonnet-test",
+        "request_id": request_id,
+        "run_id": run_id,
+        "workflow_id": "single_step_external_review",
+        "step_id": "review",
+        "provider_request_id": f"provider-{request_id}",
+        "provider_session_id": provider_session_id or f"session-{run_id}",
+        "transcript_path": str(transcript_path),
+        "evidence_path": str(evidence_path),
+        "duration_ms": 12,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+        "outcome": "ok",
+        "raw_transcript_policy": "signal_only_not_shared",
+    }
+    evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
+    return evidence
+
+
 def prepare_review_handoff(state_root: Path, *, request_id: str, run_id: str) -> dict:
     proposed = load_payload(
         run_frontdoor(
@@ -224,8 +260,11 @@ def prepare_review_handoff(state_root: Path, *, request_id: str, run_id: str) ->
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    evidence_path.write_text(json.dumps({"normalized": True}) + "\n", encoding="utf-8")
-    transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+    write_normalized_provider_evidence(
+        adapter_request,
+        request_id=request_id,
+        run_id=run_id,
+    )
     return adapter_request
 
 
@@ -237,6 +276,7 @@ def external_review_report(
     result: str = "pass",
     findings: list[dict] | None = None,
 ) -> dict:
+    adapter = adapter_request["adapter"]
     return {
         "report_version": "1",
         "report_id": f"report-{run_id}",
@@ -247,8 +287,8 @@ def external_review_report(
         "result": result,
         "summary": "Review completed.",
         "provider_evidence": {
-            "provider": "claude",
-            "effective_model": "claude-sonnet-test",
+            "provider": adapter["provider_target"],
+            "effective_model": adapter.get("default_model") or "claude-sonnet-test",
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",
             "transcript_path": adapter_request["transcript_path"],
@@ -480,8 +520,13 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        evidence_path.write_text(json.dumps({"normalized": True}) + "\n", encoding="utf-8")
-        transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+        write_normalized_provider_evidence(
+            adapter_request,
+            request_id="req-frontdoor",
+            run_id="run-frontdoor",
+            provider_session_id="claude-session-test",
+        )
+        adapter = adapter_request["adapter"]
         report = {
             "report_version": "1",
             "report_id": "report-frontdoor",
@@ -492,8 +537,8 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "result": "pass",
             "summary": "No findings.",
             "provider_evidence": {
-                "provider": "claude",
-                "effective_model": "claude-sonnet-test",
+                "provider": adapter["provider_target"],
+                "effective_model": adapter.get("default_model") or "claude-sonnet-test",
                 "request_id": "req-frontdoor",
                 "provider_session_id": "claude-session-test",
                 "transcript_path": str(transcript_path),
@@ -763,8 +808,11 @@ def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        evidence_path.write_text(json.dumps({"normalized": True}) + "\n", encoding="utf-8")
-        transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+        write_normalized_provider_evidence(
+            adapter_request,
+            request_id="req-linked",
+            run_id="run-linked",
+        )
         report_path.write_text(
             json.dumps(
                 external_review_report(adapter_request, request_id="req-linked", run_id="run-linked"),

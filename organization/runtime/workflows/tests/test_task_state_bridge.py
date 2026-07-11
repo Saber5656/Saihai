@@ -21,6 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import frontdoor_orchestrator as frontdoor  # noqa: E402
+import provider_runner  # noqa: E402
 import task_state_bridge  # noqa: E402
 
 
@@ -107,6 +108,7 @@ def external_review_classification() -> dict:
 
 
 def provider_report(adapter_request: dict, *, request_id: str, run_id: str) -> dict:
+    adapter = adapter_request["adapter"]
     return {
         "report_version": "1",
         "report_id": f"report-{run_id}",
@@ -117,8 +119,8 @@ def provider_report(adapter_request: dict, *, request_id: str, run_id: str) -> d
         "result": "pass",
         "summary": "No findings.",
         "provider_evidence": {
-            "provider": "claude",
-            "effective_model": "claude-test",
+            "provider": adapter["provider_target"],
+            "effective_model": adapter.get("default_model") or "claude-test",
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",
             "transcript_path": adapter_request["transcript_path"],
@@ -354,9 +356,17 @@ def test_no_writes_into_queue_dirs() -> None:
             evidence_path = Path(adapter_request["evidence_path"])
             transcript_path = Path(adapter_request["transcript_path"])
             report_path = Path(adapter_request["report_path"])
-            write_json(evidence_path, {"normalized": True})
             write_json(transcript_path, {"signal_only": True})
-            write_json(report_path, provider_report(adapter_request, request_id="req-full", run_id="run-full"))
+            report = provider_report(adapter_request, request_id="req-full", run_id="run-full")
+            evidence = provider_runner.normalized_evidence(
+                request=adapter_request,
+                adapter=adapter_request["adapter"],
+                report=report,
+                outcome="ok",
+                details={"duration_ms": 12, "usage": {"input_tokens": 1, "output_tokens": 1}},
+            )
+            write_json(evidence_path, evidence)
+            write_json(report_path, report)
             validated = frontdoor.validate_report(state_root=state_root, run_id="run-full")
         finally:
             if old_env is None:

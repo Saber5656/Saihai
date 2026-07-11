@@ -205,6 +205,10 @@ def test_legacy_claude_transcript_path_is_accepted_for_inflight_requests() -> No
             run_id="run-legacy-transcript",
             provider_evidence={"transcript_path": str(legacy_transcript)},
         )
+        evidence_path = Path(adapter["evidence_path"])
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["transcript_path"] = str(legacy_transcript)
+        evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
 
         payload = load_payload(run_frontdoor(state_root, "validate-report", "--run-id", "run-legacy-transcript"))
         assert_equal(payload["outcome"], "report_valid", "legacy transcript outcome")

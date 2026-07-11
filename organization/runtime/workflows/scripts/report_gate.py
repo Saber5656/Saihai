@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import provider_evidence_contract
 import run_lifecycle
 import run_lock
 import run_store
@@ -300,6 +301,14 @@ def validate_external_review_report(
         errors.append("summary must be non-empty string")
 
     errors.extend(validate_provider_evidence(report.get("provider_evidence"), run, work_order, state_root))
+    errors.extend(
+        validate_normalized_provider_evidence_file(
+            report,
+            run=run,
+            work_order=work_order,
+            state_root=state_root,
+        )
+    )
     errors.extend(validate_findings(report.get("findings"), report.get("result")))
     errors.extend(validate_authority(report.get("authority")))
     return errors
@@ -351,6 +360,108 @@ def validate_provider_evidence(
         if value.get(field) and path.resolve() not in {expected.resolve() for expected in expected_paths[field]}:
             errors.append(f"provider_evidence.{field} must match current run evidence path")
     return errors
+
+
+def validate_normalized_provider_evidence(
+    value: Any,
+    *,
+    run: dict[str, Any],
+    work_order: dict[str, Any],
+    state_root: Path,
+    evidence_path: Path,
+    report_provider_evidence: dict[str, Any],
+) -> list[str]:
+    errors = provider_evidence_contract.validate_provider_evidence_schema(value)
+    if not isinstance(value, dict):
+        return errors
+
+    expected_identity = {
+        "request_id": str(run.get("request_id") or ""),
+        "run_id": str(run.get("run_id") or ""),
+        "workflow_id": str(run.get("workflow_id") or ""),
+        "step_id": str(work_order.get("step_id") or ""),
+    }
+    for field, expected in expected_identity.items():
+        if str(value.get(field) or "") != expected:
+            errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
+
+    for field in ("provider", "effective_model", "provider_session_id"):
+        expected = str(report_provider_evidence.get(field) or "")
+        if str(value.get(field) or "") != expected:
+            errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
+
+    expected_evidence_path = provider_evidence_path(
+        state_root,
+        expected_identity["run_id"],
+        expected_identity["step_id"],
+    )
+    if evidence_path.resolve() != expected_evidence_path.resolve():
+        errors.append("normalized_evidence path must match current run evidence path")
+    artifact_evidence_path = value.get("evidence_path")
+    if isinstance(artifact_evidence_path, str) and artifact_evidence_path:
+        if Path(artifact_evidence_path).expanduser().resolve() != evidence_path.resolve():
+            errors.append("normalized_evidence.evidence_path must reference its own artifact")
+
+    expected_transcript_paths = {
+        provider_transcript_path(
+            state_root,
+            expected_identity["run_id"],
+            expected_identity["step_id"],
+        ).resolve(),
+        legacy_provider_transcript_path(
+            state_root,
+            expected_identity["run_id"],
+            expected_identity["step_id"],
+        ).resolve(),
+    }
+    artifact_transcript_path = value.get("transcript_path")
+    report_transcript_path = report_provider_evidence.get("transcript_path")
+    if isinstance(artifact_transcript_path, str) and artifact_transcript_path:
+        transcript_path = Path(artifact_transcript_path).expanduser()
+        if transcript_path.resolve() not in expected_transcript_paths:
+            errors.append("normalized_evidence.transcript_path must match current run transcript path")
+        if not transcript_path.exists():
+            errors.append(f"normalized_evidence.transcript_path does not exist: {transcript_path}")
+        if (
+            isinstance(report_transcript_path, str)
+            and report_transcript_path
+            and transcript_path.resolve() != Path(report_transcript_path).expanduser().resolve()
+        ):
+            errors.append("normalized_evidence.transcript_path must match report provider_evidence")
+
+    if value.get("outcome") != "ok":
+        errors.append("normalized_evidence.outcome must be 'ok' for a valid report")
+    return list(dict.fromkeys(errors))
+
+
+def validate_normalized_provider_evidence_file(
+    report: dict[str, Any],
+    *,
+    run: dict[str, Any],
+    work_order: dict[str, Any],
+    state_root: Path,
+) -> list[str]:
+    report_provider_evidence = report.get("provider_evidence")
+    if not isinstance(report_provider_evidence, dict):
+        return []
+    raw_path = report_provider_evidence.get("evidence_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return []
+    path = Path(raw_path).expanduser()
+    if not path.exists() or not path_is_within(path, state_paths(state_root)["provider_evidence"]):
+        return []
+    try:
+        value = read_json(path)
+    except (ReportGateError, json.JSONDecodeError) as exc:
+        return [f"normalized_evidence unreadable: {exc}"]
+    return validate_normalized_provider_evidence(
+        value,
+        run=run,
+        work_order=work_order,
+        state_root=state_root,
+        evidence_path=path,
+        report_provider_evidence=report_provider_evidence,
+    )
 
 
 def validate_findings(value: Any, result: Any) -> list[str]:

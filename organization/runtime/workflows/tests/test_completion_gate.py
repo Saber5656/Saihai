@@ -74,7 +74,14 @@ def file_sha256(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def prepare_terminal_run(state_root: Path, *, run_id: str = "run-completion", request_id: str = "req-completion") -> dict:
+def prepare_terminal_run(
+    state_root: Path,
+    *,
+    run_id: str = "run-completion",
+    request_id: str = "req-completion",
+    evidence_mutator=None,
+    validation_check: bool = True,
+) -> dict:
     proposed = load_payload(
         run_frontdoor(
             state_root,
@@ -114,16 +121,26 @@ def prepare_terminal_run(state_root: Path, *, run_id: str = "run-completion", re
     transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
     evidence = {
         "evidence_version": "1",
-        "provider": "claude",
+        "provider_adapter_id": "claude_headless_p0",
+        "provider_target": "claude_headless",
+        "provider": "claude_headless",
         "effective_model": "claude-sonnet-test",
+        "request_id": request_id,
         "provider_request_id": f"provider-{request_id}",
         "provider_session_id": f"session-{run_id}",
         "run_id": run_id,
+        "workflow_id": "single_step_external_review",
         "step_id": "review",
+        "transcript_path": str(transcript_path),
+        "evidence_path": str(evidence_path),
         "duration_ms": 12,
         "usage": {"input_tokens": 1, "output_tokens": 1},
+        "outcome": "ok",
+        "raw_transcript_policy": "signal_only_not_shared",
         "stdout_sha256": file_sha256(transcript_path),
     }
+    if evidence_mutator is not None:
+        evidence_mutator(evidence)
     evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
     report = {
         "report_version": "1",
@@ -135,7 +152,7 @@ def prepare_terminal_run(state_root: Path, *, run_id: str = "run-completion", re
         "result": "pass",
         "summary": "Review completed.",
         "provider_evidence": {
-            "provider": "claude",
+            "provider": "claude_headless",
             "effective_model": "claude-sonnet-test",
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",
@@ -150,12 +167,21 @@ def prepare_terminal_run(state_root: Path, *, run_id: str = "run-completion", re
         },
     }
     report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
-    load_payload(run_frontdoor(state_root, "validate-report", "--run-id", run_id))
+    validation = load_payload(
+        run_frontdoor(
+            state_root,
+            "validate-report",
+            "--run-id",
+            run_id,
+            check=validation_check,
+        )
+    )
     return {
         "adapter": adapter,
         "report_path": report_path,
         "evidence_path": evidence_path,
         "transcript_path": transcript_path,
+        "validation": validation,
     }
 
 
@@ -277,7 +303,70 @@ def test_incomplete_provider_evidence_metadata_blocks() -> None:
         }
         artifacts["evidence_path"].write_text(json.dumps(truncated, ensure_ascii=False) + "\n", encoding="utf-8")
         blocked = verify(state_root, check=False)
-        assert "missing_provider_evidence" in reason_classes(blocked)
+        assert "invalid_provider_evidence" in reason_classes(blocked)
+
+
+def test_deprecated_provider_evidence_version_alias_blocks() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        artifacts = prepare_terminal_run(state_root)
+        evidence = json.loads(artifacts["evidence_path"].read_text(encoding="utf-8"))
+        evidence["provider_evidence_version"] = evidence.pop("evidence_version")
+        artifacts["evidence_path"].write_text(
+            json.dumps(evidence, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        blocked = verify(state_root, check=False)
+        assert "invalid_provider_evidence" in reason_classes(blocked)
+
+
+def test_schema_violations_block_before_transition_and_at_final_gate() -> None:
+    def add_alias(evidence: dict) -> None:
+        evidence["provider_evidence_version"] = "1"
+
+    def add_unknown(evidence: dict) -> None:
+        evidence["unexpected_field"] = "unexpected"
+
+    def add_raw_transcript(evidence: dict) -> None:
+        evidence["raw_transcript"] = "sensitive-provider-output"
+
+    def add_nested_stdout(evidence: dict) -> None:
+        evidence["usage"]["stdout"] = "sensitive-provider-output"
+
+    def add_nested_pane_output(evidence: dict) -> None:
+        evidence["surface_metadata"] = {"pane_output": "sensitive-provider-output"}
+
+    variants = (
+        ("canonical-plus-alias", add_alias, "provider_evidence_version"),
+        ("unknown-field", add_unknown, "unexpected_field"),
+        ("raw-transcript", add_raw_transcript, "forbidden_raw_provider_field:$.raw_transcript"),
+        ("nested-stdout", add_nested_stdout, "forbidden_raw_provider_field:$.usage.stdout"),
+        (
+            "nested-pane-output",
+            add_nested_pane_output,
+            "forbidden_raw_provider_field:$.surface_metadata.pane_output",
+        ),
+    )
+    for name, mutate, expected_error in variants:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = f"run-{name}"
+            artifacts = prepare_terminal_run(
+                state_root,
+                run_id=run_id,
+                request_id=f"req-{name}",
+                evidence_mutator=mutate,
+                validation_check=False,
+            )
+            validation = artifacts["validation"]
+            assert_equal(validation["decision"], "blocked", f"{name} report decision")
+            assert_equal(validation["outcome"], "report_invalid", f"{name} report outcome")
+            assert any(expected_error in item for item in validation["errors"]), (
+                f"{name} missing report-gate error: {validation['errors']}"
+            )
+            blocked = verify(state_root, run_id, check=False)
+            assert_equal(blocked["decision"], "blocked", f"{name} final decision")
+            assert "invalid_provider_evidence" in reason_classes(blocked)
 
 
 def test_escaped_transcript_path_is_not_hashed() -> None:
@@ -388,6 +477,8 @@ def run_all() -> None:
         test_tampered_report_digest_blocks,
         test_tampered_evidence_digest_blocks,
         test_incomplete_provider_evidence_metadata_blocks,
+        test_deprecated_provider_evidence_version_alias_blocks,
+        test_schema_violations_block_before_transition_and_at_final_gate,
         test_escaped_transcript_path_is_not_hashed,
         test_digest_mismatch_blocks,
         test_markdown_render_has_no_verbose_output,

@@ -410,7 +410,7 @@ def normalized_evidence(
     if not isinstance(report_evidence, dict):
         report_evidence = {}
     evidence = {
-        "provider_evidence_version": "1",
+        "evidence_version": "1",
         "provider_adapter_id": adapter["provider_adapter_id"],
         "provider_target": adapter["provider_target"],
         "provider": report_evidence.get("provider") or adapter["provider_target"],

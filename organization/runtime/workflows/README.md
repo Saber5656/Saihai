@@ -195,6 +195,25 @@ The gate never copies transcript content into shared run state. Provider
 evidence and transcript paths remain references under `provider-evidence/`;
 stdout and transcript payloads are still signal-only.
 
+Normalized provider evidence follows
+`schemas/provider-evidence.schema.json`. The report gate validates the
+artifact before accepting a typed report, and the completion gate validates it
+again before returning `decision: complete`. Both gates enforce
+`additionalProperties: false`, identity and canonical path bindings, and the
+signal-only raw-content policy.
+
+The canonical version field is `evidence_version: "1"`. Required traceability
+includes provider adapter/target, provider/model, request/run/workflow/step,
+provider request/session, transcript/evidence paths, duration/usage, outcome,
+and `raw_transcript_policy: "signal_only_not_shared"`. The deprecated
+`provider_evidence_version` alias, unknown fields, and raw transcript,
+stdout/stderr, prompt, provider-output, or pane-output fields are rejected,
+including when raw fields are nested inside otherwise open metadata objects.
+
+Pre-fix evidence artifacts are not silently migrated or rewritten. Rewriting a
+terminal run would break its report-gate digest binding. Preserve the old run
+for audit and create a new activation/run with the fixed provider runner.
+
 ## Final Gate And Vault Evidence
 
 `scripts/completion_gate.py` owns the final completion verification contract.
@@ -209,7 +228,7 @@ insufficient.
 | Run loads and is terminal `complete` / `complete` | `run_unloadable`, `run_not_terminal_complete` |
 | Work order and frozen snapshot still match | `missing_work_order`, `work_order_snapshot_mismatch` |
 | Typed report exists, revalidates, and matches run identity | `missing_typed_report`, `invalid_typed_report`, `report_identity_mismatch` |
-| Provider evidence exists, stays inside state root, and matches run/step | `missing_provider_evidence`, `evidence_path_escape` |
+| Provider evidence exists, matches its schema/identity/canonical paths, and stays inside state root | `missing_provider_evidence`, `invalid_provider_evidence`, `evidence_path_escape` |
 | Optional transcript digest still matches | `digest_mismatch` |
 | Report-gate transition artifact confirms `report_valid -> complete` | `missing_transition_artifact` |
 | Activation remains explicitly approved from a legal source | `activation_not_approved` |
