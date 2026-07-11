@@ -523,6 +523,36 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json({"schema_version": 1, "decision": "blocked", "reason": "not_found"}, 404)
+        except frontdoor.run_store.RunStoreError as exc:
+            self._send_json(
+                {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": exc.reason_class,
+                    "errors": exc.errors,
+                },
+                400,
+            )
+        except frontdoor.run_lock.LockContentionError as exc:
+            self._send_json(
+                {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": exc.reason_class,
+                    "owner": exc.owner,
+                },
+                409,
+            )
+        except frontdoor.run_lifecycle.LifecycleError as exc:
+            self._send_json(
+                {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": exc.reason_class,
+                    "errors": exc.errors,
+                },
+                400,
+            )
         except frontdoor.FrontdoorError as exc:
             self._send_json({"schema_version": 1, "decision": "blocked", "reason": str(exc)}, 400)
 
