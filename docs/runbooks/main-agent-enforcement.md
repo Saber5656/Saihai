@@ -48,6 +48,22 @@ The files were authored against Claude Code `2.1.172` and Codex CLI
 `0.141.0`. Re-check `claude --help`, `codex --help`, and the Codex manual when
 upgrading either tool.
 
+## Codex State-Root Policy
+
+Codex execpolicy rules do not interpret `"*"` as an argument wildcard. The
+frontend profile therefore auto-allows bridge commands for exactly two
+state-root forms:
+
+| Form | Behavior |
+|---|---|
+| No `--state-root` argument | Uses the runtime default `~/.codex/state/itb/frontdoor-orchestrator`; bridge submit/read/ack are allowed |
+| `--state-root /tmp/saihai-frontdoor-canary` | Uses the fixed disposable canary root; bridge submit/read/ack are allowed |
+
+Any other explicit state root is deliberately unmatched and falls through to
+the normal human ask/deny boundary. Do not add wildcard-like path tokens to the
+rules file. Operators that need another disposable root must use a normal
+maintenance session, not broaden the enforced frontend profile.
+
 ## Three-Tier Behavior
 
 | Tier | Behavior | Examples |
@@ -90,6 +106,7 @@ enforced.
   authority.
 - This profile does not allow direct proposal approval/status polling or broad
   sensitive file reads from frontend sessions.
+- This profile does not auto-approve arbitrary explicit state roots.
 - This profile does not prove that every future CLI version preserves the same
   settings semantics. Re-run static tests and canary checks after upgrades.
 - This profile does not replace PR review, final-gate checks, Vault evidence,
