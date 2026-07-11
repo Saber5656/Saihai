@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import http.client
 import importlib.util
 import os
@@ -155,6 +156,35 @@ def read_audit_events(state_root: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def sha256_text(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def child_thread_plan(state_root: Path, **overrides) -> dict:
+    instruction_ref = ROOT / "organization/runtime/workflows/README.md"
+    plan = {
+        "task_id": "TSK-child-thread",
+        "issue_id": "67",
+        "issue_url": "https://github.com/Saber5656/Saihai/issues/67",
+        "repo_full_name": "Saber5656/Saihai",
+        "repo_root": str(ROOT),
+        "base_branch": "origin/main",
+        "branch_name": "codex/issue-67-child-thread-create",
+        "worktree_path": str(ROOT / ".codex-project-worktrees/issue-67-child-thread-create/Saihai"),
+        "child_chat_kind": "fork",
+        "model_assignment": {
+            "surface": "codex_app",
+            "model_id": "gpt-5.6-terra",
+            "reason": "issue-scoped implementation worktree",
+        },
+        "initial_instruction_ref": str(instruction_ref),
+        "instruction_digest": sha256_text(instruction_ref.read_text(encoding="utf-8")),
+        "idempotency_key": "child-thread-key-67",
+    }
+    plan.update(overrides)
+    return plan
 
 
 def prepare_review_handoff(state_root: Path, *, request_id: str, run_id: str) -> dict:
@@ -2247,6 +2277,397 @@ def test_bridge_principal_cannot_execute_or_change_workflow_definitions() -> Non
                 ), "bridge principal must not own successful execution events"
 
 
+def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        plan = child_thread_plan(state_root)
+        result = {
+            "status": "created",
+            "thread_id": "thread-child-67",
+            "host_id": "host-local",
+            "worktree_path": plan["worktree_path"],
+            "branch_name": plan["branch_name"],
+            "instruction_ref": plan["initial_instruction_ref"],
+            "instruction_digest": plan["instruction_digest"],
+        }
+        created = load_payload(
+            run_frontdoor(
+                state_root,
+                "child-thread-create",
+                "--plan-json",
+                json.dumps(plan),
+                "--result-json",
+                json.dumps(result),
+            )
+        )
+        assert_equal(created["decision"], "ok", "child action decision")
+        assert_equal(created["idempotency_replayed"], False, "first child action replay")
+        assert created["result_digest"].startswith("sha256:"), "result digest missing"
+        assert_equal(created["child_thread"]["thread_id"], "thread-child-67", "child thread id")
+        assert_equal(created["child_thread"]["worktree_label"], "Saihai", "redacted worktree label")
+        assert "worktree_path" not in created["child_thread"], "projection summary must not expose absolute worktree path"
+        assert Path(created["action_path"]).exists(), "child action record should be durable"
+
+        replayed = load_payload(
+            run_frontdoor(
+                state_root,
+                "child-thread-create",
+                "--plan-json",
+                json.dumps(plan),
+                "--result-json",
+                json.dumps(result),
+            )
+        )
+        assert_equal(replayed["idempotency_replayed"], True, "child action replay")
+        assert_equal(replayed["action_id"], created["action_id"], "child action replay id")
+        assert_equal(replayed["result_digest"], created["result_digest"], "child action replay result digest")
+
+        same_plan_new_result = {
+            **result,
+            "thread_id": "thread-child-67-b",
+        }
+        second = load_payload(
+            run_frontdoor(
+                state_root,
+                "child-thread-create",
+                "--plan-json",
+                json.dumps({**plan, "idempotency_key": "child-thread-key-67-b"}),
+                "--result-json",
+                json.dumps(same_plan_new_result),
+            )
+        )
+        assert second["action_id"] != created["action_id"], "result digest should keep action ids unique"
+
+        conflict = dict(plan)
+        conflict["branch_name"] = "codex/issue-67-conflict"
+        blocked = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(conflict),
+            "--result-json",
+            json.dumps({**result, "branch_name": "codex/issue-67-conflict"}),
+            check=False,
+        )
+        assert_equal(blocked.returncode, 2, "child action conflict exit")
+        assert "idempotency conflict" in load_payload(blocked)["reason"]
+
+        replay_result_conflict = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(plan),
+            "--result-json",
+            json.dumps({**result, "thread_id": "thread-child-67-mutated"}),
+            check=False,
+        )
+        assert_equal(replay_result_conflict.returncode, 2, "child action replay result conflict exit")
+        assert "idempotency conflict" in load_payload(replay_result_conflict)["reason"]
+
+        projection_request = {
+            "task_id": plan["task_id"],
+            "request_id": "req-child-summary",
+            "request_kind": "orchestrator_status_request",
+            "prompt": "Show child worktree status",
+            "refs": ["organization/runtime/workflows/README.md"],
+            "idempotency_key": "summary-key",
+        }
+        projection = load_payload(
+            run_frontdoor(
+                state_root,
+                "bridge-submit-request",
+                "--task-id",
+                projection_request["task_id"],
+                "--request-id",
+                projection_request["request_id"],
+                "--request-kind",
+                projection_request["request_kind"],
+                "--prompt",
+                projection_request["prompt"],
+                "--ref",
+                projection_request["refs"][0],
+                "--idempotency-key",
+                projection_request["idempotency_key"],
+            )
+        )
+        summaries = projection["child_thread_summaries"]
+        assert_equal(len(summaries), 2, "projection child thread summary count")
+        summary = next(item for item in summaries if item["thread_id"] == "thread-child-67")
+        assert_equal(summary["issue_id"], "67", "projection issue id")
+        assert_equal(summary["branch_name"], plan["branch_name"], "projection branch")
+        assert "worktree_path" not in summary, "projection must redact worktree path value"
+        assert "pending_worktree_id" not in summary, "projection must redact pending worktree id value"
+        assert "repo_root" in projection["redacted_fields"], "repo root redaction marker"
+        assert "worktree_path" in projection["redacted_fields"], "worktree path redaction marker"
+
+
+def test_child_thread_create_blocks_bridge_and_arbitrary_paths() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        plan = child_thread_plan(state_root)
+        result = {
+            "status": "created",
+            "thread_id": "thread-child-67",
+            "worktree_path": plan["worktree_path"],
+            "branch_name": plan["branch_name"],
+            "instruction_ref": plan["initial_instruction_ref"],
+            "instruction_digest": plan["instruction_digest"],
+        }
+
+        bridge_cli = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(plan),
+            "--result-json",
+            json.dumps(result),
+            "--principal-type",
+            "main_agent_bridge",
+            "--principal-id",
+            "codex:thread",
+            check=False,
+        )
+        assert_equal(bridge_cli.returncode, 2, "bridge child action exit")
+        assert "child_thread_create requires action gateway executor" in load_payload(bridge_cli)["reason"]
+
+        unsafe_plan = dict(plan)
+        unsafe_plan["idempotency_key"] = "child-thread-key-unsafe"
+        unsafe_plan["worktree_path"] = "/tmp/outside-saihai-worktree"
+        unsafe = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(unsafe_plan),
+            "--result-json",
+            json.dumps({**result, "worktree_path": "/tmp/outside-saihai-worktree"}),
+            check=False,
+        )
+        assert_equal(unsafe.returncode, 2, "unsafe path exit")
+        assert "worktree_path must stay within repo_root" in load_payload(unsafe)["reason"]
+
+        frontdoor_module = load_server_module()
+        api = frontdoor_module.FrontdoorServer(("127.0.0.1", 0), frontdoor_module.Handler, state_root=state_root)
+        thread = threading.Thread(target=api.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{api.server_port}"
+        try:
+            bridge_headers = channel_headers(frontdoor_module, state_root, "bridge")
+            status, payload = http_json_response(
+                "POST",
+                base + "/action-gateway/child-thread-create",
+                {"plan": plan, "result": result},
+                bridge_headers,
+            )
+            assert_equal(status, 400, "bridge channel child action status")
+            assert "channel not allowed" in payload["reason"]
+
+            gateway_headers = channel_headers(frontdoor_module, state_root, "action_gateway")
+            status, payload = http_json_response(
+                "POST",
+                base + "/action-gateway/child-thread-create",
+                {
+                    "plan": {**plan, "idempotency_key": "child-thread-key-http"},
+                    "result": result,
+                },
+                gateway_headers,
+            )
+            assert_equal(status, 200, "gateway channel child action status")
+            assert_equal(payload["decision"], "ok", "gateway action decision")
+        finally:
+            api.shutdown()
+            thread.join(timeout=5)
+
+
+def test_child_thread_create_rejects_empty_idempotency_and_bad_result_flags() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        plan = child_thread_plan(state_root, idempotency_key="   ")
+        result = {
+            "status": "created",
+            "thread_id": "thread-child-67",
+            "worktree_path": plan["worktree_path"],
+            "branch_name": plan["branch_name"],
+            "instruction_ref": plan["initial_instruction_ref"],
+            "instruction_digest": plan["instruction_digest"],
+        }
+        empty_key = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(plan),
+            "--result-json",
+            json.dumps(result),
+            check=False,
+        )
+        assert_equal(empty_key.returncode, 2, "empty idempotency exit")
+        assert "idempotency_key must be non-empty" in load_payload(empty_key)["reason"]
+
+        valid_plan = child_thread_plan(state_root, idempotency_key="flag-key")
+        base_result = {
+            **result,
+            "worktree_path": valid_plan["worktree_path"],
+            "branch_name": valid_plan["branch_name"],
+            "instruction_ref": valid_plan["initial_instruction_ref"],
+            "instruction_digest": valid_plan["instruction_digest"],
+        }
+        non_boolean = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(valid_plan),
+            "--result-json",
+            json.dumps({**base_result, "created": "yes"}),
+            check=False,
+        )
+        assert_equal(non_boolean.returncode, 2, "non-boolean created exit")
+        assert "created must be boolean" in load_payload(non_boolean)["reason"]
+
+        mismatch_created = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(valid_plan),
+            "--result-json",
+            json.dumps({**base_result, "created": False}),
+            check=False,
+        )
+        assert_equal(mismatch_created.returncode, 2, "created mismatch exit")
+        assert "created must match status" in load_payload(mismatch_created)["reason"]
+
+        mismatch_reused = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(valid_plan),
+            "--result-json",
+            json.dumps({**base_result, "reused": True}),
+            check=False,
+        )
+        assert_equal(mismatch_reused.returncode, 2, "reused mismatch exit")
+        assert "reused must match status" in load_payload(mismatch_reused)["reason"]
+
+
+def test_child_thread_create_verifies_instruction_ref_and_redacts_pending_id() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        plan = child_thread_plan(state_root, idempotency_key="pending-key")
+        pending_result = {
+            "status": "pending",
+            "pending_worktree_id": "pending-abc-123",
+            "worktree_path": plan["worktree_path"],
+            "branch_name": plan["branch_name"],
+            "instruction_ref": plan["initial_instruction_ref"],
+            "instruction_digest": plan["instruction_digest"],
+        }
+        pending = load_payload(
+            run_frontdoor(
+                state_root,
+                "child-thread-create",
+                "--plan-json",
+                json.dumps(plan),
+                "--result-json",
+                json.dumps(pending_result),
+            )
+        )
+        assert_equal(pending["decision"], "ok", "pending child action")
+        assert "pending_worktree_id" not in pending["child_thread"], "pending id should be redacted"
+        assert pending["child_thread"]["pending_worktree_id_digest"].startswith("sha256:")
+
+        projection = load_payload(
+            run_frontdoor(
+                state_root,
+                "bridge-submit-request",
+                "--task-id",
+                plan["task_id"],
+                "--request-id",
+                "req-child-pending",
+                "--request-kind",
+                "orchestrator_status_request",
+                "--prompt",
+                "Show child worktree status",
+                "--ref",
+                "organization/runtime/workflows/README.md",
+                "--idempotency-key",
+                "pending-summary-key",
+            )
+        )
+        summary = projection["child_thread_summaries"][0]
+        assert "pending_worktree_id" not in summary
+        assert summary["pending_worktree_id_digest"].startswith("sha256:")
+
+        unsafe_pending = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(child_thread_plan(state_root, idempotency_key="pending-unsafe-key")),
+            "--result-json",
+            json.dumps({**pending_result, "pending_worktree_id": "/tmp/worktree-path"}),
+            check=False,
+        )
+        assert_equal(unsafe_pending.returncode, 2, "unsafe pending id exit")
+        assert "pending_worktree_id must be an opaque safe identifier" in load_payload(unsafe_pending)["reason"]
+
+        missing_ref = child_thread_plan(state_root, idempotency_key="missing-ref-key")
+        missing_ref["initial_instruction_ref"] = str(ROOT / "organization/runtime/workflows/missing-instruction.md")
+        missing = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(missing_ref),
+            "--result-json",
+            json.dumps({**pending_result, "instruction_ref": missing_ref["initial_instruction_ref"]}),
+            check=False,
+        )
+        assert_equal(missing.returncode, 2, "missing instruction ref exit")
+        assert "initial_instruction_ref must exist as a file" in load_payload(missing)["reason"]
+
+        bad_digest = child_thread_plan(state_root, idempotency_key="bad-digest-key")
+        bad_digest["instruction_digest"] = "sha256:" + "0" * 64
+        bad = run_frontdoor(
+            state_root,
+            "child-thread-create",
+            "--plan-json",
+            json.dumps(bad_digest),
+            "--result-json",
+            json.dumps({**pending_result, "instruction_digest": bad_digest["instruction_digest"]}),
+            check=False,
+        )
+        assert_equal(bad.returncode, 2, "bad instruction digest exit")
+        assert "instruction_digest does not match" in load_payload(bad)["reason"]
+
+
+def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        frontdoor_module = load_server_module().frontdoor
+        payload = {
+            "task_id": "TSK-smuggle-child",
+            "request_id": "req-smuggle-child",
+            "request_kind": "orchestrator_status_request",
+            "prompt": "Spawn a child thread",
+            "refs": ["organization/runtime/workflows/README.md"],
+            "idempotency_key": "smuggle-child",
+            "child_thread_plan": child_thread_plan(state_root),
+            "create_thread": {"environment": {"type": "worktree"}},
+            "fork_thread": True,
+            "worktree_path": "/tmp/unsafe",
+            "shell_command": "git status",
+            "git_command": "git switch main",
+        }
+        try:
+            frontdoor_module.bridge_submit_request(state_root=state_root, payload=payload)
+        except frontdoor_module.FrontdoorError as exc:
+            reason = str(exc)
+            assert "forbidden_fields:" in reason, reason
+            assert "child_thread_plan" in reason, reason
+            assert "create_thread" in reason, reason
+            assert "fork_thread" in reason, reason
+            assert "shell_command" in reason, reason
+            assert "git_command" in reason, reason
+        else:
+            raise AssertionError("bridge should reject child-thread/raw tool smuggling")
+
+
 def main() -> None:
     tests = [
         test_channel_token_permissions_are_private,
@@ -2277,6 +2698,11 @@ def main() -> None:
         test_validate_report_rejects_malformed_findings,
         test_bridge_rejects_path_unsafe_ids_and_missing_refs,
         test_bridge_principal_cannot_execute_or_change_workflow_definitions,
+        test_child_thread_create_gateway_records_redacted_summary_and_replays,
+        test_child_thread_create_blocks_bridge_and_arbitrary_paths,
+        test_child_thread_create_rejects_empty_idempotency_and_bad_result_flags,
+        test_child_thread_create_verifies_instruction_ref_and_redacts_pending_id,
+        test_bridge_rejects_child_thread_and_raw_tool_smuggling,
     ]
     for test in tests:
         test()

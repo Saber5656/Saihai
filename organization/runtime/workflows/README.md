@@ -195,6 +195,58 @@ The gate never copies transcript content into shared run state. Provider
 evidence and transcript paths remain references under `provider-evidence/`;
 stdout and transcript payloads are still signal-only.
 
+## Final Gate And Vault Evidence
+
+`scripts/completion_gate.py` owns the final completion verification contract.
+A workflow run may be treated as complete by strict-flow tooling ONLY when
+`verify-completion` returns decision `complete`. A terminal run record alone is
+insufficient.
+
+`verify-completion` re-checks the durable chain after `validate-report`:
+
+| Check | Blocked reason |
+|---|---|
+| Run loads and is terminal `complete` / `complete` | `run_unloadable`, `run_not_terminal_complete` |
+| Work order and frozen snapshot still match | `missing_work_order`, `work_order_snapshot_mismatch` |
+| Typed report exists, revalidates, and matches run identity | `missing_typed_report`, `invalid_typed_report`, `report_identity_mismatch` |
+| Provider evidence exists, stays inside state root, and matches run/step | `missing_provider_evidence`, `evidence_path_escape` |
+| Optional transcript digest still matches | `digest_mismatch` |
+| Report-gate transition artifact confirms `report_valid -> complete` | `missing_transition_artifact` |
+| Activation remains explicitly approved from a legal source | `activation_not_approved` |
+
+Snapshot, digest, and transition checks gracefully report `skipped` when that
+artifact kind is absent for the run. If the artifact kind exists and does not
+match, the gate blocks.
+
+On success, the gate writes a narrow `completion_verification` annotation into
+the already terminal run without changing `run_state`; blocked verifications
+never annotate. The Vault evidence block is intentionally thin and never copies
+raw transcript, prompt, instruction, stdout, or provider output content:
+
+| Gate-IO-Contract requirement | Orchestrator artifact satisfying it |
+|---|---|
+| Role Execution Evidence (role/result/usage source) | Vault evidence block: terminal status plus provider evidence metadata |
+| review evidence for task completion | typed report plus `verify-completion` decision |
+| Queue Evidence table row | `task-view` queue-shaped evidence |
+| Invocation Evidence (model/request/session ids) | normalized provider evidence fields |
+| Vault final update completion condition | `verification_decision == "complete"` plus evidence block in Task Detail |
+| finalization-check input | `verify-completion` JSON decision and reasons |
+
+Generate JSON for tooling:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state verify-completion \
+  --run-id <run_id>
+```
+
+Generate markdown for a Vault Task Detail:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state verify-completion \
+  --run-id <run_id> \
+  --format markdown
+```
+
 ## Work Orders And Step Snapshots
 
 `drain` turns an approved run into a bounded work order for the current
@@ -283,7 +335,8 @@ control:
 
 Commands from the target design whose backing implementations are not yet
 merged are intentionally absent from the parser. There are no dead stubs for
-`run-step`, `verify-completion`, or `list`. `resume`, `abort`, `task-view`, and
+`run-step` or `list`. `verify-completion` is available through the
+compatibility facade. `resume`, `abort`, `task-view`, and
 `lock-status` are currently exposed through the compatibility facade below
 until #19 re-exposes takt-style workflow commands.
 
@@ -470,8 +523,9 @@ validate report, inspect evidence, and recover or roll back stuck runs with
 The currently implemented workflow-frontdoor commands are `propose`, `approve`,
 `orchestrator-start-approve`, `manual-approve`, `create-run`, `drain`,
 `adapter-capability`, `prepare-claude-adapter`, `run-provider`,
-`validate-report`, `resume`, `abort`, `task-view`, `bridge-submit-request`,
-`bridge-read-projection`, `bridge-ack-output`, `channel-token`, and
+`validate-report`, `verify-completion`, `resume`,
+`abort`, `task-view`, `bridge-submit-request`, `bridge-read-projection`,
+`bridge-ack-output`, `channel-token`, and
 `lock-status`. Dedicated raw run detail and evidence inspection commands are
 still planned; the runbook uses canonical artifact inspection where needed.
 
@@ -533,6 +587,7 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
 | `POST /orchestrator/runs/{run_id}/drain` | Operator path for `workflow-frontdoor drain`; derives principal from authenticated `operator` channel headers |
 | `POST /orchestrator/runs/{run_id}/resume` | Operator path for `workflow-frontdoor resume`; derives principal from authenticated `operator` channel headers; body accepts `{"requeue": true}` |
 | `POST /orchestrator/runs/{run_id}/abort` | Operator path for `workflow-frontdoor abort`; derives principal from authenticated `operator` channel headers; body accepts `{"reason": "..."}` |
+| `GET /orchestrator/runs/{run_id}/verify-completion` | Operator or harness path for `workflow-frontdoor verify-completion`; returns JSON decision and Vault evidence block |
 | `GET /orchestrator/tasks/{task_id}/runs` | Operator path for derived `task-view`; returns thin run links and queue-shaped evidence without raw run state |
 | `POST /provider/claude/prepare` | Operator path for `workflow-frontdoor prepare-claude-adapter`; derives principal from authenticated `operator` channel headers |
 | `POST /provider/reports/validate` | Harness gate path for `workflow-frontdoor validate-report`; derives principal from authenticated `harness` channel headers |
