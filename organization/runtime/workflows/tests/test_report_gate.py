@@ -193,6 +193,24 @@ def test_evidence_path_escape_is_scope_violation() -> None:
         assert "evidence_path_escape" in payload["errors"]
 
 
+def test_legacy_claude_transcript_path_is_accepted_for_inflight_requests() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        adapter = prepare_review_handoff(state_root, request_id="req-legacy-transcript", run_id="run-legacy-transcript")
+        legacy_transcript = Path(adapter["transcript_path"]).with_name("review-claude-transcript.json")
+        legacy_transcript.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+        write_report(
+            adapter,
+            request_id="req-legacy-transcript",
+            run_id="run-legacy-transcript",
+            provider_evidence={"transcript_path": str(legacy_transcript)},
+        )
+
+        payload = load_payload(run_frontdoor(state_root, "validate-report", "--run-id", "run-legacy-transcript"))
+        assert_equal(payload["outcome"], "report_valid", "legacy transcript outcome")
+        assert_equal(payload["workflow_run"]["run_state"], "complete", "legacy transcript run state")
+
+
 def test_identity_mismatch_is_scope_violation() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -281,6 +299,7 @@ def main() -> None:
         test_transcript_leak_is_scope_violation,
         test_nested_transcript_leak_is_scope_violation,
         test_evidence_path_escape_is_scope_violation,
+        test_legacy_claude_transcript_path_is_accepted_for_inflight_requests,
         test_identity_mismatch_is_scope_violation,
         test_missing_identity_is_invalid_report,
         test_provider_blocked_waits_human,
