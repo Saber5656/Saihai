@@ -203,6 +203,20 @@ def test_runner_rejects_noncanonical_report_path_before_provider_output() -> Non
         assert not (state_root / "adapter-requests" / "run-provider-report-path").exists()
 
 
+def test_runner_reports_unreadable_work_order_as_blocked_json() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        prepare_run(state_root, request_id="req-provider-bad-order", run_id="run-provider-bad-order")
+        work_order_path = state_root / "work-orders" / "run-provider-bad-order" / "review.json"
+        work_order_path.write_text("{not-json\n", encoding="utf-8")
+
+        blocked = run_provider(state_root, run_id="run-provider-bad-order", check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "unreadable work order exit")
+        assert_equal(payload["decision"], "blocked", "unreadable work order decision")
+        assert "unreadable json:" in payload["reason"]
+
+
 def test_live_command_adapter_is_rejected_until_sandbox_support() -> None:
     outcome, report, details = provider_runner.execute_provider(
         request={"request_id": "req-live", "run_id": "run-live", "workflow_id": "single_step_external_review", "step_id": "review"},
@@ -213,6 +227,22 @@ def test_live_command_adapter_is_rejected_until_sandbox_support() -> None:
     assert_equal(outcome, "provider_unavailable", "live command outcome")
     assert report is None
     assert_equal(details["reason"], "live_command_adapter_requires_sandbox", "live command reason")
+
+
+def test_run_provider_step_honors_adapter_alias() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        prepare_run(state_root, request_id="req-provider-step-alias", run_id="run-provider-step-alias")
+
+        payload = provider_runner.run_provider_step(
+            state_root=state_root,
+            run_id="run-provider-step-alias",
+            adapter="cursor_cli_p0",
+        )
+
+        evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
+        assert_equal(evidence["provider_adapter_id"], "cursor_cli_p0", "adapter alias id")
+        assert_equal(evidence["provider_target"], "cursor_cli", "adapter alias target")
 
 
 def test_undecodable_provider_stdout_is_malformed_output() -> None:
@@ -231,7 +261,9 @@ if __name__ == "__main__":
         test_malformed_provider_output_fails_without_raw_stdout_in_run,
         test_run_provider_rejects_non_runnable_run_state,
         test_runner_rejects_noncanonical_report_path_before_provider_output,
+        test_runner_reports_unreadable_work_order_as_blocked_json,
         test_live_command_adapter_is_rejected_until_sandbox_support,
+        test_run_provider_step_honors_adapter_alias,
         test_undecodable_provider_stdout_is_malformed_output,
     )
     for test in tests:

@@ -69,8 +69,11 @@ def file_sha256(path: Path) -> str:
 
 
 def read_json(path: Path) -> dict[str, Any]:
-    with path.open(encoding="utf-8") as handle:
-        payload = json.load(handle)
+    try:
+        with path.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ProviderRunnerError(f"unreadable json: {path}") from exc
     if not isinstance(payload, dict):
         raise ProviderRunnerError(f"expected object json: {path}")
     return payload
@@ -647,7 +650,7 @@ def run_provider_step(
     *,
     state_root: Path,
     run_id: str,
-    adapter_id: str = DEFAULT_ADAPTER_ID,
+    adapter_id: str = "",
     adapter: str = "",
     timeout_seconds: int = 60,
     fake_provider_mode: str = "success",

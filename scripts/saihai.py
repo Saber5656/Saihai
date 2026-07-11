@@ -317,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         print_blocked(str(exc))
         return 2
 
+    run_store_error = frontdoor.run_store.RunStoreError
     try:
         payload = args.handler(frontdoor, args)
     except frontdoor.FrontdoorError as exc:
@@ -325,17 +326,15 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, KeyError, TypeError) as exc:
         print_blocked(str(exc))
         return 2
-    except Exception as exc:
-        if type(exc).__name__ == "RunStoreError":
-            payload = {
-                "schema_version": 1,
-                "decision": "blocked",
-                "reason": getattr(exc, "reason_class", str(exc)),
-                "errors": getattr(exc, "errors", []),
-            }
-            print_json(payload)
-            return 2
-        raise
+    except run_store_error as exc:
+        payload = {
+            "schema_version": 1,
+            "decision": "blocked",
+            "reason": exc.reason_class,
+            "errors": exc.errors,
+        }
+        print_json(payload)
+        return 2
 
     print_json(payload)
     if payload.get("decision") == "blocked" or payload.get("request_status") == "blocked":
