@@ -33,6 +33,7 @@ typed report / evidence gate です。
 | Frontdoor proposal | prompt 起点の request は `proposed` または `waiting_human` まで。`propose` は approved artifact や workflow run を作らない |
 | Approval | `approve` は proposal digest 由来の challenge id を要求する。approved envelope の `activation_source` は `human_ui` / `manual_cli` / `orchestrator-start` のみ。実行 principal は `human_operator` / `manual_operator` / `orchestrator_start` を許可し、Sahai CLI の `frontdoor approve` は `human_operator` / `human-ui` / `local_ui` を既定値にする |
 | Workflow run | approved request から durable `runs/<run_id>.json` を作り、`drain` で bounded work order を作る |
+| Provider runner | `run-provider` が validated work order と adapter descriptor から headless CLI provider を実行し、typed report と normalized provider evidence を書く。offline 検証は fake provider mode を使う |
 | Report validation | typed report と normalized provider evidence が canonical result。stdout、provider transcript、tmux pane output は signal only |
 | Main-agent bridge | main agent は request submit、redacted projection read、ack だけが可能。classification、approval、run 作成、adapter 準備、report path 指定は拒否される |
 | Status viewer | ITB session state、queue inbox、reports、role metadata、organization settings を read-only に表示する |
@@ -41,7 +42,7 @@ typed report / evidence gate です。
 
 | 非スコープ | 理由 |
 |---|---|
-| live provider runner | P0 harness は adapter request / report path / evidence path を作るだけ。provider 実行は外側の operator / runner フェーズ |
+| live provider credential setup | runner は provider descriptor から headless CLI を呼び出せるが、credential 生成・登録・検査は operator 側の手動設定に限定する |
 | tmux worker execution | `tmux_interactive` は compatibility model として残るが、この repo の P0 実行 path では使わない |
 | daemon / LaunchAgent | 現在の scheduler は invocation-drain、durable state、concurrency 1 |
 | commit / push / PR automation | publication は別 gate。P0 workflow は publish を直接実行しない |
@@ -60,7 +61,7 @@ python3 scripts/saihai.py workflow --help
 | Group | Commands | 境界 |
 |---|---|---|
 | `frontdoor` | `propose`, `approve`, `status` | activation artifact の提案・明示承認・read-only 状態確認。workflow run は作らない |
-| `workflow` | `create-run`, `drain`, `validate-report` | approved artifact / run id / typed report を扱う。`--prompt` や `--classification` は受け取らない |
+| `workflow` | `create-run`, `drain`, `run-provider`, `validate-report` | approved artifact / run id / typed report を扱う。`--prompt` や `--classification` は受け取らない |
 
 最小の operator flow:
 
@@ -87,12 +88,14 @@ python3 scripts/saihai.py workflow --state-root "$STATE_ROOT" create-run \
 python3 scripts/saihai.py workflow --state-root "$STATE_ROOT" drain \
   --run-id <run_id>
 
-# `drain` は work order を作るだけです。validation の前に full harness で
-# adapter request を作り、provider が typed report / evidence を書く必要があります。
-python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" prepare-claude-adapter \
-  --run-id <run_id>
+# Offline smoke / tests use fake provider mode. Live providers require
+# operator-side command/credential setup outside this repository.
+python3 scripts/saihai.py workflow --state-root "$STATE_ROOT" run-provider \
+  --run-id <run_id> \
+  --adapter-id claude_headless_p0 \
+  --fake-provider-mode success
 
-# Provider は harness 外で実行し、adapter request に書かれた report / evidence path へ出力します。
+# If a provider writes report/evidence outside the runner, validate it explicitly.
 python3 scripts/saihai.py workflow --state-root "$STATE_ROOT" validate-report \
   --run-id <run_id>
 ```
@@ -165,6 +168,7 @@ python3 scripts/configure_organization.py workflow-frontdoor --help
 | `drain` | run から work order を作る |
 | `adapter-capability` | provider adapter capability descriptor を出す |
 | `prepare-claude-adapter` | bounded Claude adapter request、prompt、report/evidence/transcript path を作る |
+| `run-provider` | validated work order と provider adapter descriptor から headless provider を実行し、normalized evidence と typed report を書いて report gate に渡す |
 | `validate-report` | typed report と evidence を検証して run を terminal state へ進める |
 | `bridge-submit-request` | main-agent bridge から request を submit する |
 | `bridge-read-projection` | redacted orchestrator projection を読む |

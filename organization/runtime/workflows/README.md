@@ -1,8 +1,8 @@
 # Orchestrator Workflow Contracts
 
-This directory is the contract surface for the typed agent orchestrator.
-It defines process data only. It does not run Claude, Codex, tmux, a daemon, or
-any provider.
+This directory is the contract and local harness surface for the typed agent
+orchestrator. It defines process data and the bounded invocation-drain runner.
+It does not manage provider credentials, run tmux workers, or start a daemon.
 
 ## Scope
 
@@ -31,6 +31,7 @@ any provider.
 | `schemas/security-review-report.schema.json` | Security-sensitive review evidence schema |
 | `scripts/workflow_selector.py` | Deterministic selector and activation-envelope helper |
 | `scripts/frontdoor_orchestrator.py` | Host-owned frontdoor and invocation-drain P0 harness |
+| `scripts/provider_runner.py` | Headless provider adapter runner that writes typed reports and normalized evidence |
 | `scripts/frontdoor_server.py` | Local HTTP wrapper for Agent UI integration |
 | `scripts/task_state_bridge.py` | Derived task/session run views and session-local orchestrator run index writer |
 | `tests/test_workflow_selector.py` | Unit/static contract tests |
@@ -59,6 +60,34 @@ existing runtime config convention in `organization/runtime/infra-team-bootstrap
 | Publication is a separate axis | Publication is represented by `publication_gate` and `exit.publication_result_recorded`, not by duplicating every workflow. |
 | Scheduler is bounded | Policy is invocation-drain, durable state, global advisory lock, concurrency 1. |
 | Provider is an adapter | `headless_cli` is the default transport. `tmux_interactive` is modeled but not implemented. |
+
+## Provider Runner
+
+`scripts/provider_runner.py` consumes a validated work order and a provider
+adapter descriptor from `registry.yaml`. The runner dispatches through adapter
+metadata rather than hard-coded provider names, writes a normalized evidence
+artifact under `provider-evidence/`, writes a typed report under `reports/`,
+and then hands the report to the report gate.
+
+The active descriptor set covers these provider targets:
+
+| Adapter | Provider target | Bridge pattern |
+|---|---|---|
+| `claude_headless_p0` | `claude_headless` | `none` |
+| `codex_cli_openai_p0` | `codex_cli_openai` | `none` |
+| `hermes_agent_oneshot_p0` | `hermes_agent` | `oneshot` |
+| `cursor_cli_p0` | `cursor_cli` | `none` |
+| `grok_build_cli_candidate_p0` | `grok_build_cli` | `none` |
+
+Grok routing remains data-driven: the registry lists Hermes Agent, Grok Build
+CLI, and CursorCLI as candidates, and selecting one does not require runner
+core changes. Hermes Agent is represented as a one-shot bridge provider; async
+callback or polling support is not claimed unless a separate runtime adds it.
+
+Failure modes are typed. Provider unavailable and timeout move the run to
+`waiting_human`; malformed output and non-zero exit move it to `failed`.
+stdout and transcript payloads are stored only as signal artifacts or digests,
+never copied into shared run state.
 
 ## Run Store Layout
 
@@ -325,6 +354,11 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state prepare-claude-adapter \
   --run-id <run_id>
 
+python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state run-provider \
+  --run-id <run_id> \
+  --adapter-id claude_headless_p0 \
+  --fake-provider-mode success
+
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state validate-report \
   --run-id <run_id>
 
@@ -431,9 +465,9 @@ validate report, inspect evidence, and recover or roll back stuck runs with
 
 The currently implemented workflow-frontdoor commands are `propose`, `approve`,
 `orchestrator-start-approve`, `manual-approve`, `create-run`, `drain`,
-`adapter-capability`, `prepare-claude-adapter`, `validate-report`, `resume`,
-`abort`, `task-view`, `bridge-submit-request`, `bridge-read-projection`,
-`bridge-ack-output`, `channel-token`, and
+`adapter-capability`, `prepare-claude-adapter`, `run-provider`,
+`validate-report`, `resume`, `abort`, `task-view`, `bridge-submit-request`,
+`bridge-read-projection`, `bridge-ack-output`, `channel-token`, and
 `lock-status`. Dedicated raw run detail and evidence inspection commands are
 still planned; the runbook uses canonical artifact inspection where needed.
 
