@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -216,7 +215,12 @@ def validate_adapter_descriptor(adapter: dict[str, Any]) -> list[str]:
     return errors
 
 
-def validate_work_order_for_runner(work_order: dict[str, Any]) -> list[str]:
+def validate_work_order_for_runner(
+    work_order: dict[str, Any],
+    *,
+    state_root: Path | None = None,
+    run: dict[str, Any] | None = None,
+) -> list[str]:
     errors: list[str] = []
     if work_order.get("workflow_id") != "single_step_external_review":
         errors.append("only single_step_external_review is supported")
@@ -237,6 +241,21 @@ def validate_work_order_for_runner(work_order: dict[str, Any]) -> list[str]:
         errors.append("work_order_authority must be object")
     elif (authority.get("issuer_principal") or {}).get("principal_type") == BRIDGE_PRINCIPAL_TYPE:
         errors.append("bridge principal cannot issue work orders")
+    if state_root is not None and run is not None:
+        raw_report_path = work_order.get("report_path")
+        if not isinstance(raw_report_path, str) or not raw_report_path:
+            errors.append("report_path must be non-empty string")
+        else:
+            report_path = Path(raw_report_path).expanduser()
+            canonical_report_path = report_gate.report_path(
+                state_root,
+                str(run.get("run_id") or ""),
+                str(work_order.get("step_id") or ""),
+            )
+            if not report_gate.path_is_within(report_path, state_paths(state_root)["reports"]):
+                errors.append("report_path must stay under reports")
+            if report_path.resolve() != canonical_report_path.resolve():
+                errors.append("report_path must match current run report path")
     return errors
 
 
@@ -347,6 +366,8 @@ def execute_provider(
             return "provider_nonzero_exit", None, {"exit_code": 42, "duration_ms": int((time.monotonic() - started) * 1000)}
         if fake_provider_mode == "malformed":
             return "provider_malformed_output", None, {"stdout_sha256": "sha256:" + hashlib.sha256(b"not json").hexdigest()}
+        if fake_provider_mode == "malformed_binary":
+            return parse_provider_stdout(b"\xff")
         if fake_provider_mode == "unavailable":
             return "provider_unavailable", None, {"reason": "fake_provider_unavailable"}
         report = fake_provider_report(request=request, adapter=adapter, mode=fake_provider_mode)
@@ -355,36 +376,23 @@ def execute_provider(
     command = adapter.get("command_argv")
     if not isinstance(command, list) or not command or any(not isinstance(item, str) or not item for item in command):
         return "provider_unavailable", None, {"reason": "command_argv_not_configured"}
+    return "provider_unavailable", None, {"reason": "live_command_adapter_requires_sandbox"}
+
+
+def parse_provider_stdout(stdout: bytes | str) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
+    raw = stdout if isinstance(stdout, bytes) else stdout.encode("utf-8")
+    stdout_sha256 = "sha256:" + hashlib.sha256(raw).hexdigest()
     try:
-        completed = subprocess.run(
-            command,
-            input=json.dumps(request, ensure_ascii=False),
-            capture_output=True,
-            text=True,
-            timeout=max(1, timeout_seconds),
-            check=False,
-        )
-    except FileNotFoundError:
-        return "provider_unavailable", None, {"reason": "command_not_found", "command": command[0]}
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        return "provider_timeout", None, {
-            "timed_out": True,
-            "stdout_sha256": "sha256:" + hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
-        }
-    if completed.returncode != 0:
-        return "provider_nonzero_exit", None, {"exit_code": completed.returncode}
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "provider_malformed_output", None, {"stdout_sha256": stdout_sha256}
     try:
-        payload = json.loads(completed.stdout)
+        payload = json.loads(text)
     except json.JSONDecodeError:
-        return "provider_malformed_output", None, {
-            "stdout_sha256": "sha256:" + hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest(),
-        }
+        return "provider_malformed_output", None, {"stdout_sha256": stdout_sha256}
     if not isinstance(payload, dict):
         return "provider_malformed_output", None, {"reason": "stdout_json_not_object"}
-    return "ok", payload, {
-        "stdout_sha256": "sha256:" + hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest(),
-    }
+    return "ok", payload, {"stdout_sha256": stdout_sha256}
 
 
 def normalized_evidence(
@@ -499,10 +507,27 @@ def run_provider(
         principal=principal,
     ):
         run = run_store.load_run(state_root, run_id)
+        run_state = str(run.get("run_state") or "")
+        if run_state not in {"step_queued", "waiting_provider"}:
+            append_audit_event(
+                state_root=state_root,
+                event_type="run_provider",
+                principal=principal,
+                subject=subject,
+                outcome="blocked",
+                details={"reason": "run_not_runnable", "run_state": run_state},
+            )
+            return {
+                "schema_version": 1,
+                "decision": "blocked",
+                "reason": "run_not_runnable",
+                "run_state": run_state,
+                "workflow_run": run,
+            }
         step_id = str(run.get("current_step") or "")
         order_path = work_order_path(state_root, run_id, step_id)
         work_order = read_json(order_path)
-        work_order_errors = validate_work_order_for_runner(work_order)
+        work_order_errors = validate_work_order_for_runner(work_order, state_root=state_root, run=run)
         if work_order_errors:
             return {
                 "schema_version": 1,
@@ -510,6 +535,7 @@ def run_provider(
                 "reason": "work_order_not_provider_safe",
                 "errors": work_order_errors,
             }
+        report_path = report_gate.report_path(state_root, run_id, step_id)
         request = adapter_request(
             state_root=state_root,
             run=run,
@@ -522,7 +548,7 @@ def run_provider(
         evidence_path = Path(request["evidence_path"])
         transcript_path = Path(request["transcript_path"])
 
-        if run.get("run_state") == "step_queued":
+        if run_state == "step_queued":
             run_lifecycle.transition_run(
                 state_root,
                 run_id,
@@ -579,7 +605,6 @@ def run_provider(
                 "workflow_run": run,
             }
 
-        report_path = Path(str(work_order["report_path"])).expanduser()
         report_path.parent.mkdir(parents=True, exist_ok=True)
         run_store.atomic_write_json(report_path, report)
 

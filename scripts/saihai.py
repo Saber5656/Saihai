@@ -325,6 +325,17 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, KeyError, TypeError) as exc:
         print_blocked(str(exc))
         return 2
+    except Exception as exc:
+        if type(exc).__name__ == "RunStoreError":
+            payload = {
+                "schema_version": 1,
+                "decision": "blocked",
+                "reason": getattr(exc, "reason_class", str(exc)),
+                "errors": getattr(exc, "errors", []),
+            }
+            print_json(payload)
+            return 2
+        raise
 
     print_json(payload)
     if payload.get("decision") == "blocked" or payload.get("request_status") == "blocked":
