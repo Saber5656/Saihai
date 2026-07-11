@@ -396,6 +396,53 @@
       "items": {
         "type": "object"
       }
+    },
+    "completion_verification": {
+      "type": "object",
+      "required": [
+        "verified_at",
+        "decision",
+        "report_sha256",
+        "evidence_sha256",
+        "verifier"
+      ],
+      "properties": {
+        "verified_at": {
+          "type": "string"
+        },
+        "decision": {
+          "const": "complete"
+        },
+        "report_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "evidence_sha256": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "verifier": {
+          "type": "object",
+          "required": [
+            "principal_type",
+            "principal_id",
+            "authn_method"
+          ],
+          "properties": {
+            "principal_type": {
+              "type": "string"
+            },
+            "principal_id": {
+              "type": "string"
+            },
+            "authn_method": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false
