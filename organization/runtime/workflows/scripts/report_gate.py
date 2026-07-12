@@ -23,7 +23,8 @@ EXECUTION_PRINCIPAL_TYPES = {
     "harness_runner",
     "orchestrator_start",
 }
-RAW_TRANSCRIPT_KEYS = {"raw_transcript", "transcript_content", "stdout", "pane_output"}
+FORBIDDEN_REPORT_CONTENT_KEYS = provider_evidence_contract.FORBIDDEN_RAW_CONTENT_KEYS
+ADAPTER_METADATA_FIELDS = ("transport", "bridge_pattern", "surface_metadata")
 
 
 class ReportGateError(RuntimeError):
@@ -110,7 +111,7 @@ def authoritative_adapter_request(
     *,
     run: dict[str, Any],
     work_order: dict[str, Any],
-) -> tuple[dict[str, str] | None, list[str]]:
+) -> tuple[dict[str, Any] | None, list[str]]:
     run_id = str(run.get("run_id") or "")
     step_id = str(work_order.get("step_id") or "")
     request_dir = (
@@ -163,7 +164,7 @@ def authoritative_adapter_request(
     request_path = candidates[0]
     try:
         request = read_json(request_path)
-    except (ReportGateError, json.JSONDecodeError) as exc:
+    except (ReportGateError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return None, [f"adapter_request_authority unreadable: {exc}"]
 
     errors: list[str] = []
@@ -209,8 +210,12 @@ def authoritative_adapter_request(
     registered = registry_adapters.get(adapter_id)
     if registered is None:
         errors.append(f"adapter_request_authority adapter is not registered: {adapter_id!r}")
-    elif str(registered.get("provider_target") or "") != adapter_target:
-        errors.append("adapter_request_authority.provider_target does not match registry")
+    else:
+        if str(registered.get("provider_target") or "") != adapter_target:
+            errors.append("adapter_request_authority.provider_target does not match registry")
+        for field in ADAPTER_METADATA_FIELDS:
+            if field in registered and adapter.get(field) != registered[field]:
+                errors.append(f"adapter_request_authority.{field} does not match registry")
 
     if adapter_id:
         try:
@@ -227,10 +232,15 @@ def authoritative_adapter_request(
         errors.append("adapter_request_authority.provider_target must be non-empty string")
     if errors:
         return None, list(dict.fromkeys(errors))
-    return {
+    authoritative_metadata: dict[str, Any] = {
         "provider_adapter_id": adapter_id,
         "provider_target": adapter_target,
-    }, []
+    }
+    if registered is not None:
+        for field in ADAPTER_METADATA_FIELDS:
+            if field in registered:
+                authoritative_metadata[field] = registered[field]
+    return authoritative_metadata, []
 
 
 def canonical_json(payload: Any) -> bytes:
@@ -330,7 +340,7 @@ def _raw_content_errors(report: Any) -> list[str]:
         if isinstance(value, dict):
             for key, item in value.items():
                 key_path = f"{path}.{key}" if path else str(key)
-                if key in RAW_TRANSCRIPT_KEYS:
+                if key in FORBIDDEN_REPORT_CONTENT_KEYS:
                     errors.append(f"raw_transcript_embedded:{key_path}")
                 walk(item, key_path)
         elif isinstance(value, list):
@@ -528,7 +538,7 @@ def validate_normalized_provider_evidence(
     errors.extend(adapter_errors)
     if adapter_identity is not None:
         for field, expected in adapter_identity.items():
-            if str(value.get(field) or "") != expected:
+            if value.get(field) != expected:
                 errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
 
     expected_evidence_path = provider_evidence_path(
@@ -593,7 +603,7 @@ def validate_normalized_provider_evidence_file(
         return []
     try:
         value = read_json(path)
-    except (ReportGateError, json.JSONDecodeError) as exc:
+    except (ReportGateError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return [f"normalized_evidence unreadable: {exc}"]
     return validate_normalized_provider_evidence(
         value,

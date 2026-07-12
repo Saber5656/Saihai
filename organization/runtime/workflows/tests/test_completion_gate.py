@@ -119,24 +119,15 @@ def prepare_terminal_run(
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+    fixed_fields = adapter["evidence_contract"]["fixed_fields"]
     evidence = {
-        "evidence_version": "1",
-        "provider_adapter_id": "claude_headless_p0",
-        "provider_target": "claude_headless",
+        **fixed_fields,
         "provider": "claude_headless",
         "effective_model": "claude-sonnet-test",
-        "request_id": request_id,
         "provider_request_id": f"provider-{request_id}",
         "provider_session_id": f"session-{run_id}",
-        "run_id": run_id,
-        "workflow_id": "single_step_external_review",
-        "step_id": "review",
-        "transcript_path": str(transcript_path),
-        "evidence_path": str(evidence_path),
         "duration_ms": 12,
         "usage": {"input_tokens": 1, "output_tokens": 1},
-        "outcome": "ok",
-        "raw_transcript_policy": "signal_only_not_shared",
         "stdout_sha256": file_sha256(transcript_path),
     }
     if evidence_mutator is not None:

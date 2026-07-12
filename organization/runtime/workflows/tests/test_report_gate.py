@@ -152,6 +152,75 @@ def test_normalized_evidence_adapter_identity_matches_authoritative_request() ->
             assert any(expected_error in item for item in payload["errors"]), payload["errors"]
 
 
+def test_normalized_evidence_adapter_metadata_matches_registry() -> None:
+    def change_transport(evidence: dict) -> None:
+        evidence["transport"] = "tmux_interactive"
+
+    def change_bridge_pattern(evidence: dict) -> None:
+        evidence["bridge_pattern"] = "oneshot"
+
+    def change_surface_metadata(evidence: dict) -> None:
+        evidence["surface_metadata"]["async_callback_supported"] = True
+
+    def remove_transport(evidence: dict) -> None:
+        del evidence["transport"]
+
+    variants = (
+        ("transport", change_transport, "normalized_evidence.transport mismatch"),
+        ("bridge-pattern", change_bridge_pattern, "normalized_evidence.bridge_pattern mismatch"),
+        ("surface-metadata", change_surface_metadata, "normalized_evidence.surface_metadata mismatch"),
+        ("missing-transport", remove_transport, "normalized_evidence.transport mismatch"),
+    )
+    for name, mutate, expected_error in variants:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = f"run-adapter-metadata-{name}"
+            request_id = f"req-adapter-metadata-{name}"
+            adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
+            evidence_path = Path(adapter["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            mutate(evidence)
+            evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
+            write_report(adapter, request_id=request_id, run_id=run_id)
+
+            blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
+            payload = load_payload(blocked)
+            assert_equal(blocked.returncode, 2, f"{name} exit")
+            assert_equal(payload["outcome"], "report_invalid", f"{name} outcome")
+            assert any(expected_error in item for item in payload["errors"]), payload["errors"]
+
+
+def test_adapter_request_metadata_must_match_registry() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-adapter-request-metadata"
+        request_id = "req-adapter-request-metadata"
+        adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
+        request_path = (
+            state_root
+            / "adapter-requests"
+            / run_id
+            / "review-claude_headless_p0.json"
+        )
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        request["adapter"]["surface_metadata"]["async_callback_supported"] = True
+        request_path.write_text(json.dumps(request, ensure_ascii=False) + "\n", encoding="utf-8")
+        evidence_path = Path(adapter["evidence_path"])
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["surface_metadata"]["async_callback_supported"] = True
+        evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
+        write_report(adapter, request_id=request_id, run_id=run_id)
+
+        blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "request metadata exit")
+        assert_equal(payload["outcome"], "report_invalid", "request metadata outcome")
+        assert (
+            "adapter_request_authority.surface_metadata does not match registry"
+            in payload["errors"]
+        ), payload["errors"]
+
+
 def test_adapter_request_authority_fails_closed_when_missing_or_ambiguous() -> None:
     for name, expected_count in (("missing", 0), ("ambiguous", 2)):
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -257,22 +326,55 @@ def test_transcript_leak_is_scope_violation() -> None:
 
 
 def test_nested_transcript_leak_is_scope_violation() -> None:
+    for name, raw_key in (
+        ("raw-transcript", "raw_transcript"),
+        ("raw-provider-output", "raw_provider_output"),
+        ("stderr", "stderr"),
+    ):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = f"run-nested-leak-{name}"
+            request_id = f"req-nested-leak-{name}"
+            adapter = prepare_review_handoff(
+                state_root,
+                request_id=request_id,
+                run_id=run_id,
+            )
+            write_report(
+                adapter,
+                request_id=request_id,
+                run_id=run_id,
+                recommendations=[{"summary": "do not ship", raw_key: "raw provider text"}],
+            )
+
+            blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
+            payload = load_payload(blocked)
+            assert_equal(blocked.returncode, 2, f"{name} leak exit")
+            assert_equal(payload["outcome"], "scope_violation", f"{name} leak outcome")
+            expected_error = f"raw_transcript_embedded:recommendations[0].{raw_key}"
+            assert expected_error in payload["errors"], payload["errors"]
+            assert "report" not in payload
+
+
+def test_undecodable_normalized_evidence_is_invalid_report() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
-        adapter = prepare_review_handoff(state_root, request_id="req-nested-leak", run_id="run-nested-leak")
-        write_report(
-            adapter,
-            request_id="req-nested-leak",
-            run_id="run-nested-leak",
-            recommendations=[{"summary": "do not ship", "raw_transcript": "raw transcript text"}],
-        )
+        run_id = "run-undecodable-evidence"
+        request_id = "req-undecodable-evidence"
+        adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
+        Path(adapter["evidence_path"]).write_bytes(b"\xff")
+        write_report(adapter, request_id=request_id, run_id=run_id)
 
-        blocked = run_frontdoor(state_root, "validate-report", "--run-id", "run-nested-leak", check=False)
+        blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
         payload = load_payload(blocked)
-        assert_equal(blocked.returncode, 2, "nested transcript leak exit")
-        assert_equal(payload["outcome"], "scope_violation", "nested transcript leak outcome")
-        assert "raw_transcript_embedded:recommendations[0].raw_transcript" in payload["errors"]
-        assert "report" not in payload
+        assert_equal(blocked.returncode, 2, "undecodable evidence exit")
+        assert_equal(payload["outcome"], "report_invalid", "undecodable evidence outcome")
+        assert_equal(payload["workflow_run"]["run_state"], "failed", "undecodable evidence state")
+        assert any(
+            item.startswith("normalized_evidence unreadable:")
+            for item in payload["errors"]
+        ), payload["errors"]
+        assert rejection_artifacts(state_root, run_id), "undecodable rejection artifact exists"
 
 
 def test_evidence_path_escape_is_scope_violation() -> None:
@@ -400,11 +502,14 @@ def main() -> None:
         test_findings_report_completes_and_requires_findings,
         test_missing_provider_evidence_blocks_and_preserves_report,
         test_normalized_evidence_adapter_identity_matches_authoritative_request,
+        test_normalized_evidence_adapter_metadata_matches_registry,
+        test_adapter_request_metadata_must_match_registry,
         test_adapter_request_authority_fails_closed_when_missing_or_ambiguous,
         test_run_provider_transition_authority_does_not_fallback_to_manual_requests,
         test_schema_violation_blocks_with_errors,
         test_transcript_leak_is_scope_violation,
         test_nested_transcript_leak_is_scope_violation,
+        test_undecodable_normalized_evidence_is_invalid_report,
         test_evidence_path_escape_is_scope_violation,
         test_legacy_claude_transcript_path_is_accepted_for_inflight_requests,
         test_identity_mismatch_is_scope_violation,
