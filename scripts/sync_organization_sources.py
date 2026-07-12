@@ -32,10 +32,7 @@ DEFAULT_AGENT_VAULT = env_path(
     "AGENTS_VAULT_ROOT",
     Path("."),
 )
-DEFAULT_SKILLS_ROOT = env_path(
-    "SKILLS_ROOT",
-    REPO_ROOT / "organization" / "roles",
-)
+DEFAULT_SKILLS_ROOT = Path(os.environ["SKILLS_ROOT"]).expanduser() if os.environ.get("SKILLS_ROOT") else None
 
 POLICY_REFS = [
     "AI-Organization.md",
@@ -52,9 +49,13 @@ RUNTIME_REFS = {
 
 TEAM_PREFIXES = ("gate-", "teams-", "tech-", "contents-", "business-", "infra-")
 TOOL_ROLE_ALLOWLIST = {"git-publisher"}
-PATH_ALIASES = (
-    ("AGENTS_VAULT_ROOT", DEFAULT_AGENT_VAULT),
-    ("SKILLS_ROOT", DEFAULT_SKILLS_ROOT),
+PATH_ALIASES = tuple(
+    item
+    for item in (
+        ("AGENTS_VAULT_ROOT", DEFAULT_AGENT_VAULT),
+        ("SKILLS_ROOT", DEFAULT_SKILLS_ROOT),
+    )
+    if item[1] is not None
 )
 ROLE_SKILL_FILENAME = "skill.md"
 
@@ -221,6 +222,15 @@ def main() -> None:
     args = parser.parse_args()
 
     org_root = args.repo_root / "organization"
+    if args.scope in {"all", "roles"}:
+        if args.skills_root is None:
+            parser.error("roles sync requires external SKILLS_ROOT or explicit --skills-root")
+        source = args.skills_root.expanduser().resolve()
+        destination = (org_root / "roles").resolve()
+        if not source.is_dir():
+            parser.error("roles sync source must be an existing directory")
+        if source == destination or source in destination.parents or destination in source.parents:
+            parser.error("roles sync source and destination must not overlap")
     org_root.mkdir(parents=True, exist_ok=True)
 
     policies = sync_policies(args.agent_vault, org_root) if args.scope in {"all", "policies"} else []

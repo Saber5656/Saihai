@@ -123,12 +123,56 @@ class SaihaiEnvTests(unittest.TestCase):
             payload = {"report": configured, "run_state": [f"root={configured}"], "context_refs": configured}
             redacted = saihai_env.redact_environment_values(payload, {"AGENTS_VAULT_ROOT": configured})
             self.assertNotIn(configured, repr(redacted))
-            self.assertIn("${AGENTS_VAULT_ROOT}", repr(redacted))
+            self.assertIn("${SAIHAI_ENV_REF:v1:AGENTS_VAULT_ROOT:all:", repr(redacted))
             ordinary = saihai_env.redact_environment_values(
                 {"status": "enabled", "message": "already enabled"},
                 {"AGENT_ORG_STATE": "enabled"},
             )
             self.assertEqual(ordinary, {"status": "enabled", "message": "already enabled"})
+
+    def test_effective_process_paths_are_redacted_and_expand_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            state_a = root / "state-a"
+            state_b = root / "state-b"
+            env = {
+                "AGENTS_VAULT_ROOT": str(root),
+                "SAIHAI_ITB_STATE_ROOTS": os.pathsep.join((str(state_a), str(state_b))),
+            }
+            saihai_env.load_environment(checkout_root=root, environ=env, require_vault=True)
+            payload = {
+                "vault": str(root),
+                "roots": [str(state_a), str(state_b)],
+                "message": "literal ${AGENTS_VAULT_ROOT}",
+                "body": "literal ${SAIHAI_ITB_STATE_ROOTS[0]}",
+            }
+            redacted = saihai_env.redact_environment_values(payload)
+            self.assertNotIn(str(state_a), repr(redacted))
+            self.assertIn("${SAIHAI_ENV_REF:v1:SAIHAI_ITB_STATE_ROOTS:0:", repr(redacted))
+            self.assertEqual(saihai_env.expand_environment_values(redacted), payload)
+            injected = {
+                "message": "${AGENTS_VAULT_ROOT}",
+                "body": "${SAIHAI_ITB_STATE_ROOTS[0]}",
+                "artifact_path": "${AGENTS_VAULT_ROOT}/injected",
+                "state_roots": ["${SAIHAI_ITB_STATE_ROOTS[0]}"],
+            }
+            self.assertEqual(saihai_env.expand_environment_values(injected), injected)
+            bound = saihai_env.redact_environment_values(
+                {"vault": str(root)}, binding="artifact-a"
+            )
+            self.assertEqual(
+                saihai_env.expand_environment_values(bound, binding="artifact-a"),
+                {"vault": str(root)},
+            )
+            replayed_field = {"artifact_path": bound["vault"]}
+            self.assertEqual(
+                saihai_env.expand_environment_values(replayed_field, binding="artifact-a"),
+                replayed_field,
+            )
+            self.assertEqual(
+                saihai_env.expand_environment_values(bound, binding="artifact-b"),
+                bound,
+            )
 
     def test_real_itb_artifact_writers_redact_loaded_path_canary(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -160,13 +204,16 @@ class SaihaiEnvTests(unittest.TestCase):
                 }
                 builder.write_json_yaml(root / "run-state.json", artifacts["run-state.json"])
                 builder.append_jsonl_unlocked(root / "evidence.jsonl", artifacts["evidence.jsonl"])
-                builder.atomic_write_text(root / "report.md", artifacts["report.md"])
+                builder.atomic_write_redacted_text(root / "report.md", artifacts["report.md"])
+                self.assertEqual(builder.read_json(root / "run-state.json"), artifacts["run-state.json"])
+                self.assertEqual(builder.read_jsonl(root / "evidence.jsonl"), [artifacts["evidence.jsonl"]])
             combined = "".join((root / name).read_text(encoding="utf-8") for name in artifacts)
             self.assertNotIn(str(canary), combined)
             self.assertNotIn(str(state_a), combined)
             self.assertNotIn(str(state_b), combined)
-            self.assertIn("${AGENTS_VAULT_ROOT}", combined)
-            self.assertIn("${SAIHAI_ITB_STATE_ROOTS}", combined)
+            self.assertIn("${SAIHAI_ENV_REF:v1:AGENTS_VAULT_ROOT:all:", combined)
+            self.assertIn("${SAIHAI_ENV_REF:v1:SAIHAI_ITB_STATE_ROOTS:0:", combined)
+            self.assertIn("${SAIHAI_ENV_REF:v1:SAIHAI_ITB_STATE_ROOTS:1:", combined)
 
 
 class SetupEnvTests(unittest.TestCase):
@@ -209,6 +256,57 @@ class SetupEnvTests(unittest.TestCase):
             self.assertEqual(created.returncode, 0, created.stderr)
             parsed = saihai_env.parse_env(env_file.read_text(encoding="utf-8"))
             self.assertEqual(parsed["AGENTS_VAULT_ROOT"], str(vault.resolve()))
+
+    def test_check_ignores_exported_saihai_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            valid_vault = root / "valid-vault"
+            valid_vault.mkdir()
+            env_file = root / ".env"
+            env_file.write_text(f'AGENTS_VAULT_ROOT="{valid_vault}"\n', encoding="utf-8")
+            env = os.environ.copy()
+            env.update({"AGENTS_VAULT_ROOT": str(root / "missing"), "YASU_VAULT_ROOT": ""})
+            checked = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/setup_env.py"), "--check", "--env-file", str(env_file)],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+
+
+class SyncOrganizationSourcesTests(unittest.TestCase):
+    def run_sync(self, repo_root: Path, vault: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        for key in set(saihai_env.SCHEMA) | set(saihai_env.ALIASES) | {"SAIHAI_ENV_FILE"}:
+            env.pop(key, None)
+        env["AGENTS_VAULT_ROOT"] = str(vault)
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts/sync_organization_sources.py"), "--repo-root", str(repo_root), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+
+    def test_roles_sync_requires_external_non_overlapping_source(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            vault = root / "vault"
+            vault.mkdir()
+            roles = root / "repo" / "organization" / "roles"
+            roles.mkdir(parents=True)
+            marker = roles / "keep.md"
+            marker.write_text("keep", encoding="utf-8")
+            missing = self.run_sync(root / "repo", vault, "--scope", "roles")
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertTrue(marker.is_file())
+            overlap = self.run_sync(
+                root / "repo", vault, "--scope", "roles", "--skills-root", str(roles)
+            )
+            self.assertNotEqual(overlap.returncode, 0)
+            self.assertTrue(marker.is_file())
 
 
 if __name__ == "__main__":

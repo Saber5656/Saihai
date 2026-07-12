@@ -11,7 +11,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from saihai_env import EnvError, load_environment, parse_env  # noqa: E402
+from saihai_env import ALIASES, SCHEMA, EnvError, load_environment, parse_env  # noqa: E402
 
 
 def args_parser() -> argparse.ArgumentParser:
@@ -48,6 +48,8 @@ def main() -> int:
     env_file = args.env_file.expanduser().resolve()
     if args.check:
         check_env = os.environ.copy()
+        for key in set(SCHEMA) | set(ALIASES) | {"SAIHAI_ENV_FILE"}:
+            check_env.pop(key, None)
         check_env["SAIHAI_ENV_FILE"] = str(env_file)
         load_environment(environ=check_env, require_vault=True)
         print("Saihai environment check: ok")

@@ -27,6 +27,7 @@ if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
     sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
 
 from saihai_env import (  # noqa: E402
+    expand_environment_values,
     load_environment,
     redact_environment_text,
     redact_environment_values,
@@ -541,16 +542,16 @@ def parse_basic_yaml_config(raw: str, path: Path) -> Any:
 def load_yaml_config(path: Path) -> Any:
     raw = path.read_text(encoding="utf-8")
     try:
-        return json.loads(raw)
+        return expand_environment_values(json.loads(raw), binding=str(path))
     except json.JSONDecodeError:
         pass
     if _pyyaml is not None:
         try:
-            return _pyyaml.safe_load(raw)
+            return expand_environment_values(_pyyaml.safe_load(raw), binding=str(path))
         except Exception as exc:  # pragma: no cover - depends on optional PyYAML.
             raise ValueError(f"YAML config parse failed: {path}: {exc}") from exc
     try:
-        return parse_basic_yaml_config(raw, path)
+        return expand_environment_values(parse_basic_yaml_config(raw, path), binding=str(path))
     except ValueError:
         raise
     except Exception as exc:
@@ -1446,7 +1447,7 @@ def sync_policy_digest_skills(
 
 def append_jsonl_unlocked(path: Path, entry: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(redact_environment_values(json_event_safe(entry)), ensure_ascii=False, sort_keys=True) + "\n")
+        fh.write(json.dumps(redact_environment_values(json_event_safe(entry), binding=str(path)), ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def append_jsonl(path: Path, entry: dict[str, Any]) -> None:
@@ -1472,27 +1473,34 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        data = json.loads(line)
+        data = expand_environment_values(json.loads(line), binding=str(path))
         if isinstance(data, dict):
             records.append(data)
     return records
 
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return expand_environment_values(json.loads(path.read_text(encoding="utf-8")), binding=str(path))
 
 
 def write_json_yaml(path: Path, data: Any) -> None:
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(json.dumps(redact_environment_values(data), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(redact_environment_values(data, binding=str(path)), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
 
 def atomic_write_text(path: Path, text: str) -> None:
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(redact_environment_text(text), encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def atomic_write_redacted_text(path: Path, text: str) -> None:
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(redact_environment_text(text, binding=str(path)), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -3963,7 +3971,7 @@ def gate_latency_report_output(
     }
     report_dir.mkdir(parents=True, exist_ok=True)
     write_json_yaml(json_path, summary)
-    atomic_write_text(report_path, render_gate_latency_report(summary))
+    atomic_write_redacted_text(report_path, render_gate_latency_report(summary))
     append_jsonl_atomic(session_dir / "gate-latency-comparison-events.jsonl", summary)
     return {"gateLatencyComparison": summary}
 
@@ -9910,7 +9918,7 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     )
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
-    atomic_write_text(transcript_path, completed.stdout)
+    atomic_write_redacted_text(transcript_path, completed.stdout)
     if completed.returncode != 0:
         append_jsonl(
             session_dir / "invocation-evidence.jsonl",
@@ -10140,7 +10148,7 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     )
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
-    atomic_write_text(transcript_path, completed.stdout)
+    atomic_write_redacted_text(transcript_path, completed.stdout)
     if completed.returncode != 0:
         append_jsonl_atomic(
             session_dir / "invocation-evidence.jsonl",

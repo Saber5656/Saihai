@@ -6,6 +6,7 @@ contain values read from an environment file.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -124,7 +125,7 @@ ALIASES = {
     "SKILLS_REPO_ROOT": "SKILLS_ROOT",
 }
 KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
-_LOADED_ENV_VALUES: dict[str, str] = {}
+_EFFECTIVE_PATH_VALUES: dict[str, str] = {}
 
 
 def _primary_checkout(checkout: Path) -> Path | None:
@@ -263,41 +264,138 @@ def _validate(key: str, value: str, base: Path, home: Path) -> str:
     return value
 
 
-def _redaction_values(environ: Mapping[str, str] | None) -> list[tuple[str, str, EnvField]]:
-    env = _LOADED_ENV_VALUES if environ is None else environ
+def _redaction_values(
+    environ: Mapping[str, str] | None,
+    *,
+    binding: str = "",
+) -> list[tuple[str, str, EnvField]]:
+    env = _EFFECTIVE_PATH_VALUES if environ is None else environ
     keys = set(env)
     values: list[tuple[str, str, EnvField]] = []
     for key in keys:
         if key not in SCHEMA or key in INTERNAL_KEYS or SCHEMA[key].kind not in {"path", "path_list"} or not env.get(key):
             continue
         field = SCHEMA[key]
-        candidates = [env[key]]
+        def marker(item: str, component: str) -> str:
+            digest = hashlib.sha256(
+                f"{binding}\0{key}\0{component}\0{item}".encode("utf-8")
+            ).hexdigest()[:16]
+            return f"${{SAIHAI_ENV_REF:v1:{key}:{component}:{digest}}}"
+
+        candidates = [(env[key], marker(env[key], "all"))]
         if field.kind == "path_list":
-            candidates.extend(item for item in env[key].split(os.pathsep) if item)
-        values.extend((item, f"${{{key}}}", field) for item in candidates)
+            candidates.extend(
+                (item, marker(item, str(index)))
+                for index, item in enumerate(env[key].split(os.pathsep))
+                if item
+            )
+        values.extend((item, placeholder, field) for item, placeholder in candidates)
     return values
 
 
-def redact_environment_text(text: str, environ: Mapping[str, str] | None = None) -> str:
+def redact_environment_text(
+    text: str,
+    environ: Mapping[str, str] | None = None,
+    *,
+    binding: str = "",
+) -> str:
     """Redact loaded path values in free text without rewriting ordinary words."""
-    replacements = _redaction_values(environ)
+    replacements = _redaction_values(environ, binding=binding)
     for value, placeholder, _field in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
         text = text.replace(value, placeholder)
     return text
 
 
-def redact_environment_values(value: object, environ: Mapping[str, str] | None = None) -> object:
+def redact_environment_values(
+    value: object,
+    environ: Mapping[str, str] | None = None,
+    *,
+    binding: str = "",
+) -> object:
     if isinstance(value, str):
-        for configured, placeholder, _field in _redaction_values(environ):
+        for configured, placeholder, _field in _redaction_values(environ, binding=binding):
             if value == configured:
                 return placeholder
-        return redact_environment_text(value, environ)
+        return redact_environment_text(value, environ, binding=binding)
     if isinstance(value, dict):
-        return {key: redact_environment_values(item, environ) for key, item in value.items()}
+        return {
+            key: redact_environment_values(item, environ, binding=f"{binding}/{key}")
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [redact_environment_values(item, environ) for item in value]
+        return [
+            redact_environment_values(item, environ, binding=f"{binding}/{index}")
+            for index, item in enumerate(value)
+        ]
     if isinstance(value, tuple):
-        return tuple(redact_environment_values(item, environ) for item in value)
+        return tuple(
+            redact_environment_values(item, environ, binding=f"{binding}/{index}")
+            for index, item in enumerate(value)
+        )
+    return value
+
+
+def expand_environment_text(
+    text: str,
+    environ: Mapping[str, str] | None = None,
+    *,
+    binding: str = "",
+) -> str:
+    """Expand only placeholders emitted by the redactor; never run shell expansion."""
+    replacements = _redaction_values(environ, binding=binding)
+    for configured, placeholder, _field in sorted(replacements, key=lambda item: len(item[1]), reverse=True):
+        text = text.replace(placeholder, configured)
+    return text
+
+
+def _path_field(name: str | None) -> bool:
+    if not name:
+        return False
+    compact = name.replace("-", "_").lower()
+    return compact in {"cwd", "vault", "context_ref", "context_refs", "contextref", "contextrefs"} or compact.endswith(
+        ("_path", "_paths", "_root", "_roots", "_dir", "_dirs", "path", "paths", "root", "roots")
+    )
+
+
+def expand_environment_values(
+    value: object,
+    environ: Mapping[str, str] | None = None,
+    *,
+    field_name: str | None = None,
+    binding: str = "",
+) -> object:
+    if isinstance(value, str):
+        return expand_environment_text(value, environ, binding=binding) if _path_field(field_name) else value
+    if isinstance(value, dict):
+        return {
+            key: expand_environment_values(
+                item,
+                environ,
+                field_name=str(key),
+                binding=f"{binding}/{key}",
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            expand_environment_values(
+                item,
+                environ,
+                field_name=field_name,
+                binding=f"{binding}/{index}",
+            )
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            expand_environment_values(
+                item,
+                environ,
+                field_name=field_name,
+                binding=f"{binding}/{index}",
+            )
+            for index, item in enumerate(value)
+        )
     return value
 
 
@@ -351,7 +449,6 @@ def load_environment(
                 skipped.append(key)
                 continue
             target[key] = _validate(key, raw_value, env_file.parent, Path.home())
-            _LOADED_ENV_VALUES[key] = target[key]
             loaded.append(key)
     apply_aliases()
     # Validate supported process values too, without exposing them.
@@ -359,6 +456,14 @@ def load_environment(
     for key in SCHEMA:
         if key in target and target[key] != "":
             target[key] = _validate(key, target[key], Path(base), Path.home())
+    _EFFECTIVE_PATH_VALUES.clear()
+    _EFFECTIVE_PATH_VALUES.update(
+        {
+            key: target[key]
+            for key, field in SCHEMA.items()
+            if field.kind in {"path", "path_list"} and target.get(key)
+        }
+    )
     if require_vault:
         validate_vault(target)
     return {
