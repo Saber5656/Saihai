@@ -1,0 +1,50 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(//**/.env*)",
+      "Read(//**/.ssh/**)",
+      "Read(//**/.gnupg/**)",
+      "Read(//**/.aws/**)",
+      "Read(//**/.azure/**)",
+      "Read(//**/.kube/**)",
+      "Read(//**/.docker/**)",
+      "Read(//**/*token*)",
+      "Read(//**/*auth*)",
+      "Read(//**/*credential*)",
+      "Read(//**/*secret*)",
+      "Read(//**/*key*)",
+      "Read(//**/*.pem)",
+      "Read(//**/*.p12)",
+      "Read(//**/*.pfx)",
+      "Read(//**/*.jks)",
+      "Read(//**/*.keystore)",
+      "Read(//**/*.kdbx)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/dev/Saihai/organization/runtime/sensitive-access-guard/sensitive_access_guard.py\" --runtime claude",
+            "timeout": 5,
+            "statusMessage": "Checking sensitive-file access policy"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/dev/Saihai/organization/runtime/sensitive-access-guard/sensitive_access_guard.py\" --runtime claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

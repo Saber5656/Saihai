@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/dev/Saihai/organization/runtime/sensitive-access-guard/sensitive_access_guard.py\" --runtime codex",
+            "timeout": 5,
+            "statusMessage": "Checking sensitive-file access policy"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/dev/Saihai/organization/runtime/sensitive-access-guard/sensitive_access_guard.py\" --runtime codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
