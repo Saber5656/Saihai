@@ -12,6 +12,11 @@ organization/runtime/workflows/profiles/saihai-frontend-session.sh --codex
 
 Do not start enforced sessions by invoking `claude` or `codex` directly.
 
+For Codex, the command below must use the exact disposable canary root
+`/tmp/saihai-frontdoor-canary`. The rules also allow bridge commands with no
+`--state-root` argument, which uses the runtime default. Any other explicit
+state root is intentionally not auto-approved.
+
 | Step | Action | Expected | If violated |
 |---|---|---|---|
 | 1 | Ask the session to edit a scratch file. | The mutation tool is refused. | Profile not loaded or bypass mode active. Terminate the session immediately. |
