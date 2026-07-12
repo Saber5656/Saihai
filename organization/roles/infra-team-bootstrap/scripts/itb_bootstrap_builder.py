@@ -22,6 +22,19 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[4]
+if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
+
+from saihai_env import (  # noqa: E402
+    load_environment,
+    redact_environment_text,
+    redact_environment_values,
+    validate_vault,
+)
+
+ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_vault=True)
+
 try:
     import yaml as _pyyaml
 except ModuleNotFoundError:  # pragma: no cover - exercised when PyYAML is absent.
@@ -30,16 +43,13 @@ except ModuleNotFoundError:  # pragma: no cover - exercised when PyYAML is absen
 
 ITB_ROOT = Path(__file__).resolve().parents[1]
 SAHAI_ROOT = Path(
-    os.environ.get("SAHAI_ROOT")
-    or os.environ.get("SAIHAI_ROOT")
-    or os.environ.get("AGENT_TEAMS_VIEWER_ROOT")
+    os.environ.get("SAIHAI_ROOT")
     or str(ITB_ROOT.parents[2])
 ).expanduser()
 SAHAI_ROLE_ROOT = SAHAI_ROOT / "organization" / "roles"
 SKILLS_ROOT = Path(
-    os.environ.get("SKILLS_REPO_SKILLS_ROOT")
-    or os.environ.get("SKILLS_ROOT")
-    or str(Path.home() / "skills-repo" / "skills")
+    os.environ.get("SKILLS_ROOT")
+    or str(SAHAI_ROOT / "organization" / "roles")
 ).expanduser()
 SAHAI_MIGRATED_ROLE_IDS = frozenset(
     {
@@ -92,12 +102,7 @@ ROLE_AGENT_REGISTRY = ITB_ROOT / "config" / "role-agent-registry.yaml"
 COMPLETION_CHAIN_CONFIG = ITB_ROOT / "config" / "completion-chain.yaml"
 GATE_OUTPUT_SCHEMAS_CONFIG = ITB_ROOT / "config" / "gate-output-schemas.yaml"
 CHILD_AGENT_ENV = "ITB_AGENT_CHILD"
-AGENTS_VAULT_ROOT = Path(
-    os.environ.get(
-        "AGENTS_VAULT_ROOT",
-        str(Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault"),
-    )
-).expanduser()
+AGENTS_VAULT_ROOT = Path(os.environ.get("AGENTS_VAULT_ROOT") or ".").expanduser()
 POLICY_ROOT = AGENTS_VAULT_ROOT / "03-Contexts/Policies"
 POLICY_DIGEST_SOURCES = {
     "AI-Organization": POLICY_ROOT / "AI-Organization.md",
@@ -109,8 +114,7 @@ POLICY_DIGEST_SKILL_BLOCK_BEGIN = "<!-- ITB_POLICY_DIGEST_SNAPSHOT_START -->"
 POLICY_DIGEST_SKILL_BLOCK_END = "<!-- ITB_POLICY_DIGEST_SNAPSHOT_END -->"
 USER_VAULT_ROOT = Path(
     os.environ.get("USER_VAULT_ROOT")
-    or os.environ.get("YASU_VAULT_ROOT")
-    or str(Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Personal Vault")
+    or str(AGENTS_VAULT_ROOT)
 ).expanduser()
 YASU_VAULT_ROOT = USER_VAULT_ROOT
 DEFAULT_PROVIDER_PERMISSION_MODE = "auto"
@@ -1442,7 +1446,7 @@ def sync_policy_digest_skills(
 
 def append_jsonl_unlocked(path: Path, entry: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(json_event_safe(entry), ensure_ascii=False, sort_keys=True) + "\n")
+        fh.write(json.dumps(redact_environment_values(json_event_safe(entry)), ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def append_jsonl(path: Path, entry: dict[str, Any]) -> None:
@@ -1481,14 +1485,14 @@ def read_json(path: Path) -> Any:
 def write_json_yaml(path: Path, data: Any) -> None:
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(redact_environment_values(data), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
 
 def atomic_write_text(path: Path, text: str) -> None:
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(text, encoding="utf-8")
+    tmp.write_text(redact_environment_text(text), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -3959,7 +3963,7 @@ def gate_latency_report_output(
     }
     report_dir.mkdir(parents=True, exist_ok=True)
     write_json_yaml(json_path, summary)
-    report_path.write_text(render_gate_latency_report(summary), encoding="utf-8")
+    atomic_write_text(report_path, render_gate_latency_report(summary))
     append_jsonl_atomic(session_dir / "gate-latency-comparison-events.jsonl", summary)
     return {"gateLatencyComparison": summary}
 
@@ -9906,7 +9910,7 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     )
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
-    transcript_path.write_text(completed.stdout, encoding="utf-8")
+    atomic_write_text(transcript_path, completed.stdout)
     if completed.returncode != 0:
         append_jsonl(
             session_dir / "invocation-evidence.jsonl",
@@ -9983,8 +9987,8 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     if result_name == "provider_response_ready":
         state["readiness_scope"] = "response_evidence"
 
-    roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
     append_jsonl_atomic(
         session_dir / "invocation-evidence.jsonl",
         invocation_evidence_entry(
@@ -10136,7 +10140,7 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     )
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
-    transcript_path.write_text(completed.stdout, encoding="utf-8")
+    atomic_write_text(transcript_path, completed.stdout)
     if completed.returncode != 0:
         append_jsonl_atomic(
             session_dir / "invocation-evidence.jsonl",
@@ -10210,8 +10214,8 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     if result_name == "provider_response_ready":
         state["readiness_scope"] = "response_evidence"
 
-    roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
     append_jsonl_atomic(
         session_dir / "invocation-evidence.jsonl",
         invocation_evidence_entry(
@@ -10487,8 +10491,8 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             state["last_provider_activation_agent"] = agent_id
             state["last_provider_activation_at"] = now
             state["last_provider_activation_usage_source"] = "codex_exec_json_no_inference"
-            roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            write_json_yaml(roster_path, roster)
+            write_json_yaml(state_path, state)
             append_jsonl(
                 session_dir / "invocation-evidence.jsonl",
                 invocation_evidence_entry(
@@ -10534,8 +10538,8 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         state["last_provider_activation_at"] = now
         state["last_provider_activation_usage_source"] = "codex_exec_json"
 
-        roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
         append_jsonl(
             session_dir / "invocation-evidence.jsonl",
             invocation_evidence_entry(
@@ -10658,8 +10662,8 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         state["last_provider_activation_agent"] = agent_id
         state["last_provider_activation_at"] = now
         state["last_provider_activation_usage_source"] = "claude_print_json_no_inference"
-        roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
         append_jsonl(
             session_dir / "invocation-evidence.jsonl",
             invocation_evidence_entry(
@@ -10707,8 +10711,8 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     state["last_provider_activation_at"] = now
     state["last_provider_activation_usage_source"] = "claude_print_json"
 
-    roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
     append_jsonl_atomic(
         session_dir / "invocation-evidence.jsonl",
         invocation_evidence_entry(
@@ -17509,6 +17513,7 @@ def run_main_command(
 
 
 def main() -> int:
+    validate_vault(os.environ)
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
@@ -17570,7 +17575,7 @@ def main() -> int:
     try:
         hook_input = load_json_file_input(args.input_json_file) if args.input_json_file else load_hook_input()
         output = run_main_command(args=args, parser=parser, hook_input=hook_input, state_root=state_root)
-        print(json.dumps(output, ensure_ascii=False))
+        print(json.dumps(redact_environment_values(output), ensure_ascii=False))
         if args.command == "gate-skill-contract-lint" and output.get("decision") == "block":
             return 2
     except Exception as exc:
@@ -17588,7 +17593,7 @@ def main() -> int:
         )
         print(
             json.dumps(
-                {
+                redact_environment_values({
                     "decision": "block",
                     "reason": f"ITB hook command failed: {type(exc).__name__}: {exc}",
                     "hookError": {
@@ -17598,7 +17603,7 @@ def main() -> int:
                         "error": event["error"],
                         "hook_errors_path": str(state_root / safe_id(event["session_id"]) / "hook-errors.jsonl"),
                     },
-                },
+                }),
                 ensure_ascii=False,
             )
         )

@@ -21,6 +21,13 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
+
+SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[3]
+if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
+from saihai_env import load_environment  # noqa: E402
+
+ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT)
 from typing import Any, Iterable
 
 

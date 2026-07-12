@@ -14,7 +14,14 @@ import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+from saihai_env import load_environment, validate_vault  # noqa: E402
+
+ENV_DIAGNOSTICS = load_environment(checkout_root=REPO_ROOT, require_vault=True)
 
 
 def env_path(name: str, default: Path) -> Path:
@@ -23,11 +30,11 @@ def env_path(name: str, default: Path) -> Path:
 
 DEFAULT_AGENT_VAULT = env_path(
     "AGENTS_VAULT_ROOT",
-    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault",
+    Path("."),
 )
 DEFAULT_SKILLS_ROOT = env_path(
-    "SKILLS_REPO_SKILLS_ROOT",
-    env_path("SKILLS_ROOT", Path.home() / "skills-repo" / "skills"),
+    "SKILLS_ROOT",
+    REPO_ROOT / "organization" / "roles",
 )
 
 POLICY_REFS = [
@@ -200,6 +207,7 @@ def sync_roles(skills_root: Path, org_root: Path) -> list[dict[str, str | int | 
 
 
 def main() -> None:
+    validate_vault(os.environ)
     parser = argparse.ArgumentParser(description="Sync organization sources")
     parser.add_argument("--agent-vault", type=Path, default=DEFAULT_AGENT_VAULT)
     parser.add_argument("--skills-root", type=Path, default=DEFAULT_SKILLS_ROOT)

@@ -18,6 +18,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[4]
+if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
+from saihai_env import load_environment, redact_environment_text, validate_vault  # noqa: E402
+
+ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_vault=True)
+
 def env_path(name: str, default: Path) -> Path:
     return Path(os.environ.get(name, str(default))).expanduser()
 
@@ -32,15 +39,15 @@ def first_env_path(names: list[str], default: Path) -> Path:
 
 AGENTS_VAULT = env_path(
     "AGENTS_VAULT_ROOT",
-    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault",
+    Path("."),
 )
 USER_VAULT = first_env_path(
-    ["USER_VAULT_ROOT", "YASU_VAULT_ROOT"],
-    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Personal Vault",
+    ["USER_VAULT_ROOT"],
+    AGENTS_VAULT,
 )
 YASU_VAULT = USER_VAULT
-SKILLS_REPO = env_path("SKILLS_REPO_ROOT", Path.home() / "skills-repo")
-DOTFILES = env_path("DOTFILES_ROOT", Path.home() / "dotfiles")
+SKILLS_REPO = env_path("SKILLS_ROOT", SAIHAI_CHECKOUT_ROOT / "organization" / "roles")
+DOTFILES = env_path("DOTFILES_ROOT", SAIHAI_CHECKOUT_ROOT)
 
 DEFAULT_REPORT = AGENTS_VAULT / "03-Contexts/Reports/ITD-Monitoring-Report.md"
 DEFAULT_ROOTS = [AGENTS_VAULT, YASU_VAULT, SKILLS_REPO, DOTFILES]
@@ -460,6 +467,7 @@ def ensure_report_header(report: Path) -> str:
 
 
 def main() -> int:
+    validate_vault(os.environ)
     parser = argparse.ArgumentParser(description="Run ITD organization-quality monitor.")
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--root", action="append", type=Path, dest="roots")
@@ -489,13 +497,13 @@ def main() -> int:
 
     report_text = render_report(run_id, started_at, snapshot, findings)
     if args.dry_run:
-        print(report_text)
+        print(redact_environment_text(report_text))
         return 0
 
     report.parent.mkdir(parents=True, exist_ok=True)
     current = ensure_report_header(report)
-    report.write_text(current.rstrip() + "\n" + report_text, encoding="utf-8")
-    print(f"wrote {report}")
+    report.write_text(redact_environment_text(current.rstrip() + "\n" + report_text), encoding="utf-8")
+    print(redact_environment_text(f"wrote {report}"))
     return 0
 
 

@@ -1,5 +1,24 @@
 # Sahai
 
+## Local environment
+
+Saihai local paths are configured in the primary checkout's `.env`, not by
+editing a shell profile:
+
+```sh
+python3 scripts/setup_env.py --agents-vault /absolute/path/to/Agents-Vault
+python3 scripts/setup_env.py --check
+```
+
+The setup is non-destructive and creates an owner-only file. Linked worktrees
+reuse the primary checkout's `.env`; process variables take precedence even
+when explicitly empty. Never commit `.env` or `.env.local`.
+
+See [Local environment configuration](docs/configuration.md) for resolution,
+advanced settings, compatibility aliases, and recovery, and
+[Environment variable inventory](docs/environment-variable-inventory.md) for
+the mechanical audit.
+
 Sahai は、AI エージェント組織の実行を「プロンプトの勢い」ではなく
 typed artifact、明示承認、監査可能な state で制御するためのローカル
 orchestrator / organization runtime リポジトリです。
