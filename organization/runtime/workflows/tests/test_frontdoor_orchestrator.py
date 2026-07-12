@@ -200,24 +200,18 @@ def write_normalized_provider_evidence(
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
     adapter = adapter_request["adapter"]
+    contract = adapter_request["evidence_contract"]
+    fixed_fields = contract["fixed_fields"]
+    assert_equal(fixed_fields["request_id"], request_id, "evidence contract request")
+    assert_equal(fixed_fields["run_id"], run_id, "evidence contract run")
     evidence = {
-        "evidence_version": "1",
-        "provider_adapter_id": adapter["provider_adapter_id"],
-        "provider_target": adapter["provider_target"],
+        **fixed_fields,
         "provider": adapter["provider_target"],
         "effective_model": adapter.get("default_model") or "claude-sonnet-test",
-        "request_id": request_id,
-        "run_id": run_id,
-        "workflow_id": "single_step_external_review",
-        "step_id": "review",
         "provider_request_id": f"provider-{request_id}",
         "provider_session_id": provider_session_id or f"session-{run_id}",
-        "transcript_path": str(transcript_path),
-        "evidence_path": str(evidence_path),
         "duration_ms": 12,
         "usage": {"input_tokens": 1, "output_tokens": 1},
-        "outcome": "ok",
-        "raw_transcript_policy": "signal_only_not_shared",
     }
     evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
     return evidence
@@ -508,6 +502,34 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert "raw transcript" in adapter_request["prompt"]
         assert "Do not select workflows" in adapter_request["prompt"]
         assert "User request:" not in adapter_request["prompt"]
+        assert "provider-evidence.schema.json" in adapter_request["prompt"]
+        assert "Unlisted evidence fields are forbidden" in adapter_request["prompt"]
+        evidence_contract = adapter_request["evidence_contract"]
+        assert_equal(
+            evidence_contract["schema_path"],
+            "organization/runtime/workflows/schemas/provider-evidence.schema.json",
+            "manual evidence schema",
+        )
+        assert_equal(
+            evidence_contract["fixed_fields"]["provider_adapter_id"],
+            "claude_headless_p0",
+            "manual evidence adapter id",
+        )
+        assert_equal(
+            evidence_contract["fixed_fields"]["provider_target"],
+            "claude_headless",
+            "manual evidence provider target",
+        )
+        assert_equal(
+            evidence_contract["allowed_usage_fields"],
+            ["input_tokens", "output_tokens"],
+            "manual evidence usage fields",
+        )
+        assert_equal(
+            evidence_contract["raw_content_policy"]["unlisted_fields"],
+            "forbidden",
+            "manual evidence raw-content boundary",
+        )
         assert_equal(
             adapter_request["authority"]["provider_may_write"],
             ["typed_report_file", "normalized_provider_evidence_file"],
@@ -572,6 +594,48 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "lifecycle transition reasons",
         )
         assert_equal(transitions[-1]["to_state"], "complete", "terminal lifecycle state")
+
+
+def test_manual_prepare_evidence_contract_validates_report() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-manual-evidence-contract"
+        run_id = "run-manual-evidence-contract"
+        adapter_request = prepare_review_handoff(
+            state_root,
+            request_id=request_id,
+            run_id=run_id,
+        )
+        fixed_fields = adapter_request["evidence_contract"]["fixed_fields"]
+        assert_equal(fixed_fields["transport"], "headless_cli", "manual fixed transport")
+        assert_equal(fixed_fields["bridge_pattern"], "none", "manual fixed bridge pattern")
+        assert_equal(fixed_fields["outcome"], "ok", "manual fixed outcome")
+        assert_equal(
+            fixed_fields["surface_metadata"],
+            {
+                "surface": "claude_headless_cli",
+                "async_callback_supported": False,
+            },
+            "manual fixed surface metadata",
+        )
+
+        report = external_review_report(
+            adapter_request,
+            request_id=request_id,
+            run_id=run_id,
+        )
+        Path(adapter_request["report_path"]).write_text(
+            json.dumps(report, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        validated = load_payload(
+            run_frontdoor(state_root, "validate-report", "--run-id", run_id)
+        )
+        assert_equal(validated["outcome"], "report_valid", "manual report outcome")
+        verified = load_payload(
+            run_frontdoor(state_root, "verify-completion", "--run-id", run_id)
+        )
+        assert_equal(verified["decision"], "complete", "manual completion decision")
 
 
 def test_drain_allows_edit_capable_code_change_gate() -> None:
@@ -2721,6 +2785,7 @@ def main() -> None:
         test_channel_token_permissions_are_private,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
+        test_manual_prepare_evidence_contract_validates_report,
         test_drain_allows_edit_capable_code_change_gate,
         test_drain_blocks_invalid_existing_work_order,
         test_frontdoor_full_flow_updates_session_task_state_index,

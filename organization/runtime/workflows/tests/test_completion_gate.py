@@ -336,6 +336,12 @@ def test_schema_violations_block_before_transition_and_at_final_gate() -> None:
     def add_nested_pane_output(evidence: dict) -> None:
         evidence["surface_metadata"] = {"pane_output": "sensitive-provider-output"}
 
+    def hide_raw_content_in_usage_notes(evidence: dict) -> None:
+        evidence["usage"]["notes"] = "sensitive-provider-output"
+
+    def hide_raw_content_in_surface_metadata(evidence: dict) -> None:
+        evidence["surface_metadata"] = {"debug_notes": "sensitive-provider-output"}
+
     variants = (
         ("canonical-plus-alias", add_alias, "provider_evidence_version"),
         ("unknown-field", add_unknown, "unexpected_field"),
@@ -345,6 +351,16 @@ def test_schema_violations_block_before_transition_and_at_final_gate() -> None:
             "nested-pane-output",
             add_nested_pane_output,
             "forbidden_raw_provider_field:$.surface_metadata.pane_output",
+        ),
+        (
+            "hidden-usage-notes",
+            hide_raw_content_in_usage_notes,
+            "schema:$.usage.notes:additional_property",
+        ),
+        (
+            "hidden-surface-metadata",
+            hide_raw_content_in_surface_metadata,
+            "schema:$.surface_metadata.debug_notes:additional_property",
         ),
     )
     for name, mutate, expected_error in variants:

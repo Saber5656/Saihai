@@ -110,7 +110,22 @@ def _raw_content_errors(value: Any, path: str = "$") -> list[str]:
     return errors
 
 
+def _open_object_schema_errors(schema: Any, path: str = "$") -> list[str]:
+    if not isinstance(schema, dict):
+        return []
+    errors: list[str] = []
+    if schema.get("type") == "object" and schema.get("additionalProperties") is not False:
+        errors.append(f"schema_contract:{path}:object_must_be_closed")
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        for key, child_schema in properties.items():
+            errors.extend(_open_object_schema_errors(child_schema, _child_path(path, str(key))))
+    return errors
+
+
 def validate_provider_evidence_schema(value: Any) -> list[str]:
-    errors = _schema_errors(value, provider_evidence_schema())
+    schema = provider_evidence_schema()
+    errors = _open_object_schema_errors(schema)
+    errors.extend(_schema_errors(value, schema))
     errors.extend(_raw_content_errors(value))
     return list(dict.fromkeys(errors))

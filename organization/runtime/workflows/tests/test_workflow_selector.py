@@ -669,6 +669,34 @@ def test_provider_evidence_schema_uses_completion_version_contract() -> None:
         "signal_only_not_shared",
         "raw transcript policy",
     )
+    assert_equal(schema["properties"]["usage"]["additionalProperties"], False, "closed usage")
+    assert_equal(
+        set(schema["properties"]["usage"]["properties"]),
+        {"input_tokens", "output_tokens"},
+        "normalized usage counters",
+    )
+    for field in ("input_tokens", "output_tokens"):
+        assert_equal(
+            schema["properties"]["usage"]["properties"][field],
+            {"type": "integer", "minimum": 0},
+            f"typed usage counter {field}",
+        )
+    surface_metadata = schema["properties"]["surface_metadata"]
+    assert_equal(
+        surface_metadata["additionalProperties"],
+        False,
+        "closed surface metadata",
+    )
+    assert_equal(
+        set(surface_metadata["properties"]),
+        {"surface", "async_callback_supported", "domain_ownership", "routing_candidate_for"},
+        "known surface metadata fields",
+    )
+    assert_equal(
+        surface_metadata["properties"]["async_callback_supported"],
+        {"type": "boolean"},
+        "typed async callback metadata",
+    )
     assert_equal(schema["additionalProperties"], False, "provider evidence extra fields")
 
 

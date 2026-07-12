@@ -16,6 +16,9 @@ from test_frontdoor_orchestrator import (
     run_frontdoor,
 )
 
+import run_lifecycle
+import run_store
+
 
 def file_sha256(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
@@ -123,6 +126,103 @@ def test_missing_provider_evidence_blocks_and_preserves_report() -> None:
         assert any("provider_evidence missing:provider_session_id" in item for item in payload["errors"])
         assert_equal(report_path.read_bytes(), before, "invalid report preserved")
         assert rejection_artifacts(state_root, "run-missing-evidence"), "rejection artifact exists"
+
+
+def test_normalized_evidence_adapter_identity_matches_authoritative_request() -> None:
+    variants = (
+        ("adapter-id", "provider_adapter_id", "different_adapter", "provider_adapter_id mismatch"),
+        ("provider-target", "provider_target", "cursor_cli", "provider_target mismatch"),
+    )
+    for name, field, replacement, expected_error in variants:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = f"run-{name}"
+            request_id = f"req-{name}"
+            adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
+            evidence_path = Path(adapter["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence[field] = replacement
+            evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
+            write_report(adapter, request_id=request_id, run_id=run_id)
+
+            blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
+            payload = load_payload(blocked)
+            assert_equal(blocked.returncode, 2, f"{name} exit")
+            assert_equal(payload["outcome"], "report_invalid", f"{name} outcome")
+            assert any(expected_error in item for item in payload["errors"]), payload["errors"]
+
+
+def test_adapter_request_authority_fails_closed_when_missing_or_ambiguous() -> None:
+    for name, expected_count in (("missing", 0), ("ambiguous", 2)):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = f"run-authority-{name}"
+            request_id = f"req-authority-{name}"
+            adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
+            request_dir = state_root / "adapter-requests" / run_id
+            request_path = request_dir / "review-claude_headless_p0.json"
+            if name == "missing":
+                request_path.unlink()
+            else:
+                (request_dir / "review-decoy.json").write_text("{}\n", encoding="utf-8")
+            write_report(adapter, request_id=request_id, run_id=run_id)
+
+            blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
+            payload = load_payload(blocked)
+            assert_equal(blocked.returncode, 2, f"{name} authority exit")
+            assert_equal(payload["outcome"], "report_invalid", f"{name} authority outcome")
+            expected_error = (
+                "adapter_request_authority requires exactly one current request: "
+                f"found {expected_count}"
+            )
+            assert expected_error in payload["errors"], payload["errors"]
+
+
+def test_run_provider_transition_authority_does_not_fallback_to_manual_requests() -> None:
+    for name, expected_count in (("missing", 0), ("ambiguous", 2)):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = f"run-transition-authority-{name}"
+            request_id = f"req-transition-authority-{name}"
+            adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
+            request_path = (
+                state_root
+                / "adapter-requests"
+                / run_id
+                / "review-claude_headless_p0.json"
+            )
+            artifact_refs: list[str] = []
+            if name == "ambiguous":
+                decoy_path = request_path.with_name("review-decoy.json")
+                decoy_path.write_text("{}\n", encoding="utf-8")
+                artifact_refs = [str(request_path), str(decoy_path)]
+
+            run = run_store.load_run(state_root, run_id)
+            run_lifecycle.transition_run(
+                state_root,
+                run_id,
+                to_state="waiting_provider",
+                reason_class="provider_invoked",
+                transition="run_provider",
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "report-gate-test",
+                    "authn_method": "local_test",
+                },
+                artifact_refs=artifact_refs,
+                run=run,
+            )
+            write_report(adapter, request_id=request_id, run_id=run_id)
+
+            blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
+            payload = load_payload(blocked)
+            assert_equal(blocked.returncode, 2, f"{name} transition authority exit")
+            assert_equal(payload["outcome"], "report_invalid", f"{name} transition authority outcome")
+            expected_error = (
+                "adapter_request_authority run_provider transition requires exactly one "
+                f"current request: found {expected_count}"
+            )
+            assert expected_error in payload["errors"], payload["errors"]
 
 
 def test_schema_violation_blocks_with_errors() -> None:
@@ -299,6 +399,9 @@ def main() -> None:
         test_pass_report_completes,
         test_findings_report_completes_and_requires_findings,
         test_missing_provider_evidence_blocks_and_preserves_report,
+        test_normalized_evidence_adapter_identity_matches_authoritative_request,
+        test_adapter_request_authority_fails_closed_when_missing_or_ambiguous,
+        test_run_provider_transition_authority_does_not_fallback_to_manual_requests,
         test_schema_violation_blocks_with_errors,
         test_transcript_leak_is_scope_violation,
         test_nested_transcript_leak_is_scope_violation,

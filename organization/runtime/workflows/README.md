@@ -202,13 +202,19 @@ again before returning `decision: complete`. Both gates enforce
 `additionalProperties: false`, identity and canonical path bindings, and the
 signal-only raw-content policy.
 
+Adapter identity comes from the canonical adapter-request artifact referenced
+by the latest `run_provider` transition. A manual prepared request is used only
+when no `run_provider` transition exists. Missing, ambiguous, path-mismatched,
+unregistered, or identity-mismatched requests fail closed. The `usage` and
+`surface_metadata` objects also use closed typed property allowlists.
+
 The canonical version field is `evidence_version: "1"`. Required traceability
 includes provider adapter/target, provider/model, request/run/workflow/step,
 provider request/session, transcript/evidence paths, duration/usage, outcome,
 and `raw_transcript_policy: "signal_only_not_shared"`. The deprecated
 `provider_evidence_version` alias, unknown fields, and raw transcript,
 stdout/stderr, prompt, provider-output, or pane-output fields are rejected,
-including when raw fields are nested inside otherwise open metadata objects.
+including when raw fields are nested inside metadata objects.
 
 Pre-fix evidence artifacts are not silently migrated or rewritten. Rewriting a
 terminal run would break its report-gate digest binding. Preserve the old run
@@ -452,6 +458,13 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
 
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state lock-status
 ```
+
+`prepare-claude-adapter` returns a structured `evidence_contract` and a bounded
+prompt. They name the evidence schema, canonical report/evidence/transcript
+paths, fixed run and adapter fields, provider-supplied runtime fields, closed
+metadata allowlists, and the raw-content prohibition. The manual provider must
+write that normalized evidence artifact before returning the typed report; this
+path does not execute a live provider.
 
 The facade is compatibility-preserving and delegates to the same
 `frontdoor_orchestrator.py` functions as `saihai`. New operator workflows should

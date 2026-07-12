@@ -86,7 +86,18 @@
       "minimum": 0
     },
     "usage": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "outcome": {
       "type": "string",
@@ -110,7 +121,25 @@
       "type": "string"
     },
     "surface_metadata": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "surface": {
+          "type": "string",
+          "minLength": 1
+        },
+        "async_callback_supported": {
+          "type": "boolean"
+        },
+        "domain_ownership": {
+          "type": "string",
+          "minLength": 1
+        },
+        "routing_candidate_for": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
     },
     "stdout_sha256": {
       "type": "string",

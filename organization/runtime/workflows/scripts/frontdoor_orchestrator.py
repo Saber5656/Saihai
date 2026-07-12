@@ -2744,6 +2744,70 @@ def claude_headless_capability() -> dict[str, Any]:
     }
 
 
+def manual_provider_evidence_contract(
+    *,
+    run: dict[str, Any],
+    step_id: str,
+    capability: dict[str, Any],
+    report_path_value: str,
+    evidence_path: Path,
+    transcript_path: Path,
+) -> dict[str, Any]:
+    fixed_fields = {
+        "evidence_version": "1",
+        "provider_adapter_id": capability["provider_adapter_id"],
+        "provider_target": capability["provider_target"],
+        "request_id": run["request_id"],
+        "run_id": run["run_id"],
+        "workflow_id": run["workflow_id"],
+        "step_id": step_id,
+        "transcript_path": str(transcript_path),
+        "evidence_path": str(evidence_path),
+        "outcome": "ok",
+        "raw_transcript_policy": "signal_only_not_shared",
+    }
+    for field in ("transport", "bridge_pattern", "surface_metadata"):
+        if capability.get(field) is not None:
+            fixed_fields[field] = capability[field]
+    return {
+        "schema_path": "organization/runtime/workflows/schemas/provider-evidence.schema.json",
+        "fixed_fields": fixed_fields,
+        "provider_supplied_fields": {
+            "required": [
+                "provider",
+                "effective_model",
+                "provider_request_id",
+                "provider_session_id",
+                "duration_ms",
+                "usage",
+            ],
+            "optional": [
+                "reason_class",
+                "stdout_sha256",
+                "exit_code",
+                "timed_out",
+            ],
+        },
+        "allowed_usage_fields": ["input_tokens", "output_tokens"],
+        "allowed_surface_metadata_fields": [
+            "surface",
+            "async_callback_supported",
+            "domain_ownership",
+            "routing_candidate_for",
+        ],
+        "canonical_paths": {
+            "report_path": report_path_value,
+            "evidence_path": str(evidence_path),
+            "transcript_path": str(transcript_path),
+        },
+        "raw_content_policy": {
+            "unlisted_fields": "forbidden",
+            "raw_provider_content": "forbidden",
+            "raw_transcript_policy": "signal_only_not_shared",
+        },
+    }
+
+
 def prepare_claude_adapter(
     *,
     state_root: Path,
@@ -2780,7 +2844,15 @@ def prepare_claude_adapter(
     capability = claude_headless_capability()
     evidence_path = provider_evidence_path(state_root, run_id, step_id)
     transcript_path = provider_transcript_path(state_root, run_id, step_id)
-    prompt = bounded_claude_prompt(work_order, evidence_path=evidence_path, transcript_path=transcript_path)
+    evidence_contract = manual_provider_evidence_contract(
+        run=run,
+        step_id=step_id,
+        capability=capability,
+        report_path_value=str(work_order["report_path"]),
+        evidence_path=evidence_path,
+        transcript_path=transcript_path,
+    )
+    prompt = bounded_claude_prompt(work_order, evidence_contract=evidence_contract)
     adapter_request = {
         "adapter_request_version": "1",
         "adapter": capability,
@@ -2792,6 +2864,7 @@ def prepare_claude_adapter(
         "report_path": work_order["report_path"],
         "evidence_path": str(evidence_path),
         "transcript_path": str(transcript_path),
+        "evidence_contract": evidence_contract,
         "prompt": prompt,
         "authority": {
             "provider_may_write": ["typed_report_file", "normalized_provider_evidence_file"],
@@ -2854,12 +2927,20 @@ def validate_work_order_for_adapter(work_order: dict[str, Any]) -> list[str]:
     return errors
 
 
-def bounded_claude_prompt(work_order: dict[str, Any], *, evidence_path: Path, transcript_path: Path) -> str:
+def bounded_claude_prompt(work_order: dict[str, Any], *, evidence_contract: dict[str, Any]) -> str:
     refs = "\n".join(f"- {item.get('value', item)}" for item in work_order.get("context_refs", []))
+    fixed_fields = json.dumps(
+        evidence_contract["fixed_fields"],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    provider_fields = evidence_contract["provider_supplied_fields"]
+    canonical_paths = evidence_contract["canonical_paths"]
     return "\n".join(
         [
             "You are the bounded reviewer for a deterministic P0 orchestrator work order.",
-            "Do not select workflows, approve activation, mutate run state, edit files, commit, push, or publish.",
+            "Do not select workflows, approve activation, mutate run state, edit repository or task files, commit, push, or publish.",
+            "Write only the designated normalized evidence and typed report artifacts described below.",
             "Use only the bounded context refs listed below. Do not request or infer raw transcript sharing.",
             "",
             f"task_id: {work_order['task_id']}",
@@ -2876,9 +2957,21 @@ def bounded_claude_prompt(work_order: dict[str, Any], *, evidence_path: Path, tr
             "",
             "Return only an External Review Report JSON object matching",
             "organization/runtime/workflows/schemas/external-review-report.schema.json.",
-            f"Set provider_evidence.evidence_path to: {evidence_path}",
-            f"Set provider_evidence.transcript_path to: {transcript_path}",
-            f"The canonical report path is: {work_order['report_path']}",
+            "Before returning the report, write one Normalized Provider Evidence JSON object matching",
+            f"{evidence_contract['schema_path']}.",
+            f"Use these evidence fields exactly: {fixed_fields}",
+            "Supply these required runtime evidence fields: " + ", ".join(provider_fields["required"]),
+            "Optional runtime evidence fields are limited to: " + ", ".join(provider_fields["optional"]),
+            "usage fields are limited to non-negative integer counters: "
+            + ", ".join(evidence_contract["allowed_usage_fields"]),
+            "surface_metadata fields are limited to: "
+            + ", ".join(evidence_contract["allowed_surface_metadata_fields"]),
+            "Do not embed raw prompts, raw provider output, stdout, stderr, pane output, or raw transcript content",
+            "in the report or evidence artifact. Unlisted evidence fields are forbidden.",
+            f"Write normalized evidence to: {canonical_paths['evidence_path']}",
+            f"Set provider_evidence.evidence_path to: {canonical_paths['evidence_path']}",
+            f"Set provider_evidence.transcript_path to: {canonical_paths['transcript_path']}",
+            f"The canonical report path is: {canonical_paths['report_path']}",
         ]
     )
 

@@ -153,6 +153,36 @@ def test_runner_dispatches_through_adapter_metadata() -> None:
         assert_equal(report["provider_evidence"]["provider"], "cursor_cli", "report provider")
 
 
+def test_runner_transition_request_wins_over_manual_adapter_candidate() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-current-request"
+        prepare_run(state_root, request_id="req-provider-current-request", run_id=run_id)
+        manual = load_payload(
+            run_frontdoor(state_root, "prepare-claude-adapter", "--run-id", run_id)
+        )
+        manual_path = Path(manual["adapter_request_path"])
+
+        payload = load_payload(
+            run_provider(
+                state_root,
+                run_id=run_id,
+                adapter_id="cursor_cli_p0",
+            )
+        )
+
+        runner_path = Path(payload["adapter_request_path"])
+        assert manual_path.exists(), "manual request should remain as a bounded fallback artifact"
+        assert runner_path.exists(), "runner request should exist"
+        assert manual_path != runner_path, "test requires two adapter request candidates"
+        assert_equal(payload["report_gate"]["outcome"], "report_valid", "current request gate")
+        assert_equal(
+            payload["provider_evidence"]["provider_adapter_id"],
+            "cursor_cli_p0",
+            "transition-selected adapter",
+        )
+
+
 def test_completion_rejects_tampered_runner_evidence_identity_path_and_type() -> None:
     def change_request_id(evidence: dict, _state_root: Path) -> None:
         evidence["request_id"] = "req-other"
@@ -351,6 +381,7 @@ if __name__ == "__main__":
     tests = (
         test_fake_provider_success_completes_with_normalized_evidence,
         test_runner_dispatches_through_adapter_metadata,
+        test_runner_transition_request_wins_over_manual_adapter_candidate,
         test_completion_rejects_tampered_runner_evidence_identity_path_and_type,
         test_hermes_evidence_records_bridge_pattern_without_async_claim,
         test_provider_unavailable_waits_for_human,
