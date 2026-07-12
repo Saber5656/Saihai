@@ -13,6 +13,8 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import provider_runner
+import run_lifecycle
+import run_store
 
 from test_frontdoor_orchestrator import (
     assert_equal,
@@ -180,6 +182,70 @@ def test_runner_transition_request_wins_over_manual_adapter_candidate() -> None:
             payload["provider_evidence"]["provider_adapter_id"],
             "cursor_cli_p0",
             "transition-selected adapter",
+        )
+
+
+def test_waiting_provider_retry_records_fresh_request_authority() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-retry-authority"
+        prepare_run(state_root, request_id="req-provider-retry-authority", run_id=run_id)
+        run = run_store.load_run(state_root, run_id)
+        step_id = str(run["current_step"])
+        order_path = provider_runner.work_order_path(state_root, run_id, step_id)
+        work_order = provider_runner.read_json(order_path)
+        principal = {
+            "principal_type": "harness_runner",
+            "principal_id": "provider-retry-test",
+            "authn_method": "local_test",
+        }
+        first_adapter = provider_runner.load_provider_adapters()["claude_headless_p0"]
+        first_request = provider_runner.adapter_request(
+            state_root=state_root,
+            run=run,
+            work_order=work_order,
+            adapter=first_adapter,
+            principal=principal,
+        )
+        first_request_path = provider_runner.adapter_request_path(
+            state_root,
+            run_id,
+            step_id,
+            "claude_headless_p0",
+        )
+        run_store.atomic_write_json(first_request_path, first_request)
+        run_lifecycle.transition_run(
+            state_root,
+            run_id,
+            to_state="waiting_provider",
+            reason_class="provider_invoked",
+            transition="run_provider",
+            principal=principal,
+            artifact_refs=[str(order_path), str(first_request_path)],
+            run=run,
+        )
+
+        payload = load_payload(
+            run_provider(
+                state_root,
+                run_id=run_id,
+                adapter_id="cursor_cli_p0",
+            )
+        )
+
+        current_request_path = Path(payload["adapter_request_path"])
+        provider_transitions = [
+            item
+            for item in payload["workflow_run"]["transitions"]
+            if item.get("transition") == "run_provider"
+        ]
+        assert_equal(len(provider_transitions), 2, "provider transition count")
+        assert str(current_request_path) in provider_transitions[-1]["artifact_refs"]
+        assert_equal(payload["report_gate"]["outcome"], "report_valid", "retry gate outcome")
+        assert_equal(
+            payload["provider_evidence"]["provider_adapter_id"],
+            "cursor_cli_p0",
+            "retry adapter authority",
         )
 
 
@@ -382,6 +448,7 @@ if __name__ == "__main__":
         test_fake_provider_success_completes_with_normalized_evidence,
         test_runner_dispatches_through_adapter_metadata,
         test_runner_transition_request_wins_over_manual_adapter_candidate,
+        test_waiting_provider_retry_records_fresh_request_authority,
         test_completion_rejects_tampered_runner_evidence_identity_path_and_type,
         test_hermes_evidence_records_bridge_pattern_without_async_claim,
         test_provider_unavailable_waits_for_human,

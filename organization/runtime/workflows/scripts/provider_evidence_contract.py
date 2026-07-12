@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -51,7 +52,9 @@ def _type_matches(value: Any, expected: Any) -> bool:
     if expected == "integer":
         return isinstance(value, int) and not isinstance(value, bool)
     if expected == "number":
-        return isinstance(value, int | float) and not isinstance(value, bool)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return True
+        return isinstance(value, float) and math.isfinite(value)
     return True
 
 

@@ -333,6 +333,12 @@ def test_schema_violations_block_before_transition_and_at_final_gate() -> None:
     def hide_raw_content_in_surface_metadata(evidence: dict) -> None:
         evidence["surface_metadata"] = {"debug_notes": "sensitive-provider-output"}
 
+    def set_non_finite_duration(value: float):
+        def mutate(evidence: dict) -> None:
+            evidence["duration_ms"] = value
+
+        return mutate
+
     variants = (
         ("canonical-plus-alias", add_alias, "provider_evidence_version"),
         ("unknown-field", add_unknown, "unexpected_field"),
@@ -353,6 +359,9 @@ def test_schema_violations_block_before_transition_and_at_final_gate() -> None:
             hide_raw_content_in_surface_metadata,
             "schema:$.surface_metadata.debug_notes:additional_property",
         ),
+        ("duration-nan", set_non_finite_duration(float("nan")), "schema:$.duration_ms:type"),
+        ("duration-infinity", set_non_finite_duration(float("inf")), "schema:$.duration_ms:type"),
+        ("duration-negative-infinity", set_non_finite_duration(float("-inf")), "schema:$.duration_ms:type"),
     )
     for name, mutate, expected_error in variants:
         with tempfile.TemporaryDirectory() as raw_tmp:

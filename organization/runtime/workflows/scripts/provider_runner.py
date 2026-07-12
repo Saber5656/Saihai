@@ -538,6 +538,17 @@ def run_provider(
                 "reason": "work_order_not_provider_safe",
                 "errors": work_order_errors,
             }
+        if run_state == "waiting_provider":
+            run_lifecycle.transition_run(
+                state_root,
+                run_id,
+                to_state="step_queued",
+                reason_class="provider_retry",
+                transition="retry_provider",
+                principal=principal,
+                artifact_refs=[str(order_path)],
+                run=run,
+            )
         report_path = report_gate.report_path(state_root, run_id, step_id)
         request = adapter_request(
             state_root=state_root,
@@ -551,17 +562,16 @@ def run_provider(
         evidence_path = Path(request["evidence_path"])
         transcript_path = Path(request["transcript_path"])
 
-        if run_state == "step_queued":
-            run_lifecycle.transition_run(
-                state_root,
-                run_id,
-                to_state="waiting_provider",
-                reason_class="provider_invoked",
-                transition="run_provider",
-                principal=principal,
-                artifact_refs=[str(order_path), str(request_path)],
-                run=run,
-            )
+        run_lifecycle.transition_run(
+            state_root,
+            run_id,
+            to_state="waiting_provider",
+            reason_class="provider_invoked",
+            transition="run_provider",
+            principal=principal,
+            artifact_refs=[str(order_path), str(request_path)],
+            run=run,
+        )
 
         outcome, report, details = execute_provider(
             request=request,

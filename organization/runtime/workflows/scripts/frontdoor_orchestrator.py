@@ -2822,7 +2822,42 @@ def prepare_claude_adapter(
         transition="prepare_claude_adapter",
         subject={"run_id": run_id},
     )
+    with run_lock.hold_global_lock(
+        state_root,
+        operation="prepare_claude_adapter",
+        run_id=run_id,
+        principal=actor,
+    ):
+        return _prepare_claude_adapter_locked(
+            state_root=state_root,
+            run_id=run_id,
+            actor=actor,
+        )
+
+
+def _prepare_claude_adapter_locked(
+    *,
+    state_root: Path,
+    run_id: str,
+    actor: dict[str, Any],
+) -> dict[str, Any]:
     run = run_store.load_run(state_root, run_id)
+    run_state = str(run.get("run_state") or "")
+    if run_state != "step_queued":
+        append_audit_event(
+            state_root=state_root,
+            event_type="prepare_claude_adapter",
+            principal=actor,
+            subject={"run_id": run_id, "request_id": str(run.get("request_id") or "")},
+            outcome="blocked",
+            details={"reason": "run_not_preparable", "run_state": run_state},
+        )
+        return {
+            "schema_version": 1,
+            "decision": "blocked",
+            "reason": "run_not_preparable",
+            "run_state": run_state,
+        }
     signature = assert_execution_principal(
         state_root=state_root,
         principal=actor,
@@ -2844,6 +2879,39 @@ def prepare_claude_adapter(
     capability = claude_headless_capability()
     evidence_path = provider_evidence_path(state_root, run_id, step_id)
     transcript_path = provider_transcript_path(state_root, run_id, step_id)
+    request_path = adapter_request_path(
+        state_root,
+        run_id,
+        step_id,
+        capability["provider_adapter_id"],
+    )
+    artifact_paths = {
+        "adapter_request": request_path,
+        "report": Path(str(work_order["report_path"])).expanduser(),
+        "evidence": evidence_path,
+        "transcript": transcript_path,
+    }
+    existing_artifacts = sorted(
+        label for label, artifact_path in artifact_paths.items() if artifact_path.exists()
+    )
+    if existing_artifacts:
+        append_audit_event(
+            state_root=state_root,
+            event_type="prepare_claude_adapter",
+            principal=actor,
+            subject={"run_id": run_id, "request_id": str(run.get("request_id") or "")},
+            outcome="blocked",
+            details={
+                "reason": "manual_handoff_artifacts_exist",
+                "artifacts": existing_artifacts,
+            },
+        )
+        return {
+            "schema_version": 1,
+            "decision": "blocked",
+            "reason": "manual_handoff_artifacts_exist",
+            "artifacts": existing_artifacts,
+        }
     evidence_contract = manual_provider_evidence_contract(
         run=run,
         step_id=step_id,
@@ -2874,20 +2942,26 @@ def prepare_claude_adapter(
             "work_order_signature": work_order.get("work_order_authority", {}).get("signature"),
         },
     }
-    path = adapter_request_path(state_root, run_id, step_id, capability["provider_adapter_id"])
-    write_json(path, adapter_request)
+    write_json(request_path, adapter_request)
+    provider_runner.write_signal_transcript(
+        transcript_path,
+        {
+            "outcome": "manual_handoff_prepared",
+            "adapter_request_path": str(request_path),
+        },
+    )
     append_audit_event(
         state_root=state_root,
         event_type="prepare_claude_adapter",
         principal=actor,
         subject={"run_id": run_id, "request_id": str(run.get("request_id") or "")},
         outcome="ok",
-        details={"adapter_request_path": str(path)},
+        details={"adapter_request_path": str(request_path)},
     )
     return {
         "schema_version": 1,
         "decision": "ok",
-        "adapter_request_path": str(path),
+        "adapter_request_path": str(request_path),
         "adapter_request": adapter_request,
     }
 
