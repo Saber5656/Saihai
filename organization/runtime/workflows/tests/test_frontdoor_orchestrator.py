@@ -2401,6 +2401,23 @@ def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> N
         assert "worktree_path" in projection["redacted_fields"], "worktree path redaction marker"
 
 
+def test_child_thread_checkout_requires_registered_git_worktree() -> None:
+    frontdoor = load_server_module().frontdoor
+    common_dir = frontdoor.git_common_dir(frontdoor.REPO_ROOT)
+    assert common_dir is not None, "trusted Saihai common dir must resolve"
+    assert frontdoor.is_approved_checkout(ROOT), "current registered worktree must be approved"
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        fake_checkout = Path(raw_tmp) / "fake-checkout"
+        fake_checkout.mkdir()
+        (fake_checkout / ".git").write_text(f"gitdir: {common_dir}\n", encoding="utf-8")
+        assert_equal(
+            frontdoor.git_common_dir(fake_checkout),
+            common_dir,
+            "forged checkout demonstrates common-dir collision",
+        )
+        assert not frontdoor.is_approved_checkout(fake_checkout), "unregistered checkout must be rejected"
+
+
 def test_child_thread_create_blocks_bridge_and_arbitrary_paths() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -2699,6 +2716,7 @@ def main() -> None:
         test_bridge_rejects_path_unsafe_ids_and_missing_refs,
         test_bridge_principal_cannot_execute_or_change_workflow_definitions,
         test_child_thread_create_gateway_records_redacted_summary_and_replays,
+        test_child_thread_checkout_requires_registered_git_worktree,
         test_child_thread_create_blocks_bridge_and_arbitrary_paths,
         test_child_thread_create_rejects_empty_idempotency_and_bad_result_flags,
         test_child_thread_create_verifies_instruction_ref_and_redacts_pending_id,

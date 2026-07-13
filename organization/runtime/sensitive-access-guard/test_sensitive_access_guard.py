@@ -25,6 +25,7 @@ class PolicyTest(unittest.TestCase):
             ".env",
             ".env.local",
             ".env.example",
+            "directory-path.env",
             "config/auth.json",
             "gh-token.txt",
             "ACCESS_TOKEN",
@@ -94,7 +95,7 @@ class HookTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as state:
             first = self.run_hook(
                 state,
-                {"session_id": "session-a", "tool_input": {"command": "cat .env.example"}},
+                {"session_id": "session-a", "tool_input": {"command": "cat directory-path.env"}},
             )
             self.assertEqual(first.returncode, 0)
             self.assertEqual(
@@ -207,7 +208,7 @@ class HookTest(unittest.TestCase):
     def test_symlink_to_protected_name_is_denied_without_reading_target(self) -> None:
         with tempfile.TemporaryDirectory() as state:
             root = Path(state)
-            protected = root / ".env.example"
+            protected = root / "directory-path.env"
             protected.write_text("not-a-real-secret\n", encoding="utf-8")
             link = root / "safe-link"
             link.symlink_to(protected)

@@ -24,20 +24,20 @@ def load_server():
 
 @contextmanager
 def orch_root(root: Path):
-    previous = os.environ.get("SAIHAI_ORCH_STATE_ROOT")
-    os.environ["SAIHAI_ORCH_STATE_ROOT"] = str(root)
+    previous = os.environ.get("SAHAI_ORCH_STATE_ROOT")
+    os.environ["SAHAI_ORCH_STATE_ROOT"] = str(root)
     try:
         yield
     finally:
         if previous is None:
-            os.environ.pop("SAIHAI_ORCH_STATE_ROOT", None)
+            os.environ.pop("SAHAI_ORCH_STATE_ROOT", None)
         else:
-            os.environ["SAIHAI_ORCH_STATE_ROOT"] = previous
+            os.environ["SAHAI_ORCH_STATE_ROOT"] = previous
 
 
 @contextmanager
 def orch_roots(server, roots: list[tuple[str, Path]]):
-    previous_env = os.environ.pop("SAIHAI_ORCH_STATE_ROOT", None)
+    previous_env = os.environ.pop("SAHAI_ORCH_STATE_ROOT", None)
     previous_roots = server.ORCH_STATE_ROOTS
     server.ORCH_STATE_ROOTS = roots
     try:
@@ -45,7 +45,7 @@ def orch_roots(server, roots: list[tuple[str, Path]]):
     finally:
         server.ORCH_STATE_ROOTS = previous_roots
         if previous_env is not None:
-            os.environ["SAIHAI_ORCH_STATE_ROOT"] = previous_env
+            os.environ["SAHAI_ORCH_STATE_ROOT"] = previous_env
 
 
 def write_json(path: Path, payload: dict) -> None:

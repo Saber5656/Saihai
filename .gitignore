@@ -1,3 +1,4 @@
 __pycache__/
 .DS_Store
-.directory-path.local.md
+directory-path.env
+!directory-path.env.example

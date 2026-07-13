@@ -9,7 +9,7 @@ blocked alongside live secrets.
 
 | Class | Examples |
 |---|---|
-| Environment files | `.env`, `.env.local`, `.env.example`, any `.env.*` |
+| Environment files | `.env`, `.env.local`, `.env.example`, any `.env.*`, and local `directory-path.env` |
 | Tokens and auth | `token`, `gh-token`, `github_pat`, `oauth.json`, `access_token`, `auth.json`, credentials, passwords, passphrases, and secrets |
 | SSH / auth directories | any path containing `.ssh`, `.gnupg`, `.aws`, `.azure`, or `.kube` |
 | Keys | `id_rsa`, `id_ed25519`, `private_key`, `service-key`, `keys.json`, `api-key`, `*.key`, `*.pem`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx` |

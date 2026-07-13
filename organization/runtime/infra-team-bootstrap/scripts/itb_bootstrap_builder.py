@@ -22,6 +22,14 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[4]
+if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
+
+from directory_paths import expand_path_aliases, load_environment, validate_vault  # noqa: E402
+
+ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_catalog=True)
+
 try:
     import yaml as _pyyaml
 except ModuleNotFoundError:  # pragma: no cover - exercised when PyYAML is absent.
@@ -31,15 +39,12 @@ except ModuleNotFoundError:  # pragma: no cover - exercised when PyYAML is absen
 ITB_ROOT = Path(__file__).resolve().parents[1]
 SAHAI_ROOT = Path(
     os.environ.get("SAHAI_ROOT")
-    or os.environ.get("SAIHAI_ROOT")
-    or os.environ.get("AGENT_TEAMS_VIEWER_ROOT")
     or str(ITB_ROOT.parents[2])
 ).expanduser()
 SAHAI_ROLE_ROOT = SAHAI_ROOT / "organization" / "roles"
 SKILLS_ROOT = Path(
-    os.environ.get("SKILLS_REPO_SKILLS_ROOT")
-    or os.environ.get("SKILLS_ROOT")
-    or str(Path.home() / "skills-repo" / "skills")
+    os.environ.get("SKILLS_ROOT")
+    or str(SAHAI_ROOT / "organization" / "roles")
 ).expanduser()
 SAHAI_MIGRATED_ROLE_IDS = frozenset(
     {
@@ -92,12 +97,7 @@ ROLE_AGENT_REGISTRY = ITB_ROOT / "config" / "role-agent-registry.yaml"
 COMPLETION_CHAIN_CONFIG = ITB_ROOT / "config" / "completion-chain.yaml"
 GATE_OUTPUT_SCHEMAS_CONFIG = ITB_ROOT / "config" / "gate-output-schemas.yaml"
 CHILD_AGENT_ENV = "ITB_AGENT_CHILD"
-AGENTS_VAULT_ROOT = Path(
-    os.environ.get(
-        "AGENTS_VAULT_ROOT",
-        str(Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault"),
-    )
-).expanduser()
+AGENTS_VAULT_ROOT = Path(os.environ.get("AGENTS_VAULT_ROOT") or ".").expanduser()
 POLICY_ROOT = AGENTS_VAULT_ROOT / "03-Contexts/Policies"
 POLICY_DIGEST_SOURCES = {
     "AI-Organization": POLICY_ROOT / "AI-Organization.md",
@@ -109,8 +109,7 @@ POLICY_DIGEST_SKILL_BLOCK_BEGIN = "<!-- ITB_POLICY_DIGEST_SNAPSHOT_START -->"
 POLICY_DIGEST_SKILL_BLOCK_END = "<!-- ITB_POLICY_DIGEST_SNAPSHOT_END -->"
 USER_VAULT_ROOT = Path(
     os.environ.get("USER_VAULT_ROOT")
-    or os.environ.get("YASU_VAULT_ROOT")
-    or str(Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Personal Vault")
+    or str(AGENTS_VAULT_ROOT)
 ).expanduser()
 YASU_VAULT_ROOT = USER_VAULT_ROOT
 DEFAULT_PROVIDER_PERMISSION_MODE = "auto"
@@ -289,18 +288,8 @@ def expand_config_path_value(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    replacements = {
-        "${AGENTS_VAULT_ROOT}": str(AGENTS_VAULT_ROOT),
-        "$AGENTS_VAULT_ROOT": str(AGENTS_VAULT_ROOT),
-        "${USER_VAULT_ROOT}": str(USER_VAULT_ROOT),
-        "$USER_VAULT_ROOT": str(USER_VAULT_ROOT),
-        "${YASU_VAULT_ROOT}": str(YASU_VAULT_ROOT),
-        "$YASU_VAULT_ROOT": str(YASU_VAULT_ROOT),
-        "${HOME}": str(Path.home()),
-        "$HOME": str(Path.home()),
-    }
-    for source, target in replacements.items():
-        raw = raw.replace(source, target)
+    raw = expand_path_aliases(raw)
+    raw = raw.replace("${HOME}", str(Path.home())).replace("$HOME", str(Path.home()))
     return str(Path(raw).expanduser())
 
 
@@ -17509,6 +17498,7 @@ def run_main_command(
 
 
 def main() -> int:
+    validate_vault(os.environ)
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",

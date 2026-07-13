@@ -1,5 +1,24 @@
 # Sahai
 
+## Local environment
+
+Saihai local paths are configured in the primary checkout's
+`directory-path.env`, not by
+editing a shell profile:
+
+Run `python3 scripts/setup_directory_paths.py --help`, provide all nine required
+directory options, then validate with
+`python3 scripts/setup_directory_paths.py --check`.
+
+The setup is non-destructive and creates an owner-only file. Linked worktrees
+reuse the primary checkout's `directory-path.env`; process variables take
+precedence even when explicitly empty. Never commit `directory-path.env`.
+
+See [Local environment configuration](docs/configuration.md) for resolution,
+compatibility aliases, and recovery, and
+[Directory path variable inventory](docs/environment-variable-inventory.md)
+for the path audit.
+
 Sahai は、AI エージェント組織の実行を「プロンプトの勢い」ではなく
 typed artifact、明示承認、監査可能な state で制御するためのローカル
 orchestrator / organization runtime リポジトリです。

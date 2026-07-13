@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+from directory_paths import load_environment  # noqa: E402
+
+ENV_DIAGNOSTICS = load_environment(checkout_root=REPO_ROOT, require_catalog=True)
 FRONTDOOR_PATH = REPO_ROOT / "organization" / "runtime" / "workflows" / "scripts" / "frontdoor_orchestrator.py"
 
 FRONTDOOR_COMMANDS = {"propose", "approve", "status"}

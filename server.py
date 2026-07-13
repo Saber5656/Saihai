@@ -22,6 +22,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parent
+if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
+from directory_paths import load_environment
+
+ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_catalog=True)
+
 HOME = Path.home()
 STATE_ROOTS = [
     ("claude", HOME / ".claude" / "state" / "itb"),
@@ -170,7 +177,11 @@ def jsonish_file(path: Path):
 
 
 def orch_roots() -> list[tuple[str, Path]]:
-    env_root = os.environ.get("SAIHAI_ORCH_STATE_ROOT", "").strip()
+    env_root = (
+        os.environ.get("SAHAI_ORCH_STATE_ROOT")
+        or os.environ.get("SAIHAI_ORCH_STATE_ROOT")
+        or ""
+    ).strip()
     candidates: list[tuple[str, Path]]
     if env_root:
         candidates = [("env", Path(env_root).expanduser())]
