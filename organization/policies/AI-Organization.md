@@ -271,7 +271,7 @@ flowchart TD
     ENG --> TECHDIR["tech-director<br/>技術組織統括"]
     TECHDIR --> TECHLEAD["tech-lead<br/>設計・技術判断"]
     TECHDIR --> TECHIMPL["tech-frontend / tech-backend / tech-mobile / tech-infrastructure<br/>実装"]
-    TECHDIR --> TECHSPEC["tech-architect / tech-data-structure / tech-performance / tech-security / security-professor<br/>専門設計・検証"]
+    TECHDIR --> TECHSPEC["tech-architect / tech-data-structure / tech-performance / tech-security<br/>専門設計・検証"]
     TECHDIR --> TECHQA["tech-qa / tech-tester / tech-reviewer / tech-docs / tech-debugger / tech-designer<br/>品質・文書・調査"]
     TECHIMPL -.必要時相談.-> TECHLEAD
     TECHSPEC -.必要時相談.-> TECHLEAD

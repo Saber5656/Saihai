@@ -1158,25 +1158,37 @@
       ]
     },
     {
-      "source": "${SKILLS_ROOT}/tech-security/SKILL.md",
+      "source": "organization/roles/tech-security/skill.md",
       "path": "organization/roles/tech-security/skill.md",
-      "bytes": 8580,
-      "sha1": "cf37b1bc7cc3b8e81619ce03d0bd5da4bd4a0b25",
+      "bytes": 11042,
+      "sha1": "0c5f20f1798e8fba96e888e85dd5fcfbc5835668",
       "role_id": "tech-security",
       "team": "tech",
       "category": "Team Role",
       "status": "active",
-      "purpose": "認証、認可、秘密情報、外部入力、攻撃面のレビューを担う",
+      "purpose": "認証、認可、秘密情報、外部入力、攻撃面、Web/API脆弱性のレビューを担う",
       "user_invocable": "false",
-      "compatibility_source": "skills-repo",
-      "migration_stage": "directory_mirror",
-      "artifact_count": 1,
+      "compatibility_source": "repository-native",
+      "migration_stage": "role_authoritative",
+      "artifact_count": 3,
       "artifacts": [
         {
-          "source": "${SKILLS_ROOT}/tech-security/SKILL.md",
+          "source": "organization/roles/tech-security/skill.md",
           "path": "organization/roles/tech-security/skill.md",
-          "bytes": 8580,
-          "sha1": "cf37b1bc7cc3b8e81619ce03d0bd5da4bd4a0b25"
+          "bytes": 11042,
+          "sha1": "0c5f20f1798e8fba96e888e85dd5fcfbc5835668"
+        },
+        {
+          "source": "organization/roles/tech-security/references/web-security-review-checklist.md",
+          "path": "organization/roles/tech-security/references/web-security-review-checklist.md",
+          "bytes": 28526,
+          "sha1": "83186bbb7a803c8577bc1d07cc0a87ed61d8a652"
+        },
+        {
+          "source": "organization/roles/tech-security/evals/evals.json",
+          "path": "organization/roles/tech-security/evals/evals.json",
+          "bytes": 5748,
+          "sha1": "ca160e36f57225a0feb118278083e50cbda5ec79"
         }
       ]
     },

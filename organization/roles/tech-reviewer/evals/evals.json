@@ -12,7 +12,7 @@
     {
       "id": 2,
       "prompt": "差分には認可ロジック変更、性能劣化の疑い、受け入れ条件の未検証が含まれる。tech-reviewer としてレビューしてください。",
-      "expected_output": "TR は専門レビューを代替せず、認可は tech-security / security-professor、性能は tech-performance、受け入れ条件や検証不足は tech-qa / tech-tester へ Specialist Handoff する。専門レビュー待ちが blocking なら Verdict は blocked にする。",
+      "expected_output": "TR は専門レビューを代替せず、認可と深いWeb/API脅威はtech-security、性能はtech-performance、受け入れ条件や検証不足はtech-qa / tech-testerへSpecialist Handoffする。専門レビュー待ちがblockingならVerdictはblockedにする。",
       "files": [
         "skills/tech-reviewer/SKILL.md"
       ]

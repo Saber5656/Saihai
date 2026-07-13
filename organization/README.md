@@ -23,11 +23,12 @@ still use Agent-Teams-Viewer while new user-facing references use Sahai.
 
 ## Migration Rule
 
-Do not delete existing skills during this migration. Team Role skills are kept as
-compatibility sources until all runtimes read this repository directly. Sahai
-role mirrors use a directory layout: `organization/roles/<role>/skill.md` is
-the skill entrypoint, and sibling directories preserve role-local references,
-evals, scripts, config, and tests.
+Team Role skills remain compatibility sources until each role is promoted to
+repository-native authority. Role mirrors use a directory layout:
+`organization/roles/<role>/skill.md` is the skill entrypoint, and sibling
+directories preserve role-local references, evals, scripts, config, and tests.
+`tech-security` is repository-native: role sync indexes its Saihai directory and
+must not overwrite it from an external skills repository.
 
 `scripts/sync_organization_sources.py` regenerates mirrored role and policy
 files. It copies, indexes, and preserves source paths so drift can be audited.

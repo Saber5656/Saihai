@@ -77,7 +77,7 @@ agent_id: tech-lead
    - システム境界は `tech-architect`。
    - 型、スキーマ、データフローは `tech-data-structure`。
    - 性能計測は `tech-performance`。
-   - 認証、認可、秘密情報、攻撃面は `tech-security` または `security-professor`。
+   - 認証、認可、秘密情報、攻撃面、深いWeb/APIレビューは `tech-security`。
    - 差分妥当性は `tech-reviewer`。
 
 4. 解決方針を比較する。
