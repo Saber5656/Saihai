@@ -22,6 +22,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parent
+if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
+from saihai_env import load_environment, redact_environment_values
+
+ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_vault=True)
+
 HOME = Path.home()
 STATE_ROOTS = [
     ("claude", HOME / ".claude" / "state" / "itb"),
@@ -971,7 +978,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _send_json(self, payload: dict, code: int = 200) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(redact_environment_values(payload), ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

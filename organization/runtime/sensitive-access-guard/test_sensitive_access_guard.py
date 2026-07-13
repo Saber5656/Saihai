@@ -206,6 +206,25 @@ class HookTest(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             self.assertIn("failed closed", result.stderr)
 
+    def test_environment_load_failure_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as state:
+            env = os.environ.copy()
+            env["SENSITIVE_ACCESS_GUARD_STATE_ROOT"] = state
+            env["SAIHAI_ENV_FILE"] = str(Path(state) / "missing-config")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--runtime", "codex"],
+                input=json.dumps(
+                    {"session_id": "session-env-error", "tool_input": {"command": "git status"}}
+                ),
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("failed closed: EnvError", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
     def test_indirect_shell_reads_are_denied(self) -> None:
         for command in (
             "cat .*",

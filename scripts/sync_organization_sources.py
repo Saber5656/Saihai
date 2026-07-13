@@ -14,7 +14,14 @@ import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+from saihai_env import load_environment, validate_vault  # noqa: E402
+
+ENV_DIAGNOSTICS = load_environment(checkout_root=REPO_ROOT, require_vault=True)
 
 
 def env_path(name: str, default: Path) -> Path:
@@ -23,12 +30,9 @@ def env_path(name: str, default: Path) -> Path:
 
 DEFAULT_AGENT_VAULT = env_path(
     "AGENTS_VAULT_ROOT",
-    Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Agents-Vault",
+    Path("."),
 )
-DEFAULT_SKILLS_ROOT = env_path(
-    "SKILLS_REPO_SKILLS_ROOT",
-    env_path("SKILLS_ROOT", Path.home() / "skills-repo" / "skills"),
-)
+DEFAULT_SKILLS_ROOT = Path(os.environ["SKILLS_ROOT"]).expanduser() if os.environ.get("SKILLS_ROOT") else None
 
 POLICY_REFS = [
     "AI-Organization.md",
@@ -45,9 +49,13 @@ RUNTIME_REFS = {
 
 TEAM_PREFIXES = ("gate-", "teams-", "tech-", "contents-", "business-", "infra-")
 TOOL_ROLE_ALLOWLIST = {"git-publisher"}
-PATH_ALIASES = (
-    ("AGENTS_VAULT_ROOT", DEFAULT_AGENT_VAULT),
-    ("SKILLS_ROOT", DEFAULT_SKILLS_ROOT),
+PATH_ALIASES = tuple(
+    item
+    for item in (
+        ("AGENTS_VAULT_ROOT", DEFAULT_AGENT_VAULT),
+        ("SKILLS_ROOT", DEFAULT_SKILLS_ROOT),
+    )
+    if item[1] is not None
 )
 ROLE_SKILL_FILENAME = "skill.md"
 
@@ -200,6 +208,7 @@ def sync_roles(skills_root: Path, org_root: Path) -> list[dict[str, str | int | 
 
 
 def main() -> None:
+    validate_vault(os.environ)
     parser = argparse.ArgumentParser(description="Sync organization sources")
     parser.add_argument("--agent-vault", type=Path, default=DEFAULT_AGENT_VAULT)
     parser.add_argument("--skills-root", type=Path, default=DEFAULT_SKILLS_ROOT)
@@ -213,6 +222,15 @@ def main() -> None:
     args = parser.parse_args()
 
     org_root = args.repo_root / "organization"
+    if args.scope in {"all", "roles"}:
+        if args.skills_root is None:
+            parser.error("roles sync requires external SKILLS_ROOT or explicit --skills-root")
+        source = args.skills_root.expanduser().resolve()
+        destination = (org_root / "roles").resolve()
+        if not source.is_dir():
+            parser.error("roles sync source must be an existing directory")
+        if source == destination or source in destination.parents or destination in source.parents:
+            parser.error("roles sync source and destination must not overlap")
     org_root.mkdir(parents=True, exist_ok=True)
 
     policies = sync_policies(args.agent_vault, org_root) if args.scope in {"all", "policies"} else []

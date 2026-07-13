@@ -24,6 +24,11 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[3]
+if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
+from saihai_env import load_environment  # noqa: E402
+
 
 DENY_COMPONENT_PATTERNS = (
     re.compile(r"^\.env.*$", re.IGNORECASE),
@@ -433,13 +438,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    args = parse_args()
-    if args.clear:
-        if not args.session_id:
-            raise GuardError("--clear requires --session-id")
-        return clear_latch(args.runtime, args.session_id)
-
     try:
+        load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT)
+        args = parse_args()
+        if args.clear:
+            if not args.session_id:
+                raise GuardError("--clear requires --session-id")
+            return clear_latch(args.runtime, args.session_id)
+
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise GuardError("hook input must be a JSON object")

@@ -18,5 +18,8 @@ jobs:
         with:
           python-version: "3.11"
       - name: Run validation suite
+        env:
+          AGENTS_VAULT_ROOT: ${{ runner.temp }}/agents-vault
         run: |
+          mkdir -p "$AGENTS_VAULT_ROOT"
           python3 scripts/validate_all.py
