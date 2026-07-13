@@ -9,10 +9,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+import provider_evidence_contract
 import run_lifecycle
 import run_lock
 import run_store
 import task_state_bridge
+import workflow_selector
 
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
 EXECUTION_PRINCIPAL_TYPES = {
@@ -21,7 +23,8 @@ EXECUTION_PRINCIPAL_TYPES = {
     "harness_runner",
     "orchestrator_start",
 }
-RAW_TRANSCRIPT_KEYS = {"raw_transcript", "transcript_content", "stdout", "pane_output"}
+FORBIDDEN_REPORT_CONTENT_KEYS = provider_evidence_contract.FORBIDDEN_RAW_CONTENT_KEYS
+ADAPTER_METADATA_FIELDS = ("transport", "bridge_pattern", "surface_metadata")
 
 
 class ReportGateError(RuntimeError):
@@ -36,6 +39,7 @@ def state_paths(state_root: Path) -> dict[str, Path]:
     return {
         "runs": state_root / "runs",
         "work_orders": state_root / "work-orders",
+        "adapter_requests": state_root / "adapter-requests",
         "provider_evidence": state_root / "provider-evidence",
         "reports": state_root / "reports",
         "transitions": state_root / "transitions",
@@ -100,6 +104,143 @@ def legacy_provider_transcript_path(state_root: Path, run_id: str, step_id: str)
         / run_store.validate_artifact_id(run_id, "run_id")
         / f"{run_store.validate_artifact_id(step_id, 'step_id')}-claude-transcript.json"
     )
+
+
+def authoritative_adapter_request(
+    state_root: Path,
+    *,
+    run: dict[str, Any],
+    work_order: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    run_id = str(run.get("run_id") or "")
+    step_id = str(work_order.get("step_id") or "")
+    request_dir = (
+        state_paths(state_root)["adapter_requests"]
+        / run_store.validate_artifact_id(run_id, "run_id")
+    )
+    request_prefix = f"{run_store.validate_artifact_id(step_id, 'step_id')}-"
+
+    transition_candidates: list[Path] = []
+    has_run_provider_transition = False
+    transitions = run.get("transitions")
+    if isinstance(transitions, list):
+        for transition in reversed(transitions):
+            if not isinstance(transition, dict) or transition.get("transition") != "run_provider":
+                continue
+            has_run_provider_transition = True
+            refs = transition.get("artifact_refs")
+            if isinstance(refs, list):
+                for raw_ref in refs:
+                    if not isinstance(raw_ref, str) or not raw_ref:
+                        continue
+                    candidate = Path(raw_ref).expanduser()
+                    if (
+                        path_is_within(candidate, request_dir)
+                        and candidate.parent.resolve() == request_dir.resolve()
+                        and candidate.name.startswith(request_prefix)
+                        and candidate.suffix == ".json"
+                    ):
+                        transition_candidates.append(candidate)
+            break
+
+    candidates = list(dict.fromkeys(path.resolve() for path in transition_candidates))
+    if has_run_provider_transition and len(candidates) != 1:
+        return None, [
+            "adapter_request_authority run_provider transition requires exactly one "
+            f"current request: found {len(candidates)}"
+        ]
+    if not has_run_provider_transition and request_dir.exists():
+        candidates = [
+            path.resolve()
+            for path in sorted(request_dir.glob(f"{request_prefix}*.json"))
+            if path_is_within(path, request_dir) and path.parent.resolve() == request_dir.resolve()
+        ]
+    if len(candidates) != 1:
+        return None, [
+            "adapter_request_authority requires exactly one current request: "
+            f"found {len(candidates)}"
+        ]
+
+    request_path = candidates[0]
+    try:
+        request = read_json(request_path)
+    except (ReportGateError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, [f"adapter_request_authority unreadable: {exc}"]
+
+    errors: list[str] = []
+    if request.get("adapter_request_version") != "1":
+        errors.append("adapter_request_authority.adapter_request_version must be '1'")
+    expected_identity = {
+        "request_id": str(run.get("request_id") or ""),
+        "run_id": run_id,
+        "workflow_id": str(run.get("workflow_id") or ""),
+        "step_id": step_id,
+    }
+    for field, expected in expected_identity.items():
+        if str(request.get(field) or "") != expected:
+            errors.append(f"adapter_request_authority.{field} mismatch: expected {expected!r}")
+
+    expected_paths = {
+        "work_order_path": work_order_path(state_root, run_id, step_id),
+        "report_path": report_path(state_root, run_id, step_id),
+        "evidence_path": provider_evidence_path(state_root, run_id, step_id),
+        "transcript_path": provider_transcript_path(state_root, run_id, step_id),
+    }
+    for field, expected in expected_paths.items():
+        raw_path = request.get(field)
+        if not isinstance(raw_path, str) or not raw_path:
+            errors.append(f"adapter_request_authority.{field} must be non-empty string")
+        elif Path(raw_path).expanduser().resolve() != expected.resolve():
+            errors.append(f"adapter_request_authority.{field} mismatch")
+
+    adapter = request.get("adapter")
+    if not isinstance(adapter, dict):
+        return None, errors + ["adapter_request_authority.adapter must be object"]
+    adapter_id = str(adapter.get("provider_adapter_id") or "")
+    adapter_target = str(adapter.get("provider_target") or "")
+    try:
+        registry = workflow_selector.load_registry()
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, errors + [f"adapter_request_authority registry unreadable: {exc}"]
+    registry_adapters = {
+        str(item.get("provider_adapter_id") or ""): item
+        for item in registry.get("provider_adapters", [])
+        if isinstance(item, dict) and item.get("provider_adapter_id")
+    }
+    registered = registry_adapters.get(adapter_id)
+    if registered is None:
+        errors.append(f"adapter_request_authority adapter is not registered: {adapter_id!r}")
+    else:
+        if str(registered.get("provider_target") or "") != adapter_target:
+            errors.append("adapter_request_authority.provider_target does not match registry")
+        for field in ADAPTER_METADATA_FIELDS:
+            if field in registered and adapter.get(field) != registered[field]:
+                errors.append(f"adapter_request_authority.{field} does not match registry")
+
+    if adapter_id:
+        try:
+            validated_adapter_id = run_store.validate_artifact_id(adapter_id, "adapter_id")
+        except run_store.RunStoreError:
+            errors.append("adapter_request_authority.provider_adapter_id is not artifact-safe")
+        else:
+            expected_request_path = request_dir / f"{request_prefix}{validated_adapter_id}.json"
+            if request_path != expected_request_path.resolve():
+                errors.append("adapter_request_authority path does not match provider_adapter_id")
+    else:
+        errors.append("adapter_request_authority.provider_adapter_id must be non-empty string")
+    if not adapter_target:
+        errors.append("adapter_request_authority.provider_target must be non-empty string")
+    if errors:
+        return None, list(dict.fromkeys(errors))
+    authoritative_metadata: dict[str, Any] = {
+        "provider_adapter_id": adapter_id,
+        "provider_target": adapter_target,
+    }
+    if registered is not None:
+        for field in ADAPTER_METADATA_FIELDS:
+            if field in registered:
+                authoritative_metadata[field] = registered[field]
+    return authoritative_metadata, []
 
 
 def canonical_json(payload: Any) -> bytes:
@@ -199,7 +340,7 @@ def _raw_content_errors(report: Any) -> list[str]:
         if isinstance(value, dict):
             for key, item in value.items():
                 key_path = f"{path}.{key}" if path else str(key)
-                if key in RAW_TRANSCRIPT_KEYS:
+                if key in FORBIDDEN_REPORT_CONTENT_KEYS:
                     errors.append(f"raw_transcript_embedded:{key_path}")
                 walk(item, key_path)
         elif isinstance(value, list):
@@ -300,6 +441,14 @@ def validate_external_review_report(
         errors.append("summary must be non-empty string")
 
     errors.extend(validate_provider_evidence(report.get("provider_evidence"), run, work_order, state_root))
+    errors.extend(
+        validate_normalized_provider_evidence_file(
+            report,
+            run=run,
+            work_order=work_order,
+            state_root=state_root,
+        )
+    )
     errors.extend(validate_findings(report.get("findings"), report.get("result")))
     errors.extend(validate_authority(report.get("authority")))
     return errors
@@ -351,6 +500,119 @@ def validate_provider_evidence(
         if value.get(field) and path.resolve() not in {expected.resolve() for expected in expected_paths[field]}:
             errors.append(f"provider_evidence.{field} must match current run evidence path")
     return errors
+
+
+def validate_normalized_provider_evidence(
+    value: Any,
+    *,
+    run: dict[str, Any],
+    work_order: dict[str, Any],
+    state_root: Path,
+    evidence_path: Path,
+    report_provider_evidence: dict[str, Any],
+) -> list[str]:
+    errors = provider_evidence_contract.validate_provider_evidence_schema(value)
+    if not isinstance(value, dict):
+        return errors
+
+    expected_identity = {
+        "request_id": str(run.get("request_id") or ""),
+        "run_id": str(run.get("run_id") or ""),
+        "workflow_id": str(run.get("workflow_id") or ""),
+        "step_id": str(work_order.get("step_id") or ""),
+    }
+    for field, expected in expected_identity.items():
+        if str(value.get(field) or "") != expected:
+            errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
+
+    for field in ("provider", "effective_model", "provider_session_id"):
+        expected = str(report_provider_evidence.get(field) or "")
+        if str(value.get(field) or "") != expected:
+            errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
+
+    adapter_identity, adapter_errors = authoritative_adapter_request(
+        state_root,
+        run=run,
+        work_order=work_order,
+    )
+    errors.extend(adapter_errors)
+    if adapter_identity is not None:
+        for field, expected in adapter_identity.items():
+            if value.get(field) != expected:
+                errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
+
+    expected_evidence_path = provider_evidence_path(
+        state_root,
+        expected_identity["run_id"],
+        expected_identity["step_id"],
+    )
+    if evidence_path.resolve() != expected_evidence_path.resolve():
+        errors.append("normalized_evidence path must match current run evidence path")
+    artifact_evidence_path = value.get("evidence_path")
+    if isinstance(artifact_evidence_path, str) and artifact_evidence_path:
+        if Path(artifact_evidence_path).expanduser().resolve() != evidence_path.resolve():
+            errors.append("normalized_evidence.evidence_path must reference its own artifact")
+
+    expected_transcript_paths = {
+        provider_transcript_path(
+            state_root,
+            expected_identity["run_id"],
+            expected_identity["step_id"],
+        ).resolve(),
+        legacy_provider_transcript_path(
+            state_root,
+            expected_identity["run_id"],
+            expected_identity["step_id"],
+        ).resolve(),
+    }
+    artifact_transcript_path = value.get("transcript_path")
+    report_transcript_path = report_provider_evidence.get("transcript_path")
+    if isinstance(artifact_transcript_path, str) and artifact_transcript_path:
+        transcript_path = Path(artifact_transcript_path).expanduser()
+        if transcript_path.resolve() not in expected_transcript_paths:
+            errors.append("normalized_evidence.transcript_path must match current run transcript path")
+        if not transcript_path.exists():
+            errors.append(f"normalized_evidence.transcript_path does not exist: {transcript_path}")
+        if (
+            isinstance(report_transcript_path, str)
+            and report_transcript_path
+            and transcript_path.resolve() != Path(report_transcript_path).expanduser().resolve()
+        ):
+            errors.append("normalized_evidence.transcript_path must match report provider_evidence")
+
+    if value.get("outcome") != "ok":
+        errors.append("normalized_evidence.outcome must be 'ok' for a valid report")
+    return list(dict.fromkeys(errors))
+
+
+def validate_normalized_provider_evidence_file(
+    report: dict[str, Any],
+    *,
+    run: dict[str, Any],
+    work_order: dict[str, Any],
+    state_root: Path,
+) -> list[str]:
+    report_provider_evidence = report.get("provider_evidence")
+    if not isinstance(report_provider_evidence, dict):
+        return []
+    raw_path = report_provider_evidence.get("evidence_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return []
+    path = Path(raw_path).expanduser()
+    if not path.exists() or not path_is_within(path, state_paths(state_root)["provider_evidence"]):
+        return []
+    try:
+        value = read_json(path)
+    except (ReportGateError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return [f"normalized_evidence unreadable: {exc}"]
+    return validate_normalized_provider_evidence(
+        value,
+        run=run,
+        work_order=work_order,
+        state_root=state_root,
+        evidence_path=path,
+        report_provider_evidence=report_provider_evidence,
+    )
 
 
 def validate_findings(value: Any, result: Any) -> list[str]:

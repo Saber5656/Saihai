@@ -22,6 +22,7 @@ WORKFLOW_TEMPLATE_SCHEMA = WORKFLOW_ROOT / "schemas/workflow-template.schema.jso
 PUBLICATION_RESULT_SCHEMA = WORKFLOW_ROOT / "schemas/publication-result.schema.json"
 CODE_CHANGE_REPORT_SCHEMA = WORKFLOW_ROOT / "schemas/code-change-report.schema.json"
 ORCHESTRATOR_PROJECTION_SCHEMA = WORKFLOW_ROOT / "schemas/orchestrator-projection.schema.json"
+PROVIDER_EVIDENCE_SCHEMA = WORKFLOW_ROOT / "schemas/provider-evidence.schema.json"
 
 PUBLICATION_GATE_ID = "exit.publication_result_recorded"
 
@@ -115,7 +116,7 @@ def test_contract_validation() -> None:
     contracts = selector.validate_contracts()
     assert_equal(contracts["decision"], "ok", f"contracts errors: {contracts['errors']}")
     assert_equal(contracts["workflow_contracts"]["template_count"], 6, "template count")
-    assert_equal(contracts["workflow_contracts"]["schema_count"], 17, "schema count")
+    assert_equal(contracts["workflow_contracts"]["schema_count"], 18, "schema count")
 
 
 def test_registry_gate_profiles_and_active_templates() -> None:
@@ -632,6 +633,73 @@ def test_external_review_report_schema_rejects_embedded_raw_fields() -> None:
     assert '"minItems": 1' in conditional
 
 
+def test_provider_evidence_schema_uses_completion_version_contract() -> None:
+    schema = json.loads(PROVIDER_EVIDENCE_SCHEMA.read_text(encoding="utf-8"))
+    assert_equal(
+        set(schema["required"]),
+        {
+            "evidence_version",
+            "provider_adapter_id",
+            "provider_target",
+            "provider",
+            "effective_model",
+            "request_id",
+            "run_id",
+            "workflow_id",
+            "step_id",
+            "provider_request_id",
+            "provider_session_id",
+            "transcript_path",
+            "evidence_path",
+            "duration_ms",
+            "usage",
+            "outcome",
+            "raw_transcript_policy",
+        },
+        "completion evidence required fields",
+    )
+    assert_equal(
+        schema["properties"]["evidence_version"]["const"],
+        "1",
+        "provider evidence version",
+    )
+    assert "provider_evidence_version" not in schema["properties"]
+    assert_equal(
+        schema["properties"]["raw_transcript_policy"]["const"],
+        "signal_only_not_shared",
+        "raw transcript policy",
+    )
+    assert_equal(schema["properties"]["usage"]["additionalProperties"], False, "closed usage")
+    assert_equal(
+        set(schema["properties"]["usage"]["properties"]),
+        {"input_tokens", "output_tokens"},
+        "normalized usage counters",
+    )
+    for field in ("input_tokens", "output_tokens"):
+        assert_equal(
+            schema["properties"]["usage"]["properties"][field],
+            {"type": "integer", "minimum": 0},
+            f"typed usage counter {field}",
+        )
+    surface_metadata = schema["properties"]["surface_metadata"]
+    assert_equal(
+        surface_metadata["additionalProperties"],
+        False,
+        "closed surface metadata",
+    )
+    assert_equal(
+        set(surface_metadata["properties"]),
+        {"surface", "async_callback_supported", "domain_ownership", "routing_candidate_for"},
+        "known surface metadata fields",
+    )
+    assert_equal(
+        surface_metadata["properties"]["async_callback_supported"],
+        {"type": "boolean"},
+        "typed async callback metadata",
+    )
+    assert_equal(schema["additionalProperties"], False, "provider evidence extra fields")
+
+
 def test_orchestrator_projection_schema_closes_redacted_objects() -> None:
     schema = json.loads(ORCHESTRATOR_PROJECTION_SCHEMA.read_text(encoding="utf-8"))
     defs = schema["$defs"]
@@ -762,6 +830,7 @@ def main() -> None:
         test_permission_monotonicity_fuzz_for_p0_selection,
         test_work_order_schema_constrains_single_step_external_review,
         test_external_review_report_schema_rejects_embedded_raw_fields,
+        test_provider_evidence_schema_uses_completion_version_contract,
         test_orchestrator_projection_schema_closes_redacted_objects,
         test_publication_and_code_change_report_schemas_require_evidence,
         test_workflow_template_schema_and_security_template_publication_path,

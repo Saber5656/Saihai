@@ -13,6 +13,8 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import provider_runner
+import run_lifecycle
+import run_store
 
 from test_frontdoor_orchestrator import (
     assert_equal,
@@ -85,14 +87,52 @@ def test_fake_provider_success_completes_with_normalized_evidence() -> None:
         assert_equal(payload["report_gate"]["outcome"], "report_valid", "gate outcome")
         assert_equal(payload["workflow_run"]["run_state"], "complete", "run state")
         evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
+        assert_equal(evidence["evidence_version"], "1", "evidence version")
+        assert "provider_evidence_version" not in evidence
         assert_equal(evidence["provider_adapter_id"], "claude_headless_p0", "adapter id")
         assert_equal(evidence["provider_target"], "claude_headless", "provider target")
+        assert_equal(evidence["request_id"], "req-provider-ok", "evidence request id")
+        assert_equal(evidence["run_id"], "run-provider-ok", "evidence run id")
+        assert_equal(evidence["workflow_id"], "single_step_external_review", "evidence workflow id")
+        assert_equal(evidence["step_id"], "review", "evidence step id")
+        assert_equal(
+            Path(evidence["evidence_path"]).resolve(),
+            Path(payload["evidence_path"]).resolve(),
+            "evidence self path",
+        )
+        assert_equal(
+            Path(evidence["transcript_path"]).resolve(),
+            Path(payload["transcript_path"]).resolve(),
+            "evidence transcript path",
+        )
+        assert isinstance(evidence["duration_ms"], int | float)
+        assert not isinstance(evidence["duration_ms"], bool)
+        assert isinstance(evidence["usage"], dict)
         assert_equal(evidence["outcome"], "ok", "evidence outcome")
+        assert_equal(
+            evidence["raw_transcript_policy"],
+            "signal_only_not_shared",
+            "raw transcript policy",
+        )
         assert "provider_request_id" in evidence
         assert "duration_ms" in evidence
         serialized_run = json.dumps(payload["workflow_run"], ensure_ascii=False)
         assert "raw transcript" not in serialized_run.lower()
         assert "Fake provider completed" not in serialized_run
+        completion = load_payload(
+            run_frontdoor(
+                state_root,
+                "verify-completion",
+                "--run-id",
+                "run-provider-ok",
+            )
+        )
+        assert_equal(completion["decision"], "complete", "completion decision")
+        assert_equal(
+            completion["evidence"]["verification_decision"],
+            "complete",
+            "completion evidence decision",
+        )
 
 
 def test_runner_dispatches_through_adapter_metadata() -> None:
@@ -113,6 +153,157 @@ def test_runner_dispatches_through_adapter_metadata() -> None:
         assert_equal(evidence["provider_adapter_id"], "cursor_cli_p0", "adapter id")
         assert_equal(evidence["provider_target"], "cursor_cli", "provider target")
         assert_equal(report["provider_evidence"]["provider"], "cursor_cli", "report provider")
+
+
+def test_runner_transition_request_wins_over_manual_adapter_candidate() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-current-request"
+        prepare_run(state_root, request_id="req-provider-current-request", run_id=run_id)
+        manual = load_payload(
+            run_frontdoor(state_root, "prepare-claude-adapter", "--run-id", run_id)
+        )
+        manual_path = Path(manual["adapter_request_path"])
+
+        payload = load_payload(
+            run_provider(
+                state_root,
+                run_id=run_id,
+                adapter_id="cursor_cli_p0",
+            )
+        )
+
+        runner_path = Path(payload["adapter_request_path"])
+        assert manual_path.exists(), "manual request should remain as a bounded fallback artifact"
+        assert runner_path.exists(), "runner request should exist"
+        assert manual_path != runner_path, "test requires two adapter request candidates"
+        assert_equal(payload["report_gate"]["outcome"], "report_valid", "current request gate")
+        assert_equal(
+            payload["provider_evidence"]["provider_adapter_id"],
+            "cursor_cli_p0",
+            "transition-selected adapter",
+        )
+
+
+def test_waiting_provider_retry_records_fresh_request_authority() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-retry-authority"
+        prepare_run(state_root, request_id="req-provider-retry-authority", run_id=run_id)
+        run = run_store.load_run(state_root, run_id)
+        step_id = str(run["current_step"])
+        order_path = provider_runner.work_order_path(state_root, run_id, step_id)
+        work_order = provider_runner.read_json(order_path)
+        principal = {
+            "principal_type": "harness_runner",
+            "principal_id": "provider-retry-test",
+            "authn_method": "local_test",
+        }
+        first_adapter = provider_runner.load_provider_adapters()["claude_headless_p0"]
+        first_request = provider_runner.adapter_request(
+            state_root=state_root,
+            run=run,
+            work_order=work_order,
+            adapter=first_adapter,
+            principal=principal,
+        )
+        first_request_path = provider_runner.adapter_request_path(
+            state_root,
+            run_id,
+            step_id,
+            "claude_headless_p0",
+        )
+        run_store.atomic_write_json(first_request_path, first_request)
+        run_lifecycle.transition_run(
+            state_root,
+            run_id,
+            to_state="waiting_provider",
+            reason_class="provider_invoked",
+            transition="run_provider",
+            principal=principal,
+            artifact_refs=[str(order_path), str(first_request_path)],
+            run=run,
+        )
+
+        payload = load_payload(
+            run_provider(
+                state_root,
+                run_id=run_id,
+                adapter_id="cursor_cli_p0",
+            )
+        )
+
+        current_request_path = Path(payload["adapter_request_path"])
+        provider_transitions = [
+            item
+            for item in payload["workflow_run"]["transitions"]
+            if item.get("transition") == "run_provider"
+        ]
+        assert_equal(len(provider_transitions), 2, "provider transition count")
+        assert str(current_request_path) in provider_transitions[-1]["artifact_refs"]
+        assert_equal(payload["report_gate"]["outcome"], "report_valid", "retry gate outcome")
+        assert_equal(
+            payload["provider_evidence"]["provider_adapter_id"],
+            "cursor_cli_p0",
+            "retry adapter authority",
+        )
+
+
+def test_completion_rejects_tampered_runner_evidence_identity_path_and_type() -> None:
+    def change_request_id(evidence: dict, _state_root: Path) -> None:
+        evidence["request_id"] = "req-other"
+
+    def change_self_path(evidence: dict, state_root: Path) -> None:
+        evidence["evidence_path"] = str(state_root / "provider-evidence/wrong.json")
+
+    def change_transcript_path(evidence: dict, state_root: Path) -> None:
+        evidence["transcript_path"] = str(state_root / "provider-evidence/wrong-transcript.json")
+
+    def change_duration_type(evidence: dict, _state_root: Path) -> None:
+        evidence["duration_ms"] = "12"
+
+    variants = (
+        ("request-id", change_request_id, "normalized_evidence.request_id mismatch"),
+        ("self-path", change_self_path, "must reference its own artifact"),
+        ("transcript-path", change_transcript_path, "must match current run transcript path"),
+        ("duration-type", change_duration_type, "schema:$.duration_ms:type"),
+    )
+    for name, mutate, expected_error in variants:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = f"run-provider-tampered-{name}"
+            prepare_run(
+                state_root,
+                request_id=f"req-provider-tampered-{name}",
+                run_id=run_id,
+            )
+            runner_payload = load_payload(run_provider(state_root, run_id=run_id))
+            evidence_path = Path(runner_payload["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            mutate(evidence, state_root)
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            blocked_process = run_frontdoor(
+                state_root,
+                "verify-completion",
+                "--run-id",
+                run_id,
+                check=False,
+            )
+            blocked = load_payload(blocked_process)
+            assert_equal(blocked_process.returncode, 2, f"{name} completion exit")
+            assert_equal(blocked["decision"], "blocked", f"{name} completion decision")
+            invalid_details = [
+                item["detail"]
+                for item in blocked["reasons"]
+                if item["reason_class"] == "invalid_provider_evidence"
+            ]
+            assert any(expected_error in detail for detail in invalid_details), (
+                f"{name} missing invalid evidence detail: {invalid_details}"
+            )
 
 
 def test_hermes_evidence_records_bridge_pattern_without_async_claim() -> None:
@@ -256,6 +447,9 @@ if __name__ == "__main__":
     tests = (
         test_fake_provider_success_completes_with_normalized_evidence,
         test_runner_dispatches_through_adapter_metadata,
+        test_runner_transition_request_wins_over_manual_adapter_candidate,
+        test_waiting_provider_retry_records_fresh_request_authority,
+        test_completion_rejects_tampered_runner_evidence_identity_path_and_type,
         test_hermes_evidence_records_bridge_pattern_without_async_claim,
         test_provider_unavailable_waits_for_human,
         test_malformed_provider_output_fails_without_raw_stdout_in_run,

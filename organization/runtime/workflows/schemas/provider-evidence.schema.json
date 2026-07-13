@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sahai.local/schemas/workflows/provider-evidence.schema.json",
+  "title": "Normalized Provider Evidence",
+  "description": "Canonical provider evidence artifact consumed by the final completion gate.",
+  "type": "object",
+  "required": [
+    "evidence_version",
+    "provider_adapter_id",
+    "provider_target",
+    "provider",
+    "effective_model",
+    "request_id",
+    "run_id",
+    "workflow_id",
+    "step_id",
+    "provider_request_id",
+    "provider_session_id",
+    "transcript_path",
+    "evidence_path",
+    "duration_ms",
+    "usage",
+    "outcome",
+    "raw_transcript_policy"
+  ],
+  "properties": {
+    "evidence_version": {
+      "const": "1"
+    },
+    "provider_adapter_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider_target": {
+      "type": "string",
+      "enum": [
+        "claude_headless",
+        "codex_cli_openai",
+        "hermes_agent",
+        "cursor_cli",
+        "grok_build_cli"
+      ]
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1
+    },
+    "effective_model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workflow_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "step_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider_request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider_session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "transcript_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "evidence_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "duration_ms": {
+      "type": "number",
+      "minimum": 0
+    },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "provider_timeout",
+        "provider_nonzero_exit",
+        "provider_malformed_output",
+        "provider_unavailable"
+      ]
+    },
+    "reason_class": {
+      "type": "string",
+      "minLength": 1
+    },
+    "transport": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bridge_pattern": {
+      "type": "string"
+    },
+    "surface_metadata": {
+      "type": "object",
+      "properties": {
+        "surface": {
+          "type": "string",
+          "minLength": 1
+        },
+        "async_callback_supported": {
+          "type": "boolean"
+        },
+        "domain_ownership": {
+          "type": "string",
+          "minLength": 1
+        },
+        "routing_candidate_for": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "stdout_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+    "timed_out": {
+      "type": "boolean"
+    },
+    "raw_transcript_policy": {
+      "const": "signal_only_not_shared"
+    }
+  },
+  "additionalProperties": false
+}
