@@ -9972,8 +9972,8 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     if result_name == "provider_response_ready":
         state["readiness_scope"] = "response_evidence"
 
-    roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
     append_jsonl_atomic(
         session_dir / "invocation-evidence.jsonl",
         invocation_evidence_entry(
@@ -10199,8 +10199,8 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     if result_name == "provider_response_ready":
         state["readiness_scope"] = "response_evidence"
 
-    roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
     append_jsonl_atomic(
         session_dir / "invocation-evidence.jsonl",
         invocation_evidence_entry(
@@ -10476,8 +10476,8 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             state["last_provider_activation_agent"] = agent_id
             state["last_provider_activation_at"] = now
             state["last_provider_activation_usage_source"] = "codex_exec_json_no_inference"
-            roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            write_json_yaml(roster_path, roster)
+            write_json_yaml(state_path, state)
             append_jsonl(
                 session_dir / "invocation-evidence.jsonl",
                 invocation_evidence_entry(
@@ -10523,8 +10523,8 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         state["last_provider_activation_at"] = now
         state["last_provider_activation_usage_source"] = "codex_exec_json"
 
-        roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
         append_jsonl(
             session_dir / "invocation-evidence.jsonl",
             invocation_evidence_entry(
@@ -10647,8 +10647,8 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         state["last_provider_activation_agent"] = agent_id
         state["last_provider_activation_at"] = now
         state["last_provider_activation_usage_source"] = "claude_print_json_no_inference"
-        roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
         append_jsonl(
             session_dir / "invocation-evidence.jsonl",
             invocation_evidence_entry(
@@ -10696,8 +10696,8 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     state["last_provider_activation_at"] = now
     state["last_provider_activation_usage_source"] = "claude_print_json"
 
-    roster_path.write_text(json.dumps(roster, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
     append_jsonl_atomic(
         session_dir / "invocation-evidence.jsonl",
         invocation_evidence_entry(
