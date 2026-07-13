@@ -1,4 +1,5 @@
 __pycache__/
+.workspace/
 .DS_Store
 .directory-path.local.md
 .env*

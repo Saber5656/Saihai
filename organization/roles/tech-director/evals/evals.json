@@ -10,7 +10,7 @@
     {
       "id": 2,
       "prompt": "TPM から tech チームへ、認可ロジック変更、秘密情報の取り扱い、デプロイ設定変更を含むタスクが渡された。承認要否は未確定。tech-director として実行可否と担当割り振りを判断してください。",
-      "expected_output": "tech-security、security-professor、tech-devopssec を含め、権限モデル変更や秘密情報リスクがあるため human approval を waiting_human または required_before_execution として扱う。",
+      "expected_output": "tech-securityとtech-devopssecを含め、Web/APIの深い脅威もtech-securityへ集約し、権限モデル変更や秘密情報リスクがあるため human approval を waiting_human または required_before_execution として扱う。",
       "files": []
     },
     {

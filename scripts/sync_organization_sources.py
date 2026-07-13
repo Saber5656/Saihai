@@ -58,6 +58,7 @@ PATH_ALIASES = tuple(
     if item[1] is not None
 )
 ROLE_SKILL_FILENAME = "skill.md"
+REPOSITORY_NATIVE_ROLES = {"tech-security"}
 
 
 def public_path(path: Path) -> str:
@@ -128,6 +129,45 @@ def role_record_path(skill_dir: Path, relative: Path) -> str:
     return f"${{SKILLS_ROOT}}/{skill_dir.name}/{suffix}"
 
 
+def repository_role_record(
+    role_dir: Path, org_root: Path
+) -> dict[str, str | int | bool | list[dict[str, str | int]]]:
+    skill_md = role_dir / ROLE_SKILL_FILENAME
+    text = skill_md.read_text(encoding="utf-8")
+    meta = parse_frontmatter(text)
+    name = meta.get("name") or role_dir.name
+    artifacts: list[dict[str, str | int]] = []
+    for src in sorted(role_dir.rglob("*")):
+        if not src.is_file():
+            continue
+        path = relative_repo_path(org_root.parent, src)
+        artifacts.append(
+            {
+                "source": path,
+                "path": path,
+                "bytes": src.stat().st_size,
+                "sha1": sha1(src),
+            }
+        )
+    skill_path = relative_repo_path(org_root.parent, skill_md)
+    return {
+        "source": skill_path,
+        "path": skill_path,
+        "bytes": skill_md.stat().st_size,
+        "sha1": sha1(skill_md),
+        "role_id": name,
+        "team": meta.get("team", name.split("-", 1)[0]),
+        "category": meta.get("category", ""),
+        "status": meta.get("status", ""),
+        "purpose": meta.get("purpose", ""),
+        "user_invocable": meta.get("user-invocable", ""),
+        "compatibility_source": "repository-native",
+        "migration_stage": "role_authoritative",
+        "artifact_count": len(artifacts),
+        "artifacts": artifacts,
+    }
+
+
 def sync_policies(agent_vault: Path, org_root: Path) -> list[dict[str, str | int]]:
     source_root = agent_vault / "03-Contexts" / "Policies"
     records = []
@@ -155,7 +195,14 @@ def sync_runtime(org_root: Path) -> list[dict[str, str | int]]:
 
 
 def sync_roles(skills_root: Path, org_root: Path) -> list[dict[str, str | int | bool | list[dict[str, str | int]]]]:
-    records = []
+    records_by_name: dict[
+        str, dict[str, str | int | bool | list[dict[str, str | int]]]
+    ] = {}
+    for name in sorted(REPOSITORY_NATIVE_ROLES):
+        role_dir = org_root / "roles" / name
+        if (role_dir / ROLE_SKILL_FILENAME).is_file():
+            records_by_name[name] = repository_role_record(role_dir, org_root)
+
     for skill_md in sorted(skills_root.glob("*/SKILL.md")):
         text = skill_md.read_text(encoding="utf-8")
         meta = parse_frontmatter(text)
@@ -163,6 +210,8 @@ def sync_roles(skills_root: Path, org_root: Path) -> list[dict[str, str | int | 
             continue
         name = meta.get("name") or skill_md.parent.name
         safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "-", name).strip("-")
+        if safe_name in REPOSITORY_NATIVE_ROLES:
+            continue
         role_dir = org_root / "roles" / safe_name
         legacy_flat_dst = org_root / "roles" / f"{safe_name}.md"
         if legacy_flat_dst.exists():
@@ -186,8 +235,7 @@ def sync_roles(skills_root: Path, org_root: Path) -> list[dict[str, str | int | 
                 }
             )
         skill_dst = role_dir / ROLE_SKILL_FILENAME
-        records.append(
-            {
+        records_by_name[safe_name] = {
                 "source": role_record_path(skill_md.parent, Path("SKILL.md")),
                 "path": relative_repo_path(org_root.parent, skill_dst),
                 "bytes": skill_dst.stat().st_size,
@@ -203,8 +251,7 @@ def sync_roles(skills_root: Path, org_root: Path) -> list[dict[str, str | int | 
                 "artifact_count": len(artifacts),
                 "artifacts": artifacts,
             }
-        )
-    return records
+    return [records_by_name[name] for name in sorted(records_by_name)]
 
 
 def main() -> None:
