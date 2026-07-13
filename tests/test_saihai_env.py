@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
 import importlib.util
+import json
+import os
 import stat
 import subprocess
 import sys
@@ -346,6 +347,59 @@ class SyncOrganizationSourcesTests(unittest.TestCase):
             )
             self.assertNotEqual(overlap.returncode, 0)
             self.assertTrue(marker.is_file())
+
+    def test_roles_sync_preserves_repository_native_tech_security(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            vault = root / "vault"
+            vault.mkdir()
+            repo = root / "repo"
+            native = repo / "organization/roles/tech-security"
+            native.mkdir(parents=True)
+            (native / "skill.md").write_text(
+                "---\nname: tech-security\nteam: tech\ncategory: Team Role\n"
+                "status: active\npurpose: native security\nuser-invocable: false\n---\n"
+                "repository-native\n",
+                encoding="utf-8",
+            )
+            (native / "references").mkdir()
+            (native / "references/checklist.md").write_text("deep-web-checklist\n", encoding="utf-8")
+
+            skills = root / "skills"
+            external_security = skills / "tech-security"
+            external_security.mkdir(parents=True)
+            (external_security / "SKILL.md").write_text(
+                "---\nname: tech-security\nteam: tech\ncategory: Team Role\n---\n"
+                "obsolete-external-copy\n",
+                encoding="utf-8",
+            )
+            external_reviewer = skills / "tech-reviewer"
+            external_reviewer.mkdir()
+            (external_reviewer / "SKILL.md").write_text(
+                "---\nname: tech-reviewer\nteam: tech\ncategory: Team Role\n---\n"
+                "external-reviewer\n",
+                encoding="utf-8",
+            )
+
+            result = self.run_sync(
+                repo, vault, "--scope", "roles", "--skills-root", str(skills)
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("repository-native", (native / "skill.md").read_text(encoding="utf-8"))
+            self.assertNotIn("obsolete-external-copy", (native / "skill.md").read_text(encoding="utf-8"))
+            self.assertTrue((native / "references/checklist.md").is_file())
+            self.assertIn(
+                "external-reviewer",
+                (repo / "organization/roles/tech-reviewer/skill.md").read_text(encoding="utf-8"),
+            )
+
+            index = json.loads(
+                (repo / "organization/role-index.json").read_text(encoding="utf-8")
+            )
+            security = next(item for item in index["roles"] if item["role_id"] == "tech-security")
+            self.assertEqual("repository-native", security["compatibility_source"])
+            self.assertEqual("role_authoritative", security["migration_stage"])
+            self.assertEqual(2, security["artifact_count"])
 
 
 if __name__ == "__main__":

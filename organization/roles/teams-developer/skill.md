@@ -26,7 +26,7 @@ purpose: 旧 Claude Teams 実験時の実装プロセスメモを参照用に保
 | 環境、依存関係、ビルド基盤、CI 下準備 | `tech-infrastructure` |
 | モバイル実装 | `tech-mobile` |
 | テスト設計、再現確認、検証 | `tech-tester` |
-| セキュリティ観点 | `tech-security` / `security-professor` |
+| セキュリティ観点 | `tech-security` |
 | 独立技術レビュー | `tech-reviewer` |
 
 既存ノートにこのスキル名が出てきた場合だけ、参照用 legacy として読み替える。
@@ -144,7 +144,7 @@ purpose: 旧 Claude Teams 実験時の実装プロセスメモを参照用に保
 
 ## 4. セキュリティチェック（最重要）
 
-**コーディング完了後、project-manager に成果物を提出する前に必ず `/security-professor` スキルを実行してセキュリティレビューを行う。これは省略不可の必須ステップ。**
+**コーディング完了後、project-manager に成果物を提出する前に必ず `tech-security` へレビューをhandoffする。これは省略不可の必須ステップ。Web/APIの深いレビューでは `tech-security` のbundled Web security checklistを使う。**
 
 ### 4.1 実装中に注意すべき代表的な脆弱性
 
@@ -161,9 +161,9 @@ purpose: 旧 Claude Teams 実験時の実装プロセスメモを参照用に保
 
 ```
 1. コーディング完了
-2. /security-professor スキルを実行
+2. tech-security へレビューをhandoff
 3. 検出された脆弱性をすべて修正する
-4. 再度 /security-professor を実行して修正を確認
+4. 再度 tech-security へhandoffして修正を確認
 5. セキュリティ問題なし → project-manager に提出
 ```
 
@@ -190,7 +190,7 @@ project-manager への完了報告には以下を含める。
 
 ### セキュリティチェック結果
 - 実施日時: YYYY-MM-DD
-- 使用スキル: /security-professor
+- 使用ロール: tech-security
 - 検出された問題: なし / [問題がある場合は内容と対応を記載]
 
 ### 残課題・引き継ぎ事項

@@ -37,7 +37,7 @@ TPM はチーム単位までのルーティングを担当し、`tech-director` 
 | In | Task Detail、Project Manager Handoff、Team Routing Decision、review requirements、approval status、open questions |
 | Out | tech チーム内アサイン、`tech/tasks.md` の team task board、実行順序、相互レビュー線、承認要否、Completion Report に含める実施サマリ |
 | 前ロール | `teams-project-manager` |
-| 主な下流 | tech 系エージェント、必要に応じて `security-professor` |
+| 主な下流 | tech 系エージェント。security reviewは `tech-security` に集約 |
 | 対象外 | Gate 起票、TPM のチーム単位ルーティング再定義、最終応答整形、単独完了宣言 |
 
 ## チーム内タスク管理
@@ -94,8 +94,7 @@ code-like diff がある場合は micro-flow でも `tech-qa` と `tech-reviewer
 | `tech-data-structure` | 型、スキーマ、データフロー、構造整合性 |
 | `tech-infrastructure` | 依存関係、環境設定、ビルド基盤、技術実装側の基盤 |
 | `tech-devopssec` | CI/CD、IaC、権限、デプロイ安全性 |
-| `tech-security` | 認証、認可、秘密情報、攻撃面、脅威観点 |
-| `security-professor` | Web セキュリティの深い体系レビュー |
+| `tech-security` | 認証、認可、秘密情報、攻撃面、脅威観点、Web/APIの深い体系レビュー |
 | `tech-debugger` | 不具合再現、原因切り分け、ログ読解、観測点整理 |
 | `tech-performance` | ボトルネック調査、計測、改善案比較 |
 | `tech-tester` | テストケース設計、再現確認、失敗条件切り分け |
@@ -152,7 +151,7 @@ code-like diff がある team task は、次の QA 証跡が揃うまで `done` 
 | 型、スキーマ、データフロー | `tech-data-structure` | 実装担当、`tech-reviewer` |
 | 依存関係、ビルド、環境 | `tech-infrastructure` | `tech-devopssec`、`tech-reviewer` |
 | CI/CD、権限、配備 | `tech-devopssec` | `tech-security` |
-| 認証、認可、秘密情報、外部入力 | `tech-security` | 深い Web リスクは `security-professor` |
+| 認証、認可、秘密情報、外部入力、深いWebリスク | `tech-security` | Web/APIではbundled checklistを使う |
 | 原因不明の不具合 | `tech-debugger` | 実装担当、`tech-tester` |
 | 性能問題 | `tech-performance` | 実装担当、`tech-qa` |
 | テスト設計、再現確認 | `tech-tester` | `tech-qa` |

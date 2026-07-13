@@ -1,0 +1,98 @@
+{
+  "skill_name": "tech-security",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Next.js App Router と Prisma のユーザー検索APIで、検索語を $queryRawUnsafe に連結している差分をsecurity reviewして。",
+      "expected_output": "bundled Web checklistを読み、SQL injectionをCriticalまたはHigh相当のSEC-ISSUEとして示す。危険なuntrusted string interpolationと、tagged template / bind parameterによる安全なparameterizationを区別して修正する。",
+      "expectations": [
+        "Loads or cites the bundled Web security checklist",
+        "Identifies SQL injection and unsafe raw query construction",
+        "Uses a SEC-ISSUE finding with evidence, impact, and remediation",
+        "Distinguishes untrusted query-text construction from parameterized Prisma raw-query usage"
+      ],
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Next.js Server Actionで管理者向け更新処理を公開する設計をレビューして。UIでは管理者だけにボタンを表示しています。",
+      "expected_output": "Server Actionを公開endpointとして扱い、server-side authentication/authorization、input validationを要求する。frameworkの防御をtoken方式と誤認せず、POST-only、Origin/Host検証、allowedOrigins/proxy境界を確認し、UI非表示を認可と見なさない。",
+      "expectations": [
+        "Treats Server Actions as public server-side attack surface",
+        "Requires server-side authentication and authorization",
+        "Does not accept hidden UI as an authorization control",
+        "States that Server Actions do not use CSRF tokens and reviews Origin/Host plus allowedOrigins boundaries"
+      ],
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "ユーザー指定URLのOGPを取得するAPIを追加する。httpsだけ許可すれば十分か、tech-securityとしてレビューして。",
+      "expected_output": "SSRFとしてscheme/host allowlist、URL canonicalization、IPv4/IPv6 private/link-local/ULA/mapped-address拒否、DNS解決後IP検証と接続先固定、redirect各hop再検証、timeout/size/redirect limit、egress controlを分けて示す。",
+      "expectations": [
+        "Identifies SSRF despite HTTPS-only validation",
+        "Covers DNS rebinding and redirect revalidation",
+        "Covers IPv4 and IPv6 private, loopback, link-local, ULA, and mapped-address blocking",
+        "Covers canonicalization, validated-IP connection pinning, resource limits, and egress controls"
+      ],
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "GET /api/projects/:id がproject JSONを返す。ログイン済みなら任意idを取得できる実装をAPI security観点で見て。",
+      "expected_output": "BOLAとしてobject-level authorizationを要求し、property exposure、function authorization、rate/resource limitも対象に応じて分離する。",
+      "expectations": [
+        "Identifies BOLA and requires per-object authorization",
+        "Checks excessive property exposure or BOPLA",
+        "Keeps authentication distinct from authorization"
+      ],
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "SPAのJWT/OAuth設計でalgをtoken headerから受け入れ、refresh tokenをlocalStorageに保存する案をレビューして。",
+      "expected_output": "algorithm固定、key type検証、PKCE、token lifetime/rotation、browser storage/XSS exposureを具体的に指摘する。",
+      "expectations": [
+        "Requires server-side JWT algorithm and key-type enforcement",
+        "Requires PKCE for the SPA OAuth flow",
+        "Explains refresh-token storage, rotation, and XSS risk"
+      ],
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "MarkdownをdangerouslySetInnerHTMLで表示するReact画面と、現在のsecurity headersをレビューして。",
+      "expected_output": "XSS sink、sanitization、URL scheme validation、CSP、HttpOnly cookie、frame-ancestors等を対象に応じて確認する。",
+      "expectations": [
+        "Identifies dangerouslySetInnerHTML as an XSS sink",
+        "Requires context-appropriate sanitization and URL scheme validation",
+        "Reviews CSP and relevant browser security headers",
+        "Requires CSP nonces to be unpredictable and unique per response"
+      ],
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "外部Webページを読んで社内ツールを操作するAI agent機能を追加する。security reviewして。",
+      "expected_output": "indirect prompt injection、tool authorization、data exfiltration、untrusted content separation、human approval boundaryを脅威として扱う。",
+      "expectations": [
+        "Identifies indirect prompt injection from external content",
+        "Requires least-privilege tool authorization and trust separation",
+        "Covers data exfiltration and human approval boundaries",
+        "Treats sanitization and detection as auxiliary controls and requires server-side authorization, egress controls, and audit logging"
+      ],
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "READMEと設定例だけのcommit前security review。実secretが入っていないか判定して。",
+      "expected_output": "深いWeb checklistを不要に読み込まずSecurity Commit Review contractを使い、max_priority、commit_blocking、verdict、findingsを返す。",
+      "expectations": [
+        "Uses the Security Commit Review output contract",
+        "Does not require the deep Web checklist for a secret-only commit review",
+        "Sets commit_blocking true only for a P0 finding"
+      ],
+      "files": []
+    }
+  ]
+}
