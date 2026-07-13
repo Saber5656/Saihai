@@ -187,6 +187,33 @@ def child_thread_plan(state_root: Path, **overrides) -> dict:
     return plan
 
 
+def write_normalized_provider_evidence(
+    adapter_request: dict,
+    *,
+    request_id: str,
+    run_id: str,
+    provider_session_id: str = "",
+) -> dict:
+    evidence_path = Path(adapter_request["evidence_path"])
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    adapter = adapter_request["adapter"]
+    contract = adapter_request["evidence_contract"]
+    fixed_fields = contract["fixed_fields"]
+    assert_equal(fixed_fields["request_id"], request_id, "evidence contract request")
+    assert_equal(fixed_fields["run_id"], run_id, "evidence contract run")
+    evidence = {
+        **fixed_fields,
+        "provider": adapter["provider_target"],
+        "effective_model": adapter.get("default_model") or "claude-sonnet-test",
+        "provider_request_id": f"provider-{request_id}",
+        "provider_session_id": provider_session_id or f"session-{run_id}",
+        "duration_ms": 12,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+    evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
+    return evidence
+
+
 def prepare_review_handoff(state_root: Path, *, request_id: str, run_id: str) -> dict:
     proposed = load_payload(
         run_frontdoor(
@@ -224,8 +251,11 @@ def prepare_review_handoff(state_root: Path, *, request_id: str, run_id: str) ->
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    evidence_path.write_text(json.dumps({"normalized": True}) + "\n", encoding="utf-8")
-    transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+    write_normalized_provider_evidence(
+        adapter_request,
+        request_id=request_id,
+        run_id=run_id,
+    )
     return adapter_request
 
 
@@ -237,6 +267,7 @@ def external_review_report(
     result: str = "pass",
     findings: list[dict] | None = None,
 ) -> dict:
+    adapter = adapter_request["adapter"]
     return {
         "report_version": "1",
         "report_id": f"report-{run_id}",
@@ -247,8 +278,8 @@ def external_review_report(
         "result": result,
         "summary": "Review completed.",
         "provider_evidence": {
-            "provider": "claude",
-            "effective_model": "claude-sonnet-test",
+            "provider": adapter["provider_target"],
+            "effective_model": adapter.get("default_model") or "claude-sonnet-test",
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",
             "transcript_path": adapter_request["transcript_path"],
@@ -468,6 +499,34 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert "raw transcript" in adapter_request["prompt"]
         assert "Do not select workflows" in adapter_request["prompt"]
         assert "User request:" not in adapter_request["prompt"]
+        assert "provider-evidence.schema.json" in adapter_request["prompt"]
+        assert "Unlisted evidence fields are forbidden" in adapter_request["prompt"]
+        evidence_contract = adapter_request["evidence_contract"]
+        assert_equal(
+            evidence_contract["schema_path"],
+            "organization/runtime/workflows/schemas/provider-evidence.schema.json",
+            "manual evidence schema",
+        )
+        assert_equal(
+            evidence_contract["fixed_fields"]["provider_adapter_id"],
+            "claude_headless_p0",
+            "manual evidence adapter id",
+        )
+        assert_equal(
+            evidence_contract["fixed_fields"]["provider_target"],
+            "claude_headless",
+            "manual evidence provider target",
+        )
+        assert_equal(
+            evidence_contract["allowed_usage_fields"],
+            ["input_tokens", "output_tokens"],
+            "manual evidence usage fields",
+        )
+        assert_equal(
+            evidence_contract["raw_content_policy"]["unlisted_fields"],
+            "forbidden",
+            "manual evidence raw-content boundary",
+        )
         assert_equal(
             adapter_request["authority"]["provider_may_write"],
             ["typed_report_file", "normalized_provider_evidence_file"],
@@ -477,11 +536,44 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         evidence_path = Path(adapter_request["evidence_path"])
         transcript_path = Path(adapter_request["transcript_path"])
         report_path = Path(adapter_request["report_path"])
+        assert transcript_path.exists(), "manual handoff transcript marker missing"
+        transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+        assert_equal(
+            transcript["raw_content_policy"],
+            "signal_only_not_shared",
+            "manual transcript policy",
+        )
+        assert_equal(
+            transcript["payload"]["outcome"],
+            "manual_handoff_prepared",
+            "manual transcript outcome",
+        )
+        transcript_before = transcript_path.read_bytes()
+        duplicate_prepare = run_frontdoor(
+            state_root,
+            "prepare-claude-adapter",
+            "--run-id",
+            "run-frontdoor",
+            check=False,
+        )
+        duplicate_payload = load_payload(duplicate_prepare)
+        assert_equal(duplicate_prepare.returncode, 2, "duplicate prepare exit")
+        assert_equal(
+            duplicate_payload["reason"],
+            "manual_handoff_artifacts_exist",
+            "duplicate prepare reason",
+        )
+        assert "transcript" in duplicate_payload["artifacts"]
+        assert_equal(transcript_path.read_bytes(), transcript_before, "duplicate prepare transcript")
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
-        transcript_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        evidence_path.write_text(json.dumps({"normalized": True}) + "\n", encoding="utf-8")
-        transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+        write_normalized_provider_evidence(
+            adapter_request,
+            request_id="req-frontdoor",
+            run_id="run-frontdoor",
+            provider_session_id="claude-session-test",
+        )
+        adapter = adapter_request["adapter"]
         report = {
             "report_version": "1",
             "report_id": "report-frontdoor",
@@ -492,8 +584,8 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "result": "pass",
             "summary": "No findings.",
             "provider_evidence": {
-                "provider": "claude",
-                "effective_model": "claude-sonnet-test",
+                "provider": adapter["provider_target"],
+                "effective_model": adapter.get("default_model") or "claude-sonnet-test",
                 "request_id": "req-frontdoor",
                 "provider_session_id": "claude-session-test",
                 "transcript_path": str(transcript_path),
@@ -527,6 +619,140 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "lifecycle transition reasons",
         )
         assert_equal(transitions[-1]["to_state"], "complete", "terminal lifecycle state")
+        terminal_prepare = run_frontdoor(
+            state_root,
+            "prepare-claude-adapter",
+            "--run-id",
+            "run-frontdoor",
+            check=False,
+        )
+        terminal_payload = load_payload(terminal_prepare)
+        assert_equal(terminal_prepare.returncode, 2, "terminal prepare exit")
+        assert_equal(terminal_payload["reason"], "run_not_preparable", "terminal prepare reason")
+        assert_equal(terminal_payload["run_state"], "complete", "terminal prepare state")
+        assert_equal(transcript_path.read_bytes(), transcript_before, "terminal prepare transcript")
+
+
+def test_manual_prepare_evidence_contract_validates_report() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-manual-evidence-contract"
+        run_id = "run-manual-evidence-contract"
+        adapter_request = prepare_review_handoff(
+            state_root,
+            request_id=request_id,
+            run_id=run_id,
+        )
+        fixed_fields = adapter_request["evidence_contract"]["fixed_fields"]
+        assert_equal(fixed_fields["transport"], "headless_cli", "manual fixed transport")
+        assert_equal(fixed_fields["bridge_pattern"], "none", "manual fixed bridge pattern")
+        assert_equal(fixed_fields["outcome"], "ok", "manual fixed outcome")
+        assert_equal(
+            fixed_fields["surface_metadata"],
+            {
+                "surface": "claude_headless_cli",
+                "async_callback_supported": False,
+            },
+            "manual fixed surface metadata",
+        )
+
+        report = external_review_report(
+            adapter_request,
+            request_id=request_id,
+            run_id=run_id,
+        )
+        Path(adapter_request["report_path"]).write_text(
+            json.dumps(report, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        validated = load_payload(
+            run_frontdoor(state_root, "validate-report", "--run-id", run_id)
+        )
+        assert_equal(validated["outcome"], "report_valid", "manual report outcome")
+        verified = load_payload(
+            run_frontdoor(state_root, "verify-completion", "--run-id", run_id)
+        )
+        assert_equal(verified["decision"], "complete", "manual completion decision")
+
+
+def test_concurrent_manual_prepare_writes_canonical_artifacts_once() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        create_approved_run(
+            state_root,
+            request_id="req-concurrent-prepare",
+            run_id="run-concurrent-prepare",
+        )
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "drain",
+                "--run-id",
+                "run-concurrent-prepare",
+            )
+        )
+        barrier = threading.Barrier(3)
+        results = []
+
+        def prepare() -> None:
+            barrier.wait()
+            results.append(
+                run_frontdoor(
+                    state_root,
+                    "prepare-claude-adapter",
+                    "--run-id",
+                    "run-concurrent-prepare",
+                    check=False,
+                )
+            )
+
+        workers = [threading.Thread(target=prepare) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join(timeout=10)
+            assert not worker.is_alive(), "concurrent prepare worker did not finish"
+
+        assert_equal(sorted(item.returncode for item in results), [0, 2], "prepare exits")
+        payloads = [load_payload(item) for item in results]
+        assert_equal(
+            sorted(item["decision"] for item in payloads),
+            ["blocked", "ok"],
+            "prepare decisions",
+        )
+        blocked = next(item for item in payloads if item["decision"] == "blocked")
+        assert_equal(
+            blocked["reason"],
+            "manual_handoff_artifacts_exist",
+            "concurrent prepare block reason",
+        )
+        assert "transcript" in blocked["artifacts"]
+
+        request_path = (
+            state_root
+            / "adapter-requests"
+            / "run-concurrent-prepare"
+            / "review-claude_headless_p0.json"
+        )
+        transcript_path = (
+            state_root
+            / "provider-evidence"
+            / "run-concurrent-prepare"
+            / "review-provider-transcript.json"
+        )
+        assert request_path.exists(), "concurrent prepare request missing"
+        assert transcript_path.exists(), "concurrent prepare transcript missing"
+        events = [
+            event
+            for event in read_audit_events(state_root)
+            if event["event_type"] == "prepare_claude_adapter"
+        ]
+        assert_equal(
+            sorted(event["outcome"] for event in events),
+            ["blocked", "ok"],
+            "concurrent prepare audit outcomes",
+        )
 
 
 def test_drain_allows_edit_capable_code_change_gate() -> None:
@@ -763,8 +989,11 @@ def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        evidence_path.write_text(json.dumps({"normalized": True}) + "\n", encoding="utf-8")
-        transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+        write_normalized_provider_evidence(
+            adapter_request,
+            request_id="req-linked",
+            run_id="run-linked",
+        )
         report_path.write_text(
             json.dumps(
                 external_review_report(adapter_request, request_id="req-linked", run_id="run-linked"),
@@ -2673,6 +2902,8 @@ def main() -> None:
         test_channel_token_permissions_are_private,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
+        test_manual_prepare_evidence_contract_validates_report,
+        test_concurrent_manual_prepare_writes_canonical_artifacts_once,
         test_drain_allows_edit_capable_code_change_gate,
         test_drain_blocks_invalid_existing_work_order,
         test_frontdoor_full_flow_updates_session_task_state_index,

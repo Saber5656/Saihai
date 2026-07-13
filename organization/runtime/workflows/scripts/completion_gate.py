@@ -15,18 +15,6 @@ import run_lock
 import run_store
 import work_order_builder
 
-REQUIRED_EVIDENCE_FIELDS = {
-    "evidence_version",
-    "provider",
-    "effective_model",
-    "provider_request_id",
-    "provider_session_id",
-    "run_id",
-    "step_id",
-    "duration_ms",
-    "usage",
-}
-
 
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
@@ -226,26 +214,6 @@ def _verify_evidence_digest(
         reasons.append(reason("digest_mismatch", f"expected {stdout_sha256}, found {actual}"))
 
 
-def _evidence_identity_errors(evidence: dict[str, Any], *, run: dict[str, Any], step_id: str) -> list[str]:
-    errors: list[str] = []
-    missing = sorted(REQUIRED_EVIDENCE_FIELDS - set(evidence))
-    errors.extend(f"evidence missing:{field}" for field in missing)
-    if evidence.get("evidence_version") != "1":
-        errors.append("evidence_version must be '1'")
-    for field in ("provider", "effective_model", "provider_request_id", "provider_session_id"):
-        if not isinstance(evidence.get(field), str) or not evidence.get(field):
-            errors.append(f"evidence.{field} must be a non-empty string")
-    if not isinstance(evidence.get("usage"), dict):
-        errors.append("evidence.usage must be a json object")
-    if not isinstance(evidence.get("duration_ms"), int | float) or isinstance(evidence.get("duration_ms"), bool):
-        errors.append("evidence.duration_ms must be a number")
-    for field in ("run_id", "step_id"):
-        expected = str(run.get(field) if field != "step_id" else step_id)
-        if str(evidence.get(field) or "") != expected:
-            errors.append(f"evidence.{field} mismatch: expected {expected!r}")
-    return errors
-
-
 def vault_evidence(state_root: Path, run: dict[str, Any], report: dict[str, Any], evidence: dict[str, Any] | None) -> dict[str, Any]:
     provider_evidence = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
     report_path = Path(str(run.get("_verified_report_path") or "")).expanduser()
@@ -424,8 +392,15 @@ def verify_completion(
                 else:
                     evidence = _load_optional_json(evidence_path, reasons, "missing_provider_evidence")
                     if evidence is not None:
-                        for item in _evidence_identity_errors(evidence, run=run, step_id=str(work_order.get("step_id") or "")):
-                            reasons.append(reason("missing_provider_evidence", item))
+                        for item in report_gate.validate_normalized_provider_evidence(
+                            evidence,
+                            run=run,
+                            work_order=work_order,
+                            state_root=state_root,
+                            evidence_path=evidence_path,
+                            report_provider_evidence=provider,
+                        ):
+                            reasons.append(reason("invalid_provider_evidence", item))
                     _verify_evidence_digest(
                         state_root=state_root,
                         evidence=evidence,

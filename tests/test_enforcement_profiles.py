@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -19,6 +20,7 @@ CODEX_RULES = PROFILE_ROOT / "codex-main-agent.rules.example"
 LAUNCHER = PROFILE_ROOT / "saihai-frontend-session.sh"
 VERIFY_DOC = PROFILE_ROOT / "verify_enforcement.md"
 RUNBOOK = ROOT / "docs/runbooks/main-agent-enforcement.md"
+CODEX_CANARY_STATE_ROOT = "/tmp/saihai-frontdoor-canary"
 
 APPROVED_CLAUDE_BASH_PREFIXES = (
     "Bash(python3 scripts/configure_organization.py workflow-frontdoor bridge-submit-request*)",
@@ -193,21 +195,159 @@ def test_codex_rules_allow_only_bridge_prefixes() -> None:
         "bridge command alternatives",
     )
     assert_contains(rules, 'decision = "allow"', "allow decision")
-    assert_contains(rules, '"--state-root", "*"', "state-root bridge rule")
+    assert '"--state-root", "*"' not in rules, "Codex rules must not treat '*' as a wildcard"
+    assert_contains(
+        rules,
+        f'"--state-root", "{CODEX_CANARY_STATE_ROOT}"',
+        "fixed canary state-root bridge rule",
+    )
     assert "scripts/saihai.py\", \"frontdoor" not in rules
     assert_contains(
         rules,
+        f"workflow-frontdoor --state-root {CODEX_CANARY_STATE_ROOT} bridge-read-projection",
+        "canary state-root bridge match",
+    )
+    assert_contains(
+        rules,
         "workflow-frontdoor --state-root /tmp/frontdoor-state bridge-read-projection",
-        "state-root bridge match",
+        "arbitrary state-root negative example",
     )
     assert_contains(rules, "frontdoor approve", "negative direct frontdoor approval example")
     assert_contains(rules, "frontdoor status", "negative direct frontdoor status example")
     assert_contains(rules, "workflow-frontdoor create-run", "negative facade example")
     assert_contains(
         rules,
-        "workflow-frontdoor --state-root /tmp/frontdoor-state create-run",
-        "negative state-root facade example",
+        f"workflow-frontdoor --state-root {CODEX_CANARY_STATE_ROOT} create-run",
+        "negative canary-root facade example",
     )
+    assert_contains(rules, "run-provider", "negative provider-dispatch example")
+    assert_contains(rules, "child-thread-create", "negative child-thread action example")
+    assert_contains(rules, "git status", "negative git example")
+
+
+def run_codex_execpolicy(binary: str, command: list[str]) -> dict:
+    completed = subprocess.run(
+        [
+            binary,
+            "execpolicy",
+            "check",
+            "--pretty",
+            "--rules",
+            str(CODEX_RULES),
+            *command,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert_equal(completed.returncode, 0, f"execpolicy return for {command}")
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"execpolicy returned invalid JSON for {command}: {completed.stdout!r}; stderr={completed.stderr!r}"
+        ) from exc
+
+
+def test_codex_rules_with_installed_execpolicy() -> None:
+    binary = shutil.which("codex")
+    if binary is None:
+        return
+
+    help_result = subprocess.run(
+        [binary, "execpolicy", "check", "--help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if help_result.returncode != 0 or "--rules" not in help_result.stdout:
+        return
+
+    allowed = [
+        [
+            "python3",
+            "scripts/configure_organization.py",
+            "workflow-frontdoor",
+            "bridge-read-projection",
+            "--request-id",
+            "req-example",
+        ],
+        [
+            "python3",
+            "scripts/configure_organization.py",
+            "workflow-frontdoor",
+            "--state-root",
+            CODEX_CANARY_STATE_ROOT,
+            "bridge-read-projection",
+            "--request-id",
+            "req-example",
+        ],
+    ]
+    for command in allowed:
+        payload = run_codex_execpolicy(binary, command)
+        assert_equal(payload.get("decision"), "allow", f"execpolicy decision for {command}")
+
+    not_allowed = [
+        [
+            "python3",
+            "scripts/configure_organization.py",
+            "workflow-frontdoor",
+            "--state-root",
+            "/tmp/frontdoor-state",
+            "bridge-read-projection",
+            "--request-id",
+            "req-example",
+        ],
+        [
+            "python3",
+            "scripts/configure_organization.py",
+            "workflow-frontdoor",
+            "create-run",
+            "--request-id",
+            "req-example",
+        ],
+        [
+            "python3",
+            "scripts/configure_organization.py",
+            "workflow-frontdoor",
+            "--state-root",
+            CODEX_CANARY_STATE_ROOT,
+            "drain",
+            "--run-id",
+            "run-example",
+        ],
+        [
+            "python3",
+            "scripts/configure_organization.py",
+            "workflow-frontdoor",
+            "--state-root",
+            CODEX_CANARY_STATE_ROOT,
+            "run-provider",
+            "--run-id",
+            "run-example",
+            "--adapter-json",
+            "adapter.json",
+        ],
+        [
+            "python3",
+            "scripts/configure_organization.py",
+            "workflow-frontdoor",
+            "--state-root",
+            CODEX_CANARY_STATE_ROOT,
+            "child-thread-create",
+            "--plan-json",
+            "{}",
+            "--result-json",
+            "{}",
+        ],
+        ["git", "status"],
+    ]
+    for command in not_allowed:
+        payload = run_codex_execpolicy(binary, command)
+        assert "decision" not in payload, f"execpolicy unexpectedly allowed {command}: {payload}"
+        assert_equal(payload.get("matchedRules"), [], f"execpolicy matches for {command}")
 
 
 def test_launcher_refuses_bypass_flags() -> None:
@@ -291,6 +431,7 @@ def test_runbook_references_profiles_and_canary() -> None:
         "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary bridge-read-projection --request-id req-canary",
         "git status",
         "explicitly refused by the profile",
+        "Any other explicit state root",
         "R57 action gateway",
     ]:
         assert_contains(runbook, phrase, "runbook canary/limits")
@@ -300,6 +441,7 @@ def test_verify_doc_copy_pasteable() -> None:
     text = VERIFY_DOC.read_text(encoding="utf-8")
     assert_contains(text, "saihai-frontend-session.sh", "verify launcher")
     assert_contains(text, "--codex", "verify codex launcher")
+    assert_contains(text, "exact disposable canary root", "verify Codex canary root")
     assert_contains(text, "Bypass detector", "verify bypass detector")
     assert_contains(text, "Hooks may log", "verify hook boundary")
 
@@ -321,6 +463,7 @@ def main() -> None:
         test_claude_disables_bypass_mode,
         test_codex_profile_pins_readonly_and_approval,
         test_codex_rules_allow_only_bridge_prefixes,
+        test_codex_rules_with_installed_execpolicy,
         test_launcher_refuses_bypass_flags,
         test_launcher_passes_clean_args,
         test_launcher_requires_installed_codex_profile,

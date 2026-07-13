@@ -972,6 +972,48 @@ def validate_contracts() -> dict[str, Any]:
     if '"result": {"const": "findings"}' not in report_condition or '"minItems": 1' not in report_condition:
         errors.append("external review findings result must require non-empty findings")
 
+    provider_evidence_schema = loaded_schemas.get("provider-evidence.schema.json", {})
+    provider_evidence_required = set(provider_evidence_schema.get("required", []))
+    for field in (
+        "evidence_version",
+        "provider_adapter_id",
+        "provider_target",
+        "provider",
+        "effective_model",
+        "request_id",
+        "run_id",
+        "workflow_id",
+        "step_id",
+        "provider_request_id",
+        "provider_session_id",
+        "transcript_path",
+        "evidence_path",
+        "duration_ms",
+        "usage",
+        "outcome",
+        "raw_transcript_policy",
+    ):
+        if field not in provider_evidence_required:
+            errors.append(f"provider evidence schema must require {field}")
+    if (
+        provider_evidence_schema.get("properties", {})
+        .get("evidence_version", {})
+        .get("const")
+        != "1"
+    ):
+        errors.append("provider evidence schema must require evidence_version '1'")
+    if "provider_evidence_version" in provider_evidence_schema.get("properties", {}):
+        errors.append("provider evidence schema must not define provider_evidence_version")
+    if (
+        provider_evidence_schema.get("properties", {})
+        .get("raw_transcript_policy", {})
+        .get("const")
+        != "signal_only_not_shared"
+    ):
+        errors.append("provider evidence schema must keep raw transcript content signal-only")
+    if provider_evidence_schema.get("additionalProperties") is not False:
+        errors.append("provider evidence schema must reject undeclared fields")
+
     workflow_run_schema = loaded_schemas.get("workflow-run.schema.json", {})
     run_activation = (workflow_run_schema.get("properties") or {}).get("activation", {})
     run_activation_condition = json.dumps(run_activation, sort_keys=True)

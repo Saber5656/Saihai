@@ -22,6 +22,45 @@ class SaihaiEnvTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
+    def test_secret_bearing_environment_variants_are_gitignored(self) -> None:
+        ignored = (
+            ".env",
+            ".env.production",
+            ".envrc",
+            ".flaskenv",
+            ".dev.vars",
+            "backend.env",
+            "backend.env.local",
+            ".direnv/cache",
+            "terraform.tfvars",
+            "production.auto.tfvars.json",
+        )
+        allowed = (".env.example", "environment.ts")
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / ".gitignore").write_text(
+                (ROOT / ".gitignore").read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            for relative in (*ignored, *allowed):
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("placeholder\n", encoding="utf-8")
+            for relative in ignored:
+                with self.subTest(relative=relative):
+                    result = subprocess.run(
+                        ["git", "-C", str(root), "check-ignore", "--quiet", relative],
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0)
+            for relative in allowed:
+                with self.subTest(relative=relative):
+                    result = subprocess.run(
+                        ["git", "-C", str(root), "check-ignore", "--quiet", relative],
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 1)
+
     def test_process_environment_including_empty_wins(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

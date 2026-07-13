@@ -20,19 +20,31 @@ import shlex
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
+from typing import Any, Iterable
 
 SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[3]
 if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
     sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
 from saihai_env import load_environment  # noqa: E402
 
-ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT)
-from typing import Any, Iterable
-
 
 DENY_COMPONENT_PATTERNS = (
-    re.compile(r"^\.env(?:\..+)?$", re.IGNORECASE),
+    re.compile(r"^\.env.*$", re.IGNORECASE),
+    re.compile(r"^.+\.env(?:[._-].*)?$", re.IGNORECASE),
+    re.compile(r"^\.direnv$", re.IGNORECASE),
+    re.compile(r"^(?:env|environment|dotenv)(?:[._-](?:local|prod|production|stage|staging|dev|development|test|testing))?\.(?:json|ya?ml|toml|ini|conf|config)$", re.IGNORECASE),
+    re.compile(r"^(?:terraform\.tfvars|.+\.tfvars(?:\.json)?|.+\.auto\.tfvars(?:\.json)?)$", re.IGNORECASE),
+    re.compile(r"^\.dev\.vars(?:\..+)?$", re.IGNORECASE),
+    re.compile(r"^\.flaskenv(?:\..+)?$", re.IGNORECASE),
+    re.compile(r"^\.authinfo(?:\.gpg)?$", re.IGNORECASE),
+    re.compile(
+        r"^\.(?:profile|bash_profile|bash_login|bashrc|zprofile|zlogin|zshrc|zshenv|kshrc)$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^config\.fish$", re.IGNORECASE),
+    re.compile(r"^\.sops\.ya?ml$", re.IGNORECASE),
     re.compile(r"^(?:auth|authentication|authorization)(?:[._-].*)?$", re.IGNORECASE),
     re.compile(r"^(?:token|tokens)(?:[._-].*)?$", re.IGNORECASE),
     re.compile(r"^(?:oauth|pat|password|passwd|passphrase)(?:[._-].*)?$", re.IGNORECASE),
@@ -44,8 +56,18 @@ DENY_COMPONENT_PATTERNS = (
     re.compile(r"^(?:authorized_keys|known_hosts|ssh_config|sshd_config)$", re.IGNORECASE),
     re.compile(r"^(?:key|keys)(?:[._-].*)?$", re.IGNORECASE),
     re.compile(r"^.*[._-](?:key|keys)(?:[._-].*)?$", re.IGNORECASE),
-    re.compile(r"^\.(?:netrc|npmrc|pypirc)$", re.IGNORECASE),
+    re.compile(
+        r"^.*[._-](?:auth|authentication|authorization|token|tokens|credential|credentials|"
+        r"secret|secrets|password|passwd|passphrase)(?:[._-].*)?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\.(?:netrc|npmrc|pypirc|pgpass|my\.cnf|s3cfg|boto|vault-token|consul-token|"
+        r"terraformrc|gem/credentials|config/gcloud/credentials\.db)$",
+        re.IGNORECASE,
+    ),
     re.compile(r"^\.git-credentials$", re.IGNORECASE),
+    re.compile(r"^(?:credentials?|secrets?|tokens?|passwords?)(?:[._-].*)?\.(?:json|ya?ml|toml|ini|conf|config|txt)$", re.IGNORECASE),
 )
 
 DENY_PATH_COMPONENTS = {
@@ -55,7 +77,27 @@ DENY_PATH_COMPONENTS = {
     ".azure",
     ".kube",
     ".docker",
+    ".password-store",
+    ".terraform.d",
+    ".oci",
+    ".pulumi",
+    ".config/op",
+    ".config/gcloud",
+    ".config/gh",
+    ".local/share/keyrings",
+    "environment.d",
 }
+
+DENY_PATH_PATTERNS = (
+    re.compile(r"(?:^|/)\.local/share/keyrings(?:/|$)", re.IGNORECASE),
+    re.compile(
+        r"(?:^|/)\.config/(?:gcloud|gh|op|1password|aws|azure|doctl|ibm|pulumi|"
+        r"rclone|hub|glab-cli|stripe|vercel|netlify|sentry|railway|fish|age)(?:/|$)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:^|/)\.(?:oci|pulumi|heroku|cf)(?:/|$)", re.IGNORECASE),
+    re.compile(r"(?:^|/)Library/Keychains(?:/|$)", re.IGNORECASE),
+)
 
 DENY_EXTENSIONS = {
     ".key",
@@ -65,6 +107,27 @@ DENY_EXTENSIONS = {
     ".jks",
     ".keystore",
     ".kdbx",
+    ".env",
+    ".ppk",
+    ".p8",
+    ".pk8",
+    ".pkcs8",
+    ".der",
+    ".csr",
+    ".crt",
+    ".cer",
+    ".p7b",
+    ".p7c",
+    ".asc",
+    ".gpg",
+    ".pgp",
+    ".ovpn",
+    ".mobileconfig",
+    ".snk",
+    ".keychain",
+    ".keychain-db",
+    ".age",
+    ".sops",
 }
 
 SENSITIVE_WORD = re.compile(
@@ -95,7 +158,7 @@ def iter_strings(value: Any) -> Iterable[str]:
 def normalize_components(text: str) -> list[str]:
     normalized = text.replace("\\", "/")
     return [
-        part.strip("'\"`[]{}(),;:")
+        re.sub(r"[?*\[\]!]", "", part.strip("'\"`{}(),;:"))
         for part in re.split(r"[/\s]+", normalized)
         if part
     ]
@@ -107,6 +170,8 @@ def sensitive_reason(text: str) -> str | None:
     if SENSITIVE_WORD.search(text):
         return "sensitive_auth_or_key_name"
     normalized_path = text.replace("\\", "/").lower()
+    if any(pattern.search(normalized_path) for pattern in DENY_PATH_PATTERNS):
+        return "protected_auth_store"
     if re.search(r"(?:^|/)\.config/gcloud(?:/|$)", normalized_path):
         return "protected_auth_store"
     if re.search(r"(?:^|/)\.config/gh/hosts\.yml(?:$|[^a-z0-9])", normalized_path):
@@ -122,19 +187,41 @@ def sensitive_reason(text: str) -> str | None:
     return None
 
 
-PATH_FIELD_NAMES = {"file_path", "path", "notebook_path", "filename", "file"}
+PATH_FIELD_NAMES = {
+    "file_path",
+    "file_paths",
+    "path",
+    "paths",
+    "notebook_path",
+    "notebook_paths",
+    "filename",
+    "filenames",
+    "file",
+    "files",
+}
 READ_COMMAND = re.compile(
     r"(?:^|[/\s;&|])(?:cat|head|tail|less|more|sed|awk|grep|rg|find|xargs|cp|mv|"
-    r"install|dd|tar|zip|7z|rsync|scp|sftp|openssl|base64)(?=$|\s)"
+    r"install|dd|tar|zip|7z|rsync|scp|sftp|openssl|base64|ls|wc|stat|du|diff|"
+    r"cmp|file|strings|hexdump|xxd|od|sort|uniq|cut)(?=$|[\s<>|&])"
 )
 INDIRECT_READ = re.compile(r"(?:\*|\?|\$[({A-Za-z_`]|`|\bfind\b.*-exec\b|\bxargs\b)")
 
+LOCK_TIMEOUT_SECONDS = 3.0
+LOCK_RETRY_SECONDS = 0.05
+
 
 def iter_path_values(value: Any) -> Iterable[str]:
+    def path_strings(item: Any) -> Iterable[str]:
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, list):
+            for entry in item:
+                yield from path_strings(entry)
+
     if isinstance(value, dict):
         for key, item in value.items():
-            if str(key).lower() in PATH_FIELD_NAMES and isinstance(item, str):
-                yield item
+            if str(key).lower() in PATH_FIELD_NAMES:
+                yield from path_strings(item)
             yield from iter_path_values(item)
     elif isinstance(value, list):
         for item in value:
@@ -162,10 +249,16 @@ def command_reason(command: str, cwd: str) -> str | None:
     if READ_COMMAND.search(command) and INDIRECT_READ.search(command):
         return "indirect_filesystem_read"
     try:
-        tokens = shlex.split(command, posix=True)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="<>|&")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
     except ValueError:
         return "unparseable_shell_command"
     for token in tokens:
+        reason = sensitive_reason(token)
+        if reason:
+            return reason
         reason = resolved_path_reason(token, cwd)
         if reason:
             return reason
@@ -213,7 +306,15 @@ def session_lock(runtime: str, session_id: str) -> Iterable[None]:
             raise GuardError("invalid session lock")
         if stat.S_IMODE(info.st_mode) != 0o600:
             raise GuardError("session lock mode must be 0600")
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise GuardError("session lock deadline exceeded") from exc
+                time.sleep(LOCK_RETRY_SECONDS)
         yield
     finally:
         os.close(fd)
@@ -337,13 +438,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    args = parse_args()
-    if args.clear:
-        if not args.session_id:
-            raise GuardError("--clear requires --session-id")
-        return clear_latch(args.runtime, args.session_id)
-
     try:
+        load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT)
+        args = parse_args()
+        if args.clear:
+            if not args.session_id:
+                raise GuardError("--clear requires --session-id")
+            return clear_latch(args.runtime, args.session_id)
+
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
             raise GuardError("hook input must be a JSON object")
