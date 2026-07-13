@@ -37,16 +37,16 @@ except ModuleNotFoundError:  # pragma: no cover - exercised when PyYAML is absen
 
 
 ITB_ROOT = Path(__file__).resolve().parents[1]
-SAHAI_ROOT = Path(
-    os.environ.get("SAHAI_ROOT")
+SAIHAI_ROOT = Path(
+    os.environ.get("SAIHAI_ROOT")
     or str(ITB_ROOT.parents[2])
 ).expanduser()
-SAHAI_ROLE_ROOT = SAHAI_ROOT / "organization" / "roles"
+SAIHAI_ROLE_ROOT = SAIHAI_ROOT / "organization" / "roles"
 SKILLS_ROOT = Path(
     os.environ.get("SKILLS_ROOT")
-    or str(SAHAI_ROOT / "organization" / "roles")
+    or str(SAIHAI_ROOT / "organization" / "roles")
 ).expanduser()
-SAHAI_MIGRATED_ROLE_IDS = frozenset(
+SAIHAI_MIGRATED_ROLE_IDS = frozenset(
     {
         "business-director",
         "business-information-strategy",
@@ -628,11 +628,11 @@ def allowed_tools_argument(value: Any) -> str:
 
 
 def sahai_role_skill_path(role_id: str) -> Path:
-    return SAHAI_ROLE_ROOT / role_id / "skill.md"
+    return SAIHAI_ROLE_ROOT / role_id / "skill.md"
 
 
 def legacy_sahai_role_skill_path(role_id: str) -> Path:
-    return SAHAI_ROLE_ROOT / f"{role_id}.md"
+    return SAIHAI_ROLE_ROOT / f"{role_id}.md"
 
 
 def role_definition_path(role_id: str) -> Path:
@@ -653,7 +653,7 @@ def role_skill_path(role_id: str) -> Path:
 
 
 def role_is_migrated_to_sahai(role_id: str) -> bool:
-    return role_id in SAHAI_MIGRATED_ROLE_IDS and (
+    return role_id in SAIHAI_MIGRATED_ROLE_IDS and (
         sahai_role_skill_path(role_id).exists() or legacy_sahai_role_skill_path(role_id).exists()
     )
 
@@ -11214,7 +11214,7 @@ def session_start_config_digest() -> str:
         Path(__file__).resolve(),
         HOOK_BUNDLE_DIR / "codex-hooks.example.json",
         HOOK_BUNDLE_DIR / "claude-settings-hooks.example.json",
-        SAHAI_ROOT / "organization" / "settings.json",
+        SAIHAI_ROOT / "organization" / "settings.json",
     ):
         hasher.update(str(path).encode("utf-8"))
         hasher.update(b"\0")
@@ -16874,7 +16874,7 @@ def gate_skill_contract_lint_findings(skills_root: Path) -> tuple[list[dict[str,
             return None
         if relative.endswith("/SKILL.md"):
             role_id = relative.split("/", 1)[0]
-            if role_id in SAHAI_MIGRATED_ROLE_IDS:
+            if role_id in SAIHAI_MIGRATED_ROLE_IDS:
                 path = sahai_role_skill_path(role_id)
                 if path.exists():
                     return path

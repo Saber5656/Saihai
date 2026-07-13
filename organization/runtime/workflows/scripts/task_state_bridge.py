@@ -24,7 +24,7 @@ DEFAULT_ITB_STATE_ROOTS = (
     Path.home() / ".claude" / "state" / "itb",
     Path.home() / ".codex" / "state" / "itb",
 )
-ITB_STATE_ROOTS_ENV = "SAHAI_ITB_STATE_ROOTS"
+ITB_STATE_ROOTS_ENV = "SAIHAI_ITB_STATE_ROOTS"
 RUN_VIEW_VERSION = "1"
 SESSION_INDEX_VERSION = "1"
 SAFE_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")

@@ -13,6 +13,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from directory_paths import (  # noqa: E402
     ALIASES,
+    CATALOG_ENV_KEY,
+    LEGACY_CATALOG_ENV_KEY,
     SCHEMA,
     EnvError,
     default_catalog_path,
@@ -25,7 +27,7 @@ def args_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--agents-vault", type=Path)
     parser.add_argument("--user-vault", type=Path)
-    parser.add_argument("--sahai-root", type=Path)
+    parser.add_argument("--saihai-root", "--sahai-root", dest="saihai_root", type=Path)
     parser.add_argument("--skills-repo-root", type=Path)
     parser.add_argument("--skills-root", type=Path)
     parser.add_argument("--dotfiles-root", type=Path)
@@ -70,9 +72,9 @@ def main() -> int:
     env_file = (args.env_file or default_env_file).expanduser().resolve()
     if args.check:
         check_env = os.environ.copy()
-        for key in set(SCHEMA) | set(ALIASES) | {"SAHAI_DIRECTORY_PATH_ENV"}:
+        for key in set(SCHEMA) | set(ALIASES) | {CATALOG_ENV_KEY, LEGACY_CATALOG_ENV_KEY}:
             check_env.pop(key, None)
-        check_env["SAHAI_DIRECTORY_PATH_ENV"] = str(env_file)
+        check_env[CATALOG_ENV_KEY] = str(env_file)
         load_environment(environ=check_env, require_catalog=True)
         print("Saihai directory path check: ok")
         return 0
@@ -84,7 +86,7 @@ def main() -> int:
         vault = Path(entered) if entered else None
     vault = require_directory("AGENTS_VAULT_ROOT", vault, required=True, writable=True)
     configured_paths = {
-        "SAHAI_ROOT": require_directory("SAHAI_ROOT", args.sahai_root or catalog_root, required=True),
+        "SAIHAI_ROOT": require_directory("SAIHAI_ROOT", args.saihai_root or catalog_root, required=True),
         "USER_VAULT_ROOT": require_directory("USER_VAULT_ROOT", args.user_vault, required=True),
         "SKILLS_REPO_ROOT": require_directory("SKILLS_REPO_ROOT", args.skills_repo_root, required=True),
         "SKILLS_ROOT": require_directory("SKILLS_ROOT", args.skills_root, required=True),

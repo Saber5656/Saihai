@@ -48,8 +48,8 @@ The setup command refuses to overwrite an existing file.
 
 The loader locates the catalog in this order:
 
-1. path supplied by process variable `SAHAI_DIRECTORY_PATH_ENV`;
-2. `directory-path.env` below process `SAHAI_ROOT` or legacy `SAIHAI_ROOT`;
+1. path supplied by process variable `SAIHAI_DIRECTORY_PATH_ENV` (or legacy `SAHAI_DIRECTORY_PATH_ENV`);
+2. `directory-path.env` below process `SAIHAI_ROOT` or legacy `SAHAI_ROOT`;
 3. `directory-path.env` in the current Saihai checkout;
 4. `directory-path.env` in the primary checkout of a linked Git worktree;
 5. no file.
@@ -69,7 +69,7 @@ resolved from the directory containing the catalog; `~` and `${HOME}` are
 supported.
 
 The parser rejects unknown and duplicate keys, `export`, command substitution,
-backticks, arbitrary shell expansion, and `SAHAI_DIRECTORY_PATH_ENV` inside the
+backticks, arbitrary shell expansion, and either directory-path selector inside the
 catalog. Diagnostics expose key names and error classes, not configured path
 values.
 
@@ -82,7 +82,7 @@ the complete contract so that recovery remains possible.
 
 | Variable | Requirement | Purpose |
 |---|---|---|
-| `SAHAI_ROOT` | required | Primary Saihai checkout and catalog locator |
+| `SAIHAI_ROOT` | required | Primary Saihai checkout and catalog locator |
 | `AGENTS_VAULT_ROOT` | required, read/write | Shared organization Vault |
 | `USER_VAULT_ROOT` | required | Personal Obsidian Vault |
 | `SKILLS_REPO_ROOT` | required | Skills source repository |
@@ -91,8 +91,8 @@ the complete contract so that recovery remains possible.
 | `DEV_ROOT` | required | Local source repositories |
 | `DEV_WORKTREES_ROOT` | required | Standard development worktrees |
 | `TASK_WORKTREE_ROOT` | required | Task-specific worktrees |
-| `SAHAI_ORCH_STATE_ROOT` | optional | Optional orchestrator state override |
-| `SAHAI_ITB_STATE_ROOTS` | optional | Optional path-list override for ITB state roots |
+| `SAIHAI_ORCH_STATE_ROOT` | optional | Optional orchestrator state override |
+| `SAIHAI_ITB_STATE_ROOTS` | optional | Optional path-list override for ITB state roots |
 | `SENSITIVE_ACCESS_GUARD_STATE_ROOT` | optional | Optional guard state override |
 
 ## Compatibility aliases
@@ -102,13 +102,13 @@ emits value-free deprecation diagnostics.
 
 | Legacy name | Canonical name |
 |---|---|
-| `SAIHAI_ROOT` | `SAHAI_ROOT` |
-| `AGENT_TEAMS_VIEWER_ROOT` | `SAHAI_ROOT` |
+| `SAHAI_ROOT` | `SAIHAI_ROOT` |
+| `AGENT_TEAMS_VIEWER_ROOT` | `SAIHAI_ROOT` |
 | `YASU_VAULT_ROOT` | `USER_VAULT_ROOT` |
 | `SKILLS_REPO_SKILLS_ROOT` | `SKILLS_ROOT` |
 | `DEV_REPO_ROOT` | `DEV_ROOT` |
-| `SAIHAI_ORCH_STATE_ROOT` | `SAHAI_ORCH_STATE_ROOT` |
-| `SAIHAI_ITB_STATE_ROOTS` | `SAHAI_ITB_STATE_ROOTS` |
+| `SAHAI_ORCH_STATE_ROOT` | `SAIHAI_ORCH_STATE_ROOT` |
+| `SAHAI_ITB_STATE_ROOTS` | `SAIHAI_ITB_STATE_ROOTS` |
 
 New code and configuration must use canonical names.
 
@@ -128,4 +128,5 @@ python3 scripts/setup_directory_paths.py --check
 ```
 
 To recover from an invalid explicit selector, unset
-`SAHAI_DIRECTORY_PATH_ENV` so normal primary-checkout discovery can resume.
+`SAIHAI_DIRECTORY_PATH_ENV` (and legacy `SAHAI_DIRECTORY_PATH_ENV`) so normal
+primary-checkout discovery can resume.

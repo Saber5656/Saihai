@@ -178,8 +178,8 @@ def jsonish_file(path: Path):
 
 def orch_roots() -> list[tuple[str, Path]]:
     env_root = (
-        os.environ.get("SAHAI_ORCH_STATE_ROOT")
-        or os.environ.get("SAIHAI_ORCH_STATE_ROOT")
+        os.environ.get("SAIHAI_ORCH_STATE_ROOT")
+        or os.environ.get("SAHAI_ORCH_STATE_ROOT")
         or ""
     ).strip()
     candidates: list[tuple[str, Path]]

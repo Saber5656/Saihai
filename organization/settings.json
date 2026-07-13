@@ -11,7 +11,7 @@
   },
   "knowledge": {
     "canonical_repo": "Sahai",
-    "canonical_repo_path": "${SAHAI_ROOT}",
+    "canonical_repo_path": "${SAIHAI_ROOT}",
     "context_vault_path": "${AGENTS_VAULT_ROOT}",
     "legacy_skills_repo_path": "${SKILLS_REPO_ROOT}",
     "policy_location": "organization/policies",

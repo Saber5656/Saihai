@@ -26,7 +26,7 @@ class DirectoryPathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             env_file = self.write_env(root, "AGENTS_VAULT_ROOT=from-file\nSKILLS_ROOT=from-file\n")
-            env = {"SAHAI_DIRECTORY_PATH_ENV": str(env_file), "AGENTS_VAULT_ROOT": "", "SKILLS_ROOT": "/process"}
+            env = {"SAIHAI_DIRECTORY_PATH_ENV": str(env_file), "AGENTS_VAULT_ROOT": "", "SKILLS_ROOT": "/process"}
             result = directory_paths.load_environment(environ=env)
             self.assertEqual(env["AGENTS_VAULT_ROOT"], "")
             self.assertEqual(env["SKILLS_ROOT"], "/process")
@@ -36,7 +36,7 @@ class DirectoryPathsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             env_file = self.write_env(root, "# c\nAGENTS_VAULT_ROOT='vault dir'\nUSER_VAULT_ROOT=\"${HOME}/personal\" # c\nSKILLS_ROOT=~/skills\n")
-            env = {"SAHAI_DIRECTORY_PATH_ENV": str(env_file)}
+            env = {"SAIHAI_DIRECTORY_PATH_ENV": str(env_file)}
             with mock.patch("pathlib.Path.home", return_value=Path("/home/tester")):
                 directory_paths.load_environment(environ=env)
             self.assertEqual(env["AGENTS_VAULT_ROOT"], str((root / "vault dir").resolve()))
@@ -54,7 +54,7 @@ class DirectoryPathsTests(unittest.TestCase):
             root = Path(raw)
             invalid = self.write_env(root, "ITB_TASK_DETAIL_LINE_CAP=1\n")
             with self.assertRaises(directory_paths.EnvError):
-                directory_paths.load_environment(environ={"SAHAI_DIRECTORY_PATH_ENV": str(invalid)})
+                directory_paths.load_environment(environ={"SAIHAI_DIRECTORY_PATH_ENV": str(invalid)})
             invalid.unlink()
             env = {"SKILLS_REPO_SKILLS_ROOT": str(root / "skills")}
             result = directory_paths.load_environment(checkout_root=root, environ=env)
@@ -62,22 +62,59 @@ class DirectoryPathsTests(unittest.TestCase):
             self.assertIn("deprecated_alias:SKILLS_REPO_SKILLS_ROOT:use=SKILLS_ROOT", result["warnings"])
 
     def test_legacy_values_populate_canonical_names_and_expand_aliases(self) -> None:
-        root = "/tmp/sahai-canonical"
-        env = {"SAIHAI_ROOT": root, "DEV_REPO_ROOT": "/tmp/dev"}
-        directory_paths.load_environment(checkout_root=Path("/tmp/missing"), environ=env)
-        self.assertEqual(env["SAHAI_ROOT"], root)
-        self.assertEqual(env["DEV_ROOT"], "/tmp/dev")
-        self.assertEqual(
-            directory_paths.expand_path_aliases("${SAHAI_ROOT}/organization:$DEV_REPO_ROOT/x", env),
-            f"{root}/organization:/tmp/dev/x",
+        root = "/tmp/saihai-canonical"
+        env = {
+            "SAHAI_ROOT": root,
+            "SAHAI_ORCH_STATE_ROOT": "/tmp/orch",
+            "SAHAI_ITB_STATE_ROOTS": os.pathsep.join(("/tmp/itb-a", "/tmp/itb-b")),
+            "DEV_REPO_ROOT": "/tmp/dev",
+        }
+        result = directory_paths.load_environment(
+            checkout_root=Path("/tmp/missing"), environ=env
         )
+        self.assertEqual(env["SAIHAI_ROOT"], root)
+        self.assertIn("deprecated_alias:SAHAI_ROOT:use=SAIHAI_ROOT", result["warnings"])
+        self.assertEqual(env["DEV_ROOT"], "/tmp/dev")
+        self.assertEqual(env["SAIHAI_ORCH_STATE_ROOT"], "/tmp/orch")
+        self.assertEqual(
+            env["SAIHAI_ITB_STATE_ROOTS"],
+            os.pathsep.join(("/tmp/itb-a", "/tmp/itb-b")),
+        )
+        self.assertEqual(
+            directory_paths.expand_path_aliases(
+                "${SAIHAI_ROOT}/organization:${SAHAI_ROOT}/organization:$DEV_REPO_ROOT/x",
+                env,
+            ),
+            f"{root}/organization:{root}/organization:/tmp/dev/x",
+        )
+
+    def test_legacy_catalog_selector_remains_compatible(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            env_file = self.write_env(Path(raw), "AGENTS_VAULT_ROOT=vault\n")
+            result = directory_paths.load_environment(
+                environ={"SAHAI_DIRECTORY_PATH_ENV": str(env_file)}
+            )
+            self.assertEqual(result["source"], "explicit")
+            self.assertEqual(
+                directory_paths.resolve_env_file(
+                    environ={"SAHAI_DIRECTORY_PATH_ENV": str(env_file)}
+                ),
+                env_file.resolve(),
+            )
+
+    def test_canonical_values_win_when_legacy_aliases_are_also_present(self) -> None:
+        env = {"SAIHAI_ROOT": "/canonical", "SAHAI_ROOT": "/legacy"}
+        directory_paths.load_environment(
+            checkout_root=Path("/tmp/missing"), environ=env
+        )
+        self.assertEqual(env["SAIHAI_ROOT"], "/canonical")
 
     def test_process_alias_precedes_env_canonical_including_empty(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             env_file = self.write_env(root, "USER_VAULT_ROOT=from-file\n")
             for alias_value in (str(root / "process"), ""):
-                env = {"SAHAI_DIRECTORY_PATH_ENV": str(env_file), "YASU_VAULT_ROOT": alias_value}
+                env = {"SAIHAI_DIRECTORY_PATH_ENV": str(env_file), "YASU_VAULT_ROOT": alias_value}
                 directory_paths.load_environment(environ=env)
                 self.assertEqual(env["USER_VAULT_ROOT"], alias_value)
 
@@ -119,13 +156,13 @@ class DirectoryPathsTests(unittest.TestCase):
             root = Path(raw)
             secretish = "private-value-must-not-leak"
             env_file = self.write_env(root, f"AGENTS_VAULT_ROOT={secretish}\n")
-            result = directory_paths.load_environment(environ={"SAHAI_DIRECTORY_PATH_ENV": str(env_file)})
+            result = directory_paths.load_environment(environ={"SAIHAI_DIRECTORY_PATH_ENV": str(env_file)})
             self.assertNotIn(secretish, repr(result))
 
     def test_empty_required_path_stays_empty_until_required_validation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             env_file = self.write_env(Path(raw), "AGENTS_VAULT_ROOT=\n")
-            env = {"SAHAI_DIRECTORY_PATH_ENV": str(env_file)}
+            env = {"SAIHAI_DIRECTORY_PATH_ENV": str(env_file)}
             directory_paths.load_environment(environ=env)
             self.assertEqual(env["AGENTS_VAULT_ROOT"], "")
             with self.assertRaises(directory_paths.EnvError):
@@ -150,7 +187,13 @@ class DirectoryPathsTests(unittest.TestCase):
 class SetupDirectoryPathsTests(unittest.TestCase):
     def run_setup(self, *args: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
-        for key in ("AGENTS_VAULT_ROOT", "SAHAI_DIRECTORY_PATH_ENV", "SAHAI_ROOT"):
+        for key in (
+            "AGENTS_VAULT_ROOT",
+            "SAIHAI_DIRECTORY_PATH_ENV",
+            "SAHAI_DIRECTORY_PATH_ENV",
+            "SAIHAI_ROOT",
+            "SAHAI_ROOT",
+        ):
             env.pop(key, None)
         return subprocess.run(
             [sys.executable, str(ROOT / "scripts/setup_directory_paths.py"), *args],
@@ -183,7 +226,7 @@ class SetupDirectoryPathsTests(unittest.TestCase):
             first = self.run_setup(*options, "--env-file", str(env_file))
             self.assertEqual(first.returncode, 0, first.stderr)
             parsed = directory_paths.parse_env(env_file.read_text(encoding="utf-8"))
-            self.assertEqual(Path(parsed["SAHAI_ROOT"]), directory_paths.default_catalog_path(ROOT).parent)
+            self.assertEqual(Path(parsed["SAIHAI_ROOT"]), directory_paths.default_catalog_path(ROOT).parent)
             self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o600)
             before = env_file.read_bytes()
             second = self.run_setup(*options, "--env-file", str(env_file))
@@ -227,9 +270,13 @@ class SetupDirectoryPathsTests(unittest.TestCase):
 class SyncOrganizationSourcesTests(unittest.TestCase):
     def run_sync(self, repo_root: Path, vault: Path, *args: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
-        for key in set(directory_paths.SCHEMA) | set(directory_paths.ALIASES) | {"SAHAI_DIRECTORY_PATH_ENV"}:
+        for key in (
+            set(directory_paths.SCHEMA)
+            | set(directory_paths.ALIASES)
+            | {directory_paths.CATALOG_ENV_KEY, directory_paths.LEGACY_CATALOG_ENV_KEY}
+        ):
             env.pop(key, None)
-        env["SAHAI_DIRECTORY_PATH_ENV"] = ""
+        env[directory_paths.CATALOG_ENV_KEY] = ""
         env.update({key: str(repo_root) for key, field in directory_paths.SCHEMA.items() if field.required})
         env["AGENTS_VAULT_ROOT"] = str(vault)
         return subprocess.run(

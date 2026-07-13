@@ -30,7 +30,7 @@ class EnvField:
 PATH = EnvField("path")
 
 SCHEMA: dict[str, EnvField] = {
-    "SAHAI_ROOT": EnvField("path", required=True),
+    "SAIHAI_ROOT": EnvField("path", required=True),
     "AGENTS_VAULT_ROOT": EnvField("path", required=True),
     "USER_VAULT_ROOT": EnvField("path", required=True),
     "SKILLS_REPO_ROOT": EnvField("path", required=True),
@@ -39,29 +39,31 @@ SCHEMA: dict[str, EnvField] = {
     "DEV_ROOT": EnvField("path", required=True),
     "DEV_WORKTREES_ROOT": EnvField("path", required=True),
     "TASK_WORKTREE_ROOT": EnvField("path", required=True),
-    "SAHAI_ORCH_STATE_ROOT": PATH,
-    "SAHAI_ITB_STATE_ROOTS": EnvField("path_list"),
+    "SAIHAI_ORCH_STATE_ROOT": PATH,
+    "SAIHAI_ITB_STATE_ROOTS": EnvField("path_list"),
     "SENSITIVE_ACCESS_GUARD_STATE_ROOT": PATH,
     # Compatibility aliases: accepted for reads, never advertised in directory-path.env.example.
-    "SAIHAI_ROOT": PATH,
+    "SAHAI_ROOT": PATH,
     "AGENT_TEAMS_VIEWER_ROOT": PATH,
     "YASU_VAULT_ROOT": PATH,
     "SKILLS_REPO_SKILLS_ROOT": PATH,
     "DEV_REPO_ROOT": PATH,
-    "SAIHAI_ORCH_STATE_ROOT": PATH,
-    "SAIHAI_ITB_STATE_ROOTS": EnvField("path_list"),
+    "SAHAI_ORCH_STATE_ROOT": PATH,
+    "SAHAI_ITB_STATE_ROOTS": EnvField("path_list"),
 }
 
 INTERNAL_KEYS: frozenset[str] = frozenset()
 ALIASES = {
-    "SAIHAI_ROOT": "SAHAI_ROOT",
-    "AGENT_TEAMS_VIEWER_ROOT": "SAHAI_ROOT",
+    "SAHAI_ROOT": "SAIHAI_ROOT",
+    "AGENT_TEAMS_VIEWER_ROOT": "SAIHAI_ROOT",
     "YASU_VAULT_ROOT": "USER_VAULT_ROOT",
     "SKILLS_REPO_SKILLS_ROOT": "SKILLS_ROOT",
     "DEV_REPO_ROOT": "DEV_ROOT",
-    "SAIHAI_ORCH_STATE_ROOT": "SAHAI_ORCH_STATE_ROOT",
-    "SAIHAI_ITB_STATE_ROOTS": "SAHAI_ITB_STATE_ROOTS",
+    "SAHAI_ORCH_STATE_ROOT": "SAIHAI_ORCH_STATE_ROOT",
+    "SAHAI_ITB_STATE_ROOTS": "SAIHAI_ITB_STATE_ROOTS",
 }
+CATALOG_ENV_KEY = "SAIHAI_DIRECTORY_PATH_ENV"
+LEGACY_CATALOG_ENV_KEY = "SAHAI_DIRECTORY_PATH_ENV"
 KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -89,10 +91,11 @@ def default_catalog_path(checkout_root: Path | None = None) -> Path:
 def resolve_env_file(checkout_root: Path | None = None, environ: Mapping[str, str] | None = None) -> Path | None:
     env = os.environ if environ is None else environ
     checkout = (checkout_root or Path(__file__).resolve().parent).resolve()
-    if "SAHAI_DIRECTORY_PATH_ENV" in env:
-        raw = env["SAHAI_DIRECTORY_PATH_ENV"]
+    selector_key = CATALOG_ENV_KEY if CATALOG_ENV_KEY in env else LEGACY_CATALOG_ENV_KEY
+    if selector_key in env:
+        raw = env[selector_key]
         return Path(raw).expanduser().resolve() if raw else None
-    root_value = env.get("SAHAI_ROOT") or env.get("SAIHAI_ROOT")
+    root_value = env.get("SAIHAI_ROOT") or env.get("SAHAI_ROOT")
     if root_value:
         candidate = Path(root_value).expanduser() / "directory-path.env"
         if candidate.is_file():
@@ -150,7 +153,7 @@ def parse_env(text: str) -> dict[str, str]:
         key = key.strip()
         if not KEY_RE.fullmatch(key):
             raise EnvError(f"invalid_key:line={line_no}")
-        if key == "SAHAI_DIRECTORY_PATH_ENV":
+        if key in {CATALOG_ENV_KEY, LEGACY_CATALOG_ENV_KEY}:
             raise EnvError("circular_env_file_key")
         if key not in SCHEMA:
             raise EnvError(f"unknown_key:key={key}:line={line_no}")
@@ -317,7 +320,11 @@ def load_environment(
             raise EnvError(f"runtime_environment_invalid:{exc}") from exc
     return {
         "status": "loaded" if env_file else "not_configured",
-        "source": "explicit" if "SAHAI_DIRECTORY_PATH_ENV" in target else ("discovered" if env_file else "none"),
+        "source": (
+            "explicit"
+            if CATALOG_ENV_KEY in target or LEGACY_CATALOG_ENV_KEY in target
+            else ("discovered" if env_file else "none")
+        ),
         "loaded_keys": tuple(sorted(loaded)),
         "skipped_process_keys": tuple(sorted(skipped)),
         "warnings": tuple(sorted(warnings)),
