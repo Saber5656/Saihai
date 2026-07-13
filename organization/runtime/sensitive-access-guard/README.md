@@ -10,7 +10,7 @@ blocked alongside live secrets.
 
 | Class | Examples |
 |---|---|
-| Environment files | `.env`, any `.env*`, `.direnv`, `*.env`, `*.tfvars`, `.dev.vars`, shell startup profiles, fish configuration, and suffixed variants such as `production.env.local` |
+| Environment files | `.env`, any `.env*`, local `directory-path.env`, `.direnv`, `*.env`, `*.tfvars`, `.dev.vars`, shell startup profiles, fish configuration, and suffixed variants such as `production.env.local` |
 | Tokens and auth | `token`, `gh-token`, `github_pat`, `oauth.json`, `access_token`, `auth.json`, credentials, passwords, passphrases, and secrets |
 | SSH / auth directories | any path containing `.ssh`, `.gnupg`, `.aws`, `.azure`, or `.kube` |
 | Keys | `id_rsa`, `id_ed25519`, private/public keys, service keys, API keys, and key/certificate stores including `*.key`, `*.pem`, `*.p12`, `*.pfx`, `*.ppk`, `*.p8`, `*.pk8`, `*.pkcs8`, `*.der`, `*.csr`, `*.crt`, `*.cer`, `*.p7b`, `*.asc`, `*.gpg`, `*.pgp`, `*.jks`, `*.keystore`, `*.kdbx`, `*.ovpn`, and `*.mobileconfig` |

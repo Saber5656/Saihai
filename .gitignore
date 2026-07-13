@@ -15,3 +15,5 @@ __pycache__/
 *.auto.tfvars
 *.auto.tfvars.json
 !.env.example
+directory-path.env
+!directory-path.env.example

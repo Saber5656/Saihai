@@ -27,12 +27,14 @@ from typing import Any, Iterable
 SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[3]
 if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
     sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
-from saihai_env import load_environment  # noqa: E402
+
+from directory_paths import load_environment  # noqa: E402
 
 
 DENY_COMPONENT_PATTERNS = (
     re.compile(r"^\.env.*$", re.IGNORECASE),
     re.compile(r"^.+\.env(?:[._-].*)?$", re.IGNORECASE),
+    re.compile(r"^directory-path\.env$", re.IGNORECASE),
     re.compile(r"^\.direnv$", re.IGNORECASE),
     re.compile(r"^(?:env|environment|dotenv)(?:[._-](?:local|prod|production|stage|staging|dev|development|test|testing))?\.(?:json|ya?ml|toml|ini|conf|config)$", re.IGNORECASE),
     re.compile(r"^(?:terraform\.tfvars|.+\.tfvars(?:\.json)?|.+\.auto\.tfvars(?:\.json)?)$", re.IGNORECASE),
