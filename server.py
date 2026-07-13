@@ -25,9 +25,9 @@ from urllib.parse import parse_qs, urlparse
 SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parent
 if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
     sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
-from saihai_env import load_environment, redact_environment_values
+from directory_paths import load_environment
 
-ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_vault=True)
+ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_catalog=True)
 
 HOME = Path.home()
 STATE_ROOTS = [
@@ -177,7 +177,11 @@ def jsonish_file(path: Path):
 
 
 def orch_roots() -> list[tuple[str, Path]]:
-    env_root = os.environ.get("SAIHAI_ORCH_STATE_ROOT", "").strip()
+    env_root = (
+        os.environ.get("SAIHAI_ORCH_STATE_ROOT")
+        or os.environ.get("SAHAI_ORCH_STATE_ROOT")
+        or ""
+    ).strip()
     candidates: list[tuple[str, Path]]
     if env_root:
         candidates = [("env", Path(env_root).expanduser())]
@@ -978,7 +982,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _send_json(self, payload: dict, code: int = 200) -> None:
-        body = json.dumps(redact_environment_values(payload), ensure_ascii=False).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

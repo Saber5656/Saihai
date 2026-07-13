@@ -21,9 +21,9 @@ from typing import Any
 SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[4]
 if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
     sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
-from saihai_env import load_environment, redact_environment_text, validate_vault  # noqa: E402
+from directory_paths import load_environment, validate_vault  # noqa: E402
 
-ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_vault=True)
+ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_catalog=True)
 
 def env_path(name: str, default: Path) -> Path:
     return Path(os.environ.get(name, str(default))).expanduser()
@@ -46,7 +46,10 @@ USER_VAULT = first_env_path(
     AGENTS_VAULT,
 )
 YASU_VAULT = USER_VAULT
-SKILLS_REPO = env_path("SKILLS_ROOT", SAIHAI_CHECKOUT_ROOT / "organization" / "roles")
+SKILLS_REPO = env_path(
+    "SKILLS_REPO_ROOT",
+    env_path("SKILLS_ROOT", SAIHAI_CHECKOUT_ROOT / "organization" / "roles"),
+)
 DOTFILES = env_path("DOTFILES_ROOT", SAIHAI_CHECKOUT_ROOT)
 
 DEFAULT_REPORT = AGENTS_VAULT / "03-Contexts/Reports/ITD-Monitoring-Report.md"
@@ -497,13 +500,13 @@ def main() -> int:
 
     report_text = render_report(run_id, started_at, snapshot, findings)
     if args.dry_run:
-        print(redact_environment_text(report_text))
+        print(report_text)
         return 0
 
     report.parent.mkdir(parents=True, exist_ok=True)
     current = ensure_report_header(report)
-    report.write_text(redact_environment_text(current.rstrip() + "\n" + report_text), encoding="utf-8")
-    print(redact_environment_text(f"wrote {report}"))
+    report.write_text(current.rstrip() + "\n" + report_text, encoding="utf-8")
+    print(f"wrote {report}")
     return 0
 
 

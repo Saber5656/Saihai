@@ -14,9 +14,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from saihai_env import load_environment  # noqa: E402
+from directory_paths import load_environment  # noqa: E402
 
-ENV_DIAGNOSTICS = load_environment(checkout_root=REPO_ROOT, require_vault=True)
+ENV_DIAGNOSTICS = load_environment(checkout_root=REPO_ROOT, require_catalog=True)
 from typing import Any
 
 ORG_ROOT = REPO_ROOT / "organization"
@@ -28,7 +28,7 @@ ITD_MONITOR = ORG_ROOT / "runtime" / "infra-task-dispatcher" / "scripts" / "itd_
 WORKFLOW_SELECTOR = ORG_ROOT / "runtime" / "workflows" / "scripts" / "workflow_selector.py"
 WORKFLOW_FRONTDOOR = ORG_ROOT / "runtime" / "workflows" / "scripts" / "frontdoor_orchestrator.py"
 WORKFLOW_FRONTDOOR_SERVER = ORG_ROOT / "runtime" / "workflows" / "scripts" / "frontdoor_server.py"
-SAHAI_CLI = REPO_ROOT / "scripts" / "saihai.py"
+SAIHAI_CLI = REPO_ROOT / "scripts" / "saihai.py"
 VALIDATE_ALL = REPO_ROOT / "scripts" / "validate_all.py"
 ITB_FACADE_COMMANDS = {
     "agent-call",
@@ -148,8 +148,8 @@ def runtime_paths() -> dict[str, Any]:
         "workflow_selector": WORKFLOW_SELECTOR,
         "workflow_frontdoor": WORKFLOW_FRONTDOOR,
         "workflow_frontdoor_server": WORKFLOW_FRONTDOOR_SERVER,
-        "sahai_cli": SAHAI_CLI,
-        "saihai_cli": SAHAI_CLI,
+        "sahai_cli": SAIHAI_CLI,
+        "saihai_cli": SAIHAI_CLI,
         "validate_all": VALIDATE_ALL,
         "role_root": ORG_ROOT / "roles",
         "runtime_registry": ITB_RUNTIME_ROOT / "config" / "role-agent-registry.yaml",

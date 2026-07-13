@@ -14,7 +14,7 @@ from typing import Any
 SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[4]
 if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
     sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
-from saihai_env import load_environment  # noqa: E402
+from directory_paths import load_environment  # noqa: E402
 
 ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT)
 

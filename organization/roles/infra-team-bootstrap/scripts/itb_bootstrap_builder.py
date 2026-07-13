@@ -26,15 +26,9 @@ SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[4]
 if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
     sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
 
-from saihai_env import (  # noqa: E402
-    expand_environment_values,
-    load_environment,
-    redact_environment_text,
-    redact_environment_values,
-    validate_vault,
-)
+from directory_paths import expand_path_aliases, load_environment, validate_vault  # noqa: E402
 
-ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_vault=True)
+ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_catalog=True)
 
 try:
     import yaml as _pyyaml
@@ -43,16 +37,16 @@ except ModuleNotFoundError:  # pragma: no cover - exercised when PyYAML is absen
 
 
 ITB_ROOT = Path(__file__).resolve().parents[1]
-SAHAI_ROOT = Path(
+SAIHAI_ROOT = Path(
     os.environ.get("SAIHAI_ROOT")
     or str(ITB_ROOT.parents[2])
 ).expanduser()
-SAHAI_ROLE_ROOT = SAHAI_ROOT / "organization" / "roles"
+SAIHAI_ROLE_ROOT = SAIHAI_ROOT / "organization" / "roles"
 SKILLS_ROOT = Path(
     os.environ.get("SKILLS_ROOT")
-    or str(SAHAI_ROOT / "organization" / "roles")
+    or str(SAIHAI_ROOT / "organization" / "roles")
 ).expanduser()
-SAHAI_MIGRATED_ROLE_IDS = frozenset(
+SAIHAI_MIGRATED_ROLE_IDS = frozenset(
     {
         "business-director",
         "business-information-strategy",
@@ -294,18 +288,8 @@ def expand_config_path_value(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    replacements = {
-        "${AGENTS_VAULT_ROOT}": str(AGENTS_VAULT_ROOT),
-        "$AGENTS_VAULT_ROOT": str(AGENTS_VAULT_ROOT),
-        "${USER_VAULT_ROOT}": str(USER_VAULT_ROOT),
-        "$USER_VAULT_ROOT": str(USER_VAULT_ROOT),
-        "${YASU_VAULT_ROOT}": str(YASU_VAULT_ROOT),
-        "$YASU_VAULT_ROOT": str(YASU_VAULT_ROOT),
-        "${HOME}": str(Path.home()),
-        "$HOME": str(Path.home()),
-    }
-    for source, target in replacements.items():
-        raw = raw.replace(source, target)
+    raw = expand_path_aliases(raw)
+    raw = raw.replace("${HOME}", str(Path.home())).replace("$HOME", str(Path.home()))
     return str(Path(raw).expanduser())
 
 
@@ -542,16 +526,16 @@ def parse_basic_yaml_config(raw: str, path: Path) -> Any:
 def load_yaml_config(path: Path) -> Any:
     raw = path.read_text(encoding="utf-8")
     try:
-        return expand_environment_values(json.loads(raw), binding=str(path))
+        return json.loads(raw)
     except json.JSONDecodeError:
         pass
     if _pyyaml is not None:
         try:
-            return expand_environment_values(_pyyaml.safe_load(raw), binding=str(path))
+            return _pyyaml.safe_load(raw)
         except Exception as exc:  # pragma: no cover - depends on optional PyYAML.
             raise ValueError(f"YAML config parse failed: {path}: {exc}") from exc
     try:
-        return expand_environment_values(parse_basic_yaml_config(raw, path), binding=str(path))
+        return parse_basic_yaml_config(raw, path)
     except ValueError:
         raise
     except Exception as exc:
@@ -644,11 +628,11 @@ def allowed_tools_argument(value: Any) -> str:
 
 
 def sahai_role_skill_path(role_id: str) -> Path:
-    return SAHAI_ROLE_ROOT / role_id / "skill.md"
+    return SAIHAI_ROLE_ROOT / role_id / "skill.md"
 
 
 def legacy_sahai_role_skill_path(role_id: str) -> Path:
-    return SAHAI_ROLE_ROOT / f"{role_id}.md"
+    return SAIHAI_ROLE_ROOT / f"{role_id}.md"
 
 
 def role_definition_path(role_id: str) -> Path:
@@ -669,7 +653,7 @@ def role_skill_path(role_id: str) -> Path:
 
 
 def role_is_migrated_to_sahai(role_id: str) -> bool:
-    return role_id in SAHAI_MIGRATED_ROLE_IDS and (
+    return role_id in SAIHAI_MIGRATED_ROLE_IDS and (
         sahai_role_skill_path(role_id).exists() or legacy_sahai_role_skill_path(role_id).exists()
     )
 
@@ -1447,7 +1431,7 @@ def sync_policy_digest_skills(
 
 def append_jsonl_unlocked(path: Path, entry: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(redact_environment_values(json_event_safe(entry), binding=str(path)), ensure_ascii=False, sort_keys=True) + "\n")
+        fh.write(json.dumps(json_event_safe(entry), ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def append_jsonl(path: Path, entry: dict[str, Any]) -> None:
@@ -1473,20 +1457,20 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        data = expand_environment_values(json.loads(line), binding=str(path))
+        data = json.loads(line)
         if isinstance(data, dict):
             records.append(data)
     return records
 
 
 def read_json(path: Path) -> Any:
-    return expand_environment_values(json.loads(path.read_text(encoding="utf-8")), binding=str(path))
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def write_json_yaml(path: Path, data: Any) -> None:
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(json.dumps(redact_environment_values(data, binding=str(path)), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -1494,13 +1478,6 @@ def atomic_write_text(path: Path, text: str) -> None:
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def atomic_write_redacted_text(path: Path, text: str) -> None:
-    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(redact_environment_text(text, binding=str(path)), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -3971,7 +3948,7 @@ def gate_latency_report_output(
     }
     report_dir.mkdir(parents=True, exist_ok=True)
     write_json_yaml(json_path, summary)
-    atomic_write_redacted_text(report_path, render_gate_latency_report(summary))
+    report_path.write_text(render_gate_latency_report(summary), encoding="utf-8")
     append_jsonl_atomic(session_dir / "gate-latency-comparison-events.jsonl", summary)
     return {"gateLatencyComparison": summary}
 
@@ -9918,7 +9895,7 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     )
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
-    atomic_write_redacted_text(transcript_path, completed.stdout)
+    transcript_path.write_text(completed.stdout, encoding="utf-8")
     if completed.returncode != 0:
         append_jsonl(
             session_dir / "invocation-evidence.jsonl",
@@ -10148,7 +10125,7 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     )
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
-    atomic_write_redacted_text(transcript_path, completed.stdout)
+    transcript_path.write_text(completed.stdout, encoding="utf-8")
     if completed.returncode != 0:
         append_jsonl_atomic(
             session_dir / "invocation-evidence.jsonl",
@@ -11237,7 +11214,7 @@ def session_start_config_digest() -> str:
         Path(__file__).resolve(),
         HOOK_BUNDLE_DIR / "codex-hooks.example.json",
         HOOK_BUNDLE_DIR / "claude-settings-hooks.example.json",
-        SAHAI_ROOT / "organization" / "settings.json",
+        SAIHAI_ROOT / "organization" / "settings.json",
     ):
         hasher.update(str(path).encode("utf-8"))
         hasher.update(b"\0")
@@ -16897,7 +16874,7 @@ def gate_skill_contract_lint_findings(skills_root: Path) -> tuple[list[dict[str,
             return None
         if relative.endswith("/SKILL.md"):
             role_id = relative.split("/", 1)[0]
-            if role_id in SAHAI_MIGRATED_ROLE_IDS:
+            if role_id in SAIHAI_MIGRATED_ROLE_IDS:
                 path = sahai_role_skill_path(role_id)
                 if path.exists():
                     return path
@@ -17583,7 +17560,7 @@ def main() -> int:
     try:
         hook_input = load_json_file_input(args.input_json_file) if args.input_json_file else load_hook_input()
         output = run_main_command(args=args, parser=parser, hook_input=hook_input, state_root=state_root)
-        print(json.dumps(redact_environment_values(output), ensure_ascii=False))
+        print(json.dumps(output, ensure_ascii=False))
         if args.command == "gate-skill-contract-lint" and output.get("decision") == "block":
             return 2
     except Exception as exc:
@@ -17601,7 +17578,7 @@ def main() -> int:
         )
         print(
             json.dumps(
-                redact_environment_values({
+                {
                     "decision": "block",
                     "reason": f"ITB hook command failed: {type(exc).__name__}: {exc}",
                     "hookError": {
@@ -17611,7 +17588,7 @@ def main() -> int:
                         "error": event["error"],
                         "hook_errors_path": str(state_root / safe_id(event["session_id"]) / "hook-errors.jsonl"),
                     },
-                }),
+                },
                 ensure_ascii=False,
             )
         )

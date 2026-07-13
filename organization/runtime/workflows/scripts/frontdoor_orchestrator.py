@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1110,6 +1111,53 @@ def validate_child_pending_worktree_id(value: Any) -> str:
     return text
 
 
+def git_common_dir(repo_root: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode:
+        return None
+    return Path(result.stdout.strip()).resolve(strict=False)
+
+
+def git_worktree_roots(repo_root: Path) -> set[Path]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "list", "--porcelain", "-z"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    if result.returncode:
+        return set()
+    return {
+        Path(field.removeprefix("worktree ")).resolve(strict=False)
+        for field in result.stdout.split("\0")
+        if field.startswith("worktree ")
+    }
+
+
+def is_approved_checkout(repo_root: Path) -> bool:
+    expected = git_common_dir(REPO_ROOT)
+    candidate = git_common_dir(repo_root)
+    registered = git_worktree_roots(REPO_ROOT)
+    return (
+        expected is not None
+        and candidate == expected
+        and repo_root.resolve(strict=False) in registered
+    )
+
+
 def validate_child_thread_plan(plan: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(plan, dict):
         raise FrontdoorError("child_thread_plan must be object")
@@ -1138,7 +1186,7 @@ def validate_child_thread_plan(plan: dict[str, Any]) -> dict[str, Any]:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_full_name):
         raise FrontdoorError("repo_full_name must be owner/repo")
     repo_root = Path(str(plan["repo_root"])).expanduser().resolve(strict=False)
-    if repo_root.name != "Saihai" or not path_is_within(repo_root, REPO_ROOT.parent):
+    if not is_approved_checkout(repo_root):
         raise FrontdoorError("repo_root must identify the approved Saihai checkout family")
     instruction_ref = validate_child_thread_path(
         plan["initial_instruction_ref"],

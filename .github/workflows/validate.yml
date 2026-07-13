@@ -19,7 +19,15 @@ jobs:
           python-version: "3.11"
       - name: Run validation suite
         env:
+          SAIHAI_ROOT: ${{ github.workspace }}
           AGENTS_VAULT_ROOT: ${{ runner.temp }}/agents-vault
+          USER_VAULT_ROOT: ${{ runner.temp }}/user-vault
+          SKILLS_REPO_ROOT: ${{ github.workspace }}
+          SKILLS_ROOT: ${{ github.workspace }}/organization/roles
+          DOTFILES_ROOT: ${{ github.workspace }}
+          DEV_ROOT: ${{ runner.temp }}
+          DEV_WORKTREES_ROOT: ${{ runner.temp }}/worktrees
+          TASK_WORKTREE_ROOT: ${{ runner.temp }}/worktrees
         run: |
-          mkdir -p "$AGENTS_VAULT_ROOT"
+          mkdir -p "$AGENTS_VAULT_ROOT" "$USER_VAULT_ROOT" "$DEV_WORKTREES_ROOT"
           python3 scripts/validate_all.py

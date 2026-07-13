@@ -25,6 +25,7 @@ class PolicyTest(unittest.TestCase):
             ".env",
             ".env.local",
             ".env.example",
+            "directory-path.env",
             ".envrc",
             ".env-local",
             ".env_local",
@@ -210,7 +211,7 @@ class HookTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as state:
             env = os.environ.copy()
             env["SENSITIVE_ACCESS_GUARD_STATE_ROOT"] = state
-            env["SAIHAI_ENV_FILE"] = str(Path(state) / "missing-config")
+            env["SAIHAI_DIRECTORY_PATH_ENV"] = str(Path(state) / "missing-config")
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), "--runtime", "codex"],
                 input=json.dumps(
