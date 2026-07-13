@@ -25,7 +25,18 @@ class PolicyTest(unittest.TestCase):
             ".env",
             ".env.local",
             ".env.example",
+            ".envrc",
+            ".env-local",
+            ".env_local",
+            "backend.env",
+            "production.env.local",
+            ".direnv",
             "config/auth.json",
+            "config/foo_auth.json",
+            "config/prod-secret.json",
+            "config/db_credentials.json",
+            "config/session_token",
+            "config/my-token.txt",
             "gh-token.txt",
             "ACCESS_TOKEN",
             "oauth.json",
@@ -45,6 +56,34 @@ class PolicyTest(unittest.TestCase):
             "service-key.json",
             "keys.json",
             "certificates/service.p12",
+            "certificates/service.ppk",
+            "certificates/private.pkcs8",
+            "certificates/key.asc",
+            "vpn/client.ovpn",
+            "terraform.tfvars",
+            "production.auto.tfvars.json",
+            ".dev.vars",
+            ".flaskenv",
+            ".authinfo",
+            ".authinfo.gpg",
+            "environment.production.yaml",
+            ".bash_login",
+            ".zshrc",
+            ".zlogin",
+            "/Users/me/.config/fish/config.fish",
+            "/Users/me/.config/age/identity.txt",
+            ".sops.yaml",
+            "credentials.json",
+            ".pgpass",
+            ".vault-token",
+            "/Users/me/.local/share/keyrings/login.keyring",
+            "/Users/me/.config/op/config",
+            "/Users/me/.config/rclone/rclone.conf",
+            "/Users/me/.oci/config",
+            "/Users/me/Library/Keychains/login.keychain-db",
+            "keys/signing.pub",
+            "keys/release.snk",
+            "secrets/archive.age",
             ".netrc",
         ]
         for value in denied:
@@ -52,7 +91,20 @@ class PolicyTest(unittest.TestCase):
                 self.assertIsNotNone(GUARD.sensitive_reason(value))
 
     def test_allows_non_secret_key_substrings(self) -> None:
-        allowed = ["keymap.json", "keyboard.ts", "monkey.png", "environment.ts", "tokenizer.py"]
+        allowed = [
+            "keymap.json",
+            "keyboard.ts",
+            "monkey.png",
+            "environment.ts",
+            "tokenizer.py",
+            "authoring-guide.md",
+            "secretary.py",
+            ".flaskenv-guide.md",
+            "authinfo_parser.py",
+            "zlogin-helper.md",
+            "age/identity.txt",
+            "publications/report.pub",
+        ]
         for value in allowed:
             with self.subTest(value=value):
                 self.assertIsNone(GUARD.sensitive_reason(value))
@@ -166,6 +218,11 @@ class HookTest(unittest.TestCase):
             "cp .* /tmp/out",
             "tar cf /tmp/out.tar .*",
             "rsync -a .* /tmp/out",
+            "ls .*",
+            "wc .*",
+            "stat .*",
+            "du .*",
+            "diff -u .* empty",
         ):
             with self.subTest(command=command), tempfile.TemporaryDirectory() as state:
                 result = self.run_hook(
@@ -179,6 +236,43 @@ class HookTest(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0)
                 self.assertIn("indirect_filesystem_read", result.stdout)
+
+    def test_attached_shell_redirections_are_denied(self) -> None:
+        for command in (
+            "cat<.env",
+            "head <.env",
+            "cat<.ssh/config",
+            "cat<*",
+            "cat<.?nv",
+            "cat<$TARGET",
+            "head<${FILE}",
+        ):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as state:
+                result = self.run_hook(
+                    state,
+                    {
+                        "session_id": f"session-redirection-{command}",
+                        "cwd": state,
+                        "tool_name": "Bash",
+                        "tool_input": {"command": command},
+                    },
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assertIn('"permissionDecision":"deny"', result.stdout)
+
+    def test_glob_patterns_in_non_shell_fields_are_denied(self) -> None:
+        for pattern in (".env*", "production.env*", "*-secret.json"):
+            with self.subTest(pattern=pattern), tempfile.TemporaryDirectory() as state:
+                result = self.run_hook(
+                    state,
+                    {
+                        "session_id": f"session-pattern-{pattern}",
+                        "tool_name": "mcp_search",
+                        "tool_input": {"pattern": pattern},
+                    },
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assertIn("deny", result.stdout)
 
     def test_codex_shaped_cmd_payload_is_checked(self) -> None:
         with tempfile.TemporaryDirectory() as state:
@@ -218,6 +312,24 @@ class HookTest(unittest.TestCase):
                     "cwd": state,
                     "tool_name": "Read",
                     "tool_input": {"file_path": str(link)},
+                },
+            )
+            self.assertIn("symlink_to_protected_path", result.stdout)
+
+    def test_list_valued_paths_resolve_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as state:
+            root = Path(state)
+            protected = root / ".env.local"
+            protected.write_text("not-a-real-secret\n", encoding="utf-8")
+            link = root / "safe-link"
+            link.symlink_to(protected)
+            result = self.run_hook(
+                str(root / "guard-state"),
+                {
+                    "session_id": "session-list-link",
+                    "cwd": state,
+                    "tool_name": "read_multiple_files",
+                    "tool_input": {"paths": [str(link)]},
                 },
             )
             self.assertIn("symlink_to_protected_path", result.stdout)
@@ -284,6 +396,20 @@ class HookTest(unittest.TestCase):
             assert child.stdout is not None and child.stderr is not None
             child.stdout.close()
             child.stderr.close()
+
+    def test_session_lock_wait_has_a_fail_closed_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as state:
+            session_id = "session-lock-deadline"
+            with mock.patch.dict(
+                os.environ, {"SENSITIVE_ACCESS_GUARD_STATE_ROOT": state}
+            ), mock.patch.object(GUARD, "LOCK_TIMEOUT_SECONDS", 0.05), GUARD.session_lock(
+                "codex", session_id
+            ):
+                started = time.monotonic()
+                with self.assertRaisesRegex(GUARD.GuardError, "deadline exceeded"):
+                    with GUARD.session_lock("codex", session_id):
+                        pass
+                self.assertLess(time.monotonic() - started, 0.5)
 
     def test_human_clear_removes_latch(self) -> None:
         with tempfile.TemporaryDirectory() as state:

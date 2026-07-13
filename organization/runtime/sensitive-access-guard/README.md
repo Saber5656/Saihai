@@ -1,7 +1,8 @@
 # Sensitive Access Guard
 
 This guard blocks tool input that references secret-bearing files or names and
-latches the current Codex or Claude Code session. It is intentionally strict:
+latches the current Codex or Claude Code session when the runtime dispatches
+the attempt to `PreToolUse`. It is intentionally strict:
 `.env.example`, public-key files, SSH configuration, and token templates are
 blocked alongside live secrets.
 
@@ -9,11 +10,11 @@ blocked alongside live secrets.
 
 | Class | Examples |
 |---|---|
-| Environment files | `.env`, `.env.local`, `.env.example`, any `.env.*` |
+| Environment files | `.env`, any `.env*`, `.direnv`, `*.env`, `*.tfvars`, `.dev.vars`, shell startup profiles, fish configuration, and suffixed variants such as `production.env.local` |
 | Tokens and auth | `token`, `gh-token`, `github_pat`, `oauth.json`, `access_token`, `auth.json`, credentials, passwords, passphrases, and secrets |
 | SSH / auth directories | any path containing `.ssh`, `.gnupg`, `.aws`, `.azure`, or `.kube` |
-| Keys | `id_rsa`, `id_ed25519`, `private_key`, `service-key`, `keys.json`, `api-key`, `*.key`, `*.pem`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx` |
-| Other auth stores | `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.config/gh/hosts.yml`, `.config/gcloud/*`, `.docker/*`, `authorized_keys`, `known_hosts` |
+| Keys | `id_rsa`, `id_ed25519`, private/public keys, service keys, API keys, and key/certificate stores including `*.key`, `*.pem`, `*.p12`, `*.pfx`, `*.ppk`, `*.p8`, `*.pk8`, `*.pkcs8`, `*.der`, `*.csr`, `*.crt`, `*.cer`, `*.p7b`, `*.asc`, `*.gpg`, `*.pgp`, `*.jks`, `*.keystore`, `*.kdbx`, `*.ovpn`, and `*.mobileconfig` |
+| Other auth stores | `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, password-manager/keychain stores, common cloud and developer CLI credential directories, `.docker/*`, `authorized_keys`, and `known_hosts` |
 
 The guard applies to reads, writes, edits, copies, searches, and commands. It
 does not open a referenced file and never stores the attempted command or path.
@@ -36,8 +37,15 @@ The hook matcher is deliberately `.*` so Bash, file tools, and MCP tools are
 evaluated. `UserPromptSubmit` is also registered: after a latch is set, later
 prompts are rejected until a human clears it.
 
+Claude Code permission deny rules can reject a protected built-in `Read`
+before the runtime dispatches that attempt to `PreToolUse`. In that case the
+protected content is not returned, but this hook cannot create a session
+latch. The primary live guarantee is content non-disclosure; session latching
+is an additional guard for attempts that reach the hook.
+
 For explicit path fields, the guard resolves an existing symlink without
 opening its target and evaluates both the supplied name and resolved target.
+Singular and list-valued path fields use the same resolution policy.
 For Bash, broad indirect read forms such as read commands with globs, shell
 variables, command substitution, `find -exec`, or `xargs` are denied. This is
 deliberately conservative. Copy/archive tools including `cp`, `tar`, `zip`,
@@ -73,6 +81,14 @@ both runtimes.
 The state directory must be owned by the current user, be a real directory
 rather than a symlink, and have mode `0700`. Per-session lock files must be
 regular, owned by the current user, and mode `0600`. Any mismatch fails closed.
+Lock acquisition uses a bounded retry deadline shorter than the example hook
+timeout; lock contention beyond that deadline raises an internal guard error
+and fails closed instead of allowing the hook runtime to time out.
+
+An existing path that cannot be resolved, including a broken symlink or a
+filesystem resolution error, is denied with `unresolvable_path` and latches the
+session. This conservative behavior requires the same explicit human unlock as
+any other policy denial.
 
 ## Enforcement boundary
 
@@ -82,6 +98,10 @@ This is a guardrail, not an OS security boundary.
   shell handling and does not intercept every non-shell or non-MCP tool.
 - Claude Code does not send prompt-level `@file` references through
   `PreToolUse`; runtime Read deny rules are required as a second layer.
+- Claude Code 2.1.207 can apply those Read deny rules before `PreToolUse` for
+  model-origin built-in reads. The read is denied without a latch. This is an
+  accepted live-runtime limitation when content non-disclosure, rather than
+  mandatory session termination, is the governing objective.
 - A process that already holds a secret in memory or environment variables is
   outside this file-reference guard.
 - Encoded or programmatically constructed paths and custom file-reading
