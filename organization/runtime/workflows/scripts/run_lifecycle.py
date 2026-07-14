@@ -239,12 +239,18 @@ def transition_run(
 
 
 def work_order_path(state_root: Path, run_id: str, step_id: str) -> Path:
-    return (
-        state_root
-        / "work-orders"
-        / run_store.validate_artifact_id(run_id, "run_id")
-        / f"{run_store.validate_artifact_id(step_id, 'step_id')}.json"
-    )
+    try:
+        validated_run_id = run_store.validate_artifact_id(run_id, "run_id")
+        validated_step_id = run_store.validate_artifact_id(step_id, "step_id")
+        return safe_paths.state_artifact_path(
+            state_root,
+            "work-orders",
+            validated_run_id,
+            f"{validated_step_id}.json",
+        )
+    except (run_store.RunStoreError, safe_paths.SafePathError) as exc:
+        errors = exc.errors if isinstance(exc, run_store.RunStoreError) else [str(exc)]
+        raise LifecycleError("invalid_work_order", errors) from exc
 
 
 def _load_json(path: Path) -> dict[str, Any]:

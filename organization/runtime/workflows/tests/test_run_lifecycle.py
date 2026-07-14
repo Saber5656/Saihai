@@ -122,6 +122,18 @@ def assert_equal(actual, expected, label: str) -> None:
     assert actual == expected, f"{label}: expected {expected!r}, got {actual!r}"
 
 
+def assert_invalid_work_order_path(state_root: Path, run_id: str, step_id: str, label: str) -> None:
+    try:
+        run_lifecycle.work_order_path(state_root, run_id, step_id)
+    except run_lifecycle.LifecycleError as exc:
+        if exc.reason_class != "invalid_work_order":
+            raise AssertionError(
+                f"{label} reason: expected 'invalid_work_order', got {exc.reason_class!r}"
+            )
+    else:
+        raise AssertionError(f"{label} must fail closed")
+
+
 def transition(state_root: Path, run_id: str, to_state: str, reason_class: str) -> dict:
     return run_lifecycle.transition_run(
         state_root,
@@ -131,6 +143,33 @@ def transition(state_root: Path, run_id: str, to_state: str, reason_class: str) 
         transition="test_transition",
         principal=manual_principal(),
     )
+
+
+def test_work_order_path_uses_confined_safe_constructor() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp) / "state"
+        path = run_lifecycle.work_order_path(state_root, "run-lifecycle", "review")
+        expected = state_root.resolve() / "work-orders" / "run-lifecycle" / "review.json"
+        if path != expected:
+            raise AssertionError(f"normal work order path: expected {expected!r}, got {path!r}")
+
+
+def test_work_order_path_rejects_traversal_and_unsafe_components() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp) / "state"
+        assert_invalid_work_order_path(state_root, "run-lifecycle", "../outside", "traversal step")
+        assert_invalid_work_order_path(state_root, "run lifecycle", "review", "unsafe run component")
+
+
+def test_work_order_path_rejects_symlinked_namespace() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        state_root = root / "state"
+        outside = root / "outside"
+        state_root.mkdir()
+        outside.mkdir()
+        (state_root / "work-orders").symlink_to(outside, target_is_directory=True)
+        assert_invalid_work_order_path(state_root, "run-lifecycle", "review", "symlink namespace")
 
 
 def test_transition_table_allows_p0_happy_path() -> None:
@@ -573,6 +612,9 @@ def test_resume_does_not_duplicate_runs() -> None:
 
 def main() -> None:
     tests = [
+        test_work_order_path_uses_confined_safe_constructor,
+        test_work_order_path_rejects_traversal_and_unsafe_components,
+        test_work_order_path_rejects_symlinked_namespace,
         test_transition_table_allows_p0_happy_path,
         test_transition_signature_covers_full_record_payload,
         test_terminal_rejects_further_transitions,
