@@ -1,0 +1,6 @@
+extensions:
+  - addsTo:
+      pack: codeql/python-all
+      extensible: barrierModel
+    data:
+      - ["frontdoor_orchestrator", "Member[configured_state_root].ReturnValue", "path-injection"]
