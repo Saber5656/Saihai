@@ -351,6 +351,14 @@ def test_state_root_is_fixed_by_host_configuration() -> None:
             else:
                 raise AssertionError("arbitrary state root should be rejected")
 
+            frontdoor_module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = "/tmp/unsafe[state-root]"
+            try:
+                frontdoor_module.configured_state_root()
+            except frontdoor_module.FrontdoorError as exc:
+                assert "validated absolute host path" in str(exc)
+            else:
+                raise AssertionError("unvalidated configured state root should be rejected")
+
             symlink = Path(raw_tmp) / "configured-link"
             symlink.symlink_to(configured, target_is_directory=True)
             frontdoor_module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = str(symlink)
@@ -385,6 +393,15 @@ def test_state_root_catalog_is_loaded_only_from_primary_checkout() -> None:
     frontdoor_module = load_server_module().frontdoor
     with tempfile.TemporaryDirectory() as raw_tmp:
         root = Path(raw_tmp)
+        previous_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(root / "attacker-home")
+        try:
+            assert_equal(frontdoor_module.host_home_directory(), frontdoor_module.HOST_HOME, "OS account home authority")
+        finally:
+            if previous_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous_home
         primary = root / "primary"
         worktree = root / "task-worktree"
         primary.mkdir()
@@ -408,19 +425,129 @@ def test_state_root_catalog_is_loaded_only_from_primary_checkout() -> None:
             capture_output=True,
             text=True,
         )
-        trusted_root = root / "trusted-state"
-        attacker_root = root / "attacker-state"
         (primary / "directory-path.env").write_text(
-            f"SAIHAI_ORCH_STATE_ROOT={trusted_root}\n",
+            "SAIHAI_ORCH_STATE_ROOT=/tmp/saihai-primary-test-state\n",
             encoding="utf-8",
         )
+        (primary / "directory-path.env").chmod(0o600)
         (worktree / "directory-path.env").write_text(
-            f"SAIHAI_ORCH_STATE_ROOT={attacker_root}\n",
+            "SAIHAI_ORCH_STATE_ROOT=/tmp/saihai-worktree-test-state\n",
             encoding="utf-8",
         )
-        catalog_path, catalog, _diagnostics = frontdoor_module.load_primary_directory_catalog(worktree)
+        (worktree / "directory-path.env").chmod(0o600)
+        attacker_repo = root / "attacker-repo"
+        attacker_repo.mkdir()
+        subprocess.run(["git", "-C", str(attacker_repo), "init"], check=True, capture_output=True, text=True)
+        previous_git_dir = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = str(attacker_repo / ".git")
+        previous_primary_root = frontdoor_module.MANAGED_PRIMARY_CHECKOUT_ROOT
+        frontdoor_module.MANAGED_PRIMARY_CHECKOUT_ROOT = primary
+        worktree_gitfile = worktree / ".git"
+        original_gitfile = worktree_gitfile.read_text(encoding="utf-8")
+        worktree_gitfile.write_text(f"gitdir: {attacker_repo / '.git'}\n", encoding="utf-8")
+        try:
+            catalog_path, catalog, _diagnostics = frontdoor_module.load_primary_directory_catalog(worktree)
+        finally:
+            worktree_gitfile.write_text(original_gitfile, encoding="utf-8")
+            if previous_git_dir is None:
+                os.environ.pop("GIT_DIR", None)
+            else:
+                os.environ["GIT_DIR"] = previous_git_dir
         assert_equal(catalog_path, (primary / "directory-path.env").resolve(), "primary catalog path")
-        assert_equal(catalog["SAIHAI_ORCH_STATE_ROOT"], str(trusted_root), "primary catalog authority")
+        assert_equal(catalog["SAIHAI_ORCH_STATE_ROOT"], "/tmp/saihai-primary-test-state", "primary catalog authority")
+
+        worktree_gitfile.unlink()
+        worktree_gitfile.symlink_to(attacker_repo / ".git", target_is_directory=True)
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "checkout_identity_invalid" in str(exc)
+        else:
+            raise AssertionError("symlink git admin should not self-identify as primary")
+        worktree_gitfile.unlink()
+        worktree_gitfile.mkdir()
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "checkout_identity_invalid" in str(exc)
+        else:
+            raise AssertionError("directory git admin should not self-identify as primary")
+        worktree_gitfile.rmdir()
+        worktree_gitfile.write_text(original_gitfile, encoding="utf-8")
+
+        original_open = frontdoor_module.os.open
+
+        def missing_catalog_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            if Path(path) == catalog_path:
+                raise FileNotFoundError(str(path))
+            return original_open(path, flags, *args, **kwargs)
+
+        frontdoor_module.os.open = missing_catalog_open
+        try:
+            missing_path, missing_catalog, missing_diagnostics = frontdoor_module.load_primary_directory_catalog(worktree)
+        finally:
+            frontdoor_module.os.open = original_open
+        assert_equal(missing_path, catalog_path, "missing-race catalog path")
+        assert_equal(missing_catalog, {}, "missing-race default catalog")
+        assert_equal(missing_diagnostics["status"], "not_configured", "missing-race status")
+
+        original_parser = frontdoor_module.parse_directory_catalog
+
+        def replace_catalog_after_read(text: str) -> dict[str, str]:
+            catalog_path.unlink()
+            catalog_path.write_text(
+                "SAIHAI_ORCH_STATE_ROOT=/tmp/saihai-replaced-test-state\n",
+                encoding="utf-8",
+            )
+            catalog_path.chmod(0o644)
+            return original_parser(text)
+
+        frontdoor_module.parse_directory_catalog = replace_catalog_after_read
+        try:
+            _path, snapshot_catalog, _diagnostics = frontdoor_module.load_primary_directory_catalog(worktree)
+        finally:
+            frontdoor_module.parse_directory_catalog = original_parser
+        assert_equal(
+            snapshot_catalog["SAIHAI_ORCH_STATE_ROOT"],
+            "/tmp/saihai-primary-test-state",
+            "validated descriptor snapshot",
+        )
+        assert_equal(catalog_path.stat().st_mode & 0o777, 0o644, "pathname was replaced after descriptor read")
+
+        catalog_path.write_text("SAIHAI_ORCH_STATE_ROOT=relative-state\n", encoding="utf-8")
+        catalog_path.chmod(0o600)
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "state_root_must_be_validated_absolute_host_path" in str(exc)
+        else:
+            raise AssertionError("relative primary state root should be rejected")
+
+        catalog_path.write_text("SAIHAI_ORCH_STATE_ROOT=/tmp/host-root/../redirected-root\n", encoding="utf-8")
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "state_root_traversal_forbidden" in str(exc)
+        else:
+            raise AssertionError("raw traversal primary state root should be rejected")
+
+        catalog_path.chmod(0o644)
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "catalog_mode_must_be_0600" in str(exc)
+        else:
+            raise AssertionError("non-private primary catalog should be rejected")
+
+        catalog_path.unlink()
+        catalog_path.symlink_to(worktree / "directory-path.env")
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "catalog_must_be_regular_file" in str(exc)
+        else:
+            raise AssertionError("symlink primary catalog should be rejected")
+        frontdoor_module.MANAGED_PRIMARY_CHECKOUT_ROOT = previous_primary_root
 
 
 def test_state_artifact_category_symlink_is_rejected() -> None:
@@ -2663,10 +2790,11 @@ def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> N
         assert Path(created["action_path"]).exists(), "child action record should be durable"
         action_record = json.loads(Path(created["action_path"]).read_text(encoding="utf-8"))
         assert "idempotency_key" not in action_record["plan"], "child action must not store raw idempotency key"
-        assert action_record["plan"]["idempotency_key_digest"].startswith("sha256:")
+        assert "idempotency_key_digest" not in action_record["plan"]
         child_idempotency = frontdoor_module.child_thread_idempotency_path(state_root, plan["idempotency_key"])
         child_idempotency_text = child_idempotency.read_text(encoding="utf-8")
-        assert plan["idempotency_key"] not in child_idempotency_text, "idempotency artifact must store digest only"
+        assert plan["idempotency_key"] not in child_idempotency_text, "idempotency artifact must not store the key"
+        assert "idempotency_key_digest" not in child_idempotency_text
 
         replayed = load_payload(
             run_frontdoor(
@@ -2753,7 +2881,7 @@ def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> N
         bridge_idempotency = frontdoor_module.idempotency_path(state_root, projection_request["idempotency_key"])
         bridge_idempotency_text = bridge_idempotency.read_text(encoding="utf-8")
         assert projection_request["idempotency_key"] not in bridge_idempotency_text
-        assert "idempotency_key_digest" in bridge_idempotency_text
+        assert "idempotency_key_digest" not in bridge_idempotency_text
         summaries = projection["child_thread_summaries"]
         assert_equal(len(summaries), 2, "projection child thread summary count")
         summary = next(item for item in summaries if item["thread_id"] == "thread-child-67")

@@ -9,8 +9,10 @@ import hashlib
 import hmac
 import json
 import os
+import pwd
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import time
@@ -25,8 +27,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from directory_paths import EnvError as DirectoryPathError
-from directory_paths import default_catalog_path
-from directory_paths import load_environment as load_directory_environment
+from directory_paths import parse_env as parse_directory_catalog
 import run_store
 import run_lock
 import run_lifecycle
@@ -38,8 +39,21 @@ import workflow_selector
 import provider_runner
 import scoped_worker_executor
 
+def host_home_directory() -> Path:
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError) as exc:
+        raise RuntimeError("host_account_home_unavailable") from exc
+    if not home.is_absolute():
+        raise RuntimeError("host_account_home_invalid")
+    return home.resolve()
+
+
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_STATE_ROOT = Path.home() / ".codex" / "state" / "itb" / "frontdoor-orchestrator"
+HOST_HOME = host_home_directory()
+DEFAULT_STATE_ROOT = HOST_HOME / ".codex" / "state" / "itb" / "frontdoor-orchestrator"
+MANAGED_PRIMARY_CHECKOUT_ROOT = HOST_HOME / "dev" / "Saihai"
+SAFE_HOST_STATE_ROOT_RE = re.compile(r"^/(?:[\w .,'@%+=:~&()-]+/)*[\w .,'@%+=:~&()-]+/?$")
 SCOPED_WORKER_REPO_FULL_NAME = "Saber5656/Saihai"
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
 HTTP_CHANNEL_PRINCIPALS = {
@@ -50,18 +64,60 @@ HTTP_CHANNEL_PRINCIPALS = {
     "action_gateway": ("action_gateway_executor", "child-thread-gateway", "local_http_channel"),
 }
 
+def validate_host_state_root_value(raw: str) -> str:
+    configured = raw.strip()
+    if not SAFE_HOST_STATE_ROOT_RE.fullmatch(configured):
+        raise DirectoryPathError("state_root_must_be_validated_absolute_host_path")
+    if any(part in {".", ".."} for part in configured.split("/")):
+        raise DirectoryPathError("state_root_traversal_forbidden")
+    return configured
+
+
 def load_primary_directory_catalog(repo_root: Path) -> tuple[Path, dict[str, str], dict[str, object]]:
-    catalog_path = default_catalog_path(repo_root)
-    catalog: dict[str, str] = {}
+    checkout = repo_root.resolve()
+    primary_root = MANAGED_PRIMARY_CHECKOUT_ROOT.resolve()
+    git_admin = checkout / ".git"
     try:
-        diagnostics = load_directory_environment(
-            checkout_root=catalog_path.parent,
-            environ=catalog,
-            load_runtime=False,
-        )
-    except DirectoryPathError as exc:
+        git_admin_stat = git_admin.lstat()
+        primary_git_stat = (primary_root / ".git").lstat()
+    except OSError as exc:
+        raise RuntimeError("directory_path_environment_invalid:checkout_identity_invalid") from exc
+    if not stat.S_ISDIR(primary_git_stat.st_mode):
+        raise RuntimeError("directory_path_environment_invalid:managed_primary_checkout_unavailable")
+    if checkout == primary_root:
+        if not stat.S_ISDIR(git_admin_stat.st_mode):
+            raise RuntimeError("directory_path_environment_invalid:checkout_identity_invalid")
+    elif not stat.S_ISREG(git_admin_stat.st_mode):
+        raise RuntimeError("directory_path_environment_invalid:checkout_identity_invalid")
+    catalog_path = primary_root / "directory-path.env"
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(catalog_path, flags)
+    except FileNotFoundError:
+        return catalog_path, {}, {"status": "not_configured", "loaded_keys": ()}
+    except OSError as exc:
+        raise RuntimeError("directory_path_environment_invalid:catalog_must_be_regular_file") from exc
+    try:
+        catalog_stat = os.fstat(fd)
+        if not stat.S_ISREG(catalog_stat.st_mode):
+            raise DirectoryPathError("catalog_must_be_regular_file")
+        if catalog_stat.st_uid != os.getuid():
+            raise DirectoryPathError("catalog_owner_mismatch")
+        if stat.S_IMODE(catalog_stat.st_mode) != 0o600:
+            raise DirectoryPathError("catalog_mode_must_be_0600")
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            parsed = parse_directory_catalog(handle.read())
+        configured = parsed.get("SAIHAI_ORCH_STATE_ROOT") or parsed.get("SAHAI_ORCH_STATE_ROOT") or ""
+        catalog = {"SAIHAI_ORCH_STATE_ROOT": validate_host_state_root_value(configured)} if configured else {}
+    except (DirectoryPathError, OSError, UnicodeError) as exc:
         raise RuntimeError(f"directory_path_environment_invalid:{exc}") from exc
-    return catalog_path, catalog, diagnostics
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return catalog_path, catalog, {"status": "loaded", "loaded_keys": tuple(sorted(catalog))}
 
 
 PRIMARY_DIRECTORY_CATALOG_PATH, DIRECTORY_CATALOG, DIRECTORY_ENV_DIAGNOSTICS = load_primary_directory_catalog(REPO_ROOT)
@@ -571,7 +627,13 @@ def adapter_request_path(state_root: Path, run_id: str, step_id: str, adapter_id
 
 def configured_state_root() -> Path:
     configured = DIRECTORY_CATALOG.get("SAIHAI_ORCH_STATE_ROOT", "").strip()
-    root = Path(configured).expanduser() if configured else DEFAULT_STATE_ROOT
+    if configured:
+        try:
+            root = Path(validate_host_state_root_value(configured))
+        except DirectoryPathError as exc:
+            raise FrontdoorError("configured state root must be a validated absolute host path") from exc
+    else:
+        root = DEFAULT_STATE_ROOT
     if root.is_symlink() or (root.exists() and not root.is_dir()):
         raise FrontdoorError("configured state root must be a non-symlink directory")
     return root.resolve(strict=False)
@@ -644,7 +706,7 @@ def read_private_file_text(path: Path, *, label: str) -> str:
         return handle.read().strip()
 
 
-def channel_token(state_root: Path, channel: str) -> str:
+def ensure_channel_token_file(state_root: Path, channel: str) -> Path:
     path = channel_token_path(state_root, channel)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
@@ -659,6 +721,12 @@ def channel_token(state_root: Path, channel: str) -> str:
         else:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(secrets.token_urlsafe(32) + "\n")
+    ensure_private_file(path, label="channel token")
+    return path
+
+
+def channel_token(state_root: Path, channel: str) -> str:
+    path = ensure_channel_token_file(state_root, channel)
     return read_private_file_text(path, label="channel token")
 
 
@@ -1472,7 +1540,6 @@ def child_thread_create_action(
     normalized_result = validate_child_thread_result(result, normalized_plan)
     result_digest = child_thread_result_digest(normalized_result)
     idempotency_key = normalized_plan["idempotency_key"]
-    idempotency_digest = idempotency_key_digest(idempotency_key)
     idempotency_file = child_thread_idempotency_path(state_root, idempotency_key)
     subject = {
         "task_id": normalized_plan["task_id"],
@@ -1552,7 +1619,6 @@ def child_thread_create_action(
         "result_digest": result_digest,
         "plan": {
             **{key: value for key, value in normalized_plan.items() if key != "idempotency_key"},
-            "idempotency_key_digest": idempotency_digest,
         },
         "result": normalized_result,
         "authority": {
@@ -1569,7 +1635,6 @@ def child_thread_create_action(
         idempotency_file,
         {
             "idempotency_version": "1",
-            "idempotency_key_digest": idempotency_digest,
             "action_id": action_id,
             "plan_digest": plan_digest,
             "result_digest": result_digest,
@@ -1703,7 +1768,6 @@ def bridge_submit_request(
 
     digest = request_digest(payload)
     idempotency_key = str(payload["idempotency_key"])
-    idempotency_digest = idempotency_key_digest(idempotency_key)
     idempotency_file = idempotency_path(state_root, idempotency_key)
     if idempotency_file.exists():
         existing = read_json(idempotency_file)
@@ -1741,7 +1805,7 @@ def bridge_submit_request(
                 frontdoor=frontdoor_name,
                 chat_session_id=chat_session_id,
                 peer=peer,
-                    extra={"idempotency_key_digest": idempotency_digest},
+                extra={"request_digest": digest},
             ),
         )
         return projection
@@ -1838,7 +1902,6 @@ def bridge_submit_request(
         idempotency_file,
         {
             "idempotency_version": "1",
-            "idempotency_key_digest": idempotency_digest,
             "request_id": str(payload["request_id"]),
             "request_digest": digest,
             "created_at": now,
@@ -3754,12 +3817,12 @@ def main() -> None:
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "channel-token":
-            channel_token(state_root, args.channel)
+            token_path = ensure_channel_token_file(state_root, args.channel)
             payload = {
                 "schema_version": 1,
                 "decision": "ok",
                 "channel": args.channel,
-                "token_path": str(channel_token_path(state_root, args.channel)),
+                "token_path": str(token_path),
                 "token_exposed": False,
             }
         else:
