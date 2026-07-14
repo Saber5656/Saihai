@@ -1,0 +1,28 @@
+{
+  "bridge_pattern": "none",
+  "duration_ms": 0,
+  "effective_model": "claude-sonnet-operator-selected",
+  "evidence_path": "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-evidence.json",
+  "evidence_version": "1",
+  "outcome": "provider_timeout",
+  "provider": "claude_headless",
+  "provider_adapter_id": "claude_headless_p0",
+  "provider_request_id": "provider-fixture",
+  "provider_session_id": "session-run-waiting-human-timeout",
+  "provider_target": "claude_headless",
+  "raw_transcript_policy": "signal_only_not_shared",
+  "reason_class": "provider_timeout",
+  "request_id": "req-waiting-human-timeout",
+  "run_id": "run-waiting-human-timeout",
+  "stdout_sha256": "sha256:4f8c60fa55ebaf6cbf203185db18698eab652dd4f7c2a10fa8d8bb3d80fc8f8b",
+  "step_id": "review",
+  "surface_metadata": {
+    "async_callback_supported": false,
+    "surface": "claude_headless_cli"
+  },
+  "timed_out": true,
+  "transcript_path": "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-transcript.json",
+  "transport": "headless_cli",
+  "usage": {},
+  "workflow_id": "single_step_external_review"
+}

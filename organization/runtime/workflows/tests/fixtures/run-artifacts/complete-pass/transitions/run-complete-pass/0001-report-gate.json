@@ -1,0 +1,28 @@
+{
+  "errors": [],
+  "evidence_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/review-provider-evidence.json",
+  "evidence_sha256": "sha256:27248310b844324dc53d78a62ebefa828032062a049683ccddd294296ca17107",
+  "from_state": "validating",
+  "gate": "report_gate",
+  "iteration": 1,
+  "occurred_at": "2026-01-01T00:00:00+0000",
+  "on": "report_valid",
+  "outcome": "report_valid",
+  "principal": {
+    "authn_method": "local_test",
+    "principal_id": "e2e-harness",
+    "principal_type": "harness_runner"
+  },
+  "reason_class": "report_valid",
+  "report_path": "__STATE_ROOT__/reports/run-complete-pass/review-external-review-report.json",
+  "report_sha256": "sha256:880c720f8a20d777dc08ed45c9af3cc871c6b70c2038f1cba65f87337c7508c1",
+  "run_id": "run-complete-pass",
+  "signature": {
+    "algorithm": "sha256-local-principal-key",
+    "signature": "sha256:1c8db7464c3f8770cb9f698a9885f96af93c665adb88cfa2fe9e5a297741ab9e",
+    "signed_at": "2026-01-01T00:00:00+0000"
+  },
+  "step_id": "review",
+  "to_state": "complete",
+  "transition_artifact_version": "1"
+}

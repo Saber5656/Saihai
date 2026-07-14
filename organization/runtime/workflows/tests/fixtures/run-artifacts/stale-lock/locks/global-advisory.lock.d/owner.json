@@ -1,0 +1,13 @@
+{
+  "created_at": "2026-01-01T00:00:00+0000",
+  "hostname": "fixture.invalid",
+  "lock_type": "workflow-run-global",
+  "lock_version": "1",
+  "operation": "run_provider",
+  "owner_nonce": "fixture-stale-lock",
+  "pid": 1,
+  "principal_type": "harness_runner",
+  "process_start_token": "fixture-dead-process",
+  "run_id": "run-stale-lock",
+  "stale_after_seconds": 300
+}

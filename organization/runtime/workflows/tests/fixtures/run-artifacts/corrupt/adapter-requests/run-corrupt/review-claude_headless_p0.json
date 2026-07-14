@@ -1,0 +1,66 @@
+{
+  "adapter": {
+    "adapter_contract_version": "1",
+    "bridge_pattern": "none",
+    "concurrency_unit": "process",
+    "context_freshness": "fresh_process",
+    "default_model": "claude-sonnet-operator-selected",
+    "permission_enforcement": "harness",
+    "provider_adapter_id": "claude_headless_p0",
+    "provider_target": "claude_headless",
+    "report_authority": "typed_report_and_evidence_file",
+    "requires_marker": false,
+    "reset_strategy": "new_session",
+    "supports_structured_output": true,
+    "surface_metadata": {
+      "async_callback_supported": false,
+      "surface": "claude_headless_cli"
+    },
+    "sync_mode": "sync",
+    "transport": "headless_cli"
+  },
+  "adapter_request_version": "1",
+  "authority": {
+    "issued_by_principal": {
+      "authn_method": "local_test",
+      "principal_id": "e2e-harness",
+      "principal_type": "harness_runner"
+    },
+    "provider_may_write": [
+      "typed_report_file",
+      "normalized_provider_evidence_file"
+    ],
+    "provider_must_not": [
+      "select_workflow",
+      "approve_activation",
+      "mutate_run_state",
+      "edit_repo",
+      "commit",
+      "push",
+      "publish",
+      "copy_raw_transcript_to_run_state"
+    ],
+    "work_order_signature": {
+      "algorithm": "sha256-hmac-sha256-local-principal-key",
+      "signature": "sha256:eef5aa7fed57c0320bcbf2e0ef5942a34c587e9889fe3693a104f2afc1e236bb",
+      "signed_at": "2026-01-01T00:00:00+0000"
+    }
+  },
+  "context_refs": [
+    {
+      "digest": "sha256:c41db1f858186ab952c68f0e8dee35b1726ff4d8f24f0ce74f9e906937b89df1",
+      "size_bytes": 12,
+      "type": "repo_file",
+      "value": ".tmp/e2e-harness-fixture/ref.md"
+    }
+  ],
+  "evidence_path": "__STATE_ROOT__/provider-evidence/run-corrupt/review-provider-evidence.json",
+  "instruction": "Send one bounded readonly review or consultation work order to an external provider adapter and require an authoritative typed report/evidence file. Step 'review' (reviewer): follow the input work order contract and produce external_review_report.",
+  "report_path": "__STATE_ROOT__/reports/run-corrupt/review-external-review-report.json",
+  "request_id": "req-corrupt",
+  "run_id": "run-corrupt",
+  "step_id": "review",
+  "transcript_path": "__STATE_ROOT__/provider-evidence/run-corrupt/review-provider-transcript.json",
+  "work_order_path": "__STATE_ROOT__/work-orders/run-corrupt/review.json",
+  "workflow_id": "single_step_external_review"
+}

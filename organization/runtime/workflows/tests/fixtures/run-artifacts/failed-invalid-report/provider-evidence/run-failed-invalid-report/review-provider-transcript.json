@@ -1,0 +1,9 @@
+{
+  "fixture_marker": "__FIXTURE_TRANSCRIPT__",
+  "payload": {
+    "outcome": "fixture_signal"
+  },
+  "raw_content_policy": "signal_only_not_shared",
+  "transcript_signal_version": "1",
+  "written_at": "2026-01-01T00:00:00+0000"
+}
