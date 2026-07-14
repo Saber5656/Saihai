@@ -357,7 +357,7 @@ viewer の role state は次のように導出されます。
 | Provider evidence | `<state_root>/provider-evidence/<run_id>/*` | normalized evidence と signal-only transcript |
 | Session run index | `<session_dir>/orchestrator-runs.json` | rebuild 可能な viewer projection。canonical run state ではない |
 | Task view | `workflow-frontdoor task-view` / `GET /orchestrator/tasks/{task_id}/runs` | derived thin link/status と queue-shaped evidence |
-| Role queue files | `<session_dir>/queue/inbox|tasks|reports` | canonical ITB role-queue evidence。orchestrator は書き込まない |
+| Role queue files | `<session_dir>/queue/inbox`, `<session_dir>/queue/tasks`, `<session_dir>/queue/reports` | canonical ITB role-queue evidence。orchestrator は書き込まない |
 | Audit log | `<state_root>/audit/*.jsonl` | principal-scoped transition、replay、rejection、acknowledgement evidence |
 
 ## Workflow contract

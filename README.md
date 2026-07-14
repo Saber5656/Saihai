@@ -433,7 +433,7 @@ Viewer role states are derived as follows:
 | Provider evidence | `<state_root>/provider-evidence/<run_id>/*` | Normalized evidence and signal-only transcript. |
 | Session run index | `<session_dir>/orchestrator-runs.json` | Rebuildable viewer projection, not canonical run state. |
 | Task view | `workflow-frontdoor task-view` / `GET /orchestrator/tasks/{task_id}/runs` | Derived thin links/status and queue-shaped evidence. |
-| Role queue files | `<session_dir>/queue/inbox|tasks|reports` | Canonical ITB role-queue evidence; the orchestrator does not write it. |
+| Role queue files | `<session_dir>/queue/inbox`, `<session_dir>/queue/tasks`, `<session_dir>/queue/reports` | Canonical ITB role-queue evidence; the orchestrator does not write it. |
 | Audit log | `<state_root>/audit/*.jsonl` | Principal-scoped transition, replay, rejection, and acknowledgement evidence. |
 
 ## Workflow contracts
