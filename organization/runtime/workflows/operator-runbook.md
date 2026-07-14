@@ -96,24 +96,32 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STAT
   --run-id <run_id>
 ```
 
-6. Prepare the adapter request.
+6. Run the provider through the host-owned runner.
 
 Input: `run-id` whose current step has a work order.
 
-Output: adapter request JSON under `adapter-requests/`, with canonical report,
-provider evidence, transcript, and prompt paths.
+Live execution requires operator-managed pinned executable path/digest values,
+the exact environment guard, and an explicit `--live` flag. Codex additionally
+requires a pinned host confinement wrapper and profile. Credential creation,
+configuration, and inspection remain manual operator work.
 
 ```sh
-python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" prepare-claude-adapter \
-  --run-id <run_id>
+SAIHAI_ALLOW_LIVE_PROVIDERS=1 python3 scripts/configure_organization.py workflow-frontdoor \
+  --state-root "$STATE_ROOT" run-provider \
+  --run-id <run_id> --adapter-id claude_headless_p0 --live --timeout-seconds 1800
 ```
 
-7. Run the provider outside this harness.
+`prepare-claude-adapter` remains only as deprecated, non-executable compatibility
+output. It grants no provider write authority.
 
-The provider must write the typed report, normalized evidence, and confined
-transcript files named in the adapter request. The transcript is signal-only
-provider evidence, not completion authority. It must not select workflows,
-approve activation, mutate run state, edit the repo, commit, push, or publish.
+7. Inspect the durable provider result.
+
+The runner owns the typed report, normalized evidence, and owner-only transcript.
+During a long call, `waiting_provider` contains the current attempt/lease,
+heartbeat, timeout, retry counters, and last typed outcome. The global workflow
+lock is not held during the provider subprocess. A single invocation defaults to
+30 minutes and may be configured up to 24 hours; the harness has no cumulative
+deadline. The same retryable failure is automatically retried at most five times.
 
 8. Validate the report.
 
@@ -236,8 +244,8 @@ transcript, and audit JSONL files.
 | Provider report terminalized blocked or invalid | `validate-report` has already set terminal `run_state = failed`, `goal_state = blocked`, and a `provider_report_blocked` / `provider_report_invalid` reason. | Preserve the terminal run and provider artifacts. Create a new request/run for a corrected attempt; rerunning `validate-report` on the terminal run only replays `terminal_run_already_set`. |
 | Invalid report | `validate-report` sets run `run_state = failed`, `goal_state = blocked`, terminal reason `invalid_report`. | Preserve the failed report and validation errors. Create a new request/run for a corrected attempt; do not hand-edit the failed run. |
 | Lock contention | Contract says `global_advisory_lock` and concurrency 1, but current P0 has no separate lock-inspection CLI. | Ensure only one operator drains/validates a state root at a time. If a future lock file/API is introduced, this runbook must be updated by that implementation issue. |
-| Resume required | Run is non-terminal and all canonical artifacts for the current step exist. | Current CLI has no `resume` command. Manual resume means rerun the idempotent next command (`drain`, `prepare-claude-adapter`, or `validate-report`) after inspecting state. Dedicated resume is planned in [#22](https://github.com/Saber5656/Saihai/issues/22). |
-| Abort required | Operator must stop a non-terminal run. | Dedicated abort is planned in [#22](https://github.com/Saber5656/Saihai/issues/22). Until then, preserve artifacts and record the stop decision outside the run state unless an approved break-glass procedure explicitly updates state. |
+| Resume required | Run is non-terminal and provider lease/result state exists. | Run `resume --run-id <id>`. A live lease returns `provider_in_flight`; an expired lease requeues without changing the signed work order; `result_ready` resumes at report validation. |
+| Abort required | Operator must stop a non-terminal run. | Run `abort --run-id <id> --reason <reason>`. Heartbeat detects the lost lease/run state and stops the subprocess; stale worker results are never promoted to canonical artifacts. |
 
 Behavior-changing fixes for recovery, locking, resume, abort, provider runners,
 or report validation must update this runbook in the same change.
