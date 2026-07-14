@@ -274,9 +274,13 @@ def _project_lock_info(info: dict) -> dict:
     projected = {key: info[key] for key in LOCK_INFO_VIEW_KEYS if key in info}
     owner = info.get("owner")
     if isinstance(owner, dict):
-        projected["owner"] = _redact_artifact(
-            {key: owner[key] for key in LOCK_OWNER_VIEW_KEYS if key in owner}
-        ) or None
+        try:
+            safe_owner = _redact_artifact(
+                {key: owner[key] for key in LOCK_OWNER_VIEW_KEYS if key in owner}
+            )
+        except RecursionError:
+            safe_owner = None
+        projected["owner"] = safe_owner or None
     else:
         projected["owner"] = None
     return projected

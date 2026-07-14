@@ -386,6 +386,31 @@ def test_lock_owner_uses_safe_projection() -> None:
         assert "LOCK-UNEXPECTED-LEAK" not in raw
 
 
+def test_deep_lock_owner_redaction_is_nonfatal() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        nested: object = "leaf"
+        for _ in range(1_200):
+            nested = {"nested": nested}
+
+        class DeepOwnerLock:
+            @staticmethod
+            def inspect_global_lock(_root: Path) -> dict:
+                return {
+                    "decision": "ok",
+                    "locked": True,
+                    "stale": False,
+                    "owner": {"operation": nested},
+                }
+
+        with http_server(root) as (server, url):
+            server._run_lock = lambda: DeepOwnerLock
+            status, payload, raw = request(url, "/api/workflow-lock")
+        assert status == 200
+        assert payload["locks"][0]["owner"] is None
+        assert "Traceback" not in raw
+
+
 def test_g11_large_inventory_is_fast_and_not_truncated_at_500() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         root = Path(raw_tmp)
@@ -592,6 +617,7 @@ def main() -> None:
         test_g9_orchestrator_root_is_not_a_session_root,
         test_g10_lock_missing_owner_is_nonfatal,
         test_lock_owner_uses_safe_projection,
+        test_deep_lock_owner_redaction_is_nonfatal,
         test_g11_large_inventory_is_fast_and_not_truncated_at_500,
         test_discovery_limit_reports_truncation,
         test_run_filters_are_applied_before_result_cap,
