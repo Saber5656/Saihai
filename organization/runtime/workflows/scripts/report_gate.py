@@ -772,15 +772,42 @@ def gate_report(
             if path.resolve() != canonical_report_path.resolve():
                 raise ReportGateError("report path must match canonical work order report path")
 
+            if run_state == "waiting_provider" and not run_lifecycle._runner_claim_expired(work_order):
+                append_audit_event(
+                    state_root=state_root,
+                    event_type="validate_report",
+                    principal=actor,
+                    subject=subject,
+                    outcome="blocked",
+                    details={"reason": "provider_in_flight", "run_state": run_state},
+                )
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "validated": False,
+                    "report_status": "waiting_provider",
+                    "reason": "provider_in_flight",
+                    "errors": [],
+                    "outcome": "provider_in_flight",
+                    "transition_artifact_path": None,
+                    "rejection_artifact_path": None,
+                    "run_path": str(run_file),
+                    "workflow_run": run,
+                }
+
             report_read_outcome: str | None = None
             report_read_error: str | None = None
+            report_digest: str | None = None
             try:
+                if not path.is_file():
+                    raise OSError("report path is not a regular file")
                 raw_report = path.read_bytes()
             except OSError:
                 report = {}
                 report_read_outcome = "report_not_written"
-                report_read_error = "report file is missing"
+                report_read_error = "report file is unavailable"
             else:
+                report_digest = "sha256:" + hashlib.sha256(raw_report).hexdigest()
                 try:
                     report = json.loads(raw_report.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -937,7 +964,6 @@ def gate_report(
                 terminal_reason=terminal_reason,
                 run=run,
             )
-            report_digest = file_sha256(path) if path.exists() else None
             evidence_path = (
                 report.get("provider_evidence", {}).get("evidence_path")
                 if isinstance(report.get("provider_evidence"), dict)

@@ -343,6 +343,21 @@ def scenario_missing_report_file(harness: OrchestratorHarness) -> dict[str, Any]
     return {"outcome": payload["outcome"], "state": payload["workflow_run"]["run_state"]}
 
 
+def scenario_directory_report_path(harness: OrchestratorHarness) -> dict[str, Any]:
+    run_id = prepare_run(harness, "directory-report-path")
+    prepared = harness.frontdoor.prepare_claude_adapter(state_root=harness.state_root, run_id=run_id)
+    report_path = Path(prepared["adapter_request"]["report_path"])
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.mkdir()
+    payload = harness.frontdoor.validate_report(state_root=harness.state_root, run_id=run_id)
+    require_equal(payload.get("decision"), "blocked", "directory report decision")
+    require_equal(payload.get("outcome"), "report_not_written", "directory report outcome")
+    require_equal(payload["workflow_run"]["run_state"], "waiting_human", "directory report state")
+    artifact = json.loads(Path(payload["transition_artifact_path"]).read_text(encoding="utf-8"))
+    require_equal(artifact["report_sha256"], None, "directory report digest")
+    return {"outcome": payload["outcome"], "state": payload["workflow_run"]["run_state"], "digest": None}
+
+
 def scenario_cross_run_report(harness: OrchestratorHarness) -> dict[str, Any]:
     run_id = prepare_run(harness, "cross-run-report")
     write_review_artifacts(harness, run_id, report_updates={"run_id": "run-other"})
@@ -446,6 +461,19 @@ def scenario_claim_blocks_second_runner(harness: OrchestratorHarness) -> dict[st
     require_equal(payload.get("run_state"), "waiting_provider", "live claim state")
     require_equal(run_path.read_bytes(), before, "live claim run immutability")
     return {"reason": payload["reason"], "state": payload["run_state"]}
+
+
+def scenario_validate_respects_live_claim(harness: OrchestratorHarness) -> dict[str, Any]:
+    run_id = prepare_run(harness, "validate-live-claim")
+    set_provider_claim(harness, run_id, "2999-01-01T00:00:00+0000")
+    run_path = harness.state_root / "runs" / f"{run_id}.json"
+    before = run_path.read_bytes()
+    payload = harness.frontdoor.validate_report(state_root=harness.state_root, run_id=run_id)
+    require_equal(payload.get("decision"), "blocked", "live claim validation decision")
+    require_equal(payload.get("reason"), "provider_in_flight", "live claim validation reason")
+    require_equal(payload["workflow_run"]["run_state"], "waiting_provider", "live claim validation state")
+    require_equal(run_path.read_bytes(), before, "live claim validation run immutability")
+    return {"reason": payload["reason"], "state": payload["workflow_run"]["run_state"], "immutable": True}
 
 
 def scenario_resume_after_interrupt(harness: OrchestratorHarness) -> dict[str, Any]:
@@ -665,12 +693,14 @@ SCENARIOS = [
     Scenario("invalid_report_blocks", "report_integrity", ("frontdoor.validate_report",), {"outcome": "report_invalid", "state": "failed"}, scenario_invalid_report_blocks),
     Scenario("malformed_report_file", "report_integrity", ("frontdoor.validate_report",), {"outcome": "report_invalid", "state": "failed"}, scenario_malformed_report_file),
     Scenario("missing_report_file", "report_integrity", ("frontdoor.validate_report",), {"outcome": "report_not_written", "state": "waiting_human"}, scenario_missing_report_file),
+    Scenario("directory_report_path", "report_integrity", ("frontdoor.validate_report",), {"outcome": "report_not_written", "state": "waiting_human", "digest": None}, scenario_directory_report_path),
     Scenario("cross_run_report", "report_integrity", ("frontdoor.validate_report",), {"outcome": "scope_violation", "state": "waiting_human"}, scenario_cross_run_report),
     Scenario("transcript_leak_is_scope_violation", "confinement", ("frontdoor.validate_report",), {"outcome": "scope_violation", "leaked_artifacts": []}, scenario_transcript_leak_is_scope_violation),
     Scenario("provider_failure_matrix", "provider", ("provider_runner.run_provider_step",), {"nonzero": {"reason": "provider_nonzero_exit", "state": "waiting_human"}}, scenario_provider_failure_matrix),
     Scenario("report_not_written", "provider", ("provider_runner.execute_provider",), {"reason": "report_not_written", "state": "waiting_human"}, scenario_report_not_written),
     Scenario("resume_after_timeout", "durability", ("frontdoor.resume_run",), {"state": "complete", "recovered": True}, scenario_resume_after_timeout),
     Scenario("claim_blocks_second_runner", "durability", ("provider_runner.run_provider_step",), {"reason": "provider_in_flight", "state": "waiting_provider"}, scenario_claim_blocks_second_runner),
+    Scenario("validate_respects_live_claim", "durability", ("frontdoor.validate_report",), {"reason": "provider_in_flight", "state": "waiting_provider", "immutable": True}, scenario_validate_respects_live_claim),
     Scenario("resume_after_interrupt", "durability", ("frontdoor.resume_run",), {"reason": "provider_lease_expired", "state": "complete"}, scenario_resume_after_interrupt),
     Scenario("lock_contention_is_typed", "locking", ("run_lock.acquire_global_lock",), {"reason_class": "lock_contention", "state_unchanged": True}, scenario_lock_contention_is_typed),
     Scenario("stale_lock_recovered", "locking", ("run_lock.global_lock_path",), {"state": "step_queued", "lock_released": True}, scenario_stale_lock_recovered),

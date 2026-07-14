@@ -533,6 +533,76 @@ def test_missing_report_waits_for_human() -> None:
         assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "missing report state")
 
 
+def test_directory_report_path_fails_closed_without_hashing() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        adapter = prepare_review_handoff(state_root, request_id="req-report-directory", run_id="run-report-directory")
+        report_path = Path(adapter["report_path"])
+        report_path.mkdir()
+
+        blocked = run_frontdoor(state_root, "validate-report", "--run-id", "run-report-directory", check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "directory report exit")
+        assert_equal(payload["outcome"], "report_not_written", "directory report outcome")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "directory report state")
+        artifact = json.loads(Path(payload["transition_artifact_path"]).read_text(encoding="utf-8"))
+        assert_equal(artifact["report_sha256"], None, "directory report digest")
+
+
+def test_permission_denied_report_fails_closed_without_hashing() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        adapter = prepare_review_handoff(state_root, request_id="req-report-denied", run_id="run-report-denied")
+        report_path = Path(adapter["report_path"])
+        report_path.write_text("{}\n", encoding="utf-8")
+        report_path.chmod(0o000)
+        try:
+            blocked = run_frontdoor(state_root, "validate-report", "--run-id", "run-report-denied", check=False)
+        finally:
+            report_path.chmod(0o600)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "permission-denied report exit")
+        assert_equal(payload["outcome"], "report_not_written", "permission-denied report outcome")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "permission-denied report state")
+        artifact = json.loads(Path(payload["transition_artifact_path"]).read_text(encoding="utf-8"))
+        assert_equal(artifact["report_sha256"], None, "permission-denied report digest")
+
+
+def test_live_provider_claim_blocks_report_validation() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-report-live-claim"
+        prepare_review_handoff(state_root, request_id="req-report-live-claim", run_id=run_id)
+        run = run_store.load_run(state_root, run_id)
+        run_lifecycle.transition_run(
+            state_root,
+            run_id,
+            to_state="waiting_provider",
+            reason_class="provider_invoked",
+            transition="test_live_claim",
+            principal={"principal_type": "harness_runner", "principal_id": "first-runner", "authn_method": "local_test"},
+            run=run,
+        )
+        order_path = run_lifecycle.work_order_path(state_root, run_id, "review")
+        work_order = json.loads(order_path.read_text(encoding="utf-8"))
+        work_order["work_order_authority"]["runner_claim"] = {
+            "claim_state": "claimed",
+            "lease_id": "lease-live-report",
+            "lease_expires_at": "2999-01-01T00:00:00+0000",
+        }
+        run_store.atomic_write_json(order_path, work_order)
+        run_path = run_store.run_path(state_root, run_id)
+        before = run_path.read_bytes()
+
+        blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "live claim validation exit")
+        assert_equal(payload["reason"], "provider_in_flight", "live claim validation reason")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_provider", "live claim validation state")
+        assert_equal(run_path.read_bytes(), before, "live claim canonical run unchanged")
+        assert_equal(payload["transition_artifact_path"], None, "live claim transition artifact")
+
+
 def test_terminal_replay_does_not_write_new_transition_artifact() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -572,6 +642,9 @@ def main() -> None:
         test_malformed_report_json_fails_closed,
         test_unreadable_report_shapes_fail_closed,
         test_missing_report_waits_for_human,
+        test_directory_report_path_fails_closed_without_hashing,
+        test_permission_denied_report_fails_closed_without_hashing,
+        test_live_provider_claim_blocks_report_validation,
         test_terminal_replay_does_not_write_new_transition_artifact,
     ]
     for test in tests:
