@@ -13,6 +13,7 @@ Sahai は、プロンプトを実行権限として扱うのではなく、typed
 - Python 3.10 以上
 - live scoped-worker backend を有効にする場合は Git 2.37 以上
 - primary checkout から設定された、書き込み可能な Agents Vault
+- checkout は host-managed primary checkout `~/dev/Saihai`、またはその checkout を primary とする linked worktree。`directory-path.env` と `--state-root` を設定しても、任意の clone が有効になるわけではない
 - operator が live provider を明示的に有効化する場合のみ provider CLI と credential。offline path では不要
 
 <a id="local-environment"></a>
@@ -69,7 +70,7 @@ setup command は非破壊的で、owner-only file を書き込みます。proce
 
 ## Offline quickstart
 
-次の flow は deterministic fake provider を使用し、live provider call を行わないため、local checkout で安全に実行できます。先に[ローカル環境](#local-environment)の設定を完了してください。
+次の flow は、上記の managed primary checkout またはその linked worktree からのみ実行してください。deterministic fake provider を使用し、live provider call は行いません。先に[ローカル環境](#local-environment)の設定を完了してください。path 設定だけでは、別の clone に実行権限は与えられません。
 
 ```sh
 suffix="$(date +%s)"

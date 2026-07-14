@@ -20,6 +20,9 @@ Sahai uses only the Python 3.10+ standard library for normal operation. No
 - Python 3.10 or newer
 - Git 2.37 or newer when the live scoped-worker backend is enabled
 - A writable Agents Vault configured through the primary checkout
+- The checkout is the host-managed primary checkout at `~/dev/Saihai` or a
+  linked worktree whose primary is that checkout; `directory-path.env` and
+  `--state-root` do not make an arbitrary clone valid
 - Provider CLIs and credentials only when an operator intentionally enables a
   live provider; the offline path does not require them
 
@@ -82,9 +85,10 @@ for the complete path audit.
 
 ## Offline quickstart
 
-The following flow is safe for a local checkout: it uses a deterministic fake
-provider and makes no live provider call. Complete
-[Local environment](#local-environment) first.
+Run the following flow only from that managed primary checkout or one of its
+linked worktrees. It uses a deterministic fake provider and makes no live
+provider call. Complete [Local environment](#local-environment) first; path
+configuration alone does not authorize a different clone.
 
 ```sh
 suffix="$(date +%s)"
