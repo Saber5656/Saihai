@@ -780,9 +780,11 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         )
         assert_equal(
             adapter_request["authority"]["provider_may_write"],
-            ["typed_report_file", "normalized_provider_evidence_file"],
+            [],
             "adapter write authority",
         )
+        assert_equal(adapter_request["deprecated"], True, "manual adapter deprecated")
+        assert_equal(adapter_request["execution_allowed"], False, "manual adapter execution blocked")
 
         evidence_path = Path(adapter_request["evidence_path"])
         transcript_path = Path(adapter_request["transcript_path"])

@@ -11,6 +11,8 @@ Usage:  python3 server.py [--port 8765]
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import functools
 import importlib.util
 import json
 import os
@@ -59,6 +61,11 @@ RUN_STATES = {
     "aborted",
 }
 MAX_RUN_FILE_BYTES = 1_000_000
+MAX_RUN_DISCOVERY_FILES = 500
+MAX_RUN_SCAN_ENTRIES = 2_000
+MAX_DETAIL_ARTIFACT_FILES = 200
+MAX_DETAIL_ARTIFACT_SCAN_ENTRIES = 1_000
+MAX_DETAIL_ARTIFACT_BYTES = 5_000_000
 DENIED_ARTIFACT_KEYS = {
     "prompt",
     "provider_transcript",
@@ -70,6 +77,45 @@ DENIED_ARTIFACT_KEYS = {
     "transcript",
     "transcript_content",
     "pane_output",
+}
+RUN_RECORD_VIEW_KEYS = {
+    "run_version",
+    "run_id",
+    "task_id",
+    "request_id",
+    "workflow_id",
+    "goal_state",
+    "run_state",
+    "current_step",
+    "iteration",
+    "max_steps",
+    "activation",
+    "terminal",
+    "requester",
+    "scheduling",
+    "context_sharing",
+    "completion_verification",
+}
+LOCK_OWNER_VIEW_KEYS = {
+    "lock_version",
+    "lock_type",
+    "pid",
+    "hostname",
+    "process_start_token",
+    "created_at",
+    "stale_after_seconds",
+    "operation",
+    "run_id",
+    "principal_type",
+}
+LOCK_INFO_VIEW_KEYS = {
+    "schema_version",
+    "decision",
+    "error",
+    "locked",
+    "stale",
+    "stale_reason",
+    "lock_path",
 }
 TEAM_ORDER = ["gate", "tech", "contents", "business", "infra"]
 TEAM_LABELS = {
@@ -139,6 +185,7 @@ def _load_workflow_module(module_name: str, filename: str):
                 pass
 
 
+@functools.lru_cache(maxsize=1)
 def _task_state_bridge():
     return _load_workflow_module("saihai_task_state_bridge", "task_state_bridge.py")
 
@@ -202,17 +249,46 @@ def _safe_artifact_id(value: str) -> bool:
     return bool(RUN_ID_RE.fullmatch(str(value or "")))
 
 
+def _artifact_key_is_denied(key: object) -> bool:
+    raw_key = str(key or "").strip()
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", raw_key).replace("-", "_").lower()
+    if normalized == "transcript_path":
+        return False
+    sensitive_tokens = {"prompt", "transcript"}
+    return normalized in DENIED_ARTIFACT_KEYS or bool(sensitive_tokens.intersection(normalized.split("_")))
+
+
 def _redact_artifact(value):
     if isinstance(value, dict):
-        return {key: _redact_artifact(item) for key, item in value.items() if key not in DENIED_ARTIFACT_KEYS}
+        return {key: _redact_artifact(item) for key, item in value.items() if not _artifact_key_is_denied(key)}
     if isinstance(value, list):
         return [_redact_artifact(item) for item in value]
     return value
 
 
+def _project_run_record(run_record: dict) -> dict:
+    return _redact_artifact({key: run_record[key] for key in RUN_RECORD_VIEW_KEYS if key in run_record})
+
+
+def _project_lock_info(info: dict) -> dict:
+    projected = {key: info[key] for key in LOCK_INFO_VIEW_KEYS if key in info}
+    owner = info.get("owner")
+    if isinstance(owner, dict):
+        try:
+            safe_owner = _redact_artifact(
+                {key: owner[key] for key in LOCK_OWNER_VIEW_KEYS if key in owner}
+            )
+        except RecursionError:
+            safe_owner = None
+        projected["owner"] = safe_owner or None
+    else:
+        projected["owner"] = None
+    return projected
+
+
 def _read_json_limited(path: Path, *, root: Path | None = None, max_bytes: int | None = None):
     if root is not None and not _path_is_within(path, root):
-        return None
+        return {"view_error": "outside_root"}
     try:
         if path.stat().st_size > (MAX_RUN_FILE_BYTES if max_bytes is None else max_bytes):
             return {"view_error": "oversize"}
@@ -222,7 +298,12 @@ def _read_json_limited(path: Path, *, root: Path | None = None, max_bytes: int |
         return None
     except ValueError:
         return {"view_error": "corrupt_json"}
-    return _redact_artifact(payload) if isinstance(payload, (dict, list)) else payload
+    except RecursionError:
+        return {"view_error": "too_deep"}
+    try:
+        return _redact_artifact(payload) if isinstance(payload, (dict, list)) else payload
+    except RecursionError:
+        return {"view_error": "too_deep"}
 
 
 def mtime_iso(path: Path | None) -> str:
@@ -326,19 +407,31 @@ def load_thin_run(path: Path, *, state_root: Path, run_path: Path | None = None)
     }
 
 
-def _run_files(state_root: Path) -> list[Path]:
+def _run_files_with_metadata(state_root: Path) -> tuple[list[Path], bool]:
     runs_dir = state_root / "runs"
     if not runs_dir.is_dir():
-        return []
+        return [], False
     out: list[Path] = []
-    for path in runs_dir.iterdir():
-        name = path.name
-        if name.startswith(".") or not name.endswith(".json"):
-            continue
-        if ".error." in name or ".corrupt-" in name:
-            continue
-        out.append(path)
-    return sorted(out)
+    truncated = False
+    try:
+        for scanned, path in enumerate(runs_dir.iterdir(), start=1):
+            if scanned > MAX_RUN_SCAN_ENTRIES:
+                truncated = True
+                break
+            name = path.name
+            if name.startswith(".") or not name.endswith(".json"):
+                continue
+            if ".error." in name or ".corrupt-" in name:
+                continue
+            out.append(path)
+    except OSError:
+        truncated = True
+    return sorted(out), truncated
+
+
+def _run_files(state_root: Path) -> list[Path]:
+    paths, _ = _run_files_with_metadata(state_root)
+    return paths[:MAX_RUN_DISCOVERY_FILES]
 
 
 def _iso_to_epoch(value: str) -> float | None:
@@ -364,10 +457,21 @@ def _stale_seconds(value: str) -> int | None:
     return max(0, int(time.time() - epoch))
 
 
-def workflow_runs(task_id: str = "", session_id: str = "", state: str = "") -> list[dict]:
+def _workflow_run_sort_key(item: dict) -> tuple[str, str]:
+    return str(item.get("last_transition_at") or ""), str(item.get("run_id") or "")
+
+
+def workflow_run_inventory(
+    task_id: str = "",
+    session_id: str = "",
+    state: str = "",
+) -> tuple[list[dict], bool]:
     rows: list[dict] = []
+    truncated = False
     for runtime, root in orch_roots():
-        for path in _run_files(root):
+        paths, root_truncated = _run_files_with_metadata(root)
+        root_rows: list[dict] = []
+        for path in paths:
             row = load_thin_run(path, state_root=root, run_path=path)
             if task_id and str(row.get("task_id") or "") != task_id:
                 continue
@@ -381,8 +485,19 @@ def workflow_runs(task_id: str = "", session_id: str = "", state: str = "") -> l
                 "orch_root": str(root),
                 "stale_seconds": _stale_seconds(str(row.get("last_transition_at") or "")),
             }
-            rows.append(row)
-    rows.sort(key=lambda item: (str(item.get("last_transition_at") or ""), str(item.get("run_id") or "")), reverse=True)
+            root_rows.append(row)
+        root_rows.sort(key=_workflow_run_sort_key, reverse=True)
+        if len(root_rows) > MAX_RUN_DISCOVERY_FILES:
+            root_rows = root_rows[:MAX_RUN_DISCOVERY_FILES]
+            root_truncated = True
+        truncated = truncated or root_truncated
+        rows.extend(root_rows)
+    rows.sort(key=_workflow_run_sort_key, reverse=True)
+    return rows, truncated
+
+
+def workflow_runs(task_id: str = "", session_id: str = "", state: str = "") -> list[dict]:
+    rows, _ = workflow_run_inventory(task_id=task_id, session_id=session_id, state=state)
     return rows
 
 
@@ -393,17 +508,47 @@ def _read_artifact(path: Path, root: Path):
     return payload if isinstance(payload, (dict, list)) else None
 
 
-def _artifact_list(directory: Path, pattern: str, root: Path) -> list:
+def _artifact_list_with_metadata(directory: Path, pattern: str, root: Path) -> tuple[list, dict]:
     if not directory.is_dir() or not _path_is_within(directory, root):
-        return []
-    out = []
-    for path in sorted(directory.glob(pattern)):
+        return [], {"truncated": False, "files_returned": 0, "bytes_read": 0}
+    candidates: list[Path] = []
+    truncated = False
+    try:
+        for scanned, path in enumerate(directory.iterdir(), start=1):
+            if scanned > MAX_DETAIL_ARTIFACT_SCAN_ENTRIES:
+                truncated = True
+                break
+            if fnmatch.fnmatch(path.name, pattern):
+                candidates.append(path)
+    except OSError:
+        truncated = True
+
+    out: list = []
+    bytes_read = 0
+    for path in sorted(candidates):
         if not path.is_file() or not _path_is_within(path, root):
             continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if len(out) >= MAX_DETAIL_ARTIFACT_FILES or bytes_read + size > MAX_DETAIL_ARTIFACT_BYTES:
+            truncated = True
+            break
         payload = _read_json_limited(path, root=root)
+        bytes_read += size
         if isinstance(payload, (dict, list)):
             out.append(payload)
-    return out
+    return out, {
+        "truncated": truncated,
+        "files_returned": len(out),
+        "bytes_read": bytes_read,
+    }
+
+
+def _artifact_list(directory: Path, pattern: str, root: Path) -> list:
+    artifacts, _ = _artifact_list_with_metadata(directory, pattern, root)
+    return artifacts
 
 
 def _lock_info(runtime: str, root: Path) -> dict:
@@ -416,7 +561,7 @@ def _lock_info(runtime: str, root: Path) -> dict:
     else:
         lock_path = root / "locks" / "global-advisory.lock.d"
         info = {"decision": "ok", "locked": lock_path.exists(), "stale": False, "owner": None, "lock_path": str(lock_path)}
-    return {"runtime": runtime, "orch_root": str(root), **info}
+    return {"runtime": runtime, "orch_root": str(root), **_project_lock_info(info)}
 
 
 def workflow_run_detail(
@@ -448,16 +593,30 @@ def workflow_run_detail(
             work_order = _read_artifact(root / "work-orders" / run_id / f"{step_id}.json", root)
             report = _read_artifact(root / "reports" / run_id / f"{step_id}-external-review-report.json", root)
             evidence = _read_artifact(root / "provider-evidence" / run_id / f"{step_id}-provider-evidence.json", root)
+        transitions, transition_meta = _artifact_list_with_metadata(
+            root / "transitions" / run_id,
+            "*.json",
+            root,
+        )
+        rejections, rejection_meta = _artifact_list_with_metadata(
+            root / "reports" / run_id,
+            "*-rejection-*.json",
+            root,
+        )
         return {
             "runtime": runtime,
             "orch_root": str(root),
             "run": thin,
-            "run_record": run_record,
+            "run_record": _project_run_record(run_record),
             "work_order": work_order,
             "report": report,
             "evidence": evidence,
-            "transitions": _artifact_list(root / "transitions" / run_id, "*.json", root),
-            "rejections": _artifact_list(root / "reports" / run_id, "*-rejection-*.json", root),
+            "transitions": transitions,
+            "rejections": rejections,
+            "artifact_truncation": {
+                "transitions": transition_meta,
+                "rejections": rejection_meta,
+            },
             "lock": _lock_info(runtime, root),
         }
     return None
@@ -495,9 +654,11 @@ def api_workflow_runs(task_id: str = "", session_id: str = "", state: str = "") 
     if state and state not in RUN_STATES:
         return {"error": "invalid_run_state"}, 400
     roots = orch_roots()
+    rows, truncated = workflow_run_inventory(task_id=task_id, session_id=session_id, state=state)
     return {
-        "workflow_runs": workflow_runs(task_id=task_id, session_id=session_id, state=state),
+        "workflow_runs": rows,
         "roots": [str(root) for _, root in roots],
+        "truncated": truncated,
         "generated_at": time.time(),
     }, 200
 
@@ -1060,6 +1221,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "internal server error"}, 500)
             except Exception:
                 pass
+
+    def do_POST(self):  # noqa: N802
+        path = urlparse(self.path).path
+        if path in {"/api/workflow-runs", "/api/workflow-run", "/api/workflow-lock"}:
+            self._send_json({"error": "method_not_allowed"}, 405)
+            return
+        self.send_error(404)
 
 
 def main() -> None:

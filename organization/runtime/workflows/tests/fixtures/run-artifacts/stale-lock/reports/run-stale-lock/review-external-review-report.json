@@ -1,0 +1,24 @@
+{
+  "authority": {
+    "canonical_result": "typed_report_file",
+    "raw_transcript_shared": false,
+    "stdout_is_signal_only": true
+  },
+  "findings": [],
+  "provider_evidence": {
+    "effective_model": "claude-sonnet-operator-selected",
+    "evidence_path": "__STATE_ROOT__/provider-evidence/run-stale-lock/review-provider-evidence.json",
+    "provider": "claude_headless",
+    "provider_session_id": "fake-session-run-stale-lock",
+    "request_id": "req-stale-lock",
+    "transcript_path": "__STATE_ROOT__/provider-evidence/run-stale-lock/review-provider-transcript.json"
+  },
+  "report_id": "report-run-stale-lock",
+  "report_version": "1",
+  "request_id": "req-stale-lock",
+  "result": "pass",
+  "run_id": "run-stale-lock",
+  "step_id": "review",
+  "summary": "Fake provider completed the bounded work order.",
+  "workflow_id": "single_step_external_review"
+}

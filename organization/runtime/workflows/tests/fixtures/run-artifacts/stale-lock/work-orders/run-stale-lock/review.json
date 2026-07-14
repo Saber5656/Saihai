@@ -1,0 +1,60 @@
+{
+  "activation_scope": {
+    "allowed_ops": {
+      "commit": false,
+      "edit": false,
+      "network": false,
+      "push": false
+    },
+    "allowed_paths": [],
+    "expires_at": "run_terminal",
+    "step_budget": 1
+  },
+  "assignment_role": "reviewer",
+  "context_refs": [
+    {
+      "digest": "sha256:a4cdf85c3e4f4ffed9c88b4e6bdf24a8932636f02cdaded5793820c8c2b1197a",
+      "size_bytes": 12,
+      "type": "repo_file",
+      "value": ".tmp/e2e-harness-fixture/ref.md"
+    }
+  ],
+  "context_scope": {
+    "mode": "refs_only",
+    "raw_transcript_sharing": "forbidden"
+  },
+  "expected_output": "external_review_report",
+  "external_provider_allowed": true,
+  "from_role": "frontdoor",
+  "instruction": "Send one bounded readonly review or consultation work order to an external provider adapter and require an authoritative typed report/evidence file. Step 'review' (reviewer): follow the input work order contract and produce external_review_report.",
+  "permission_mode": "readonly",
+  "policy_digest": "sha256:d028f5cefac398298296c14d33ff8f0402e1ae4ac57b265bdc7bd8bcf8729c45",
+  "report_path": "__STATE_ROOT__/reports/run-stale-lock/review-external-review-report.json",
+  "request_id": "req-stale-lock",
+  "requester": {
+    "chat_session_id": "harness",
+    "frontdoor": "codex"
+  },
+  "run_id": "run-stale-lock",
+  "step_id": "review",
+  "task_id": "TSK-stale-lock",
+  "to_role": "tech-reviewer",
+  "work_order_authority": {
+    "issuer_principal": {
+      "authn_method": "local_cli",
+      "principal_id": "manual-cli",
+      "principal_type": "manual_operator"
+    },
+    "runner_claim": {
+      "claim_state": "unclaimed",
+      "lease_expires_at": null
+    },
+    "signature": {
+      "algorithm": "sha256-hmac-sha256-local-principal-key",
+      "signature": "sha256:e9704c387ecc845ea4067babea2f01b976618e15de3256893c716487de37564f",
+      "signed_at": "2026-01-01T00:00:00+0000"
+    }
+  },
+  "work_order_version": "1",
+  "workflow_id": "single_step_external_review"
+}

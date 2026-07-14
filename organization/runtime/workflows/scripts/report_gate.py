@@ -772,7 +772,7 @@ def gate_report(
             if path.resolve() != canonical_report_path.resolve():
                 raise ReportGateError("report path must match canonical work order report path")
 
-            if run_state == "waiting_provider" and not run_lifecycle._runner_claim_expired(work_order):
+            if run_state == "waiting_provider" and run_lifecycle.provider_claim_is_live(run, work_order):
                 append_audit_event(
                     state_root=state_root,
                     event_type="validate_report",

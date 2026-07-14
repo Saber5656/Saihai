@@ -52,7 +52,7 @@ typed report / evidence gate です。
 | Frontdoor proposal | prompt 起点の request は `proposed` または `waiting_human` まで。`propose` は approved artifact や workflow run を作らない |
 | Approval | `approve` は proposal digest 由来の challenge id を要求する。approved envelope の `activation_source` は `human_ui` / `manual_cli` / `orchestrator-start` のみ。実行 principal は `human_operator` / `manual_operator` / `orchestrator_start` を許可し、Sahai CLI の `frontdoor approve` は `human_operator` / `human-ui` / `local_ui` を既定値にする |
 | Workflow run | approved request から durable `runs/<run_id>.json` を作り、`drain` で bounded work order を作る |
-| Provider runner | `run-provider` が validated work order と adapter descriptor から fake headless provider を dispatch し、typed report と normalized provider evidence を書く。live `command_argv` adapter は sandbox/snapshot support が入るまで拒否する |
+| Provider runner | `run-provider` が validated work order と adapter descriptor から fake provider または固定argvの `claude_headless_p0` / `codex_cli_openai_p0` を dispatch し、runner-owned typed report、normalized evidence、confined transcript を書く。live は local CLI の `--live` と `SAIHAI_ALLOW_LIVE_PROVIDERS=1` の両方が必要 |
 | Report validation | typed report と normalized provider evidence が canonical result。stdout、provider transcript、tmux pane output は signal only |
 | Main-agent bridge | main agent は request submit、redacted projection read、ack だけが可能。classification、approval、run 作成、adapter 準備、report path 指定は拒否される |
 | Child-thread action gateway | issue-scoped child worktree chat は `child-thread-create` action gateway で記録する。main-agent は raw `create_thread` / `fork_thread` / shell / git 権限を持たず、projection の redacted summary だけを読む |
@@ -63,7 +63,7 @@ typed report / evidence gate です。
 
 | 非スコープ | 理由 |
 |---|---|
-| live provider credential setup | runner は provider descriptor を読めるが、live `command_argv` 実行は sandbox/snapshot support が入るまで拒否する。credential 生成・登録・検査は operator 側の手動設定に限定する |
+| live provider credential setup | credential 生成・登録・検査は operator 側の手動設定に限定する。runner は credential 値を受け取らず、任意argv・shell・model override・任意cwdを許可しない |
 | tmux worker execution | `tmux_interactive` は compatibility model として残るが、この repo の P0 実行 path では使わない |
 | daemon / LaunchAgent | 現在の scheduler は invocation-drain、durable state、concurrency 1 |
 | commit / push / PR automation | publication は別 gate。P0 workflow は publish を直接実行しない |
@@ -107,12 +107,48 @@ python3 scripts/saihai.py workflow create-run \
 python3 scripts/saihai.py workflow drain \
   --run-id <run_id>
 
-# Offline smoke / tests use fake provider mode. Live providers require
-# operator-side command/credential setup outside this repository.
+# Offline smoke / tests use fake provider mode and never invoke a provider.
 python3 scripts/saihai.py workflow run-provider \
   --run-id <run_id> \
   --adapter-id claude_headless_p0 \
   --fake-provider-mode success
+
+# Optional live readonly review. Provider authentication and all host bindings are
+# configured manually by the operator. Both the flag and exact guard are required.
+SAIHAI_ALLOW_LIVE_PROVIDERS=1 python3 scripts/saihai.py workflow run-provider \
+  --run-id <run_id> \
+  --adapter-id claude_headless_p0 \
+  --live \
+  --timeout-seconds 1800
+
+SAIHAI_ALLOW_LIVE_PROVIDERS=1 python3 scripts/saihai.py workflow run-provider \
+  --run-id <run_id> \
+  --adapter-id codex_cli_openai_p0 \
+  --live \
+  --timeout-seconds 1800
+
+live adapter の command boundary は host-owned です。
+
+| Adapter | Mechanical boundary |
+|---|---|
+| `claude_headless_p0` | `SAIHAI_CLAUDE_EXECUTABLE_PATH` と `..._SHA256` で固定した absolute executable、owner/mode/digest 再検証、`--print --output-format json`、plan mode、tools/slash commands/MCP 無効、safe mode、session persistence 無効 |
+| `codex_cli_openai_p0` | executable に加え host-owned confinement wrapper/profile の absolute path と digest が必須。isolated cwd、`exec --ephemeral --json`、approval never、read-only sandbox、user config/rules と inherited shell environment 無効。confinement binding がなければ fail-closed |
+
+host binding 用 environment variable は path と digest だけを保持し、credential 値を渡しません。Codex は
+`SAIHAI_CODEX_EXECUTABLE_{PATH,SHA256}`、`SAIHAI_CODEX_CONFINEMENT_WRAPPER_{PATH,SHA256}`、
+`SAIHAI_CODEX_CONFINEMENT_PROFILE_{PATH,SHA256}` を全て要求します。caller は argv、shell、cwd、model、
+provider endpoint、出力pathを指定できません。
+
+provider call 前には signed work order、iteration 固定 snapshot、run/request/step binding、context file の
+size/digest、adapter request digest、lease、pinned executable を再検証します。承認済み context は最大20 files、
+各256 KB、合計1 MBまでを canonical JSON として inline 渡し、provider に repository read authority を与えません。
+stdout/stderr は合計4 MiBで打ち切り、owner-only `0700` directory / `0600` transcript にだけ保存します。
+`stdout_sha256` は raw stdout、`transcript_sha256` は transcript JSON 全体を意味します。
+
+1回の provider CLI timeout は既定30分、範囲1秒〜24時間です。ハーネス全体には累積 wall-clock timeoutを置きません。
+実行中は durable claim/lease を30秒ごとに heartbeatし、global workflow lock は provider subprocess 中に保持しません。
+attempt journal と retry counter は永続化され、同一障害は初回後最大5回自動再試行してから `waiting_human` へ移ります。
+host/process 再起動後も `resume` / 再度の `run-provider` から継続できます。
 
 # If a provider writes report/evidence outside the runner, validate it explicitly.
 python3 scripts/saihai.py workflow validate-report \
@@ -166,8 +202,8 @@ python3 scripts/configure_organization.py validate-all
 
 この検証は stdlib の self-runner test、workflow contract validation、Python
 compile check をまとめて実行し、最後に summary JSON を1行出力します。子プロセスでは
-`SAIHAI_ALLOW_LIVE_PROVIDERS` を空にして、live provider token や network 前提に依存しません。P0 runner は live
-`command_argv` adapter を sandbox/snapshot support が入るまで拒否し、fake provider mode だけで検証します。
+`SAIHAI_ALLOW_LIVE_PROVIDERS` を空にして、live provider token や network 前提に依存しません。adapter tests は
+recorded fixture と patched subprocess/binary discovery のみを使い、live provider を呼びません。
 
 ## Frontdoor Harness
 
@@ -187,8 +223,8 @@ python3 scripts/configure_organization.py workflow-frontdoor --help
 | `create-run` | approved request から workflow-run を作る |
 | `drain` | run から work order を作る |
 | `adapter-capability` | provider adapter capability descriptor を出す |
-| `prepare-claude-adapter` | bounded Claude adapter request、prompt、report/evidence/transcript path を作る |
-| `run-provider` | validated work order と provider adapter descriptor から fake headless provider を実行し、normalized evidence と typed report を書いて report gate に渡す。live `command_argv` adapter は sandbox/snapshot support まで拒否する |
+| `prepare-claude-adapter` | deprecated/non-executable な互換 artifact のみ作る。provider write authority はなく、live execution は `run-provider --live` に一本化 |
+| `run-provider` | validated work order と provider adapter descriptor から fake provider または固定argvの readonly live adapter を実行し、runner-owned evidence/report を report gate に渡す。live は local CLI の `--live` + environment guard が必須 |
 | `validate-report` | typed report と evidence を検証して run を terminal state へ進める |
 | `bridge-submit-request` | main-agent bridge から request を submit する |
 | `bridge-read-projection` | redacted orchestrator projection を読む |

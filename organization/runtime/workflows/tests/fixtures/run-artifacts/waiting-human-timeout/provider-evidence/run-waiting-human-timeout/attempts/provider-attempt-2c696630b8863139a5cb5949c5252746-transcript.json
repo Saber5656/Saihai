@@ -1,0 +1,12 @@
+{
+  "payload": {
+    "details": {
+      "duration_ms": 0,
+      "timed_out": true
+    },
+    "outcome": "provider_timeout"
+  },
+  "raw_content_policy": "signal_only_not_shared",
+  "transcript_signal_version": "1",
+  "written_at": "2026-01-01T00:00:00+0000"
+}

@@ -1,0 +1,43 @@
+{
+  "authority": {
+    "canonical_result": "typed_report_file",
+    "raw_transcript_shared": false,
+    "stdout_is_signal_only": true
+  },
+  "findings": [
+    {
+      "evidence_refs": [
+        "organization/runtime/workflows/README.md"
+      ],
+      "finding_id": "F-1",
+      "severity": "low",
+      "status": "open",
+      "summary": "Fake provider finding."
+    },
+    {
+      "evidence_refs": [
+        "organization/runtime/workflows/README.md"
+      ],
+      "finding_id": "F-2",
+      "severity": "medium",
+      "status": "open",
+      "summary": "Second deterministic fixture finding."
+    }
+  ],
+  "provider_evidence": {
+    "effective_model": "claude-sonnet-operator-selected",
+    "evidence_path": "__STATE_ROOT__/provider-evidence/run-complete-findings/review-provider-evidence.json",
+    "provider": "claude_headless",
+    "provider_session_id": "fake-session-run-complete-findings",
+    "request_id": "req-complete-findings",
+    "transcript_path": "__STATE_ROOT__/provider-evidence/run-complete-findings/review-provider-transcript.json"
+  },
+  "report_id": "report-run-complete-findings",
+  "report_version": "1",
+  "request_id": "req-complete-findings",
+  "result": "findings",
+  "run_id": "run-complete-findings",
+  "step_id": "review",
+  "summary": "Fake provider completed the bounded work order.",
+  "workflow_id": "single_step_external_review"
+}

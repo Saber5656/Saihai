@@ -273,6 +273,22 @@ def test_snapshot_rejects_malformed_existing_file() -> None:
             raise AssertionError("non-object snapshot should be invalid")
 
 
+def test_snapshot_path_rejects_symlinked_work_order_root() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        base = Path(raw_tmp)
+        state_root = base / "state"
+        outside = base / "outside"
+        state_root.mkdir()
+        outside.mkdir()
+        (state_root / "work-orders").symlink_to(outside, target_is_directory=True)
+        try:
+            work_order_builder.snapshot_path(state_root, "run-work-order", "review", 1)
+        except work_order_builder.WorkOrderError as exc:
+            assert_equal(str(exc), "state_artifact_path_escape", "snapshot symlink reason")
+        else:
+            raise AssertionError("symlinked work-order root must be rejected")
+
+
 def main() -> None:
     tests = [
         test_build_valid_p0_order,
@@ -286,6 +302,7 @@ def main() -> None:
         test_context_mode_downgrade_is_deterministic,
         test_snapshot_freeze_and_conflict,
         test_snapshot_rejects_malformed_existing_file,
+        test_snapshot_path_rejects_symlinked_work_order_root,
     ]
     for test in tests:
         test()

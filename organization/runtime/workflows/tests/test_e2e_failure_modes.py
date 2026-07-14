@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -386,7 +387,7 @@ def scenario_provider_failure_matrix(harness: OrchestratorHarness) -> dict[str, 
         "timeout": ("provider_timeout", "waiting_human"),
         "unavailable": ("provider_unavailable", "waiting_human"),
         "nonzero": ("provider_nonzero_exit", "waiting_human"),
-        "malformed": ("provider_malformed_output", "failed"),
+        "malformed": ("provider_malformed_output", "waiting_human"),
     }
     results: dict[str, Any] = {}
     for mode, (reason, run_state) in expected.items():
@@ -478,11 +479,49 @@ def scenario_validate_respects_live_claim(harness: OrchestratorHarness) -> dict[
 
 def scenario_resume_after_interrupt(harness: OrchestratorHarness) -> dict[str, Any]:
     run_id = prepare_run(harness, "resume-interrupt")
-    order_path = set_provider_claim(harness, run_id, "2000-01-01T00:00:00+0000")
+    run = harness.run_record(run_id)
+    harness.frontdoor.run_lifecycle.transition_run(
+        harness.state_root,
+        run_id,
+        to_state="waiting_provider",
+        reason_class="provider_claimed",
+        transition="failure_matrix_interrupt",
+        principal=harness.frontdoor.default_manual_principal(),
+        run=run,
+    )
+    run["provider_execution"] = {
+        "execution_version": "1",
+        "step_id": str(run["current_step"]),
+        "adapter_id": "claude_headless_p0",
+        "work_order_digest": "sha256:" + "1" * 64,
+        "adapter_request_digest": "sha256:" + "2" * 64,
+        "context_snapshot_digest": "sha256:" + "3" * 64,
+        "phase": "invoking",
+        "attempt_number": 1,
+        "attempt_id": "provider-attempt-interrupted",
+        "timeout_seconds": 1800,
+        "lease": {
+            "lease_id": "provider-lease-interrupted",
+            "claimed_by": harness.frontdoor.default_manual_principal(),
+            "claimed_at": "2000-01-01T00:00:00+00:00",
+            "last_heartbeat_at": "2000-01-01T00:00:00+00:00",
+            "lease_expires_at": "2000-01-01T00:00:00+00:00",
+        },
+        "retry": {
+            "last_failure_fingerprint": None,
+            "consecutive_failures": 0,
+            "auto_retries_used": 0,
+            "max_auto_retries": 5,
+        },
+        "last_outcome": None,
+    }
+    harness.frontdoor.run_store.store_run(
+        harness.state_root,
+        run,
+        expected_current_state="waiting_provider",
+    )
     resumed = harness.frontdoor.resume_run(state_root=harness.state_root, run_id=run_id)
     require_equal(resumed.get("reason"), "provider_lease_expired", "expired lease reason")
-    claim = json.loads(order_path.read_text(encoding="utf-8"))["work_order_authority"]["runner_claim"]
-    require_equal(claim, {"claim_state": "unclaimed", "lease_expires_at": None}, "expired claim reset")
     completed = harness.run_step(run_id, fake_provider_mode="success")
     require_equal(completed["workflow_run"]["run_state"], "complete", "interrupt recovery state")
     return {"reason": resumed["reason"], "state": "complete"}
@@ -604,15 +643,27 @@ def scenario_transcript_never_shared(harness: OrchestratorHarness) -> dict[str, 
     module.execute_provider = lambda **_kwargs: (
         "provider_malformed_output",
         None,
-        {"stdout_sha256": "sha256:" + hashlib.sha256(marker.encode()).hexdigest(), "raw_marker": marker},
+        {
+            "_raw_stdout": marker.encode("utf-8"),
+            "_raw_stderr": b"",
+            "_live": True,
+            "exit_code": 2,
+        },
     )
     try:
         payload = run_provider_mode(harness, run_id, "success")
     finally:
         module.execute_provider = original
-    transcript = Path(payload["transcript_path"])
-    require(marker in transcript.read_text(encoding="utf-8"), "raw marker written only to transcript")
-    hits = artifact_paths_containing(harness.state_root, marker, exclude={transcript})
+    transcript_paths = set((harness.state_root / "provider-evidence" / run_id).rglob("*transcript.json"))
+    require(bool(transcript_paths), "raw marker transcripts recorded")
+    for transcript in transcript_paths:
+        transcript_payload = json.loads(transcript.read_text(encoding="utf-8"))
+        decoded_stdout = base64.b64decode(transcript_payload["stdout_base64"]).decode("utf-8")
+        require_equal(decoded_stdout, marker, "raw marker confined transcript payload")
+    encoded_marker = base64.b64encode(marker.encode("utf-8")).decode("ascii")
+    hits = artifact_paths_containing(harness.state_root, marker, exclude=transcript_paths)
+    hits += artifact_paths_containing(harness.state_root, encoded_marker, exclude=transcript_paths)
+    hits = sorted(set(hits))
     require_equal(hits, [], "raw marker artifact confinement")
     response_without_path = {key: value for key, value in payload.items() if key != "transcript_path"}
     require(marker not in json.dumps(response_without_path, ensure_ascii=False), "raw marker response confinement")

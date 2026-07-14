@@ -150,6 +150,59 @@ def validate_run_record(run: Any) -> list[str]:
         errors.append("step_history must be a list")
     if "transitions" in run and not isinstance(run.get("transitions"), list):
         errors.append("transitions must be a list")
+    provider_execution = run.get("provider_execution")
+    if provider_execution is not None:
+        if not isinstance(provider_execution, dict):
+            errors.append("provider_execution must be a json object")
+        else:
+            required_execution = {
+                "execution_version",
+                "step_id",
+                "adapter_id",
+                "work_order_digest",
+                "adapter_request_digest",
+                "context_snapshot_digest",
+                "phase",
+                "attempt_number",
+                "attempt_id",
+                "timeout_seconds",
+                "lease",
+                "retry",
+                "last_outcome",
+            }
+            errors.extend(
+                f"provider_execution.{field} is required"
+                for field in sorted(required_execution - set(provider_execution))
+            )
+            if provider_execution.get("execution_version") != "1":
+                errors.append("provider_execution.execution_version must be '1'")
+            if provider_execution.get("phase") not in {
+                "claimed", "invoking", "result_ready", "retry_scheduled", "human_gate", "completed", "abandoned"
+            }:
+                errors.append("provider_execution.phase must be known")
+            if not _is_int_at_least(provider_execution.get("attempt_number"), 1):
+                errors.append("provider_execution.attempt_number must be >= 1")
+            timeout = provider_execution.get("timeout_seconds")
+            if not _is_int_at_least(timeout, 1) or timeout > 86400:
+                errors.append("provider_execution.timeout_seconds must be between 1 and 86400")
+            for field in ("work_order_digest", "adapter_request_digest", "context_snapshot_digest"):
+                value = provider_execution.get(field)
+                if not isinstance(value, str) or not value.startswith("sha256:"):
+                    errors.append(f"provider_execution.{field} must start with sha256:")
+            lease = provider_execution.get("lease")
+            if not isinstance(lease, dict):
+                errors.append("provider_execution.lease must be a json object")
+            else:
+                for field in ("lease_id", "claimed_by", "claimed_at", "last_heartbeat_at", "lease_expires_at"):
+                    if field not in lease:
+                        errors.append(f"provider_execution.lease.{field} is required")
+            retry = provider_execution.get("retry")
+            if not isinstance(retry, dict):
+                errors.append("provider_execution.retry must be a json object")
+            else:
+                for field in ("consecutive_failures", "auto_retries_used", "max_auto_retries"):
+                    if not _is_int_at_least(retry.get(field), 0):
+                        errors.append(f"provider_execution.retry.{field} must be >= 0")
     completion_verification = run.get("completion_verification")
     if completion_verification is not None:
         if not isinstance(completion_verification, dict):

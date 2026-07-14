@@ -1,0 +1,24 @@
+{
+  "authority": {
+    "canonical_result": "typed_report_file",
+    "raw_transcript_shared": false,
+    "stdout_is_signal_only": true
+  },
+  "findings": [],
+  "provider_evidence": {
+    "effective_model": "offline-fixture",
+    "evidence_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-evidence.json",
+    "provider": "harness_fixture",
+    "provider_session_id": "session-run-failed-invalid-report",
+    "request_id": "req-failed-invalid-report",
+    "transcript_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-transcript.json"
+  },
+  "report_id": "report-run-failed-invalid-report",
+  "report_version": "1",
+  "request_id": "req-failed-invalid-report",
+  "result": "invalid",
+  "run_id": "run-failed-invalid-report",
+  "step_id": "review",
+  "summary": "Offline harness fixture report.",
+  "workflow_id": "single_step_external_review"
+}

@@ -1,0 +1,14 @@
+{
+  "fixture_marker": "__FIXTURE_TRANSCRIPT__",
+  "payload": {
+    "details": {
+      "duration_ms": 0,
+      "timed_out": true,
+      "transcript_sha256": "sha256:d6f4c14513257814bf56e6af199cb4bf36a7f6030fd5ad112916fad0bcacdc5b"
+    },
+    "outcome": "provider_timeout"
+  },
+  "raw_content_policy": "signal_only_not_shared",
+  "transcript_signal_version": "1",
+  "written_at": "2026-01-01T00:00:00+0000"
+}

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -15,6 +17,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import provider_runner
 import run_lifecycle
 import run_store
+import work_order_builder
 
 from test_frontdoor_orchestrator import (
     assert_equal,
@@ -428,7 +431,10 @@ def test_malformed_provider_output_fails_without_raw_stdout_in_run() -> None:
         payload = load_payload(blocked)
         assert_equal(blocked.returncode, 2, "malformed exit")
         assert_equal(payload["reason"], "provider_malformed_output", "reason")
-        assert_equal(payload["workflow_run"]["run_state"], "failed", "run state")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "run state")
+        retry = payload["workflow_run"]["provider_execution"]["retry"]
+        assert_equal(retry["auto_retries_used"], 5, "bounded retries")
+        assert_equal(retry["consecutive_failures"], 6, "same failure count")
         evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
         assert "stdout_sha256" in evidence
         assert "not json" not in json.dumps(payload["workflow_run"], ensure_ascii=False)
@@ -460,8 +466,7 @@ def test_runner_rejects_noncanonical_report_path_before_provider_output() -> Non
         blocked = run_provider(state_root, run_id="run-provider-report-path", check=False)
         payload = load_payload(blocked)
         assert_equal(blocked.returncode, 2, "report path exit")
-        assert_equal(payload["reason"], "work_order_not_provider_safe", "report path reason")
-        assert "report_path must stay under reports" in payload["errors"]
+        assert_equal(payload["reason"], "work_order_snapshot_mismatch", "report path reason")
         assert not escaped_report_path.exists()
         assert not (state_root / "adapter-requests" / "run-provider-report-path").exists()
 
@@ -477,10 +482,10 @@ def test_runner_reports_unreadable_work_order_as_blocked_json() -> None:
         payload = load_payload(blocked)
         assert_equal(blocked.returncode, 2, "unreadable work order exit")
         assert_equal(payload["decision"], "blocked", "unreadable work order decision")
-        assert "unreadable json:" in payload["reason"]
+        assert_equal(payload["reason"], "work_order_unavailable", "unreadable work order reason")
 
 
-def test_live_command_adapter_is_rejected_until_sandbox_support() -> None:
+def test_arbitrary_live_command_adapter_is_rejected() -> None:
     outcome, report, details = provider_runner.execute_provider(
         request={"request_id": "req-live", "run_id": "run-live", "workflow_id": "single_step_external_review", "step_id": "review"},
         adapter={"command_argv": ["python3", "-c", "print('{}')"]},
@@ -489,7 +494,131 @@ def test_live_command_adapter_is_rejected_until_sandbox_support() -> None:
     )
     assert_equal(outcome, "provider_unavailable", "live command outcome")
     assert report is None
-    assert_equal(details["reason"], "live_command_adapter_requires_sandbox", "live command reason")
+    assert_equal(details["reason"], "live_adapter_not_supported", "live command reason")
+
+
+def test_live_guard_requires_flag_and_environment() -> None:
+    adapter = provider_runner.load_provider_adapters()["claude_headless_p0"]
+    request = {
+        "request_id": "req-live-guard",
+        "run_id": "run-live-guard",
+        "workflow_id": "single_step_external_review",
+        "step_id": "review",
+    }
+    original = provider_runner.LIVE_ADAPTERS["claude_headless_p0"]
+    original_env = os.environ.pop(provider_runner.LIVE_ENV_FLAG, None)
+    calls = []
+    provider_runner.LIVE_ADAPTERS["claude_headless_p0"] = lambda *_args, **_kwargs: calls.append(True)
+    try:
+        outcome, _report, details = provider_runner.execute_provider(
+            request=request,
+            adapter=adapter,
+            timeout_seconds=1,
+            fake_provider_mode="",
+            live=False,
+        )
+        assert_equal(outcome, "provider_unavailable", "flag guard outcome")
+        assert_equal(details["reason"], "live_execution_not_enabled", "flag guard reason")
+        outcome, _report, details = provider_runner.execute_provider(
+            request=request,
+            adapter=adapter,
+            timeout_seconds=1,
+            fake_provider_mode="",
+            live=True,
+        )
+        assert_equal(outcome, "provider_unavailable", "environment guard outcome")
+        assert_equal(details["reason"], "live_env_guard_missing", "environment guard reason")
+        assert not calls
+    finally:
+        provider_runner.LIVE_ADAPTERS["claude_headless_p0"] = original
+        if original_env is not None:
+            os.environ[provider_runner.LIVE_ENV_FLAG] = original_env
+
+
+def test_patched_live_adapter_completes_without_raw_output_leakage() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-live-patched"
+        request_id = "req-provider-live-patched"
+        prepare_run(state_root, request_id=request_id, run_id=run_id)
+        marker = b"SECRET-LIVE-PROVIDER-OUTPUT"
+        report = {
+            "report_version": "1",
+            "report_id": f"report-{run_id}",
+            "request_id": request_id,
+            "run_id": run_id,
+            "workflow_id": "single_step_external_review",
+            "step_id": "review",
+            "result": "pass",
+            "summary": "Patched live adapter passed.",
+            "provider_evidence": {},
+            "findings": [],
+            "authority": {
+                "canonical_result": "typed_report_file",
+                "stdout_is_signal_only": True,
+                "raw_transcript_shared": False,
+            },
+        }
+        invocation = {
+            "status": "ok",
+            "reason": "ok",
+            "exit_code": 0,
+            "stdout": marker,
+            "stderr": b"",
+            "duration_ms": 3,
+            "report": report,
+            "evidence_fields": {
+                "provider": "anthropic",
+                "effective_model": "claude-fixture",
+                "provider_request_id": "provider-request-fixture",
+                "provider_session_id": "provider-session-fixture",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+        }
+        original = provider_runner.LIVE_ADAPTERS["claude_headless_p0"]
+        original_binding = provider_runner.provider_adapters.resolve_execution_binding
+        original_env = os.environ.get(provider_runner.LIVE_ENV_FLAG)
+        provider_runner.LIVE_ADAPTERS["claude_headless_p0"] = lambda *_args, **_kwargs: invocation
+        provider_runner.provider_adapters.resolve_execution_binding = lambda _adapter_id: {
+            "binding_version": "1",
+            "binary": {"path": "/fixture/claude", "sha256": "sha256:" + "a" * 64},
+            "confinement": "test",
+        }
+        os.environ[provider_runner.LIVE_ENV_FLAG] = "1"
+        try:
+            payload = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                live=True,
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "live-adapter-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.LIVE_ADAPTERS["claude_headless_p0"] = original
+            provider_runner.provider_adapters.resolve_execution_binding = original_binding
+            if original_env is None:
+                os.environ.pop(provider_runner.LIVE_ENV_FLAG, None)
+            else:
+                os.environ[provider_runner.LIVE_ENV_FLAG] = original_env
+        assert_equal(payload["decision"], "ok", "live patched decision")
+        assert_equal(payload["workflow_run"]["run_state"], "complete", "live patched state")
+        evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
+        transcript = json.loads(Path(payload["transcript_path"]).read_text(encoding="utf-8"))
+        typed_report = json.loads(Path(payload["report_path"]).read_text(encoding="utf-8"))
+        assert base64.b64decode(transcript["stdout_base64"]) == marker
+        assert_equal(evidence["provider_request_id"], "provider-request-fixture", "provider request id")
+        assert_equal(evidence["usage"], {"input_tokens": 1, "output_tokens": 2}, "provider usage")
+        assert_equal(evidence["stdout_sha256"], provider_runner.sha256_bytes(marker), "raw stdout digest")
+        assert_equal(
+            evidence["transcript_sha256"],
+            provider_runner.file_sha256(Path(payload["transcript_path"])),
+            "transcript digest",
+        )
+        shared = json.dumps({"run": payload["workflow_run"], "evidence": evidence, "report": typed_report})
+        assert marker.decode() not in shared
 
 
 def test_run_provider_step_honors_adapter_alias() -> None:
@@ -515,6 +644,423 @@ def test_undecodable_provider_stdout_is_malformed_output() -> None:
     assert "stdout_sha256" in details
 
 
+def test_provider_invocation_releases_global_lock_and_renews_lease() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-two-phase"
+        prepare_run(state_root, request_id="req-provider-two-phase", run_id=run_id)
+        original = provider_runner.execute_provider
+        observations: list[bool] = []
+
+        def observed_execute(**kwargs):
+            observations.append(not provider_runner.run_lock.global_lock_path(state_root).exists())
+            observations.append(kwargs["heartbeat"]() is True)
+            return original(**kwargs)
+
+        provider_runner.execute_provider = observed_execute
+        try:
+            payload = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                fake_provider_mode="success",
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "two-phase-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.execute_provider = original
+        assert_equal(observations, [True, True], "two-phase lock and heartbeat")
+        assert_equal(payload["decision"], "ok", "two-phase result")
+        execution = payload["workflow_run"]["provider_execution"]
+        assert_equal(execution["phase"], "completed", "durable result phase")
+        assert Path(execution["last_outcome"]["attempt_result_path"]).is_file()
+
+
+def test_call_immediate_snapshot_recheck_blocks_provider() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-dispatch-recheck"
+        prepare_run(state_root, request_id="req-provider-dispatch-recheck", run_id=run_id)
+        original_authorize = provider_runner.authorize_provider_dispatch
+        original_execute = provider_runner.execute_provider
+        calls: list[str] = []
+
+        def tamper_then_authorize(**kwargs):
+            run = provider_runner.run_store.load_run(state_root, run_id)
+            snapshot = work_order_builder.snapshot_path(
+                state_root, run_id, str(run["current_step"]), int(run["iteration"])
+            )
+            payload = json.loads(snapshot.read_text(encoding="utf-8"))
+            payload["policy_digest"] = "sha256:" + "0" * 64
+            snapshot.write_text(json.dumps(payload), encoding="utf-8")
+            return original_authorize(**kwargs)
+
+        def forbidden_execute(**_kwargs):
+            calls.append("called")
+            raise AssertionError("provider must not run after snapshot tamper")
+
+        provider_runner.authorize_provider_dispatch = tamper_then_authorize
+        provider_runner.execute_provider = forbidden_execute
+        try:
+            payload = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                fake_provider_mode="success",
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "dispatch-recheck-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.authorize_provider_dispatch = original_authorize
+            provider_runner.execute_provider = original_execute
+        assert not calls
+        assert_equal(payload["reason"], "provider_unavailable", "tamper outcome")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "tamper human gate")
+
+
+def test_timeout_contract_and_private_transcript_permissions() -> None:
+    assert_equal(
+        provider_runner.validate_provider_timeout(provider_runner.DEFAULT_PROVIDER_TIMEOUT_SECONDS),
+        1800,
+        "default timeout",
+    )
+    assert_equal(provider_runner.validate_provider_timeout(86400), 86400, "maximum timeout")
+    for invalid in (0, 86401):
+        try:
+            provider_runner.validate_provider_timeout(invalid)
+        except provider_runner.ProviderRunnerError:
+            pass
+        else:
+            raise AssertionError(f"invalid timeout accepted: {invalid}")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        path = Path(raw_tmp) / "provider-evidence" / "run-private" / "review-provider-transcript.json"
+        provider_runner.write_live_transcript(
+            Path(raw_tmp),
+            path,
+            stdout=b"ok",
+            stderr=b"",
+            outcome="ok",
+            exit_code=0,
+        )
+        assert_equal(path.stat().st_mode & 0o777, 0o600, "transcript mode")
+        assert_equal(path.parent.stat().st_mode & 0o777, 0o700, "transcript directory mode")
+        assert_equal(path.parent.parent.stat().st_mode & 0o777, 0o700, "evidence root mode")
+
+
+def test_direct_runner_accounts_expired_attempt_before_new_claim() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-expired-direct"
+        prepare_run(state_root, request_id="req-provider-expired-direct", run_id=run_id)
+        run = run_store.load_run(state_root, run_id)
+        digest = "sha256:" + "1" * 64
+        run["run_state"] = "waiting_provider"
+        run["provider_execution"] = {
+            "execution_version": "1",
+            "step_id": "review",
+            "adapter_id": "claude_headless_p0",
+            "work_order_digest": digest,
+            "adapter_request_digest": "sha256:" + "2" * 64,
+            "context_snapshot_digest": "sha256:" + "3" * 64,
+            "phase": "invoking",
+            "attempt_number": 1,
+            "attempt_id": "provider-attempt-expired-direct",
+            "timeout_seconds": 1800,
+            "lease": {
+                "lease_id": "provider-lease-expired-direct",
+                "claimed_by": {"principal_type": "harness_runner"},
+                "claimed_at": "2000-01-01T00:00:00+00:00",
+                "last_heartbeat_at": "2000-01-01T00:00:00+00:00",
+                "lease_expires_at": "2000-01-01T00:00:00+00:00",
+            },
+            "retry": {
+                "last_failure_fingerprint": None,
+                "consecutive_failures": 0,
+                "auto_retries_used": 0,
+                "max_auto_retries": 5,
+            },
+            "last_outcome": None,
+        }
+        run_store.store_run(state_root, run, expected_current_state="step_queued")
+        interrupted = run_store.load_run(state_root, run_id)
+        retry_allowed, abandoned_path = run_lifecycle.account_expired_provider_attempt(
+            state_root, interrupted
+        )
+        assert retry_allowed and abandoned_path is not None
+        assert json.loads(abandoned_path.read_text(encoding="utf-8"))["abandoned"] is True
+
+        payload = provider_runner.run_provider(
+            state_root=state_root,
+            run_id=run_id,
+            fake_provider_mode="success",
+            principal={
+                "principal_type": "harness_runner",
+                "principal_id": "expired-direct-test",
+                "authn_method": "local_test",
+            },
+        )
+        assert_equal(payload["decision"], "ok", "direct retry completes")
+        retry = payload["workflow_run"]["provider_execution"]["retry"]
+        assert_equal(retry["auto_retries_used"], 1, "direct runner consumes expired retry")
+        assert str(retry["last_failure_fingerprint"]).startswith("sha256:")
+
+
+def test_completed_attempt_journal_recovers_without_provider_reinvocation() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-journal-recovery"
+        prepare_run(state_root, request_id="req-provider-journal-recovery", run_id=run_id)
+        original_store = run_store.store_run
+
+        def crash_before_result_ready_store(root, candidate, **kwargs):
+            execution = candidate.get("provider_execution")
+            if isinstance(execution, dict) and execution.get("phase") == "result_ready":
+                raise RuntimeError("simulated process crash after attempt journal")
+            return original_store(root, candidate, **kwargs)
+
+        run_store.store_run = crash_before_result_ready_store
+        try:
+            try:
+                provider_runner.run_provider(
+                    state_root=state_root,
+                    run_id=run_id,
+                    adapter_id="cursor_cli_p0",
+                    fake_provider_mode="success",
+                    principal={
+                        "principal_type": "harness_runner",
+                        "principal_id": "journal-crash-test",
+                        "authn_method": "local_test",
+                    },
+                )
+            except RuntimeError as exc:
+                assert_equal(str(exc), "simulated process crash after attempt journal", "crash point")
+            else:
+                raise AssertionError("simulated crash did not occur")
+        finally:
+            run_store.store_run = original_store
+
+        interrupted = run_store.load_run(state_root, run_id)
+        interrupted["provider_execution"]["lease"]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
+        original_store(state_root, interrupted, expected_current_state="waiting_provider")
+        resumed = run_lifecycle.resume_run(
+            state_root,
+            run_id,
+            principal={
+                "principal_type": "harness_runner",
+                "principal_id": "journal-resume-test",
+                "authn_method": "local_test",
+            },
+        )
+        assert_equal(resumed["decision"], "ok", "journal resume decision")
+        assert_equal(resumed["reason"], "provider_attempt_result_pending", "journal resume reason")
+        assert_equal(resumed["next_action"], "run_provider", "journal recovery action")
+        assert_equal(
+            run_store.load_run(state_root, run_id)["run_state"],
+            "waiting_provider",
+            "resume preserves recoverable attempt",
+        )
+        original_execute = provider_runner.execute_provider
+
+        def forbidden_execute(**_kwargs):
+            raise AssertionError("completed attempt journal must prevent provider reinvocation")
+
+        provider_runner.execute_provider = forbidden_execute
+        try:
+            recovered = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                fake_provider_mode="success",
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "journal-recovery-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.execute_provider = original_execute
+        assert_equal(recovered["decision"], "ok", "journal recovery decision")
+        assert_equal(recovered["workflow_run"]["run_state"], "complete", "journal recovery state")
+        assert_equal(
+            recovered["provider_evidence"]["provider_adapter_id"],
+            "cursor_cli_p0",
+            "journal uses recorded adapter",
+        )
+        assert recovered["workflow_run"]["provider_execution"]["last_outcome"].get(
+            "recovered_from_journal"
+        )
+
+
+def test_failed_attempt_journal_preserves_typed_outcome_without_reinvocation() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-failure-journal"
+        prepare_run(state_root, request_id="req-provider-failure-journal", run_id=run_id)
+        original_execute = provider_runner.execute_provider
+        original_write = provider_runner.private_atomic_write_json
+
+        def auth_failure(**_kwargs):
+            return (
+                "provider_unavailable",
+                None,
+                {"reason": "auth_or_quota", "duration_ms": 1, "_live": False},
+            )
+
+        def crash_after_result_write(root, path, payload):
+            original_write(root, path, payload)
+            if isinstance(payload, dict) and payload.get("attempt_result_version") == "1":
+                raise RuntimeError("simulated crash after failed attempt journal")
+
+        provider_runner.execute_provider = auth_failure
+        provider_runner.private_atomic_write_json = crash_after_result_write
+        try:
+            try:
+                provider_runner.run_provider(
+                    state_root=state_root,
+                    run_id=run_id,
+                    fake_provider_mode="success",
+                    principal={
+                        "principal_type": "harness_runner",
+                        "principal_id": "failure-journal-crash-test",
+                        "authn_method": "local_test",
+                    },
+                )
+            except RuntimeError as exc:
+                assert_equal(
+                    str(exc),
+                    "simulated crash after failed attempt journal",
+                    "failed journal crash point",
+                )
+            else:
+                raise AssertionError("failed journal crash did not occur")
+        finally:
+            provider_runner.execute_provider = original_execute
+            provider_runner.private_atomic_write_json = original_write
+
+        interrupted = run_store.load_run(state_root, run_id)
+        interrupted["provider_execution"]["lease"]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
+        run_store.store_run(state_root, interrupted, expected_current_state="waiting_provider")
+        resumed = run_lifecycle.resume_run(
+            state_root,
+            run_id,
+            principal={
+                "principal_type": "harness_runner",
+                "principal_id": "failure-journal-resume-test",
+                "authn_method": "local_test",
+            },
+        )
+        assert_equal(resumed["reason"], "provider_attempt_result_pending", "failed journal pending")
+
+        def forbidden_execute(**_kwargs):
+            raise AssertionError("failed attempt journal must prevent provider reinvocation")
+
+        provider_runner.execute_provider = forbidden_execute
+        try:
+            recovered = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                fake_provider_mode="success",
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "failure-journal-recovery-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.execute_provider = original_execute
+        assert_equal(recovered["decision"], "blocked", "failed journal recovery decision")
+        assert_equal(recovered["reason"], "provider_unavailable", "failed journal outcome")
+        assert_equal(recovered["workflow_run"]["run_state"], "waiting_human", "auth human gate")
+        assert_equal(
+            recovered["workflow_run"]["provider_execution"]["last_outcome"]["reason_class"],
+            "auth_or_quota",
+            "typed failure preserved",
+        )
+
+
+def test_serialized_context_limit_blocks_before_claim_without_retry() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-context-serialized-limit"
+        prepare_run(state_root, request_id="req-provider-context-serialized-limit", run_id=run_id)
+        original_limit = provider_runner.provider_adapters.MAX_CONTEXT_BYTES
+        original_execute = provider_runner.execute_provider
+
+        def forbidden_execute(**_kwargs):
+            raise AssertionError("oversized serialized context must not invoke provider")
+
+        provider_runner.provider_adapters.MAX_CONTEXT_BYTES = 1
+        provider_runner.execute_provider = forbidden_execute
+        try:
+            blocked = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                fake_provider_mode="success",
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "serialized-context-limit-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.provider_adapters.MAX_CONTEXT_BYTES = original_limit
+            provider_runner.execute_provider = original_execute
+        assert_equal(blocked["decision"], "blocked", "serialized context decision")
+        assert_equal(blocked["reason"], "context_snapshot_serialized_limit", "serialized context reason")
+        persisted = run_store.load_run(state_root, run_id)
+        assert_equal(persisted["run_state"], "step_queued", "serialized context state")
+        assert "provider_execution" not in persisted
+
+
+def test_request_artifact_paths_are_recomputed_and_confined() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp) / "state"
+        state_root.mkdir()
+        run_id = "run-artifact-paths"
+        step_id = "review"
+        request = {
+            "report_path": str(provider_runner.provider_report_path(state_root, run_id, step_id)),
+            "evidence_path": str(provider_runner.provider_evidence_path(state_root, run_id, step_id)),
+            "transcript_path": str(provider_runner.provider_transcript_path(state_root, run_id, step_id)),
+        }
+        provider_runner.verified_request_artifact_paths(
+            state_root=state_root,
+            run_id=run_id,
+            step_id=step_id,
+            request=request,
+        )
+        request["evidence_path"] = str(state_root.parent / "escaped.json")
+        try:
+            provider_runner.verified_request_artifact_paths(
+                state_root=state_root,
+                run_id=run_id,
+                step_id=step_id,
+                request=request,
+            )
+        except provider_runner.ProviderRunnerError as exc:
+            assert_equal(str(exc), "provider_evidence_path_mismatch", "artifact path reason")
+        else:
+            raise AssertionError("request-controlled evidence path must be rejected")
+        outside = Path(raw_tmp) / "outside"
+        outside.mkdir()
+        (state_root / "reports").symlink_to(outside, target_is_directory=True)
+        try:
+            provider_runner.verified_request_artifact_paths(
+                state_root=state_root,
+                run_id=run_id,
+                step_id=step_id,
+                request=request,
+            )
+        except provider_runner.ProviderRunnerError as exc:
+            assert_equal(str(exc), "state_artifact_symlink", "report symlink reason")
+        else:
+            raise AssertionError("symlinked report root must be rejected")
+
+
 if __name__ == "__main__":
     tests = (
         test_fake_provider_success_completes_with_normalized_evidence,
@@ -531,9 +1077,19 @@ if __name__ == "__main__":
         test_run_provider_rejects_non_runnable_run_state,
         test_runner_rejects_noncanonical_report_path_before_provider_output,
         test_runner_reports_unreadable_work_order_as_blocked_json,
-        test_live_command_adapter_is_rejected_until_sandbox_support,
+        test_arbitrary_live_command_adapter_is_rejected,
+        test_live_guard_requires_flag_and_environment,
+        test_patched_live_adapter_completes_without_raw_output_leakage,
         test_run_provider_step_honors_adapter_alias,
         test_undecodable_provider_stdout_is_malformed_output,
+        test_provider_invocation_releases_global_lock_and_renews_lease,
+        test_call_immediate_snapshot_recheck_blocks_provider,
+        test_timeout_contract_and_private_transcript_permissions,
+        test_direct_runner_accounts_expired_attempt_before_new_claim,
+        test_completed_attempt_journal_recovers_without_provider_reinvocation,
+        test_failed_attempt_journal_preserves_typed_outcome_without_reinvocation,
+        test_serialized_context_limit_blocks_before_claim_without_retry,
+        test_request_artifact_paths_are_recomputed_and_confined,
     )
     for test in tests:
         test()

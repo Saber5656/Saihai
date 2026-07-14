@@ -1,0 +1,131 @@
+{
+  "adapter": {
+    "adapter_contract_version": "1",
+    "bridge_pattern": "none",
+    "concurrency_unit": "process",
+    "context_freshness": "fresh_process",
+    "default_model": "claude-sonnet-operator-selected",
+    "default_timeout_seconds": 1800,
+    "environment_policy": "minimal_allowlist",
+    "execution_profile_id": "claude-tools-disabled-pinned-v1",
+    "max_context_bytes": 1000000,
+    "max_output_bytes": 4194304,
+    "max_timeout_seconds": 86400,
+    "permission_enforcement": "harness",
+    "provider_adapter_id": "claude_headless_p0",
+    "provider_target": "claude_headless",
+    "report_authority": "typed_report_and_evidence_file",
+    "requires_marker": false,
+    "reset_strategy": "new_session",
+    "supports_structured_output": true,
+    "surface_metadata": {
+      "async_callback_supported": false,
+      "surface": "claude_headless_cli"
+    },
+    "sync_mode": "sync",
+    "transport": "headless_cli"
+  },
+  "adapter_request_version": "1",
+  "authority": {
+    "issued_by_principal": {
+      "authn_method": "local_cli",
+      "principal_id": "manual-cli",
+      "principal_type": "manual_operator"
+    },
+    "prepare_signature": {
+      "algorithm": "sha256-hmac-sha256-local-principal-key",
+      "signature": "sha256:ab59dddfc3cb5f37fb86d3daeff22c542b034561c9cf6b42a0c598f61a82672e",
+      "signed_at": "2026-01-01T00:00:00+0000"
+    },
+    "provider_may_write": [],
+    "provider_must_not": [
+      "select_workflow",
+      "approve_activation",
+      "mutate_run_state",
+      "edit_repo",
+      "commit",
+      "push"
+    ],
+    "runner_writes": [
+      "typed_report_file",
+      "normalized_provider_evidence_file",
+      "provider_transcript_file"
+    ],
+    "work_order_signature": {
+      "algorithm": "sha256-hmac-sha256-local-principal-key",
+      "signature": "sha256:eef5aa7fed57c0320bcbf2e0ef5942a34c587e9889fe3693a104f2afc1e236bb",
+      "signed_at": "2026-01-01T00:00:00+0000"
+    }
+  },
+  "deprecated": true,
+  "evidence_contract": {
+    "allowed_surface_metadata_fields": [
+      "surface",
+      "async_callback_supported",
+      "domain_ownership",
+      "routing_candidate_for"
+    ],
+    "allowed_usage_fields": [
+      "input_tokens",
+      "output_tokens"
+    ],
+    "canonical_paths": {
+      "evidence_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-evidence.json",
+      "report_path": "__STATE_ROOT__/reports/run-failed-invalid-report/review-external-review-report.json",
+      "transcript_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-transcript.json"
+    },
+    "fixed_fields": {
+      "bridge_pattern": "none",
+      "evidence_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-evidence.json",
+      "evidence_version": "1",
+      "outcome": "ok",
+      "provider_adapter_id": "claude_headless_p0",
+      "provider_target": "claude_headless",
+      "raw_transcript_policy": "signal_only_not_shared",
+      "request_id": "req-failed-invalid-report",
+      "run_id": "run-failed-invalid-report",
+      "step_id": "review",
+      "surface_metadata": {
+        "async_callback_supported": false,
+        "surface": "claude_headless_cli"
+      },
+      "transcript_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-transcript.json",
+      "transcript_sha256": "sha256:5317f2e2e0e46796f163e8ec44295e215a5714b150d5cf2933ef9d34178bf147",
+      "transport": "headless_cli",
+      "workflow_id": "single_step_external_review"
+    },
+    "provider_supplied_fields": {
+      "optional": [
+        "reason_class",
+        "stdout_sha256",
+        "exit_code",
+        "timed_out"
+      ],
+      "required": [
+        "provider",
+        "effective_model",
+        "provider_request_id",
+        "provider_session_id",
+        "duration_ms",
+        "usage"
+      ]
+    },
+    "raw_content_policy": {
+      "raw_provider_content": "forbidden",
+      "raw_transcript_policy": "signal_only_not_shared",
+      "unlisted_fields": "forbidden"
+    },
+    "schema_path": "organization/runtime/workflows/schemas/provider-evidence.schema.json"
+  },
+  "evidence_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-evidence.json",
+  "execution_allowed": false,
+  "prompt": "You are the bounded reviewer for a deterministic P0 orchestrator work order.\nDo not select workflows, approve activation, mutate run state, edit repository or task files, commit, push, or publish.\nDo not write files. This deprecated prompt artifact is not executable.\nUse only the bounded context refs listed below. Do not request or infer raw transcript sharing.\n\ntask_id: TSK-failed-invalid-report\nrequest_id: req-failed-invalid-report\nrun_id: run-failed-invalid-report\nworkflow_id: single_step_external_review\nstep_id: review\n\nContext refs:\n- .tmp/e2e-harness-fixture/ref.md\n\nInstruction:\nSend one bounded readonly review or consultation work order to an external provider adapter and require an authoritative typed report/evidence file. Step 'review' (reviewer): follow the input work order contract and produce external_review_report.\n\nReturn only an External Review Report JSON object matching\norganization/runtime/workflows/schemas/external-review-report.schema.json.\nThe live runner alone writes Normalized Provider Evidence matching\norganization/runtime/workflows/schemas/provider-evidence.schema.json.\nUse these evidence fields exactly: {\"bridge_pattern\": \"none\", \"evidence_path\": \"__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-evidence.json\", \"evidence_version\": \"1\", \"outcome\": \"ok\", \"provider_adapter_id\": \"claude_headless_p0\", \"provider_target\": \"claude_headless\", \"raw_transcript_policy\": \"signal_only_not_shared\", \"request_id\": \"req-failed-invalid-report\", \"run_id\": \"run-failed-invalid-report\", \"step_id\": \"review\", \"surface_metadata\": {\"async_callback_supported\": false, \"surface\": \"claude_headless_cli\"}, \"transcript_path\": \"__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-transcript.json\", \"transport\": \"headless_cli\", \"workflow_id\": \"single_step_external_review\"}\nSupply these required runtime evidence fields: provider, effective_model, provider_request_id, provider_session_id, duration_ms, usage\nOptional runtime evidence fields are limited to: reason_class, stdout_sha256, exit_code, timed_out\nusage fields are limited to non-negative integer counters: input_tokens, output_tokens\nsurface_metadata fields are limited to: surface, async_callback_supported, domain_ownership, routing_candidate_for\nDo not embed raw prompts, raw provider output, stdout, stderr, pane output, or raw transcript content\nin the report or evidence artifact. Unlisted evidence fields are forbidden.\nThe runner-owned normalized evidence path is: __STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-evidence.json\nSet provider_evidence.evidence_path to: __STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-evidence.json\nSet provider_evidence.transcript_path to: __STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-transcript.json\nThe canonical report path is: __STATE_ROOT__/reports/run-failed-invalid-report/review-external-review-report.json",
+  "replacement": "run-provider --live",
+  "report_path": "__STATE_ROOT__/reports/run-failed-invalid-report/review-external-review-report.json",
+  "request_id": "req-failed-invalid-report",
+  "run_id": "run-failed-invalid-report",
+  "step_id": "review",
+  "transcript_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-transcript.json",
+  "work_order_path": "__STATE_ROOT__/work-orders/run-failed-invalid-report/review.json",
+  "workflow_id": "single_step_external_review"
+}

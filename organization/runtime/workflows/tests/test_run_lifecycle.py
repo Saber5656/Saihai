@@ -345,8 +345,110 @@ def test_resume_reclaims_expired_lease() -> None:
         work_order = json.loads(order_path.read_text(encoding="utf-8"))
         assert_equal(
             work_order["work_order_authority"]["runner_claim"],
-            {"claim_state": "unclaimed", "lease_expires_at": None},
-            "runner claim reset",
+            {"claim_state": "claimed", "lease_expires_at": "2000-01-01T00:00:00+0000"},
+            "signed work order remains immutable",
+        )
+
+
+def expired_provider_execution(*, attempt_number: int = 1, retries_used: int = 0) -> dict:
+    digest = "sha256:" + "1" * 64
+    return {
+        "execution_version": "1",
+        "step_id": "review",
+        "adapter_id": "claude_headless_p0",
+        "work_order_digest": digest,
+        "adapter_request_digest": "sha256:" + "2" * 64,
+        "context_snapshot_digest": "sha256:" + "3" * 64,
+        "phase": "invoking",
+        "attempt_number": attempt_number,
+        "attempt_id": f"provider-attempt-expired-{attempt_number}",
+        "timeout_seconds": 1800,
+        "lease": {
+            "lease_id": f"provider-lease-expired-{attempt_number}",
+            "claimed_by": manual_principal(),
+            "claimed_at": "2000-01-01T00:00:00+00:00",
+            "last_heartbeat_at": "2000-01-01T00:00:00+00:00",
+            "lease_expires_at": "2000-01-01T00:00:00+00:00",
+        },
+        "retry": {
+            "last_failure_fingerprint": None,
+            "consecutive_failures": 0,
+            "auto_retries_used": retries_used,
+            "max_auto_retries": 5,
+        },
+        "last_outcome": None,
+    }
+
+
+def test_expired_provider_attempts_persist_retry_budget_and_reach_human_gate() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        store_run(
+            state_root,
+            run_state="waiting_provider",
+            goal_state="active",
+            provider_execution=expired_provider_execution(),
+        )
+        for attempt_number in range(1, 7):
+            resumed = run_lifecycle.resume_run(
+                state_root,
+                "run-lifecycle",
+                principal=manual_principal(),
+            )
+            persisted = run_store.load_run(state_root, "run-lifecycle")
+            if attempt_number <= 5:
+                assert_equal(resumed["decision"], "ok", "expired retry decision")
+                assert_equal(
+                    persisted["provider_execution"]["retry"]["auto_retries_used"],
+                    attempt_number,
+                    "durable expired retry count",
+                )
+                persisted["run_state"] = "waiting_provider"
+                persisted["goal_state"] = "active"
+                persisted["provider_execution"]["phase"] = "invoking"
+                persisted["provider_execution"]["attempt_number"] = attempt_number + 1
+                persisted["provider_execution"]["attempt_id"] = f"provider-attempt-expired-{attempt_number + 1}"
+                persisted["provider_execution"]["lease"]["lease_id"] = f"provider-lease-expired-{attempt_number + 1}"
+                persisted["provider_execution"]["lease"]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
+                run_store.store_run(state_root, persisted, expected_current_state="step_queued")
+            else:
+                assert_equal(resumed["decision"], "blocked", "exhausted retry decision")
+                assert_equal(resumed["reason"], "provider_retry_exhausted", "exhausted reason")
+                assert_equal(persisted["run_state"], "waiting_human", "human gate state")
+                assert_equal(persisted["provider_execution"]["phase"], "human_gate", "human gate phase")
+                journal = Path(persisted["provider_execution"]["last_outcome"]["attempt_result_path"])
+                assert_equal(journal.stat().st_mode & 0o777, 0o600, "abandoned journal mode")
+
+
+def test_resume_ignores_abandoned_journal_and_accounts_expired_lease() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        store_run(
+            state_root,
+            run_state="waiting_provider",
+            goal_state="active",
+            provider_execution=expired_provider_execution(),
+        )
+        interrupted = run_store.load_run(state_root, "run-lifecycle")
+        retry_allowed, journal_path = run_lifecycle.account_expired_provider_attempt(
+            state_root, interrupted
+        )
+        assert retry_allowed and journal_path is not None
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        assert_equal(journal["abandoned"], True, "abandoned journal marker")
+
+        resumed = run_lifecycle.resume_run(
+            state_root,
+            "run-lifecycle",
+            principal=manual_principal(),
+        )
+        assert_equal(resumed["decision"], "ok", "abandoned journal resume decision")
+        assert_equal(resumed["reason"], "provider_lease_expired", "abandoned journal reason")
+        assert_equal(resumed["workflow_run"]["run_state"], "step_queued", "abandoned journal state")
+        assert_equal(
+            resumed["workflow_run"]["provider_execution"]["retry"]["auto_retries_used"],
+            1,
+            "abandoned journal retry count",
         )
 
 
@@ -480,6 +582,8 @@ def main() -> None:
         test_resume_maps_states_to_next_action,
         test_resume_waiting_human_requires_flag,
         test_resume_reclaims_expired_lease,
+        test_expired_provider_attempts_persist_retry_budget_and_reach_human_gate,
+        test_resume_ignores_abandoned_journal_and_accounts_expired_lease,
         test_resume_waiting_human_requeue_enforces_p0_concurrency,
         test_resume_expired_provider_lease_enforces_p0_concurrency_before_reset,
         test_create_from_unapproved_activation_fails,
