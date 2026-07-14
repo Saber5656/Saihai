@@ -3075,6 +3075,9 @@ def _prepare_claude_adapter_locked(
     prompt = bounded_claude_prompt(work_order, evidence_contract=evidence_contract)
     adapter_request = {
         "adapter_request_version": "1",
+        "deprecated": True,
+        "execution_allowed": False,
+        "replacement": "run-provider --live",
         "adapter": capability,
         "run_id": run_id,
         "request_id": run["request_id"],
@@ -3087,14 +3090,16 @@ def _prepare_claude_adapter_locked(
         "evidence_contract": evidence_contract,
         "prompt": prompt,
         "authority": {
-            "provider_may_write": ["typed_report_file", "normalized_provider_evidence_file"],
+            "provider_may_write": [],
+            "runner_writes": ["typed_report_file", "normalized_provider_evidence_file", "provider_transcript_file"],
             "provider_must_not": ["select_workflow", "approve_activation", "mutate_run_state", "edit_repo", "commit", "push"],
             "issued_by_principal": redacted_principal(actor),
             "prepare_signature": signature,
             "work_order_signature": work_order.get("work_order_authority", {}).get("signature"),
         },
     }
-    write_json(request_path, adapter_request)
+    provider_runner.secure_artifact_tree(request_path, "adapter-requests")
+    provider_runner.private_atomic_write_json(request_path, adapter_request)
     provider_runner.write_signal_transcript(
         transcript_path,
         {
@@ -3166,7 +3171,7 @@ def bounded_claude_prompt(work_order: dict[str, Any], *, evidence_contract: dict
         [
             "You are the bounded reviewer for a deterministic P0 orchestrator work order.",
             "Do not select workflows, approve activation, mutate run state, edit repository or task files, commit, push, or publish.",
-            "Write only the designated normalized evidence and typed report artifacts described below.",
+            "Do not write files. This deprecated prompt artifact is not executable.",
             "Use only the bounded context refs listed below. Do not request or infer raw transcript sharing.",
             "",
             f"task_id: {work_order['task_id']}",
@@ -3183,7 +3188,7 @@ def bounded_claude_prompt(work_order: dict[str, Any], *, evidence_contract: dict
             "",
             "Return only an External Review Report JSON object matching",
             "organization/runtime/workflows/schemas/external-review-report.schema.json.",
-            "Before returning the report, write one Normalized Provider Evidence JSON object matching",
+            "The live runner alone writes Normalized Provider Evidence matching",
             f"{evidence_contract['schema_path']}.",
             f"Use these evidence fields exactly: {fixed_fields}",
             "Supply these required runtime evidence fields: " + ", ".join(provider_fields["required"]),
@@ -3194,7 +3199,7 @@ def bounded_claude_prompt(work_order: dict[str, Any], *, evidence_contract: dict
             + ", ".join(evidence_contract["allowed_surface_metadata_fields"]),
             "Do not embed raw prompts, raw provider output, stdout, stderr, pane output, or raw transcript content",
             "in the report or evidence artifact. Unlisted evidence fields are forbidden.",
-            f"Write normalized evidence to: {canonical_paths['evidence_path']}",
+            f"The runner-owned normalized evidence path is: {canonical_paths['evidence_path']}",
             f"Set provider_evidence.evidence_path to: {canonical_paths['evidence_path']}",
             f"Set provider_evidence.transcript_path to: {canonical_paths['transcript_path']}",
             f"The canonical report path is: {canonical_paths['report_path']}",
@@ -3226,8 +3231,9 @@ def run_provider(
     state_root: Path,
     run_id: str,
     adapter_id: str = provider_runner.DEFAULT_ADAPTER_ID,
-    timeout_seconds: int = 60,
+    timeout_seconds: int = provider_runner.DEFAULT_PROVIDER_TIMEOUT_SECONDS,
     fake_provider_mode: str = "",
+    live: bool = False,
     principal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
@@ -3238,6 +3244,7 @@ def run_provider(
             adapter_id=adapter_id,
             timeout_seconds=timeout_seconds,
             fake_provider_mode=fake_provider_mode,
+            live=live,
             principal=actor,
         )
     except provider_runner.ProviderRunnerError as exc:
@@ -3537,7 +3544,12 @@ def parser() -> argparse.ArgumentParser:
     run_provider_parser = sub.add_parser("run-provider")
     run_provider_parser.add_argument("--run-id", required=True)
     run_provider_parser.add_argument("--adapter-id", default=provider_runner.DEFAULT_ADAPTER_ID)
-    run_provider_parser.add_argument("--timeout-seconds", type=int, default=60)
+    run_provider_parser.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=provider_runner.DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+    )
+    run_provider_parser.add_argument("--live", action="store_true")
     run_provider_parser.add_argument(
         "--fake-provider-mode",
         choices=["", "success", "findings", "blocked", "timeout", "nonzero", "malformed", "unavailable"],
@@ -3697,6 +3709,7 @@ def main() -> None:
                 adapter_id=args.adapter_id,
                 timeout_seconds=args.timeout_seconds,
                 fake_provider_mode=args.fake_provider_mode,
+                live=args.live,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "verify-completion":
