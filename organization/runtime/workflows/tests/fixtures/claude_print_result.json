@@ -1,0 +1,11 @@
+{
+  "type": "result",
+  "result": "```json\n{\"report_version\":\"1\",\"report_id\":\"report-run-live\",\"request_id\":\"req-live\",\"run_id\":\"run-live\",\"workflow_id\":\"single_step_external_review\",\"step_id\":\"review\",\"result\":\"pass\",\"summary\":\"Fixture review passed.\",\"provider_evidence\":{\"provider\":\"anthropic\",\"effective_model\":\"claude-fixture\",\"request_id\":\"req-live\",\"provider_session_id\":\"claude-session-fixture\",\"transcript_path\":\"/tmp/transcript\",\"evidence_path\":\"/tmp/evidence\"},\"findings\":[],\"authority\":{\"canonical_result\":\"typed_report_file\",\"stdout_is_signal_only\":true,\"raw_transcript_shared\":false}}\n```",
+  "session_id": "claude-session-fixture",
+  "request_id": "claude-request-fixture",
+  "model": "claude-fixture",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 34
+  }
+}

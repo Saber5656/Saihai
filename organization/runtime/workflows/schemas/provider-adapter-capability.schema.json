@@ -115,6 +115,29 @@
       "items": {
         "type": "string"
       }
+    },
+    "execution_profile_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "default_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "max_timeout_seconds": {
+      "const": 86400
+    },
+    "max_context_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_output_bytes": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "environment_policy": {
+      "const": "minimal_allowlist"
     }
   },
   "additionalProperties": false
