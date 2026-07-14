@@ -15,9 +15,9 @@ import hmac
 import json
 import os
 import re
-import secrets
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -770,7 +770,7 @@ def derive_capability(
         return replacement
     worktree_path = worktree_root / str(planned_worktree["worktree_key"]) / repo_root.name
     branch = str(planned_worktree["branch"])
-    nonce_value = nonce or secrets.token_hex(24)
+    nonce_value = nonce or uuid.uuid4().hex + uuid.uuid4().hex
     if not re.fullmatch(r"[A-Za-z0-9_-]{24,128}", nonce_value):
         raise ScopedWorkerError("capability_nonce_invalid")
     instruction = {
@@ -1417,7 +1417,7 @@ def execute_capability(
     actor = assert_executor_principal(principal)
     if actor != executor_principal(gateway_principal):
         raise ScopedWorkerError("executor_gateway_binding_mismatch")
-    execution_id = "exec-" + secrets.token_hex(12)
+    execution_id = "exec-" + uuid.uuid4().hex[:24]
     subject = {"capability_id": capability_id, "execution_id": execution_id}
     capability: dict[str, Any] | None = None
     execution: dict[str, Any] | None = None

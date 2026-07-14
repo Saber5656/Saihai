@@ -706,7 +706,7 @@ def read_private_file_text(path: Path, *, label: str) -> str:
         return handle.read().strip()
 
 
-def ensure_channel_token_file(state_root: Path, channel: str) -> Path:
+def ensure_channel_token_file(state_root: Path, channel: str) -> None:
     path = channel_token_path(state_root, channel)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
@@ -722,11 +722,11 @@ def ensure_channel_token_file(state_root: Path, channel: str) -> Path:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(secrets.token_urlsafe(32) + "\n")
     ensure_private_file(path, label="channel token")
-    return path
 
 
 def channel_token(state_root: Path, channel: str) -> str:
-    path = ensure_channel_token_file(state_root, channel)
+    ensure_channel_token_file(state_root, channel)
+    path = channel_token_path(state_root, channel)
     return read_private_file_text(path, label="channel token")
 
 
@@ -3817,7 +3817,8 @@ def main() -> None:
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "channel-token":
-            token_path = ensure_channel_token_file(state_root, args.channel)
+            ensure_channel_token_file(state_root, args.channel)
+            token_path = channel_token_path(state_root, args.channel)
             payload = {
                 "schema_version": 1,
                 "decision": "ok",
