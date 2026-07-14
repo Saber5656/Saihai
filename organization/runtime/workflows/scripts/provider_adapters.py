@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import pwd
+import signal
 import stat
 import subprocess
 import tempfile
@@ -398,10 +399,40 @@ def _write_prompt(stream: Any, prompt: bytes, errors: list[str]) -> None:
 
 
 def _stop_process(process: Any) -> None:
+    pid = getattr(process, "pid", None)
+    process_group = None
+    if isinstance(pid, int) and pid > 0:
+        try:
+            candidate_group = os.getpgid(pid)
+            if candidate_group == os.getpgrp():
+                raise OSError("provider process shares the harness process group")
+            process_group = candidate_group
+            os.killpg(candidate_group, signal.SIGTERM)
+        except OSError:
+            process_group = None
     try:
-        process.terminate()
+        if process_group is None:
+            process.terminate()
         process.wait(timeout=2)
     except (OSError, subprocess.TimeoutExpired):
+        pass
+    if process_group is not None:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return
+    if process.poll() is None:
         try:
             process.kill()
             process.wait(timeout=2)
@@ -431,6 +462,7 @@ def _invoke(
             cwd=isolated_cwd.name,
             env=_minimal_environment(isolated_cwd.name),
             shell=False,
+            start_new_session=True,
         )
         assert process.stdin is not None and process.stdout is not None and process.stderr is not None
     except AdapterConfigurationError as exc:

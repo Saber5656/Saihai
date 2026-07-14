@@ -42,11 +42,20 @@ def request() -> dict:
 
 
 class FakeProcess:
-    def __init__(self, stdout: bytes, stderr: bytes = b"", returncode: int = 0, *, running: bool = False):
+    def __init__(
+        self,
+        stdout: bytes,
+        stderr: bytes = b"",
+        returncode: int = 0,
+        *,
+        running: bool = False,
+        pid: int | None = None,
+    ):
         self.stdin = io.BytesIO()
         self.stdout = io.BytesIO(stdout)
         self.stderr = io.BytesIO(stderr)
         self.returncode = None if running else returncode
+        self.pid = pid
 
     def poll(self):
         return self.returncode
@@ -160,6 +169,7 @@ def test_claude_fixture_fixed_command_and_minimal_env() -> None:
     assert command[command.index("--tools") + 1] == ""
     assert command[command.index("--permission-mode") + 1] == "plan"
     assert calls[0]["shell"] is False
+    assert calls[0]["start_new_session"] is True
     assert calls[0]["cwd"] != str(provider_adapters.REPO_ROOT)
     assert Path(calls[0]["cwd"]).name.startswith("saihai-provider-")
     assert calls[0]["env"]["HOME"] == pwd.getpwuid(os.getuid()).pw_dir
@@ -324,6 +334,34 @@ def test_timeout_validation_oserror_lease_loss_and_output_ceiling() -> None:
         assert len(limited["stdout"]) == provider_adapters.MAX_OUTPUT_BYTES
 
 
+def test_stop_process_terminates_dedicated_process_group() -> None:
+    process = FakeProcess(b"", running=True, pid=4242)
+    signals: list[tuple[int, int]] = []
+    original_getpgid = provider_adapters.os.getpgid
+    original_getpgrp = provider_adapters.os.getpgrp
+    original_killpg = provider_adapters.os.killpg
+
+    def fake_killpg(group: int, sent_signal: int) -> None:
+        signals.append((group, sent_signal))
+        if sent_signal == provider_adapters.signal.SIGTERM:
+            process.returncode = -sent_signal
+
+    provider_adapters.os.getpgid = lambda _pid: 4242
+    provider_adapters.os.getpgrp = lambda: 7
+    provider_adapters.os.killpg = fake_killpg
+    try:
+        provider_adapters._stop_process(process)
+    finally:
+        provider_adapters.os.getpgid = original_getpgid
+        provider_adapters.os.getpgrp = original_getpgrp
+        provider_adapters.os.killpg = original_killpg
+    assert signals == [
+        (4242, provider_adapters.signal.SIGTERM),
+        (4242, 0),
+        (4242, provider_adapters.signal.SIGKILL),
+    ]
+
+
 if __name__ == "__main__":
     tests = (
         test_extract_json_and_digest_verified_prompt,
@@ -333,6 +371,7 @@ if __name__ == "__main__":
         test_structured_stdout_auth_quota_and_nonzero_classes,
         test_codex_structured_auth_nonzero_and_malformed_classes,
         test_timeout_validation_oserror_lease_loss_and_output_ceiling,
+        test_stop_process_terminates_dedicated_process_group,
     )
     for test in tests:
         test()
