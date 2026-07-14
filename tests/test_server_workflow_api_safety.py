@@ -16,15 +16,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "server.py"
-SECRET_TRANSCRIPT = "SECRET-TRANSCRIPT-MARKER"
-SECRET_PROMPT = "SECRET-PROMPT"
-SECRET_PROMPT_ALIAS = "PROMPT-ALIAS-MARKER"
-SECRET_CAMEL_PROMPT = "CAMEL-PROMPT-MARKER"
-SECRET_CAMEL_TRANSCRIPT = "CAMEL-TRANSCRIPT-MARKER"
-SECRET_USER_TRANSCRIPT = "USER-TRANSCRIPT-MARKER"
-SECRET_TRANSCRIPT_TEXT = "TRANSCRIPT-TEXT-MARKER"
-SECRET_PROVIDER_TRANSCRIPT_TEXT = "PROVIDER-TRANSCRIPT-TEXT-MARKER"
-SECRET_USER_PROMPT_TEXT = "USER-PROMPT-TEXT-MARKER"
+TRANSCRIPT_LEAK_SENTINEL = "TRANSCRIPT-LEAK-SENTINEL"
+PROMPT_LEAK_SENTINEL = "PROMPT-LEAK-SENTINEL"
+PROMPT_ALIAS_LEAK_SENTINEL = "PROMPT-ALIAS-LEAK-SENTINEL"
+CAMEL_PROMPT_LEAK_SENTINEL = "CAMEL-PROMPT-LEAK-SENTINEL"
+CAMEL_TRANSCRIPT_LEAK_SENTINEL = "CAMEL-TRANSCRIPT-LEAK-SENTINEL"
+USER_TRANSCRIPT_LEAK_SENTINEL = "USER-TRANSCRIPT-LEAK-SENTINEL"
+TRANSCRIPT_TEXT_LEAK_SENTINEL = "TRANSCRIPT-TEXT-LEAK-SENTINEL"
+PROVIDER_TRANSCRIPT_TEXT_LEAK_SENTINEL = "PROVIDER-TRANSCRIPT-TEXT-LEAK-SENTINEL"
+USER_PROMPT_TEXT_LEAK_SENTINEL = "USER-PROMPT-TEXT-LEAK-SENTINEL"
 
 
 def load_server():
@@ -205,7 +205,7 @@ def test_g5_symlink_escape_is_rejected_as_outside_root() -> None:
         runs = root / "runs"
         runs.mkdir(parents=True)
         outside = base / "outside.json"
-        write_json(outside, {"run_id": "run-evil", "secret": "OUTSIDE-SECRET"})
+        write_json(outside, {"run_id": "run-evil", "marker": "OUTSIDE-LEAK-SENTINEL"})
         (runs / "run-evil.json").symlink_to(outside)
         with http_server(root) as (_, url):
             status, payload, raw = request(url, "/api/workflow-runs")
@@ -214,32 +214,32 @@ def test_g5_symlink_escape_is_rejected_as_outside_root() -> None:
         assert detail_status == 404
         assert payload["workflow_runs"][0]["view_error"] == "outside_root"
         assert detail_payload == {"error": "run_not_found"}
-        assert "OUTSIDE-SECRET" not in raw + detail_raw
+        assert "OUTSIDE-LEAK-SENTINEL" not in raw + detail_raw
 
 
 def test_g6_g7_transcript_and_prompt_are_confined() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         root = Path(raw_tmp)
         run = make_run(root, "run-sensitive", run_state="complete")
-        run["prompt"] = SECRET_PROMPT
-        run["user_prompt"] = SECRET_PROMPT_ALIAS
-        run["activation"]["userPrompt"] = SECRET_CAMEL_PROMPT
+        run["prompt"] = PROMPT_LEAK_SENTINEL
+        run["user_prompt"] = PROMPT_ALIAS_LEAK_SENTINEL
+        run["activation"]["userPrompt"] = CAMEL_PROMPT_LEAK_SENTINEL
         write_json(root / "runs" / "run-sensitive.json", run)
         transcript = root / "provider-evidence" / "run-sensitive" / "transcript.txt"
         transcript.parent.mkdir(parents=True)
-        transcript.write_text(SECRET_TRANSCRIPT, encoding="utf-8")
+        transcript.write_text(TRANSCRIPT_LEAK_SENTINEL, encoding="utf-8")
         write_json(
             root / "provider-evidence" / "run-sensitive" / "review-provider-evidence.json",
             {
                 "provider": "fake",
                 "transcript_path": str(transcript),
-                "raw_transcript": SECRET_TRANSCRIPT,
-                "rawTranscript": SECRET_CAMEL_TRANSCRIPT,
+                "raw_transcript": TRANSCRIPT_LEAK_SENTINEL,
+                "rawTranscript": CAMEL_TRANSCRIPT_LEAK_SENTINEL,
                 "nested": {
-                    "userTranscript": SECRET_USER_TRANSCRIPT,
-                    "transcriptText": SECRET_TRANSCRIPT_TEXT,
-                    "providerTranscriptText": SECRET_PROVIDER_TRANSCRIPT_TEXT,
-                    "userPromptText": SECRET_USER_PROMPT_TEXT,
+                    "userTranscript": USER_TRANSCRIPT_LEAK_SENTINEL,
+                    "transcriptText": TRANSCRIPT_TEXT_LEAK_SENTINEL,
+                    "providerTranscriptText": PROVIDER_TRANSCRIPT_TEXT_LEAK_SENTINEL,
+                    "userPromptText": USER_PROMPT_TEXT_LEAK_SENTINEL,
                 },
             },
         )
@@ -251,15 +251,15 @@ def test_g6_g7_transcript_and_prompt_are_confined() -> None:
             ]
         assert all(status == 200 for status, _, _ in responses)
         combined = "".join(raw for _, _, raw in responses)
-        assert SECRET_TRANSCRIPT not in combined
-        assert SECRET_PROMPT not in combined
-        assert SECRET_PROMPT_ALIAS not in combined
-        assert SECRET_CAMEL_PROMPT not in combined
-        assert SECRET_CAMEL_TRANSCRIPT not in combined
-        assert SECRET_USER_TRANSCRIPT not in combined
-        assert SECRET_TRANSCRIPT_TEXT not in combined
-        assert SECRET_PROVIDER_TRANSCRIPT_TEXT not in combined
-        assert SECRET_USER_PROMPT_TEXT not in combined
+        assert TRANSCRIPT_LEAK_SENTINEL not in combined
+        assert PROMPT_LEAK_SENTINEL not in combined
+        assert PROMPT_ALIAS_LEAK_SENTINEL not in combined
+        assert CAMEL_PROMPT_LEAK_SENTINEL not in combined
+        assert CAMEL_TRANSCRIPT_LEAK_SENTINEL not in combined
+        assert USER_TRANSCRIPT_LEAK_SENTINEL not in combined
+        assert TRANSCRIPT_TEXT_LEAK_SENTINEL not in combined
+        assert PROVIDER_TRANSCRIPT_TEXT_LEAK_SENTINEL not in combined
+        assert USER_PROMPT_TEXT_LEAK_SENTINEL not in combined
         assert responses[1][1]["workflow_run"]["evidence"]["transcript_path"] == str(transcript)
         assert responses[0][1]["workflow_runs"][0]["run_state"] == "complete"
         assert responses[1][1]["workflow_run"]["run"]["terminal"]["status"] == "complete"
@@ -270,7 +270,7 @@ def test_missing_and_traversal_artifact_refs_are_not_followed() -> None:
         base = Path(raw_tmp)
         root = base / "orch"
         outside = base / "outside.txt"
-        outside.write_text("ARTIFACT-SECRET", encoding="utf-8")
+        outside.write_text("ARTIFACT-LEAK-SENTINEL", encoding="utf-8")
         run = make_run(root, "run-artifacts", run_state="complete")
         run["context_refs"] = [
             {"type": "file", "value": "../outside.txt"},
@@ -287,7 +287,7 @@ def test_missing_and_traversal_artifact_refs_are_not_followed() -> None:
         assert detail["work_order"] is None
         assert detail["report"] is None
         assert detail["evidence"] is None
-        assert "ARTIFACT-SECRET" not in raw
+        assert "ARTIFACT-LEAK-SENTINEL" not in raw
 
 
 def test_artifact_symlink_escapes_are_not_followed() -> None:
@@ -296,7 +296,7 @@ def test_artifact_symlink_escapes_are_not_followed() -> None:
         root = base / "orch"
         make_run(root, "run-linked", run_state="complete")
         outside = base / "outside.json"
-        write_json(outside, {"summary": "ARTIFACT-SYMLINK-SECRET"})
+        write_json(outside, {"summary": "ARTIFACT-SYMLINK-LEAK-SENTINEL"})
         paths = [
             root / "work-orders" / "run-linked" / "review.json",
             root / "reports" / "run-linked" / "review-external-review-report.json",
@@ -312,7 +312,7 @@ def test_artifact_symlink_escapes_are_not_followed() -> None:
         assert detail["work_order"] is None
         assert detail["report"] is None
         assert detail["evidence"] is None
-        assert "ARTIFACT-SYMLINK-SECRET" not in raw
+        assert "ARTIFACT-SYMLINK-LEAK-SENTINEL" not in raw
 
 
 def test_g8_post_cannot_mutate_workflow_api() -> None:
