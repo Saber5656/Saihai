@@ -1,0 +1,8 @@
+{
+  "fixture_version": 1,
+  "generated_at": "2026-01-01T00:00:00+0000",
+  "generated_by": "organization/runtime/workflows/tests/make_run_fixtures.py",
+  "live_provider_used": false,
+  "scenario": "complete-pass",
+  "state_root_placeholder": "__STATE_ROOT__"
+}

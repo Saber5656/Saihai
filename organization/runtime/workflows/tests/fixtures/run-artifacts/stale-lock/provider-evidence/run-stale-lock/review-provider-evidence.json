@@ -1,0 +1,28 @@
+{
+  "bridge_pattern": "none",
+  "duration_ms": 0,
+  "effective_model": "claude-sonnet-operator-selected",
+  "evidence_path": "__STATE_ROOT__/provider-evidence/run-stale-lock/review-provider-evidence.json",
+  "evidence_version": "1",
+  "outcome": "ok",
+  "provider": "claude_headless",
+  "provider_adapter_id": "claude_headless_p0",
+  "provider_request_id": "provider-fixture",
+  "provider_session_id": "fake-session-run-stale-lock",
+  "provider_target": "claude_headless",
+  "raw_transcript_policy": "signal_only_not_shared",
+  "reason_class": "ok",
+  "request_id": "req-stale-lock",
+  "run_id": "run-stale-lock",
+  "stdout_sha256": "sha256:8dbadc94d734b7c92df87dcce8aba9b66ff1bf8b8afef842815cf25f27d43f2b",
+  "step_id": "review",
+  "surface_metadata": {
+    "async_callback_supported": false,
+    "surface": "claude_headless_cli"
+  },
+  "timed_out": false,
+  "transcript_path": "__STATE_ROOT__/provider-evidence/run-stale-lock/review-provider-transcript.json",
+  "transport": "headless_cli",
+  "usage": {},
+  "workflow_id": "single_step_external_review"
+}
