@@ -14,8 +14,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 SCRIPT_DIR = ROOT / "organization/runtime/workflows/scripts"
-FRONTDOOR_SCRIPT = SCRIPT_DIR / "frontdoor_orchestrator.py"
 SERVER_SCRIPT = ROOT / "server.py"
+FRONTDOOR_TEST_WRAPPER = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import frontdoor_orchestrator as frontdoor
+frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
+sys.argv = [sys.argv[0], *sys.argv[3:]]
+frontdoor.main()
+"""
 
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -259,7 +266,10 @@ def test_task_view_cli_shape() -> None:
         completed = subprocess.run(
             [
                 sys.executable,
-                str(FRONTDOOR_SCRIPT),
+                "-c",
+                FRONTDOOR_TEST_WRAPPER,
+                str(SCRIPT_DIR),
+                str(state_root),
                 "--state-root",
                 str(state_root),
                 "task-view",
@@ -279,7 +289,10 @@ def test_task_view_cli_shape() -> None:
         unknown = subprocess.run(
             [
                 sys.executable,
-                str(FRONTDOOR_SCRIPT),
+                "-c",
+                FRONTDOOR_TEST_WRAPPER,
+                str(SCRIPT_DIR),
+                str(state_root),
                 "--state-root",
                 str(state_root),
                 "task-view",

@@ -20,7 +20,11 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
+import host_state_root
 import run_store
 import run_lock
 import run_lifecycle
@@ -30,10 +34,20 @@ import task_state_bridge
 import work_order_builder
 import workflow_selector
 import provider_runner
+import scoped_worker_executor
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_STATE_ROOT = Path.home() / ".codex" / "state" / "itb" / "frontdoor-orchestrator"
+HOST_HOME = host_state_root.HOST_HOME
+DEFAULT_STATE_ROOT = host_state_root.DEFAULT_STATE_ROOT
+MANAGED_PRIMARY_CHECKOUT_ROOT = host_state_root.MANAGED_PRIMARY_CHECKOUT_ROOT
+PRIMARY_DIRECTORY_CATALOG_PATH = host_state_root.PRIMARY_DIRECTORY_CATALOG_PATH
+DIRECTORY_CATALOG = host_state_root.DIRECTORY_CATALOG
+DIRECTORY_ENV_DIAGNOSTICS = host_state_root.DIRECTORY_ENV_DIAGNOSTICS
+host_home_directory = host_state_root.host_home_directory
+validate_host_state_root_value = host_state_root.validate_host_state_root_value
+load_primary_directory_catalog = host_state_root.load_primary_directory_catalog
+SCOPED_WORKER_REPO_FULL_NAME = "Saber5656/Saihai"
+TRANSITION_SIGNATURE_ALGORITHM = "sha256-hmac-sha256-local-principal-key"
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
 HTTP_CHANNEL_PRINCIPALS = {
     "bridge": (BRIDGE_PRINCIPAL_TYPE, "http-bridge", "local_http_channel"),
@@ -42,6 +56,7 @@ HTTP_CHANNEL_PRINCIPALS = {
     "harness": ("harness_runner", "local-harness", "local_http_channel"),
     "action_gateway": ("action_gateway_executor", "child-thread-gateway", "local_http_channel"),
 }
+
 EXECUTION_PRINCIPAL_TYPES = {
     "human_operator",
     "manual_operator",
@@ -86,6 +101,17 @@ BRIDGE_FORBIDDEN_FIELDS = {
     "git_command",
     "report_path",
     "shell_command",
+    "command",
+    "command_argv",
+    "raw_cli",
+    "raw_prompt",
+    "worker_prompt",
+    "worker_backend",
+    "branch",
+    "branch_name",
+    "provider",
+    "provider_id",
+    "network",
     "evidence_path",
     "transcript_path",
     "worktree_path",
@@ -256,9 +282,18 @@ def sign_transition(
         "transition": transition,
         "subject": subject,
     }
-    signature = hmac.new(principal_key(state_root, principal), canonical_json(material), hashlib.sha256).hexdigest()
+    signature_material = {
+        "algorithm": TRANSITION_SIGNATURE_ALGORITHM,
+        "material": material,
+    }
+    keyed_digest = hmac.new(
+        principal_key(state_root, principal),
+        canonical_json(signature_material),
+        hashlib.sha256,
+    ).digest()
+    signature = hashlib.new("sha256", keyed_digest).hexdigest()
     return {
-        "algorithm": "sha256-local-principal-key",
+        "algorithm": TRANSITION_SIGNATURE_ALGORITHM,
         "signature": "sha256:" + signature,
         "signed_at": now_iso(),
     }
@@ -413,6 +448,9 @@ def state_paths(state_root: Path) -> dict[str, Path]:
         "signing_keys": state_root / "principal-keys",
         "channel_tokens": state_root / "channel-tokens",
         "child_thread_actions": state_root / "child-thread-actions",
+        "worker_capabilities": state_root / "worker-capabilities",
+        "worker_executions": state_root / "worker-executions",
+        "worker_evidence": state_root / "worker-evidence",
     }
 
 
@@ -524,19 +562,56 @@ def provider_transcript_path(state_root: Path, run_id: str, step_id: str) -> Pat
 
 
 def adapter_request_path(state_root: Path, run_id: str, step_id: str, adapter_id: str) -> Path:
-    return (
-        state_paths(state_root)["adapter_requests"]
-        / validate_artifact_id(run_id, "run_id")
-        / f"{validate_artifact_id(step_id, 'step_id')}-{validate_artifact_id(adapter_id, 'adapter_id')}.json"
+    return state_artifact_path(
+        state_root,
+        "adapter_requests",
+        validate_artifact_id(run_id, "run_id"),
+        f"{validate_artifact_id(step_id, 'step_id')}-{validate_artifact_id(adapter_id, 'adapter_id')}.json",
     )
 
 
-def path_is_within(path: Path, parent: Path) -> bool:
+def configured_state_root() -> Path:
     try:
-        path.resolve().relative_to(parent.resolve())
-    except ValueError:
-        return False
-    return True
+        return host_state_root.configured_state_root()
+    except host_state_root.HostStateRootError as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
+def trusted_state_root(requested: str | Path | None) -> Path:
+    configured = configured_state_root()
+    if requested not in (None, ""):
+        candidate = Path(requested).expanduser().resolve(strict=False)
+        if candidate != configured:
+            raise FrontdoorError("state_root_not_configured")
+    return configured
+
+
+def state_artifact_path(state_root: Path, category: str, *components: str) -> Path:
+    root = state_root.resolve(strict=False)
+    raw_base = state_paths(root)[category]
+    if raw_base.is_symlink():
+        raise FrontdoorError("state artifact category must not be a symlink")
+    base = raw_base.resolve(strict=False)
+    candidate = base.joinpath(*components).resolve(strict=False)
+    try:
+        base.relative_to(root)
+        candidate.relative_to(root)
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise FrontdoorError("state artifact path must stay within configured root") from exc
+    return candidate
+
+
+def resolve_contained_path(raw_path: str, *, parent: Path, label: str) -> Path:
+    base = parent.resolve(strict=True)
+    candidate = Path(raw_path).expanduser()
+    candidate = candidate if candidate.is_absolute() else base / candidate
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise FrontdoorError(f"{label} must stay within repo_root") from exc
+    return resolved
 
 
 def channel_token_path(state_root: Path, channel: str) -> Path:
@@ -569,7 +644,7 @@ def read_private_file_text(path: Path, *, label: str) -> str:
         return handle.read().strip()
 
 
-def channel_token(state_root: Path, channel: str) -> str:
+def ensure_channel_token_file(state_root: Path, channel: str) -> None:
     path = channel_token_path(state_root, channel)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
@@ -584,10 +659,22 @@ def channel_token(state_root: Path, channel: str) -> str:
         else:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(secrets.token_urlsafe(32) + "\n")
+    ensure_private_file(path, label="channel token")
+
+
+def channel_token(state_root: Path, channel: str) -> str:
+    ensure_channel_token_file(state_root, channel)
+    path = channel_token_path(state_root, channel)
     return read_private_file_text(path, label="channel token")
 
 
-def principal_from_authenticated_channel(state_root: Path, channel: str, token: str) -> dict[str, str]:
+def principal_from_authenticated_channel(
+    state_root: Path,
+    channel: str,
+    token: str,
+    *,
+    bind_credential: bool = False,
+) -> dict[str, str]:
     if channel not in HTTP_CHANNEL_PRINCIPALS:
         raise FrontdoorError(f"unsupported channel: {channel}")
     if not token:
@@ -596,6 +683,11 @@ def principal_from_authenticated_channel(state_root: Path, channel: str, token: 
     if not hmac.compare_digest(token, expected):
         raise FrontdoorError("invalid orchestrator channel token")
     principal_type, principal_id, authn_method = HTTP_CHANNEL_PRINCIPALS[channel]
+    if bind_credential:
+        if channel != "action_gateway":
+            raise FrontdoorError("credential binding is limited to action_gateway")
+        credential_binding = hashlib.sha256(token.encode("utf-8")).hexdigest()[:24]
+        principal_id = f"scoped-worker-gateway:{credential_binding}"
     return make_principal(principal_type, principal_id, authn_method=authn_method)
 
 
@@ -1050,13 +1142,19 @@ def attach_approval_summary(record: dict[str, Any]) -> None:
 
 
 def idempotency_path(state_root: Path, key: str) -> Path:
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return state_paths(state_root)["idempotency"] / f"key-{digest}.json"
+    return state_paths(state_root)["idempotency"] / f"key-{idempotency_key_digest(key).removeprefix('sha256:')}.json"
 
 
 def child_thread_idempotency_path(state_root: Path, key: str) -> Path:
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return state_paths(state_root)["child_thread_actions"] / "idempotency" / f"key-{digest}.json"
+    return (
+        state_paths(state_root)["child_thread_actions"]
+        / "idempotency"
+        / f"key-{idempotency_key_digest(key).removeprefix('sha256:')}.json"
+    )
+
+
+def idempotency_key_digest(key: str) -> str:
+    return "sha256:" + hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 def child_thread_action_path(state_root: Path, action_id: str) -> Path:
@@ -1094,11 +1192,7 @@ def validate_child_thread_path(raw_path: Any, *, repo_root: Path, label: str, mu
         raise FrontdoorError(f"{label} must be non-empty")
     if "\x00" in text:
         raise FrontdoorError(f"{label} cannot contain NUL bytes")
-    candidate = Path(text).expanduser()
-    resolved = candidate if candidate.is_absolute() else repo_root / candidate
-    resolved = resolved.resolve(strict=False)
-    if not path_is_within(resolved, repo_root):
-        raise FrontdoorError(f"{label} must stay within repo_root")
+    resolved = resolve_contained_path(text, parent=repo_root, label=label)
     if must_exist and not resolved.is_file():
         raise FrontdoorError(f"{label} must exist as a file")
     return str(resolved)
@@ -1461,7 +1555,9 @@ def child_thread_create_action(
         "principal": redacted_principal(actor),
         "plan_digest": plan_digest,
         "result_digest": result_digest,
-        "plan": normalized_plan,
+        "plan": {
+            **{key: value for key, value in normalized_plan.items() if key != "idempotency_key"},
+        },
         "result": normalized_result,
         "authority": {
             "orchestrator_role": "validated_action_plan_only",
@@ -1477,7 +1573,6 @@ def child_thread_create_action(
         idempotency_file,
         {
             "idempotency_version": "1",
-            "idempotency_key": idempotency_key,
             "action_id": action_id,
             "plan_digest": plan_digest,
             "result_digest": result_digest,
@@ -1648,7 +1743,7 @@ def bridge_submit_request(
                 frontdoor=frontdoor_name,
                 chat_session_id=chat_session_id,
                 peer=peer,
-                extra={"idempotency_key": idempotency_key},
+                extra={"request_digest": digest},
             ),
         )
         return projection
@@ -1745,7 +1840,6 @@ def bridge_submit_request(
         idempotency_file,
         {
             "idempotency_version": "1",
-            "idempotency_key": idempotency_key,
             "request_id": str(payload["request_id"]),
             "request_digest": digest,
             "created_at": now,
@@ -1842,6 +1936,10 @@ def build_bridge_projection(
             state_root,
             str(record.get("task_id") or ""),
         ),
+        "worker_execution_summaries": scoped_worker_executor.list_redacted_summaries(
+            state_root,
+            task_id=str(record.get("task_id") or ""),
+        ),
         "redacted_fields": [
             "user_prompt",
             "request_path",
@@ -1856,6 +1954,12 @@ def build_bridge_projection(
             "worktree_path",
             "repo_root",
             "initial_instruction_ref",
+            "worker_instruction",
+            "worker_result",
+            "worker_evidence_path",
+            "capability_nonce",
+            "capability_signature",
+            "executor_key",
         ],
         "transition_effect": "none",
     }, record
@@ -3174,6 +3278,95 @@ def verify_completion(
     return payload
 
 
+def _assert_action_gateway_host(principal: dict[str, Any], *, state_root: Path, transition: str, subject: dict[str, Any]) -> None:
+    assert_allowed_principal(
+        state_root=state_root,
+        principal=principal,
+        allowed_types=ACTION_GATEWAY_PRINCIPAL_TYPES,
+        transition=transition,
+        subject=subject,
+        blocked_reason=f"{transition} requires action gateway executor",
+    )
+
+
+def _scoped_worker_worktree_root() -> Path:
+    configured = os.environ.get("SAIHAI_SCOPED_WORKTREE_ROOT")
+    if not configured:
+        raise FrontdoorError("SAIHAI_SCOPED_WORKTREE_ROOT is required")
+    return Path(configured).expanduser()
+
+
+def _scoped_worker_repo_root() -> Path:
+    configured = os.environ.get("SAIHAI_SCOPED_REPO_ROOT")
+    return Path(configured).expanduser() if configured else REPO_ROOT
+
+
+def derive_scoped_worker_capability(
+    *,
+    state_root: Path,
+    run_id: str,
+    step_id: str,
+    principal: dict[str, Any],
+) -> dict[str, Any]:
+    subject = {"run_id": run_id, "step_id": step_id}
+    _assert_action_gateway_host(
+        principal,
+        state_root=state_root,
+        transition="derive_scoped_worker_capability",
+        subject=subject,
+    )
+    try:
+        capability = scoped_worker_executor.derive_capability_from_state(
+            state_root=state_root,
+            run_id=run_id,
+            step_id=step_id,
+            repo_root=_scoped_worker_repo_root(),
+            repo_full_name=SCOPED_WORKER_REPO_FULL_NAME,
+            worktree_root=_scoped_worker_worktree_root(),
+            principal=scoped_worker_executor.executor_principal(principal),
+            gateway_principal=principal,
+            signing_key=scoped_worker_executor.load_executor_key(),
+        )
+    except scoped_worker_executor.ScopedWorkerError as exc:
+        raise FrontdoorError(exc.reason_class) from exc
+    return {
+        "schema_version": 1,
+        "decision": "ok",
+        "capability_id": capability["capability_id"],
+        "capability_digest": capability["capability_digest"],
+        "task_id": capability["task_id"],
+        "run_id": capability["run_id"],
+        "step_id": capability["step_id"],
+        "backend_id": capability["worker_backend"]["backend_id"],
+        "expires_at": capability["expires_at"],
+    }
+
+
+def execute_scoped_worker(
+    *,
+    state_root: Path,
+    capability_id: str,
+    principal: dict[str, Any],
+) -> dict[str, Any]:
+    subject = {"capability_id": capability_id}
+    _assert_action_gateway_host(
+        principal,
+        state_root=state_root,
+        transition="execute_scoped_worker",
+        subject=subject,
+    )
+    try:
+        return scoped_worker_executor.execute_capability(
+            state_root=state_root,
+            capability_id=capability_id,
+            principal=scoped_worker_executor.executor_principal(principal),
+            gateway_principal=principal,
+            signing_key=scoped_worker_executor.load_executor_key(),
+        )
+    except scoped_worker_executor.ScopedWorkerError as exc:
+        raise FrontdoorError(exc.reason_class) from exc
+
+
 def render_vault_evidence_markdown(block: dict[str, Any]) -> str:
     return completion_gate.render_vault_evidence_markdown(block)
 
@@ -3224,13 +3417,19 @@ def build_work_order(
         refs = run["activation"]["context_scope"]["refs"]
         resolved_refs = [{"type": "repo_file", "value": ref, "path": ref} for ref in refs]
     step_id = str(step["id"])
-    authority_subject = {
-        "request_id": str(run["request_id"]),
-        "run_id": str(run["run_id"]),
-        "workflow_id": str(run["workflow_id"]),
-        "step_id": step_id,
-    }
-    return work_order_builder.build_work_order(
+    worker_execution_plan = None
+    if str(step.get("permission_mode") or "") == "edit" and os.environ.get("SAIHAI_SCOPED_CODEX_EXECUTABLE"):
+        try:
+            worker_execution_plan = scoped_worker_executor.build_execution_plan(
+                task_id=str(run["task_id"]),
+                run_id=str(run["run_id"]),
+                step_id=step_id,
+                repo_root=_scoped_worker_repo_root(),
+                repo_full_name=SCOPED_WORKER_REPO_FULL_NAME,
+            )
+        except scoped_worker_executor.ScopedWorkerError as exc:
+            raise FrontdoorError(exc.reason_class) from exc
+    work_order = work_order_builder.build_work_order(
         run=run,
         request_record=request_record,
         template=template,
@@ -3238,19 +3437,23 @@ def build_work_order(
         issuer_principal_redacted=redacted_principal(issuer_principal),
         resolved_refs=resolved_refs,
         policy_digest_value=policy_digest(request_record["approved_activation"]),
-        signature=sign_transition(
-            state_root=state_root,
-            principal=issuer_principal,
-            transition="issue_work_order",
-            subject=authority_subject,
-        ),
+        signature=None,
         report_path_value=str(report_path(state_root, str(run["run_id"]), step_id)),
+        worker_execution_plan=worker_execution_plan,
     )
+    unsigned_digest = stable_digest(work_order)
+    work_order["work_order_authority"]["signature"] = sign_transition(
+        state_root=state_root,
+        principal=issuer_principal,
+        transition="issue_work_order",
+        subject={"unsigned_work_order_digest": "sha256:" + unsigned_digest},
+    )
+    return work_order
 
 
 def parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Host-owned P0 frontdoor orchestrator")
-    parser.add_argument("--state-root", default=str(DEFAULT_STATE_ROOT))
+    parser.add_argument("--state-root", default="")
     sub = parser.add_subparsers(dest="command", required=True)
 
     propose = sub.add_parser("propose")
@@ -3397,8 +3600,8 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
-    state_root = Path(args.state_root).expanduser()
     try:
+        state_root = trusted_state_root(args.state_root)
         if args.command == "propose":
             classification = load_json_arg(args.classification) if args.classification else None
             payload = proposed_request(
@@ -3552,13 +3755,14 @@ def main() -> None:
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "channel-token":
-            token = channel_token(state_root, args.channel)
+            ensure_channel_token_file(state_root, args.channel)
+            token_path = channel_token_path(state_root, args.channel)
             payload = {
                 "schema_version": 1,
                 "decision": "ok",
                 "channel": args.channel,
-                "token_path": str(channel_token_path(state_root, args.channel)),
-                "token": token,
+                "token_path": str(token_path),
+                "token_exposed": False,
             }
         else:
             raise FrontdoorError(f"unsupported command: {args.command}")

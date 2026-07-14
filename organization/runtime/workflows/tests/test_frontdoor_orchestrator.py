@@ -17,9 +17,17 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
-FACADE = ROOT / "scripts" / "configure_organization.py"
 SCRIPT_DIR = ROOT / "organization/runtime/workflows/scripts"
 SERVER_SCRIPT = SCRIPT_DIR / "frontdoor_server.py"
+FRONTDOOR_TEST_WRAPPER = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import frontdoor_orchestrator as frontdoor
+frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
+sys.argv = [sys.argv[0], *sys.argv[3:]]
+frontdoor.main()
+"""
 
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -55,8 +63,10 @@ def run_frontdoor(
     return subprocess.run(
         [
             sys.executable,
-            str(FACADE),
-            "workflow-frontdoor",
+            "-c",
+            FRONTDOOR_TEST_WRAPPER,
+            str(SCRIPT_DIR),
+            str(state_root),
             "--state-root",
             str(state_root),
             *args,
@@ -305,6 +315,10 @@ def test_channel_token_permissions_are_private() -> None:
         token_path.chmod(0o644)
         assert_equal(frontdoor_module.channel_token(state_root, "operator"), token, "existing token")
         assert_equal(token_path.stat().st_mode & 0o777, 0o600, "tightened token mode")
+        cli_payload = load_payload(run_frontdoor(state_root, "channel-token", "--channel", "operator"))
+        assert "token" not in cli_payload, "channel token must not be emitted to stdout"
+        assert_equal(cli_payload["token_exposed"], False, "channel token output marker")
+        assert_equal(Path(cli_payload["token_path"]), token_path.resolve(), "channel token path")
 
         token_path.unlink()
         symlink_target = state_root / "leaked-token"
@@ -316,6 +330,243 @@ def test_channel_token_permissions_are_private() -> None:
             assert "must not be a symlink" in str(exc)
         else:
             raise AssertionError("channel token symlink should be blocked")
+
+
+def test_state_root_is_fixed_by_host_configuration() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    previous = frontdoor_module.DIRECTORY_CATALOG.get("SAIHAI_ORCH_STATE_ROOT")
+    previous_process = os.environ.get("SAIHAI_ORCH_STATE_ROOT")
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        configured = Path(raw_tmp) / "configured"
+        configured.mkdir()
+        frontdoor_module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = str(configured)
+        os.environ["SAIHAI_ORCH_STATE_ROOT"] = str(Path(raw_tmp) / "ignored-process-override")
+        try:
+            assert_equal(frontdoor_module.trusted_state_root(None), configured.resolve(), "configured default")
+            assert_equal(frontdoor_module.trusted_state_root(configured), configured.resolve(), "matching root")
+            try:
+                frontdoor_module.trusted_state_root(Path(raw_tmp) / "arbitrary")
+            except frontdoor_module.FrontdoorError as exc:
+                assert_equal(str(exc), "state_root_not_configured", "arbitrary root rejection")
+            else:
+                raise AssertionError("arbitrary state root should be rejected")
+
+            frontdoor_module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = "/tmp/unsafe[state-root]"
+            try:
+                frontdoor_module.configured_state_root()
+            except frontdoor_module.FrontdoorError as exc:
+                assert "validated absolute host path" in str(exc)
+            else:
+                raise AssertionError("unvalidated configured state root should be rejected")
+
+            symlink = Path(raw_tmp) / "configured-link"
+            symlink.symlink_to(configured, target_is_directory=True)
+            frontdoor_module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = str(symlink)
+            try:
+                frontdoor_module.trusted_state_root(symlink)
+            except frontdoor_module.FrontdoorError as exc:
+                assert "non-symlink directory" in str(exc)
+            else:
+                raise AssertionError("symlink state root should be rejected")
+
+            dangling = Path(raw_tmp) / "dangling-configured-link"
+            dangling.symlink_to(Path(raw_tmp) / "missing-target", target_is_directory=True)
+            frontdoor_module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = str(dangling)
+            try:
+                frontdoor_module.trusted_state_root(dangling)
+            except frontdoor_module.FrontdoorError as exc:
+                assert "non-symlink directory" in str(exc)
+            else:
+                raise AssertionError("dangling symlink state root should be rejected")
+        finally:
+            if previous is None:
+                frontdoor_module.DIRECTORY_CATALOG.pop("SAIHAI_ORCH_STATE_ROOT", None)
+            else:
+                frontdoor_module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = previous
+            if previous_process is None:
+                os.environ.pop("SAIHAI_ORCH_STATE_ROOT", None)
+            else:
+                os.environ["SAIHAI_ORCH_STATE_ROOT"] = previous_process
+
+
+def test_state_root_catalog_is_loaded_only_from_primary_checkout() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        previous_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(root / "attacker-home")
+        try:
+            assert_equal(frontdoor_module.host_home_directory(), frontdoor_module.HOST_HOME, "OS account home authority")
+        finally:
+            if previous_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = previous_home
+        primary = root / "primary"
+        worktree = root / "task-worktree"
+        primary.mkdir()
+        for args in (
+            ("init", "-b", "main"),
+            ("config", "user.name", "Frontdoor Test"),
+            ("config", "user.email", "frontdoor@example.invalid"),
+        ):
+            subprocess.run(["git", "-C", str(primary), *args], check=True, capture_output=True, text=True)
+        (primary / "README.md").write_text("fixture\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(primary), "add", "README.md"], check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-C", str(primary), "commit", "-m", "fixture"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(primary), "worktree", "add", "-b", "task-test", str(worktree)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (primary / "directory-path.env").write_text(
+            "SAIHAI_ORCH_STATE_ROOT=/tmp/saihai-primary-test-state\n",
+            encoding="utf-8",
+        )
+        (primary / "directory-path.env").chmod(0o600)
+        (worktree / "directory-path.env").write_text(
+            "SAIHAI_ORCH_STATE_ROOT=/tmp/saihai-worktree-test-state\n",
+            encoding="utf-8",
+        )
+        (worktree / "directory-path.env").chmod(0o600)
+        attacker_repo = root / "attacker-repo"
+        attacker_repo.mkdir()
+        subprocess.run(["git", "-C", str(attacker_repo), "init"], check=True, capture_output=True, text=True)
+        previous_git_dir = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = str(attacker_repo / ".git")
+        previous_primary_root = frontdoor_module.host_state_root.MANAGED_PRIMARY_CHECKOUT_ROOT
+        frontdoor_module.host_state_root.MANAGED_PRIMARY_CHECKOUT_ROOT = primary
+        worktree_gitfile = worktree / ".git"
+        original_gitfile = worktree_gitfile.read_text(encoding="utf-8")
+        worktree_gitfile.write_text(f"gitdir: {attacker_repo / '.git'}\n", encoding="utf-8")
+        try:
+            catalog_path, catalog, _diagnostics = frontdoor_module.load_primary_directory_catalog(worktree)
+        finally:
+            worktree_gitfile.write_text(original_gitfile, encoding="utf-8")
+            if previous_git_dir is None:
+                os.environ.pop("GIT_DIR", None)
+            else:
+                os.environ["GIT_DIR"] = previous_git_dir
+        assert_equal(catalog_path, (primary / "directory-path.env").resolve(), "primary catalog path")
+        assert_equal(catalog["SAIHAI_ORCH_STATE_ROOT"], "/tmp/saihai-primary-test-state", "primary catalog authority")
+
+        worktree_gitfile.unlink()
+        worktree_gitfile.symlink_to(attacker_repo / ".git", target_is_directory=True)
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "checkout_identity_invalid" in str(exc)
+        else:
+            raise AssertionError("symlink git admin should not self-identify as primary")
+        worktree_gitfile.unlink()
+        worktree_gitfile.mkdir()
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "checkout_identity_invalid" in str(exc)
+        else:
+            raise AssertionError("directory git admin should not self-identify as primary")
+        worktree_gitfile.rmdir()
+        worktree_gitfile.write_text(original_gitfile, encoding="utf-8")
+
+        original_open = frontdoor_module.os.open
+
+        def missing_catalog_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            if Path(path) == catalog_path:
+                raise FileNotFoundError(str(path))
+            return original_open(path, flags, *args, **kwargs)
+
+        frontdoor_module.os.open = missing_catalog_open
+        try:
+            missing_path, missing_catalog, missing_diagnostics = frontdoor_module.load_primary_directory_catalog(worktree)
+        finally:
+            frontdoor_module.os.open = original_open
+        assert_equal(missing_path, catalog_path, "missing-race catalog path")
+        assert_equal(missing_catalog, {}, "missing-race default catalog")
+        assert_equal(missing_diagnostics["status"], "not_configured", "missing-race status")
+
+        original_parser = frontdoor_module.host_state_root.parse_directory_catalog
+
+        def replace_catalog_after_read(text: str) -> dict[str, str]:
+            catalog_path.unlink()
+            catalog_path.write_text(
+                "SAIHAI_ORCH_STATE_ROOT=/tmp/saihai-replaced-test-state\n",
+                encoding="utf-8",
+            )
+            catalog_path.chmod(0o644)
+            return original_parser(text)
+
+        frontdoor_module.host_state_root.parse_directory_catalog = replace_catalog_after_read
+        try:
+            _path, snapshot_catalog, _diagnostics = frontdoor_module.load_primary_directory_catalog(worktree)
+        finally:
+            frontdoor_module.host_state_root.parse_directory_catalog = original_parser
+        assert_equal(
+            snapshot_catalog["SAIHAI_ORCH_STATE_ROOT"],
+            "/tmp/saihai-primary-test-state",
+            "validated descriptor snapshot",
+        )
+        assert_equal(catalog_path.stat().st_mode & 0o777, 0o644, "pathname was replaced after descriptor read")
+
+        catalog_path.write_text("SAIHAI_ORCH_STATE_ROOT=relative-state\n", encoding="utf-8")
+        catalog_path.chmod(0o600)
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "state_root_must_be_validated_absolute_host_path" in str(exc)
+        else:
+            raise AssertionError("relative primary state root should be rejected")
+
+        catalog_path.write_text("SAIHAI_ORCH_STATE_ROOT=/tmp/host-root/../redirected-root\n", encoding="utf-8")
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "state_root_traversal_forbidden" in str(exc)
+        else:
+            raise AssertionError("raw traversal primary state root should be rejected")
+
+        catalog_path.chmod(0o644)
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "catalog_mode_must_be_0600" in str(exc)
+        else:
+            raise AssertionError("non-private primary catalog should be rejected")
+
+        catalog_path.unlink()
+        catalog_path.symlink_to(worktree / "directory-path.env")
+        try:
+            frontdoor_module.load_primary_directory_catalog(worktree)
+        except RuntimeError as exc:
+            assert "catalog_must_be_regular_file" in str(exc)
+        else:
+            raise AssertionError("symlink primary catalog should be rejected")
+        frontdoor_module.host_state_root.MANAGED_PRIMARY_CHECKOUT_ROOT = previous_primary_root
+
+
+def test_state_artifact_category_symlink_is_rejected() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        state_root = root / "state"
+        outside = root / "outside"
+        state_root.mkdir()
+        outside.mkdir()
+        (state_root / "adapter-requests").symlink_to(outside, target_is_directory=True)
+
+        try:
+            frontdoor_module.adapter_request_path(state_root, "run-symlink", "review", "claude")
+        except frontdoor_module.FrontdoorError as exc:
+            assert "must not be a symlink" in str(exc)
+        else:
+            raise AssertionError("state artifact category symlink should be rejected")
+        assert_equal(list(outside.iterdir()), [], "outside directory remains untouched")
 
 
 def test_principal_key_permissions_are_private() -> None:
@@ -2507,6 +2758,7 @@ def test_bridge_principal_cannot_execute_or_change_workflow_definitions() -> Non
 
 
 def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> None:
+    frontdoor_module = load_server_module().frontdoor
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         plan = child_thread_plan(state_root)
@@ -2536,6 +2788,13 @@ def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> N
         assert_equal(created["child_thread"]["worktree_label"], "Saihai", "redacted worktree label")
         assert "worktree_path" not in created["child_thread"], "projection summary must not expose absolute worktree path"
         assert Path(created["action_path"]).exists(), "child action record should be durable"
+        action_record = json.loads(Path(created["action_path"]).read_text(encoding="utf-8"))
+        assert "idempotency_key" not in action_record["plan"], "child action must not store raw idempotency key"
+        assert "idempotency_key_digest" not in action_record["plan"]
+        child_idempotency = frontdoor_module.child_thread_idempotency_path(state_root, plan["idempotency_key"])
+        child_idempotency_text = child_idempotency.read_text(encoding="utf-8")
+        assert plan["idempotency_key"] not in child_idempotency_text, "idempotency artifact must not store the key"
+        assert "idempotency_key_digest" not in child_idempotency_text
 
         replayed = load_payload(
             run_frontdoor(
@@ -2619,6 +2878,10 @@ def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> N
                 projection_request["idempotency_key"],
             )
         )
+        bridge_idempotency = frontdoor_module.idempotency_path(state_root, projection_request["idempotency_key"])
+        bridge_idempotency_text = bridge_idempotency.read_text(encoding="utf-8")
+        assert projection_request["idempotency_key"] not in bridge_idempotency_text
+        assert "idempotency_key_digest" not in bridge_idempotency_text
         summaries = projection["child_thread_summaries"]
         assert_equal(len(summaries), 2, "projection child thread summary count")
         summary = next(item for item in summaries if item["thread_id"] == "thread-child-67")
@@ -2917,6 +3180,9 @@ def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
 def main() -> None:
     tests = [
         test_channel_token_permissions_are_private,
+        test_state_root_is_fixed_by_host_configuration,
+        test_state_root_catalog_is_loaded_only_from_primary_checkout,
+        test_state_artifact_category_symlink_is_rejected,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
         test_manual_prepare_evidence_contract_validates_report,

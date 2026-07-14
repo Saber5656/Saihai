@@ -56,7 +56,7 @@ def principal_from_args(frontdoor: Any, args: argparse.Namespace) -> dict[str, s
 
 
 def state_root_from_args(frontdoor: Any, args: argparse.Namespace) -> Path:
-    return Path(args.state_root or str(frontdoor.DEFAULT_STATE_ROOT)).expanduser()
+    return frontdoor.trusted_state_root(args.state_root)
 
 
 def read_request_json(frontdoor: Any, raw: str) -> dict[str, Any]:

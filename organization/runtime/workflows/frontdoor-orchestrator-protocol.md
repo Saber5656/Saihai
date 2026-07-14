@@ -226,12 +226,12 @@ adapter preparation, report validation, or raw request/run reads.
 
 ## P0 Certainty Boundary
 
-The current contracts are implementable for readonly external review.
-
-They are not yet sufficient for edit-capable orchestration. Code-change,
-publication, policy-change, and security-sensitive workflows are intentionally
-`waiting_human` or planned templates until separate templates, action gateway
-rules, and tests exist.
+Readonly external review remains the released P0 contract. The scoped worker
+executor implementation is feature-gated and experimental: it is not a v0.1
+product-scope claim until Issue #81 review/QA completes and a human approves the
+corresponding #53 release-scope decision. Publication, policy-change,
+security-sensitive execution, subpath grants, and provider/network tool access
+remain waiting-human or planned behavior.
 
 For edit-capable deterministic control, the next required contract is a
 host-owned action gateway that withholds write, shell, commit, push, network,
@@ -242,3 +242,28 @@ The first narrow action gateway path is `child-thread-create`. It exists only
 for issue-scoped child worktree chat spawning and does not give the main-agent
 bridge general implementation, worktree, shell, git, or thread-control
 authority.
+
+### Scoped worker executor
+
+Edit-capable work is not performed by the main-agent bridge. A host-owned
+executor may derive a `scoped-worker-capability` only from the canonical frozen
+work order and authenticated action-gateway channel. The derive and execute
+requests accept identifiers only; they do not accept raw commands, prompts,
+paths, branches, worktree locations, network/provider selections, or principal
+claims.
+
+The capability binds task, run, work-order digest, executor principal, fixed
+Codex CLI backend, repository revision, derived task worktree/branch, closed
+operations, path scope, network/provider policy, prompt-artifact digest,
+expiry, nonce, and maximum execution count. Host HMAC verification, canonical
+state comparison, and atomic nonce consumption happen before worktree creation
+or process launch. Tamper, replay, expiry, cross-binding, path/symlink escape,
+principal/backend mismatch, and ungranted provider/network use fail closed.
+
+Initial v1 supports only the whole task worktree. Finer subpath grants are not
+treated as enforced until an OS-level mechanism can guarantee them. Commit,
+push, PR, worker-tool network, and arbitrary provider dispatch remain outside
+the capability. Codex CLI model transport is fixed by the host backend and does
+not grant network/provider tools to the worker. Main-agent projections expose
+only execution/result/evidence digests and status; canonical capability,
+instruction, worktree path, raw result, and evidence path stay redacted.

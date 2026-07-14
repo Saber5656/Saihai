@@ -21,6 +21,8 @@ TASK_RUNS_RE = re.compile(r"^/orchestrator/tasks/([^/]+)/runs$")
 REQUEST_READ_RE = re.compile(r"^/frontdoor/requests/([^/]+)$")
 BRIDGE_PROJECTION_RE = re.compile(r"^/main-agent/projections/([^/]+)$")
 CHILD_THREAD_CREATE_PATH = "/action-gateway/child-thread-create"
+SCOPED_WORKER_DERIVE_PATH = "/action-gateway/scoped-worker-capabilities"
+SCOPED_WORKER_EXECUTE_PATH = "/action-gateway/scoped-worker-execute"
 BODY_PRINCIPAL_FIELDS = {"principal_type", "principal_id", "authn_method"}
 MAX_BODY_BYTES = 2_000_000
 
@@ -421,7 +423,12 @@ class Handler(BaseHTTPRequestHandler):
             + ",".join(supplied_principal_fields)
         )
 
-    def _authenticated_channel_principal(self, *, allowed_channels: set[str]) -> dict:
+    def _authenticated_channel_principal(
+        self,
+        *,
+        allowed_channels: set[str],
+        bind_credential: bool = False,
+    ) -> dict:
         channel = self.headers.get("X-Orchestrator-Channel", "")
         if not channel:
             raise frontdoor.FrontdoorError("missing orchestrator channel")
@@ -431,10 +438,20 @@ class Handler(BaseHTTPRequestHandler):
             self.state_root,
             channel,
             self.headers.get("X-Orchestrator-Token", ""),
+            bind_credential=bind_credential,
         )
 
-    def _channel_principal(self, body: dict, *, allowed_channels: set[str]) -> dict:
-        principal = self._authenticated_channel_principal(allowed_channels=allowed_channels)
+    def _channel_principal(
+        self,
+        body: dict,
+        *,
+        allowed_channels: set[str],
+        bind_credential: bool = False,
+    ) -> dict:
+        principal = self._authenticated_channel_principal(
+            allowed_channels=allowed_channels,
+            bind_credential=bind_credential,
+        )
         supplied_principal_fields = self._body_principal_fields(body)
         if supplied_principal_fields:
             raise self._body_principal_error(supplied_principal_fields)
@@ -688,7 +705,47 @@ class Handler(BaseHTTPRequestHandler):
                     state_root=self.state_root,
                     plan=body.get("plan") if isinstance(body.get("plan"), dict) else {},
                     result=body.get("result") if isinstance(body.get("result"), dict) else {},
-                    principal=self._channel_principal(body, allowed_channels={"action_gateway"}),
+                    principal=self._channel_principal(
+                        body,
+                        allowed_channels={"action_gateway"},
+                    ),
+                )
+                self._send_json(payload)
+                return
+            if self.path == SCOPED_WORKER_DERIVE_PATH:
+                allowed = {"run_id", "step_id"}
+                extra = sorted(set(body) - allowed)
+                if extra:
+                    raise frontdoor.FrontdoorError(
+                        "scoped worker derive unexpected fields: " + ",".join(extra)
+                    )
+                payload = frontdoor.derive_scoped_worker_capability(
+                    state_root=self.state_root,
+                    run_id=str(body["run_id"]),
+                    step_id=str(body["step_id"]),
+                    principal=self._channel_principal(
+                        body,
+                        allowed_channels={"action_gateway"},
+                        bind_credential=True,
+                    ),
+                )
+                self._send_json(payload)
+                return
+            if self.path == SCOPED_WORKER_EXECUTE_PATH:
+                allowed = {"capability_id"}
+                extra = sorted(set(body) - allowed)
+                if extra:
+                    raise frontdoor.FrontdoorError(
+                        "scoped worker execute unexpected fields: " + ",".join(extra)
+                    )
+                payload = frontdoor.execute_scoped_worker(
+                    state_root=self.state_root,
+                    capability_id=str(body["capability_id"]),
+                    principal=self._channel_principal(
+                        body,
+                        allowed_channels={"action_gateway"},
+                        bind_credential=True,
+                    ),
                 )
                 self._send_json(payload)
                 return
@@ -736,13 +793,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run P0 frontdoor HTTP API")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
-    parser.add_argument("--state-root", default=str(frontdoor.DEFAULT_STATE_ROOT))
+    parser.add_argument("--state-root", default="")
     args = parser.parse_args()
 
+    try:
+        state_root = frontdoor.trusted_state_root(args.state_root)
+    except frontdoor.FrontdoorError as exc:
+        parser.error(str(exc))
     server = FrontdoorServer(
         (args.host, args.port),
         Handler,
-        state_root=Path(args.state_root).expanduser(),
+        state_root=state_root,
     )
     print(f"P0 frontdoor API: http://{args.host}:{server.server_port}/")
     try:

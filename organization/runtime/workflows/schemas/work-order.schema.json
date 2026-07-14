@@ -212,7 +212,10 @@
           ],
           "properties": {
             "algorithm": {
-              "const": "sha256-local-principal-key"
+              "enum": [
+                "sha256-local-principal-key",
+                "sha256-hmac-sha256-local-principal-key"
+              ]
             },
             "signature": {
               "type": "string",
@@ -256,6 +259,17 @@
           },
           "additionalProperties": false
         }
+      },
+      "additionalProperties": false
+    },
+    "worker_execution_plan": {
+      "type": "object",
+      "required": ["plan_version", "repository", "worktree", "worker_backend"],
+      "properties": {
+        "plan_version": { "const": "1" },
+        "repository": { "type": "object" },
+        "worktree": { "type": "object" },
+        "worker_backend": { "type": "object" }
       },
       "additionalProperties": false
     }

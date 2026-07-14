@@ -249,14 +249,15 @@ def build_work_order(
     issuer_principal_redacted: dict[str, Any],
     resolved_refs: list[dict[str, Any]],
     policy_digest_value: str,
-    signature: dict[str, Any],
+    signature: dict[str, Any] | None,
     report_path_value: str,
+    worker_execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     step_id = str(step["id"])
     provider_route = step.get("provider_route") if isinstance(step.get("provider_route"), dict) else {}
     external_provider_allowed = provider_route.get("adapter_kind") == "external_provider"
     context_refs = [_normalized_context_ref(item) for item in resolved_refs if isinstance(item, dict)]
-    return {
+    work_order = {
         "work_order_version": "1",
         "task_id": run["task_id"],
         "request_id": run["request_id"],
@@ -288,6 +289,9 @@ def build_work_order(
             },
         },
     }
+    if worker_execution_plan is not None:
+        work_order["worker_execution_plan"] = worker_execution_plan
+    return work_order
 
 
 def validate_work_order(

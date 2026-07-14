@@ -116,7 +116,7 @@ def test_contract_validation() -> None:
     contracts = selector.validate_contracts()
     assert_equal(contracts["decision"], "ok", f"contracts errors: {contracts['errors']}")
     assert_equal(contracts["workflow_contracts"]["template_count"], 6, "template count")
-    assert_equal(contracts["workflow_contracts"]["schema_count"], 18, "schema count")
+    assert_equal(contracts["workflow_contracts"]["schema_count"], 20, "schema count")
 
 
 def test_registry_gate_profiles_and_active_templates() -> None:
