@@ -202,6 +202,7 @@ default state root は `~/.codex/state/itb/frontdoor-orchestrator` です。
 検証時は `--state-root /tmp/frontdoor-state` のように disposable root を使ってください。
 
 Scoped Worker Executor の live backend は fail-closed で無効です。host operator が次の既存資産を手動設定した場合だけ起動できます。executor は key や credential を生成しません。
+Live scoped workers require Git 2.37 or newer for stable NUL-delimited worktree discovery.
 
 | Environment | Purpose |
 |---|---|

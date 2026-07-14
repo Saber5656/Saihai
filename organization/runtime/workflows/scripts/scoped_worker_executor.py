@@ -36,6 +36,7 @@ CAPABILITY_VERSION = "1"
 WHOLE_WORKTREE_SCOPE = ["."]
 DEFAULT_TTL_SECONDS = 300
 MAX_TTL_SECONDS = 900
+MINIMUM_GIT_VERSION = (2, 37, 0)
 RUNNER_PROFILE = {
     "profile_version": "1",
     "approval_policy": "never",
@@ -203,6 +204,28 @@ def _run_git(repo_root: Path, *args: str, timeout: int = 30) -> subprocess.Compl
     return completed
 
 
+def _assert_supported_git() -> None:
+    try:
+        completed = subprocess.run(
+            ["git", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ScopedWorkerError("git_version_unavailable") from exc
+    match = re.search(r"git version (\d+)\.(\d+)\.(\d+)", completed.stdout)
+    if completed.returncode or match is None:
+        raise ScopedWorkerError("git_version_unavailable")
+    version = tuple(int(part) for part in match.groups())
+    if version < MINIMUM_GIT_VERSION:
+        raise ScopedWorkerError(
+            "git_version_unsupported",
+            {"minimum_version": ".".join(str(part) for part in MINIMUM_GIT_VERSION)},
+        )
+
+
 def _git_revision(repo_root: Path, revision: str = "HEAD") -> str:
     return _run_git(repo_root, "rev-parse", "--verify", revision).stdout.strip()
 
@@ -222,12 +245,16 @@ def build_execution_plan(
 ) -> dict[str, Any]:
     """Freeze host-owned repository/backend identity into a work order."""
 
+    _assert_supported_git()
     repo_root = repo_root.expanduser().resolve(strict=True)
     executable_raw = os.environ.get("SAIHAI_SCOPED_CODEX_EXECUTABLE")
     if not executable_raw or not Path(executable_raw).is_absolute():
         raise ScopedWorkerError("codex_backend_executable_not_configured")
-    executable = Path(executable_raw).expanduser().resolve(strict=True)
-    executable_stat = executable.stat()
+    try:
+        executable = Path(executable_raw).expanduser().resolve(strict=True)
+        executable_stat = executable.stat()
+    except OSError as exc:
+        raise ScopedWorkerError("codex_backend_executable_not_configured") from exc
     if not executable.is_file() or executable_stat.st_mode & 0o022:
         raise ScopedWorkerError("codex_backend_executable_insecure")
     base_revision = _git_revision(repo_root)
@@ -316,6 +343,24 @@ def _canonical_relative_path(value: Any) -> str:
     return normalized.as_posix()
 
 
+def _artifact_component(value: str, *, label: str) -> str:
+    validated = run_store.validate_artifact_id(value, label)
+    component = os.path.basename(validated)
+    if component != validated or component in {"", ".", ".."}:
+        raise ScopedWorkerError("state_artifact_path_escape", {"field": label})
+    return component
+
+
+def _state_artifact_path(state_root: Path, category: str, *components: str) -> Path:
+    base = state_paths(state_root)[category].resolve(strict=False)
+    candidate = base.joinpath(*components).resolve(strict=False)
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise ScopedWorkerError("state_artifact_path_escape", {"category": category}) from exc
+    return candidate
+
+
 def _work_order_signature_key_path(state_root: Path, issuer: dict[str, str]) -> Path:
     digest = hashlib.sha256(issuer["principal_id"].encode("utf-8")).hexdigest()[:24]
     principal_type = _safe_slug(issuer["principal_type"], limit=96)
@@ -377,9 +422,10 @@ def verify_work_order_signature(state_root: Path, work_order: dict[str, Any]) ->
 
 
 def load_frozen_work_order(state_root: Path, *, run_id: str, step_id: str) -> tuple[dict[str, Any], str]:
-    run_store.validate_artifact_id(run_id, "run_id")
-    run_store.validate_artifact_id(step_id, "step_id")
-    order_path = state_paths(state_root)["work_orders"] / run_id / f"{step_id}.json"
+    safe_run_id = _artifact_component(run_id, label="run_id")
+    safe_step_id = _artifact_component(step_id, label="step_id")
+    order_dir = _state_artifact_path(state_root, "work_orders", safe_run_id)
+    order_path = _state_artifact_path(state_root, "work_orders", safe_run_id, f"{safe_step_id}.json")
     try:
         work_order = json.loads(order_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -387,7 +433,11 @@ def load_frozen_work_order(state_root: Path, *, run_id: str, step_id: str) -> tu
     if not isinstance(work_order, dict):
         raise ScopedWorkerError("work_order_invalid")
     digest = sha256_digest(work_order)
-    snapshots = sorted(order_path.parent.glob(f"{step_id}-snapshot-*.json"))
+    snapshots = sorted(
+        path
+        for path in order_dir.iterdir()
+        if path.is_file() and path.name.startswith(f"{safe_step_id}-snapshot-") and path.suffix == ".json"
+    ) if order_dir.is_dir() else []
     if not snapshots:
         raise ScopedWorkerError("work_order_snapshot_missing")
     try:
@@ -396,11 +446,11 @@ def load_frozen_work_order(state_root: Path, *, run_id: str, step_id: str) -> tu
         raise ScopedWorkerError("work_order_snapshot_invalid") from exc
     if not isinstance(snapshot, dict) or snapshot.get("work_order_digest") != digest or snapshot.get("work_order") != work_order:
         raise ScopedWorkerError("work_order_snapshot_mismatch")
-    run = run_store.load_run(state_root, run_id)
+    run = run_store.load_run(state_root, safe_run_id)
     for field in ("task_id", "request_id", "run_id"):
         if str(work_order.get(field) or "") != str(run.get(field) or ""):
             raise ScopedWorkerError("work_order_run_binding_mismatch", {"field": field})
-    if str(work_order.get("step_id") or "") != step_id or str(run.get("current_step") or "") != step_id:
+    if str(work_order.get("step_id") or "") != safe_step_id or str(run.get("current_step") or "") != safe_step_id:
         raise ScopedWorkerError("work_order_step_binding_mismatch")
     if run.get("run_state") != "step_queued" or run.get("activation", {}).get("activation_status") != "approved":
         raise ScopedWorkerError("work_order_not_executable")
@@ -440,6 +490,149 @@ def _validate_work_order_scope(work_order: dict[str, Any]) -> tuple[list[str], l
     elif permission_mode != "readonly":
         raise ScopedWorkerError("permission_mode_not_supported")
     return operations, allowed_paths
+
+
+def _unused_capability_expired(capability: dict[str, Any], *, now_epoch: float) -> bool:
+    state = capability.get("execution_state")
+    return (
+        isinstance(state, dict)
+        and state.get("nonce_state") == "unused"
+        and state.get("execution_count") == 0
+        and now_epoch >= parse_iso(str(capability.get("expires_at") or ""))
+    )
+
+
+def _supersede_capability(
+    state_root: Path,
+    capability: dict[str, Any],
+    *,
+    principal: dict[str, Any],
+    reason: str,
+) -> str:
+    capability_id = str(capability["capability_id"])
+    capability["execution_state"] = {
+        "execution_count": 0,
+        "nonce_state": "superseded",
+        "last_execution_id": None,
+        "superseded_reason": reason,
+    }
+    run_store.atomic_write_json(
+        _state_artifact_path(state_root, "capabilities", f"{_artifact_component(capability_id, label='capability_id')}.json"),
+        capability,
+    )
+    _ensure_supersession_audit(
+        state_root=state_root,
+        capability=capability,
+        principal=principal,
+        reason=reason,
+    )
+    return capability_id
+
+
+def _ensure_supersession_audit(
+    *,
+    state_root: Path,
+    capability: dict[str, Any],
+    principal: dict[str, Any],
+    reason: str,
+) -> None:
+    capability_id = str(capability["capability_id"])
+    audit_path = state_paths(state_root)["audit"] / "events.jsonl"
+    if audit_path.exists():
+        try:
+            events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ScopedWorkerError("supersession_audit_invalid") from exc
+        if any(
+            isinstance(event, dict)
+            and event.get("event_type") == "scoped_worker_capability_superseded"
+            and isinstance(event.get("subject"), dict)
+            and event.get("subject", {}).get("capability_id") == capability_id
+            and isinstance(event.get("details"), dict)
+            and event.get("details", {}).get("reason") == reason
+            for event in events
+        ):
+            return
+    append_audit_event(
+        state_root=state_root,
+        event_type="scoped_worker_capability_superseded",
+        principal=principal,
+        subject={"capability_id": capability_id, "run_id": capability["run_id"]},
+        outcome="ok",
+        details={"reason": reason},
+    )
+
+
+def _recoverable_unused_capability(
+    capability: Any,
+    *,
+    state_root: Path,
+    candidate_path: Path,
+    issuance_binding_digest: str,
+    signing_key: bytes,
+    now_epoch: float,
+) -> bool:
+    if not isinstance(capability, dict) or capability.get("issuance_binding_digest") != issuance_binding_digest:
+        return False
+    capability_id = str(capability.get("capability_id") or "")
+    try:
+        expected_path = _state_artifact_path(
+            state_root,
+            "capabilities",
+            f"{_artifact_component(capability_id, label='capability_id')}.json",
+        )
+        material = _capability_material(capability)
+        signature = capability.get("signature")
+        supplied_signature = str(signature.get("value") or "") if isinstance(signature, dict) else ""
+        expires_at = parse_iso(str(capability.get("expires_at") or ""))
+    except (ScopedWorkerError, IndexError):
+        return False
+    state = capability.get("execution_state")
+    return (
+        candidate_path.resolve(strict=False) == expected_path
+        and capability.get("capability_digest") == sha256_digest(material)
+        and hmac.compare_digest(supplied_signature, _capability_signature(material, signing_key))
+        and isinstance(state, dict)
+        and state.get("nonce_state") == "unused"
+        and state.get("execution_count") == 0
+        and now_epoch < expires_at
+    )
+
+
+def _complete_binding_supersessions(
+    *,
+    state_root: Path,
+    binding: dict[str, Any],
+    issuance_binding_digest: str,
+    principal: dict[str, Any],
+    now_epoch: float,
+) -> None:
+    canonical_id = str(binding.get("capability_id") or "")
+    superseded_ids = binding.get("superseded_capability_ids", [])
+    if not isinstance(superseded_ids, list) or any(not isinstance(item, str) for item in superseded_ids):
+        raise ScopedWorkerError("capability_binding_invalid")
+    for capability_id in superseded_ids:
+        if capability_id == canonical_id:
+            raise ScopedWorkerError("capability_binding_invalid")
+        capability = _load_canonical_capability(state_root, capability_id)
+        if capability.get("issuance_binding_digest") != issuance_binding_digest:
+            raise ScopedWorkerError("capability_binding_conflict")
+        state = capability.get("execution_state")
+        if isinstance(state, dict) and state.get("nonce_state") == "superseded":
+            reason = str(state.get("superseded_reason") or "")
+            if reason not in {"expired_unused", "orphaned_unused"}:
+                raise ScopedWorkerError("capability_binding_conflict")
+            _ensure_supersession_audit(
+                state_root=state_root,
+                capability=capability,
+                principal=principal,
+                reason=reason,
+            )
+            continue
+        if not isinstance(state, dict) or state.get("nonce_state") != "unused" or state.get("execution_count") != 0:
+            raise ScopedWorkerError("capability_binding_conflict")
+        reason = "expired_unused" if _unused_capability_expired(capability, now_epoch=now_epoch) else "orphaned_unused"
+        _supersede_capability(state_root, capability, principal=principal, reason=reason)
 
 
 def derive_capability(
@@ -486,6 +679,7 @@ def derive_capability(
     task_id = str(work_order["task_id"])
     run_id = str(work_order["run_id"])
     step_id = str(work_order["step_id"])
+    issued = time.time() if issued_at_epoch is None else issued_at_epoch
     issuance_binding_digest = sha256_digest(
         {
             "task_id": task_id,
@@ -499,7 +693,9 @@ def derive_capability(
         }
     )
     binding_id = issuance_binding_digest.removeprefix("sha256:")
-    binding_path = state_paths(state_root)["capability_bindings"] / f"{binding_id}.json"
+    binding_path = _state_artifact_path(state_root, "capability_bindings", f"{binding_id}.json")
+    bound_capability: dict[str, Any] | None = None
+    binding: dict[str, Any] | None = None
     if binding_path.exists():
         try:
             binding = json.loads(binding_path.read_text(encoding="utf-8"))
@@ -507,30 +703,73 @@ def derive_capability(
             raise ScopedWorkerError("capability_binding_invalid") from exc
         if not isinstance(binding, dict) or binding.get("issuance_binding_digest") != issuance_binding_digest:
             raise ScopedWorkerError("capability_binding_invalid")
-        existing = _load_canonical_capability(state_root, str(binding.get("capability_id") or ""))
-        if existing.get("issuance_binding_digest") != issuance_binding_digest:
+        bound_capability = _load_canonical_capability(state_root, str(binding.get("capability_id") or ""))
+        if bound_capability.get("issuance_binding_digest") != issuance_binding_digest:
             raise ScopedWorkerError("capability_binding_conflict")
-        return existing
+        _complete_binding_supersessions(
+            state_root=state_root,
+            binding=binding,
+            issuance_binding_digest=issuance_binding_digest,
+            principal=actor,
+            now_epoch=issued,
+        )
     capabilities_dir = state_paths(state_root)["capabilities"]
+    recoverable: list[dict[str, Any]] = []
     if capabilities_dir.exists():
         for candidate_path in sorted(capabilities_dir.glob("cap-*.json")):
             try:
                 candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
-            if isinstance(candidate, dict) and candidate.get("issuance_binding_digest") == issuance_binding_digest:
-                run_store.atomic_write_json(
-                    binding_path,
-                    {
-                        "binding_version": "1",
-                        "issuance_binding_digest": issuance_binding_digest,
-                        "capability_id": candidate["capability_id"],
-                    },
-                )
-                return candidate
+            if _recoverable_unused_capability(
+                candidate,
+                state_root=state_root,
+                candidate_path=candidate_path,
+                issuance_binding_digest=issuance_binding_digest,
+                signing_key=signing_key,
+                now_epoch=issued,
+            ):
+                recoverable.append(candidate)
+    bound_capability_id = str(bound_capability.get("capability_id") or "") if bound_capability else None
+    if bound_capability is not None and not _unused_capability_expired(bound_capability, now_epoch=issued):
+        for orphan in recoverable:
+            if orphan["capability_id"] != bound_capability_id:
+                _supersede_capability(state_root, orphan, principal=actor, reason="orphaned_unused")
+        return bound_capability
+    replacement_candidates = sorted(
+        (candidate for candidate in recoverable if candidate["capability_id"] != bound_capability_id),
+        key=lambda candidate: str(candidate["capability_id"]),
+    )
+    if replacement_candidates:
+        replacement = replacement_candidates[0]
+        superseded_ids = ([bound_capability_id] if bound_capability_id else []) + [
+            str(candidate["capability_id"]) for candidate in replacement_candidates[1:]
+        ]
+        replacement_binding = {
+            "binding_version": "1",
+            "issuance_binding_digest": issuance_binding_digest,
+            "capability_id": replacement["capability_id"],
+            "superseded_capability_ids": superseded_ids,
+        }
+        run_store.atomic_write_json(binding_path, replacement_binding)
+        _complete_binding_supersessions(
+            state_root=state_root,
+            binding=replacement_binding,
+            issuance_binding_digest=issuance_binding_digest,
+            principal=actor,
+            now_epoch=issued,
+        )
+        append_audit_event(
+            state_root=state_root,
+            event_type="scoped_worker_capability_recovered",
+            principal=actor,
+            subject={"task_id": task_id, "run_id": run_id, "capability_id": replacement["capability_id"]},
+            outcome="ok",
+            details={"issuance_binding_digest": issuance_binding_digest, "superseded_capability_ids": superseded_ids},
+        )
+        return replacement
     worktree_path = worktree_root / str(planned_worktree["worktree_key"]) / repo_root.name
     branch = str(planned_worktree["branch"])
-    issued = time.time() if issued_at_epoch is None else issued_at_epoch
     nonce_value = nonce or secrets.token_hex(24)
     if not re.fullmatch(r"[A-Za-z0-9_-]{24,128}", nonce_value):
         raise ScopedWorkerError("capability_nonce_invalid")
@@ -549,7 +788,12 @@ def derive_capability(
         "allowed_paths": allowed_paths,
         "forbidden": ["commit", "push", "pull_request", "network", "provider", "worktree_change", "branch_change"],
     }
-    instruction_path = state_paths(state_root)["instructions"] / run_id / f"{step_id}.json"
+    instruction_path = _state_artifact_path(
+        state_root,
+        "instructions",
+        _artifact_component(run_id, label="run_id"),
+        f"{_artifact_component(step_id, label='step_id')}.json",
+    )
     if instruction_path.exists():
         try:
             existing_instruction = json.loads(instruction_path.read_text(encoding="utf-8"))
@@ -607,7 +851,7 @@ def derive_capability(
         },
         "execution_state": {"execution_count": 0, "nonce_state": "unused", "last_execution_id": None},
     }
-    path = state_paths(state_root)["capabilities"] / f"{capability['capability_id']}.json"
+    path = _state_artifact_path(state_root, "capabilities", f"{capability['capability_id']}.json")
     if path.exists():
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
@@ -617,13 +861,19 @@ def derive_capability(
             raise ScopedWorkerError("capability_id_conflict")
         return existing
     run_store.atomic_write_json(path, capability)
-    run_store.atomic_write_json(
-        binding_path,
-        {
-            "binding_version": "1",
-            "issuance_binding_digest": issuance_binding_digest,
-            "capability_id": capability["capability_id"],
-        },
+    replacement_binding = {
+        "binding_version": "1",
+        "issuance_binding_digest": issuance_binding_digest,
+        "capability_id": capability["capability_id"],
+        "superseded_capability_ids": [bound_capability_id] if bound_capability_id else [],
+    }
+    run_store.atomic_write_json(binding_path, replacement_binding)
+    _complete_binding_supersessions(
+        state_root=state_root,
+        binding=replacement_binding,
+        issuance_binding_digest=issuance_binding_digest,
+        principal=actor,
+        now_epoch=issued,
     )
     append_audit_event(
         state_root=state_root,
@@ -631,7 +881,11 @@ def derive_capability(
         principal=actor,
         subject={"task_id": task_id, "run_id": run_id, "capability_id": capability["capability_id"]},
         outcome="ok",
-        details={"capability_digest": capability["capability_digest"], "backend_id": BACKEND_ID},
+        details={
+            "capability_digest": capability["capability_digest"],
+            "backend_id": BACKEND_ID,
+            "supersedes_capability_id": bound_capability_id,
+        },
     )
     return capability
 
@@ -674,8 +928,8 @@ def derive_capability_from_state(
 
 
 def _load_canonical_capability(state_root: Path, capability_id: str) -> dict[str, Any]:
-    run_store.validate_artifact_id(capability_id, "capability_id")
-    path = state_paths(state_root)["capabilities"] / f"{capability_id}.json"
+    safe_capability_id = _artifact_component(capability_id, label="capability_id")
+    path = _state_artifact_path(state_root, "capabilities", f"{safe_capability_id}.json")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -733,6 +987,18 @@ def verify_capability(
     )
     if canonical.get("issuance_binding_digest") != expected_issuance_binding:
         raise ScopedWorkerError("capability_issuance_binding_invalid")
+    binding_id = expected_issuance_binding.removeprefix("sha256:")
+    binding_path = _state_artifact_path(state_root, "capability_bindings", f"{binding_id}.json")
+    try:
+        binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ScopedWorkerError("capability_binding_invalid") from exc
+    if (
+        not isinstance(binding, dict)
+        or binding.get("issuance_binding_digest") != expected_issuance_binding
+        or binding.get("capability_id") != canonical.get("capability_id")
+    ):
+        raise ScopedWorkerError("capability_not_current_binding")
     bindings = {
         "task_id": expected_task_id,
         "run_id": expected_run_id,
@@ -934,6 +1200,108 @@ def record_worker_run_outcome(
         )
 
 
+def validate_live_run_authority(
+    state_root: Path,
+    capability: dict[str, Any],
+    *,
+    allow_missing_test_run: bool = False,
+) -> None:
+    safe_run_id = _artifact_component(str(capability["run_id"]), label="run_id")
+    run_path = _state_artifact_path(state_root, "runs", f"{safe_run_id}.json")
+    if not run_path.exists():
+        if allow_missing_test_run:
+            return
+        raise ScopedWorkerError("worker_run_state_missing")
+    run = run_store.load_run(state_root, safe_run_id)
+    if (
+        run.get("task_id") != capability.get("task_id")
+        or run.get("workflow_id") != "standard_code_change"
+        or run.get("run_state") != "step_queued"
+        or run.get("current_step") != "implement"
+        or capability.get("step_id") != "implement"
+        or run.get("activation", {}).get("activation_status") != "approved"
+    ):
+        raise ScopedWorkerError("worker_run_authority_invalid")
+    _, current_digest = load_frozen_work_order(
+        state_root,
+        run_id=safe_run_id,
+        step_id="implement",
+    )
+    if current_digest != capability.get("work_order_digest"):
+        raise ScopedWorkerError("worker_run_work_order_mismatch")
+
+
+def record_worker_failure_outcome(
+    *,
+    state_root: Path,
+    capability: dict[str, Any],
+    execution: dict[str, Any],
+    principal: dict[str, Any],
+    reason_class: str,
+) -> None:
+    safe_run_id = _artifact_component(str(capability["run_id"]), label="run_id")
+    run_path = _state_artifact_path(state_root, "runs", f"{safe_run_id}.json")
+    if not run_path.exists():
+        return
+    with run_lock.hold_global_lock(
+        state_root,
+        operation="record_scoped_worker_failure",
+        run_id=safe_run_id,
+        principal=principal,
+    ):
+        run = run_store.load_run(state_root, safe_run_id)
+        if run.get("run_state") != "step_queued" or run.get("current_step") != capability.get("step_id"):
+            return
+        run.setdefault("step_history", []).append(
+            {
+                "step_id": capability["step_id"],
+                "status": "blocked",
+                "completed_at": now_iso(),
+                "execution_id": execution["execution_id"],
+                "capability_digest": capability["capability_digest"],
+                "failure_reason": reason_class,
+                "principal": principal,
+            }
+        )
+        run_lifecycle.transition_run(
+            state_root,
+            safe_run_id,
+            to_state="waiting_human",
+            reason_class="scoped_worker_execution_failed",
+            transition="record_scoped_worker_failure",
+            principal=principal,
+            artifact_refs=[],
+            expected_current_state="step_queued",
+            run=run,
+        )
+
+
+def finalize_failed_execution(
+    *,
+    state_root: Path,
+    capability: dict[str, Any] | None,
+    execution: dict[str, Any] | None,
+    principal: dict[str, Any],
+    reason_class: str,
+) -> None:
+    if capability is None or execution is None:
+        return
+    execution.update({"status": "blocked", "finished_at": now_iso(), "failure_reason": reason_class})
+    execution_path = _state_artifact_path(
+        state_root,
+        "executions",
+        f"{_artifact_component(str(execution['execution_id']), label='execution_id')}.json",
+    )
+    run_store.atomic_write_json(execution_path, execution)
+    record_worker_failure_outcome(
+        state_root=state_root,
+        capability=capability,
+        execution=execution,
+        principal=principal,
+        reason_class=reason_class,
+    )
+
+
 class CodexCliRunner:
     backend_id = BACKEND_ID
 
@@ -1017,6 +1385,8 @@ class CodexCliRunner:
 
 
 def configured_codex_runner(capability: dict[str, Any]) -> CodexCliRunner:
+    if os.environ.get("SAIHAI_ENABLE_SCOPED_WORKER_LIVE") != "1":
+        raise ScopedWorkerError("live_scoped_worker_disabled")
     backend = capability.get("worker_backend")
     if not isinstance(backend, dict):
         raise ScopedWorkerError("worker_backend_not_configured")
@@ -1049,6 +1419,8 @@ def execute_capability(
         raise ScopedWorkerError("executor_gateway_binding_mismatch")
     execution_id = "exec-" + secrets.token_hex(12)
     subject = {"capability_id": capability_id, "execution_id": execution_id}
+    capability: dict[str, Any] | None = None
+    execution: dict[str, Any] | None = None
     try:
         with run_lock.hold_global_lock(
             state_root,
@@ -1067,12 +1439,44 @@ def execute_capability(
             active_runner = runner or configured_codex_runner(capability)
             if active_runner.backend_id != capability["worker_backend"]["backend_id"]:
                 raise ScopedWorkerError("worker_backend_mismatch")
+            validate_live_run_authority(
+                state_root,
+                capability,
+                allow_missing_test_run=runner is not None,
+            )
+        _assert_supported_git()
+        worktree_path = ensure_task_worktree(capability)
+        with run_lock.hold_global_lock(
+            state_root,
+            operation="scoped_worker_consume",
+            run_id=str(capability["run_id"]),
+            principal=actor,
+        ):
+            _assert_supported_git()
+            presented = _load_canonical_capability(state_root, capability_id)
+            capability = verify_capability(
+                state_root=state_root,
+                presented=presented,
+                principal=actor,
+                gateway_principal=gateway_principal,
+                signing_key=signing_key,
+                now_epoch=now_epoch,
+            )
+            validate_live_run_authority(
+                state_root,
+                capability,
+                allow_missing_test_run=runner is not None,
+            )
             capability["execution_state"] = {
                 "execution_count": capability["execution_state"]["execution_count"] + 1,
                 "nonce_state": "consumed",
                 "last_execution_id": execution_id,
             }
-            capability_path = state_paths(state_root)["capabilities"] / f"{capability_id}.json"
+            capability_path = _state_artifact_path(
+                state_root,
+                "capabilities",
+                f"{_artifact_component(capability_id, label='capability_id')}.json",
+            )
             run_store.atomic_write_json(capability_path, capability)
             execution = {
                 "execution_version": "1",
@@ -1090,16 +1494,15 @@ def execute_capability(
                 "evidence_digest": None,
                 "failure_reason": None,
             }
-            execution_path = state_paths(state_root)["executions"] / f"{execution_id}.json"
+            execution_path = _state_artifact_path(state_root, "executions", f"{execution_id}.json")
             run_store.atomic_write_json(execution_path, execution)
-        worktree_path = ensure_task_worktree(capability)
-        instruction_path = Path(capability["prompt_artifact"]["path"])
-        raw_result = active_runner.run(
-            worktree_path=worktree_path,
-            instruction_path=instruction_path,
-            result_schema_path=RESULT_SCHEMA_PATH,
-            execution_id=execution_id,
-        )
+            instruction_path = Path(capability["prompt_artifact"]["path"])
+            raw_result = active_runner.run(
+                worktree_path=worktree_path,
+                instruction_path=instruction_path,
+                result_schema_path=RESULT_SCHEMA_PATH,
+                execution_id=execution_id,
+            )
         verify_task_worktree_after_execution(capability, worktree_path)
         actual_changed_paths = _changed_paths(worktree_path)
         result = validate_worker_result(raw_result, actual_changed_paths=actual_changed_paths)
@@ -1116,7 +1519,12 @@ def execute_capability(
             "changed_paths": actual_changed_paths,
             "result": result,
         }
-        evidence_path = state_paths(state_root)["evidence"] / capability["run_id"] / f"{capability['step_id']}-{execution_id}.json"
+        evidence_path = _state_artifact_path(
+            state_root,
+            "evidence",
+            _artifact_component(str(capability["run_id"]), label="run_id"),
+            f"{_artifact_component(str(capability['step_id']), label='step_id')}-{execution_id}.json",
+        )
         run_store.atomic_write_json(evidence_path, evidence)
         execution.update(
             {
@@ -1127,7 +1535,11 @@ def execute_capability(
             }
         )
         run_store.atomic_write_json(execution_path, execution)
-        run_path = state_paths(state_root)["runs"] / f"{capability['run_id']}.json"
+        run_path = _state_artifact_path(
+            state_root,
+            "runs",
+            f"{_artifact_component(str(capability['run_id']), label='run_id')}.json",
+        )
         transition = (
             record_worker_run_outcome(
                 state_root=state_root,
@@ -1164,15 +1576,20 @@ def execute_capability(
             ),
         }
     except ScopedWorkerError as exc:
-        execution_path = state_paths(state_root)["executions"] / f"{execution_id}.json"
+        execution_path = _state_artifact_path(state_root, "executions", f"{execution_id}.json")
         if execution_path.exists():
             try:
                 execution = json.loads(execution_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 execution = {}
             if isinstance(execution, dict):
-                execution.update({"status": "blocked", "finished_at": now_iso(), "failure_reason": exc.reason_class})
-                run_store.atomic_write_json(execution_path, execution)
+                finalize_failed_execution(
+                    state_root=state_root,
+                    capability=capability,
+                    execution=execution,
+                    principal=actor,
+                    reason_class=exc.reason_class,
+                )
         append_audit_event(
             state_root=state_root,
             event_type="scoped_worker_execute",
@@ -1183,15 +1600,20 @@ def execute_capability(
         )
         raise
     except Exception as exc:
-        execution_path = state_paths(state_root)["executions"] / f"{execution_id}.json"
+        execution_path = _state_artifact_path(state_root, "executions", f"{execution_id}.json")
         if execution_path.exists():
             try:
                 execution = json.loads(execution_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 execution = {}
             if isinstance(execution, dict):
-                execution.update({"status": "blocked", "finished_at": now_iso(), "failure_reason": "executor_internal_error"})
-                run_store.atomic_write_json(execution_path, execution)
+                finalize_failed_execution(
+                    state_root=state_root,
+                    capability=capability,
+                    execution=execution,
+                    principal=actor,
+                    reason_class="executor_internal_error",
+                )
         append_audit_event(
             state_root=state_root,
             event_type="scoped_worker_execute",

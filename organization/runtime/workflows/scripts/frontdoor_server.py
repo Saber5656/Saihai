@@ -423,7 +423,12 @@ class Handler(BaseHTTPRequestHandler):
             + ",".join(supplied_principal_fields)
         )
 
-    def _authenticated_channel_principal(self, *, allowed_channels: set[str]) -> dict:
+    def _authenticated_channel_principal(
+        self,
+        *,
+        allowed_channels: set[str],
+        bind_credential: bool = False,
+    ) -> dict:
         channel = self.headers.get("X-Orchestrator-Channel", "")
         if not channel:
             raise frontdoor.FrontdoorError("missing orchestrator channel")
@@ -433,10 +438,20 @@ class Handler(BaseHTTPRequestHandler):
             self.state_root,
             channel,
             self.headers.get("X-Orchestrator-Token", ""),
+            bind_credential=bind_credential,
         )
 
-    def _channel_principal(self, body: dict, *, allowed_channels: set[str]) -> dict:
-        principal = self._authenticated_channel_principal(allowed_channels=allowed_channels)
+    def _channel_principal(
+        self,
+        body: dict,
+        *,
+        allowed_channels: set[str],
+        bind_credential: bool = False,
+    ) -> dict:
+        principal = self._authenticated_channel_principal(
+            allowed_channels=allowed_channels,
+            bind_credential=bind_credential,
+        )
         supplied_principal_fields = self._body_principal_fields(body)
         if supplied_principal_fields:
             raise self._body_principal_error(supplied_principal_fields)
@@ -690,7 +705,10 @@ class Handler(BaseHTTPRequestHandler):
                     state_root=self.state_root,
                     plan=body.get("plan") if isinstance(body.get("plan"), dict) else {},
                     result=body.get("result") if isinstance(body.get("result"), dict) else {},
-                    principal=self._channel_principal(body, allowed_channels={"action_gateway"}),
+                    principal=self._channel_principal(
+                        body,
+                        allowed_channels={"action_gateway"},
+                    ),
                 )
                 self._send_json(payload)
                 return
@@ -705,7 +723,11 @@ class Handler(BaseHTTPRequestHandler):
                     state_root=self.state_root,
                     run_id=str(body["run_id"]),
                     step_id=str(body["step_id"]),
-                    principal=self._channel_principal(body, allowed_channels={"action_gateway"}),
+                    principal=self._channel_principal(
+                        body,
+                        allowed_channels={"action_gateway"},
+                        bind_credential=True,
+                    ),
                 )
                 self._send_json(payload)
                 return
@@ -719,7 +741,11 @@ class Handler(BaseHTTPRequestHandler):
                 payload = frontdoor.execute_scoped_worker(
                     state_root=self.state_root,
                     capability_id=str(body["capability_id"]),
-                    principal=self._channel_principal(body, allowed_channels={"action_gateway"}),
+                    principal=self._channel_principal(
+                        body,
+                        allowed_channels={"action_gateway"},
+                        bind_credential=True,
+                    ),
                 )
                 self._send_json(payload)
                 return

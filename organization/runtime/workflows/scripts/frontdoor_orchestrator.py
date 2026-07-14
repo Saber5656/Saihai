@@ -35,6 +35,7 @@ import scoped_worker_executor
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_STATE_ROOT = Path.home() / ".codex" / "state" / "itb" / "frontdoor-orchestrator"
+SCOPED_WORKER_REPO_FULL_NAME = "Saber5656/Saihai"
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
 HTTP_CHANNEL_PRINCIPALS = {
     "bridge": (BRIDGE_PRINCIPAL_TYPE, "http-bridge", "local_http_channel"),
@@ -602,7 +603,13 @@ def channel_token(state_root: Path, channel: str) -> str:
     return read_private_file_text(path, label="channel token")
 
 
-def principal_from_authenticated_channel(state_root: Path, channel: str, token: str) -> dict[str, str]:
+def principal_from_authenticated_channel(
+    state_root: Path,
+    channel: str,
+    token: str,
+    *,
+    bind_credential: bool = False,
+) -> dict[str, str]:
     if channel not in HTTP_CHANNEL_PRINCIPALS:
         raise FrontdoorError(f"unsupported channel: {channel}")
     if not token:
@@ -611,9 +618,11 @@ def principal_from_authenticated_channel(state_root: Path, channel: str, token: 
     if not hmac.compare_digest(token, expected):
         raise FrontdoorError("invalid orchestrator channel token")
     principal_type, principal_id, authn_method = HTTP_CHANNEL_PRINCIPALS[channel]
-    if channel == "action_gateway":
+    if bind_credential:
+        if channel != "action_gateway":
+            raise FrontdoorError("credential binding is limited to action_gateway")
         credential_binding = hashlib.sha256(token.encode("utf-8")).hexdigest()[:24]
-        principal_id = f"{principal_id}:{credential_binding}"
+        principal_id = f"scoped-worker-gateway:{credential_binding}"
     return make_principal(principal_type, principal_id, authn_method=authn_method)
 
 
@@ -3245,7 +3254,7 @@ def derive_scoped_worker_capability(
             run_id=run_id,
             step_id=step_id,
             repo_root=_scoped_worker_repo_root(),
-            repo_full_name="Saber5656/Saihai",
+            repo_full_name=SCOPED_WORKER_REPO_FULL_NAME,
             worktree_root=_scoped_worker_worktree_root(),
             principal=scoped_worker_executor.executor_principal(principal),
             gateway_principal=principal,
@@ -3349,7 +3358,7 @@ def build_work_order(
                 run_id=str(run["run_id"]),
                 step_id=step_id,
                 repo_root=_scoped_worker_repo_root(),
-                repo_full_name="Saber5656/Saihai",
+                repo_full_name=SCOPED_WORKER_REPO_FULL_NAME,
             )
         except scoped_worker_executor.ScopedWorkerError as exc:
             raise FrontdoorError(exc.reason_class) from exc

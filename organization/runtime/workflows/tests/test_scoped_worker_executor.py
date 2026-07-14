@@ -206,6 +206,20 @@ class GitMutationRunner:
         }
 
 
+class FailAfterLaunchRunner:
+    backend_id = executor.BACKEND_ID
+
+    def run(self, *, worktree_path: Path, instruction_path: Path, result_schema_path: Path, execution_id: str) -> dict:
+        raise executor.ScopedWorkerError("worker_process_failed")
+
+
+class UnexpectedFailureRunner:
+    backend_id = executor.BACKEND_ID
+
+    def run(self, *, worktree_path: Path, instruction_path: Path, result_schema_path: Path, execution_id: str) -> dict:
+        raise RuntimeError("unexpected fixture failure")
+
+
 def code_change_classification() -> dict:
     return {
         "classification_version": "1",
@@ -263,6 +277,25 @@ def create_approved_code_change(state_root: Path, *, user_prompt: str, worker_re
         else:
             os.environ["SAIHAI_SCOPED_REPO_ROOT"] = previous_repo
     return approved, drained
+
+
+def derive_e2e_capability(root: Path, repo: Path, *, issued_at_epoch: float = 1_800_000_000) -> tuple[Path, dict]:
+    state_root = root / "state"
+    create_approved_code_change(state_root, user_prompt="bounded change", worker_repo=repo)
+    capability = executor.derive_capability_from_state(
+        state_root=state_root,
+        run_id="run-scoped-e2e",
+        step_id="implement",
+        repo_root=repo,
+        repo_full_name="Saber5656/Saihai",
+        worktree_root=root / "worktrees",
+        principal=EXECUTOR,
+        gateway_principal=GATEWAY,
+        signing_key=SIGNING_KEY,
+        issued_at_epoch=issued_at_epoch,
+        nonce="fixed_nonce_for_scoped_worker_e2e2",
+    )
+    return state_root, capability
 
 
 def test_typed_request_to_redacted_result_e2e() -> None:
@@ -656,6 +689,17 @@ def test_codex_backend_requires_fixed_secure_absolute_executable() -> None:
                     repo_full_name="example/Saihai",
                 ),
             )
+            os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = str(Path(raw_tmp) / "missing-codex")
+            assert_reason(
+                "codex_backend_executable_not_configured",
+                lambda: executor.build_execution_plan(
+                    task_id="TSK-binary",
+                    run_id="run-binary",
+                    step_id="implement",
+                    repo_root=repo,
+                    repo_full_name="example/Saihai",
+                ),
+            )
         finally:
             if previous is None:
                 os.environ.pop("SAIHAI_SCOPED_CODEX_EXECUTABLE", None)
@@ -678,6 +722,358 @@ def test_codex_backend_requires_fixed_secure_absolute_executable() -> None:
                 now_epoch=1_800_000_001,
             ),
         )
+
+
+def test_review_fix_capability_lifecycle_and_run_preflight() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        repo = create_repo(root)
+        state_root, capability = derive_e2e_capability(root, repo)
+        frontdoor.run_lifecycle.transition_run(
+            state_root,
+            "run-scoped-e2e",
+            to_state="waiting_human",
+            reason_class="test_stale_run",
+            transition="test_stale_run",
+            principal=frontdoor.default_manual_principal(),
+        )
+        assert_reason(
+            "worker_run_authority_invalid",
+            lambda: executor.execute_capability(
+                state_root=state_root,
+                capability_id=capability["capability_id"],
+                principal=EXECUTOR,
+                gateway_principal=GATEWAY,
+                signing_key=SIGNING_KEY,
+                runner=FakeCodexRunner(),
+                now_epoch=1_800_000_001,
+            ),
+        )
+        canonical = executor._load_canonical_capability(state_root, capability["capability_id"])
+        assert_equal(canonical["execution_state"]["nonce_state"], "unused", "stale run does not consume")
+        assert not (Path(capability["worktree"]["worktree_path"]) / "scoped-worker-output.txt").exists()
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        repo = create_repo(root)
+        state_root, capability = derive_e2e_capability(root, repo)
+        assert_reason(
+            "worker_process_failed",
+            lambda: executor.execute_capability(
+                state_root=state_root,
+                capability_id=capability["capability_id"],
+                principal=EXECUTOR,
+                gateway_principal=GATEWAY,
+                signing_key=SIGNING_KEY,
+                runner=FailAfterLaunchRunner(),
+                now_epoch=1_800_000_001,
+            ),
+        )
+        canonical = executor._load_canonical_capability(state_root, capability["capability_id"])
+        assert_equal(canonical["execution_state"]["nonce_state"], "consumed", "launch failure consumes")
+        run = frontdoor.run_store.load_run(state_root, "run-scoped-e2e")
+        assert_equal(run["run_state"], "waiting_human", "launch failure returns to human")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        repo = create_repo(root)
+        state_root, capability = derive_e2e_capability(root, repo)
+        assert_reason(
+            "executor_internal_error",
+            lambda: executor.execute_capability(
+                state_root=state_root,
+                capability_id=capability["capability_id"],
+                principal=EXECUTOR,
+                gateway_principal=GATEWAY,
+                signing_key=SIGNING_KEY,
+                runner=UnexpectedFailureRunner(),
+                now_epoch=1_800_000_001,
+            ),
+        )
+        canonical = executor._load_canonical_capability(state_root, capability["capability_id"])
+        assert_equal(canonical["execution_state"]["nonce_state"], "consumed", "unexpected failure consumes")
+        run = frontdoor.run_store.load_run(state_root, "run-scoped-e2e")
+        assert_equal(run["run_state"], "waiting_human", "unexpected failure returns to human")
+        executions = list((state_root / "worker-executions").glob("*.json"))
+        execution = json.loads(executions[-1].read_text(encoding="utf-8"))
+        assert_equal(execution["failure_reason"], "executor_internal_error", "unexpected failure record")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        state_root, _, capability = derive_direct(root)
+        os.environ.pop("SAIHAI_ENABLE_SCOPED_WORKER_LIVE", None)
+        assert_reason(
+            "live_scoped_worker_disabled",
+            lambda: executor.execute_capability(
+                state_root=state_root,
+                capability_id=capability["capability_id"],
+                principal=EXECUTOR,
+                gateway_principal=GATEWAY,
+                signing_key=SIGNING_KEY,
+                now_epoch=1_800_000_001,
+            ),
+        )
+        canonical = executor._load_canonical_capability(state_root, capability["capability_id"])
+        assert_equal(canonical["execution_state"]["nonce_state"], "unused", "pre-launch failure retryable")
+
+
+def test_review_fix_expired_reissue_paths_git_and_gateway_compatibility() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        state_root, repo, expired = derive_direct(root, issued_at_epoch=1_800_000_000)
+        order = direct_work_order()
+        previous_executable = os.environ.get("SAIHAI_SCOPED_CODEX_EXECUTABLE")
+        os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = "/usr/bin/true"
+        try:
+            order["worker_execution_plan"] = executor.build_execution_plan(
+                task_id="TSK-scoped",
+                run_id="run-scoped",
+                step_id="implement",
+                repo_root=repo,
+                repo_full_name="example/Saihai",
+            )
+        finally:
+            if previous_executable is None:
+                os.environ.pop("SAIHAI_SCOPED_CODEX_EXECUTABLE", None)
+            else:
+                os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = previous_executable
+        assert_reason(
+            "capability_nonce_invalid",
+            lambda: executor.derive_capability(
+                state_root=state_root,
+                work_order=order,
+                work_order_digest=executor.sha256_digest(order),
+                repo_root=repo,
+                repo_full_name="example/Saihai",
+                worktree_root=root / "worktrees",
+                principal=EXECUTOR,
+                gateway_principal=GATEWAY,
+                signing_key=SIGNING_KEY,
+                issued_at_epoch=1_800_001_000,
+                nonce="invalid",
+            ),
+        )
+        unchanged = executor._load_canonical_capability(state_root, expired["capability_id"])
+        assert_equal(unchanged["execution_state"]["nonce_state"], "unused", "failed replacement preserves old")
+
+        replacement = executor.derive_capability(
+            state_root=state_root,
+            work_order=order,
+            work_order_digest=executor.sha256_digest(order),
+            repo_root=repo,
+            repo_full_name="example/Saihai",
+            worktree_root=root / "worktrees",
+            principal=EXECUTOR,
+            gateway_principal=GATEWAY,
+            signing_key=SIGNING_KEY,
+            issued_at_epoch=1_800_001_000,
+            nonce="replacement_nonce_for_expired_cap_01",
+        )
+        assert replacement["capability_id"] != expired["capability_id"]
+        old = executor._load_canonical_capability(state_root, expired["capability_id"])
+        assert_equal(old["execution_state"]["nonce_state"], "superseded", "expired capability superseded")
+
+        assert_reason(
+            "state_artifact_path_escape",
+            lambda: executor._state_artifact_path(state_root, "capabilities", "..", "outside.json"),
+        )
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        state_root, repo, expired = derive_direct(root, issued_at_epoch=1_800_000_000)
+        order = direct_work_order()
+        previous_executable = os.environ.get("SAIHAI_SCOPED_CODEX_EXECUTABLE")
+        os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = "/usr/bin/true"
+        try:
+            order["worker_execution_plan"] = executor.build_execution_plan(
+                task_id="TSK-scoped",
+                run_id="run-scoped",
+                step_id="implement",
+                repo_root=repo,
+                repo_full_name="example/Saihai",
+            )
+        finally:
+            if previous_executable is None:
+                os.environ.pop("SAIHAI_SCOPED_CODEX_EXECUTABLE", None)
+            else:
+                os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = previous_executable
+        original_atomic_write = executor.run_store.atomic_write_json
+        failed_binding_write = False
+
+        def fail_binding_once(path, payload):
+            nonlocal failed_binding_write
+            if path.parent.name == "worker-capability-bindings" and not failed_binding_write:
+                failed_binding_write = True
+                raise OSError("injected binding write failure")
+            return original_atomic_write(path, payload)
+
+        executor.run_store.atomic_write_json = fail_binding_once
+        try:
+            try:
+                executor.derive_capability(
+                    state_root=state_root,
+                    work_order=order,
+                    work_order_digest=executor.sha256_digest(order),
+                    repo_root=repo,
+                    repo_full_name="example/Saihai",
+                    worktree_root=root / "worktrees",
+                    principal=EXECUTOR,
+                    gateway_principal=GATEWAY,
+                    signing_key=SIGNING_KEY,
+                    issued_at_epoch=1_800_001_000,
+                    nonce="orphaned_replacement_capability_001",
+                )
+            except OSError:
+                pass
+            else:
+                raise AssertionError("expected injected binding write failure")
+        finally:
+            executor.run_store.atomic_write_json = original_atomic_write
+        capabilities = sorted((state_root / "worker-capabilities").glob("cap-*.json"))
+        assert_equal(len(capabilities), 2, "failed binding write leaves one recoverable replacement")
+        orphan_path = next(path for path in capabilities if path.stem != expired["capability_id"])
+        orphan = json.loads(orphan_path.read_text(encoding="utf-8"))
+        original_append_audit = executor.append_audit_event
+        failed_supersede_audit = False
+
+        def fail_supersede_audit_once(*args, **kwargs):
+            nonlocal failed_supersede_audit
+            if kwargs.get("event_type") == "scoped_worker_capability_superseded" and not failed_supersede_audit:
+                failed_supersede_audit = True
+                raise OSError("injected supersession audit failure")
+            return original_append_audit(*args, **kwargs)
+
+        executor.append_audit_event = fail_supersede_audit_once
+        try:
+            try:
+                executor.derive_capability(
+                    state_root=state_root,
+                    work_order=order,
+                    work_order_digest=executor.sha256_digest(order),
+                    repo_root=repo,
+                    repo_full_name="example/Saihai",
+                    worktree_root=root / "worktrees",
+                    principal=EXECUTOR,
+                    gateway_principal=GATEWAY,
+                    signing_key=SIGNING_KEY,
+                    issued_at_epoch=1_800_001_000,
+                    nonce="must_not_mint_second_replacement_01",
+                )
+            except OSError:
+                pass
+            else:
+                raise AssertionError("expected injected supersession audit failure")
+        finally:
+            executor.append_audit_event = original_append_audit
+        saved_without_audit = executor._load_canonical_capability(state_root, expired["capability_id"])
+        assert_equal(saved_without_audit["execution_state"]["nonce_state"], "superseded", "state persists before audit failure")
+        pre_retry_events = [
+            json.loads(line)
+            for line in (state_root / "audit" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert not any(
+            event["event_type"] == "scoped_worker_capability_superseded"
+            and event["subject"]["capability_id"] == expired["capability_id"]
+            for event in pre_retry_events
+        ), "injected failure must leave supersession audit pending"
+        recovered = executor.derive_capability(
+            state_root=state_root,
+            work_order=order,
+            work_order_digest=executor.sha256_digest(order),
+            repo_root=repo,
+            repo_full_name="example/Saihai",
+            worktree_root=root / "worktrees",
+            principal=EXECUTOR,
+            gateway_principal=GATEWAY,
+            signing_key=SIGNING_KEY,
+            issued_at_epoch=1_800_001_000,
+            nonce="must_not_mint_third_replacement_001",
+        )
+        assert_equal(len(list((state_root / "worker-capabilities").glob("cap-*.json"))), 2, "retry reuses orphan")
+        assert_equal(recovered["capability_id"], orphan["capability_id"], "retry keeps canonical orphan")
+        verified = executor.verify_capability(
+            state_root=state_root,
+            presented=recovered,
+            principal=EXECUTOR,
+            gateway_principal=GATEWAY,
+            signing_key=SIGNING_KEY,
+            now_epoch=1_800_001_001,
+        )
+        assert_equal(verified["capability_id"], recovered["capability_id"], "recovered capability is canonical")
+        superseded_old = executor._load_canonical_capability(state_root, expired["capability_id"])
+        assert_equal(superseded_old["execution_state"]["nonce_state"], "superseded", "retry completes supersession")
+        audit_events = [
+            json.loads(line)
+            for line in (state_root / "audit" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        assert any(
+            event["event_type"] == "scoped_worker_capability_superseded"
+            and event["subject"]["capability_id"] == expired["capability_id"]
+            and event["details"]["reason"] == "expired_unused"
+            for event in audit_events
+        ), "retry must record expired capability supersession audit"
+        assert_reason(
+            "capability_not_current_binding",
+            lambda: executor.verify_capability(
+                state_root=state_root,
+                presented=superseded_old,
+                principal=EXECUTOR,
+                gateway_principal=GATEWAY,
+                signing_key=SIGNING_KEY,
+                now_epoch=1_800_001_001,
+            ),
+        )
+
+    original_run = executor.subprocess.run
+    try:
+        def old_git(command, *args, **kwargs):
+            if command == ["git", "--version"]:
+                return subprocess.CompletedProcess(command, 0, "git version 2.36.0\n", "")
+            return original_run(command, *args, **kwargs)
+
+        executor.subprocess.run = old_git
+        assert_reason("git_version_unsupported", executor._assert_supported_git)
+    finally:
+        executor.subprocess.run = original_run
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root, _, capability = derive_direct(Path(raw_tmp))
+        try:
+            def old_git_during_execute(command, *args, **kwargs):
+                if command == ["git", "--version"]:
+                    return subprocess.CompletedProcess(command, 0, "git version 2.36.0\n", "")
+                return original_run(command, *args, **kwargs)
+
+            executor.subprocess.run = old_git_during_execute
+            assert_reason(
+                "git_version_unsupported",
+                lambda: executor.execute_capability(
+                    state_root=state_root,
+                    capability_id=capability["capability_id"],
+                    principal=EXECUTOR,
+                    gateway_principal=GATEWAY,
+                    signing_key=SIGNING_KEY,
+                    runner=FakeCodexRunner(),
+                    now_epoch=1_800_000_001,
+                ),
+            )
+        finally:
+            executor.subprocess.run = original_run
+        canonical = executor._load_canonical_capability(state_root, capability["capability_id"])
+        assert_equal(canonical["execution_state"]["nonce_state"], "unused", "old Git rejected before consume")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp) / "state"
+        token = frontdoor.channel_token(state_root, "action_gateway")
+        child_principal = frontdoor.principal_from_authenticated_channel(state_root, "action_gateway", token)
+        scoped_principal = frontdoor.principal_from_authenticated_channel(
+            state_root,
+            "action_gateway",
+            token,
+            bind_credential=True,
+        )
+        assert_equal(child_principal["principal_id"], "child-thread-gateway", "child principal compatibility")
+        assert scoped_principal["principal_id"].startswith("scoped-worker-gateway:")
 
 
 def http_post(url: str, body: dict, headers: dict[str, str]) -> tuple[int, dict]:
@@ -804,6 +1200,8 @@ def main() -> None:
         test_scope_network_provider_publication_and_symlink_fail_closed,
         test_work_order_signature_and_post_execution_git_state,
         test_codex_backend_requires_fixed_secure_absolute_executable,
+        test_review_fix_capability_lifecycle_and_run_preflight,
+        test_review_fix_expired_reissue_paths_git_and_gateway_compatibility,
         test_http_authority_boundary_rejects_bridge_and_arbitrary_plan,
         test_codex_runner_uses_fixed_args_and_minimal_environment,
     ]

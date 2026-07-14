@@ -249,7 +249,7 @@ def build_work_order(
     issuer_principal_redacted: dict[str, Any],
     resolved_refs: list[dict[str, Any]],
     policy_digest_value: str,
-    signature: dict[str, Any],
+    signature: dict[str, Any] | None,
     report_path_value: str,
     worker_execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
