@@ -16,6 +16,7 @@ from typing import Any
 
 import run_lock
 import run_store
+import safe_paths
 
 RUN_STATES = run_store.RUN_STATES
 TERMINAL_RUN_STATES = run_store.TERMINAL_RUN_STATES
@@ -278,9 +279,14 @@ def _private_attempt_journal(state_root: Path, run: dict[str, Any], payload: dic
         return None
     run_id = run_store.validate_artifact_id(str(run.get("run_id") or ""), "run_id")
     safe_attempt = run_store.validate_artifact_id(attempt_id, "attempt_id")
-    evidence_root = state_root / "provider-evidence"
-    run_dir = evidence_root / run_id
-    attempts_dir = run_dir / "attempts"
+    try:
+        attempts_dir = safe_paths.state_artifact_path(
+            state_root, "provider-evidence", run_id, "attempts"
+        )
+    except safe_paths.SafePathError as exc:
+        raise LifecycleError("provider_attempt_journal_unsafe") from exc
+    run_dir = attempts_dir.parent
+    evidence_root = run_dir.parent
     for directory in (evidence_root, run_dir, attempts_dir):
         if directory.exists():
             if directory.is_symlink():
@@ -304,7 +310,7 @@ def _private_attempt_journal(state_root: Path, run: dict[str, Any], payload: dic
 
 
 def existing_provider_attempt_journal(state_root: Path, run: dict[str, Any]) -> Path | None:
-    """Return an existing attempt result without following or replacing it."""
+    """Return a completed attempt result without treating abandoned accounting as output."""
 
     execution = run.get("provider_execution") if isinstance(run.get("provider_execution"), dict) else {}
     attempt_id = str(execution.get("attempt_id") or "")
@@ -312,8 +318,36 @@ def existing_provider_attempt_journal(state_root: Path, run: dict[str, Any]) -> 
         return None
     run_id = run_store.validate_artifact_id(str(run.get("run_id") or ""), "run_id")
     safe_attempt = run_store.validate_artifact_id(attempt_id, "attempt_id")
-    path = state_root / "provider-evidence" / run_id / "attempts" / f"{safe_attempt}-result.json"
-    return path if path.exists() or path.is_symlink() else None
+    try:
+        path = safe_paths.state_artifact_path(
+            state_root,
+            "provider-evidence",
+            run_id,
+            "attempts",
+            f"{safe_attempt}-result.json",
+        )
+    except safe_paths.SafePathError as exc:
+        raise LifecycleError("provider_attempt_journal_unsafe") from exc
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return path
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        return path
+    try:
+        with path.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return path
+    if isinstance(payload, dict) and payload.get("abandoned") is True:
+        return None
+    return path
 
 
 def account_expired_provider_attempt(state_root: Path, run: dict[str, Any]) -> tuple[bool, Path | None]:

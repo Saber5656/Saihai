@@ -667,7 +667,14 @@ def test_timeout_contract_and_private_transcript_permissions() -> None:
 
     with tempfile.TemporaryDirectory() as raw_tmp:
         path = Path(raw_tmp) / "provider-evidence" / "run-private" / "review-provider-transcript.json"
-        provider_runner.write_live_transcript(path, stdout=b"ok", stderr=b"", outcome="ok", exit_code=0)
+        provider_runner.write_live_transcript(
+            Path(raw_tmp),
+            path,
+            stdout=b"ok",
+            stderr=b"",
+            outcome="ok",
+            exit_code=0,
+        )
         assert_equal(path.stat().st_mode & 0o777, 0o600, "transcript mode")
         assert_equal(path.parent.stat().st_mode & 0o777, 0o700, "transcript directory mode")
         assert_equal(path.parent.parent.stat().st_mode & 0o777, 0o700, "evidence root mode")
@@ -708,6 +715,12 @@ def test_direct_runner_accounts_expired_attempt_before_new_claim() -> None:
             "last_outcome": None,
         }
         run_store.store_run(state_root, run, expected_current_state="step_queued")
+        interrupted = run_store.load_run(state_root, run_id)
+        retry_allowed, abandoned_path = run_lifecycle.account_expired_provider_attempt(
+            state_root, interrupted
+        )
+        assert retry_allowed and abandoned_path is not None
+        assert json.loads(abandoned_path.read_text(encoding="utf-8"))["abandoned"] is True
 
         payload = provider_runner.run_provider(
             state_root=state_root,
@@ -744,6 +757,7 @@ def test_completed_attempt_journal_recovers_without_provider_reinvocation() -> N
                 provider_runner.run_provider(
                     state_root=state_root,
                     run_id=run_id,
+                    adapter_id="cursor_cli_p0",
                     fake_provider_mode="success",
                     principal={
                         "principal_type": "harness_runner",
@@ -799,6 +813,11 @@ def test_completed_attempt_journal_recovers_without_provider_reinvocation() -> N
             provider_runner.execute_provider = original_execute
         assert_equal(recovered["decision"], "ok", "journal recovery decision")
         assert_equal(recovered["workflow_run"]["run_state"], "complete", "journal recovery state")
+        assert_equal(
+            recovered["provider_evidence"]["provider_adapter_id"],
+            "cursor_cli_p0",
+            "journal uses recorded adapter",
+        )
         assert recovered["workflow_run"]["provider_execution"]["last_outcome"].get(
             "recovered_from_journal"
         )
@@ -819,8 +838,8 @@ def test_failed_attempt_journal_preserves_typed_outcome_without_reinvocation() -
                 {"reason": "auth_or_quota", "duration_ms": 1, "_live": False},
             )
 
-        def crash_after_result_write(path, payload):
-            original_write(path, payload)
+        def crash_after_result_write(root, path, payload):
+            original_write(root, path, payload)
             if isinstance(payload, dict) and payload.get("attempt_result_version") == "1":
                 raise RuntimeError("simulated crash after failed attempt journal")
 
@@ -891,6 +910,85 @@ def test_failed_attempt_journal_preserves_typed_outcome_without_reinvocation() -
         )
 
 
+def test_serialized_context_limit_blocks_before_claim_without_retry() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-context-serialized-limit"
+        prepare_run(state_root, request_id="req-provider-context-serialized-limit", run_id=run_id)
+        original_limit = provider_runner.provider_adapters.MAX_CONTEXT_BYTES
+        original_execute = provider_runner.execute_provider
+
+        def forbidden_execute(**_kwargs):
+            raise AssertionError("oversized serialized context must not invoke provider")
+
+        provider_runner.provider_adapters.MAX_CONTEXT_BYTES = 1
+        provider_runner.execute_provider = forbidden_execute
+        try:
+            blocked = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                fake_provider_mode="success",
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "serialized-context-limit-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.provider_adapters.MAX_CONTEXT_BYTES = original_limit
+            provider_runner.execute_provider = original_execute
+        assert_equal(blocked["decision"], "blocked", "serialized context decision")
+        assert_equal(blocked["reason"], "context_snapshot_serialized_limit", "serialized context reason")
+        persisted = run_store.load_run(state_root, run_id)
+        assert_equal(persisted["run_state"], "step_queued", "serialized context state")
+        assert "provider_execution" not in persisted
+
+
+def test_request_artifact_paths_are_recomputed_and_confined() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp) / "state"
+        state_root.mkdir()
+        run_id = "run-artifact-paths"
+        step_id = "review"
+        request = {
+            "report_path": str(provider_runner.provider_report_path(state_root, run_id, step_id)),
+            "evidence_path": str(provider_runner.provider_evidence_path(state_root, run_id, step_id)),
+            "transcript_path": str(provider_runner.provider_transcript_path(state_root, run_id, step_id)),
+        }
+        provider_runner.verified_request_artifact_paths(
+            state_root=state_root,
+            run_id=run_id,
+            step_id=step_id,
+            request=request,
+        )
+        request["evidence_path"] = str(state_root.parent / "escaped.json")
+        try:
+            provider_runner.verified_request_artifact_paths(
+                state_root=state_root,
+                run_id=run_id,
+                step_id=step_id,
+                request=request,
+            )
+        except provider_runner.ProviderRunnerError as exc:
+            assert_equal(str(exc), "provider_evidence_path_mismatch", "artifact path reason")
+        else:
+            raise AssertionError("request-controlled evidence path must be rejected")
+        outside = Path(raw_tmp) / "outside"
+        outside.mkdir()
+        (state_root / "reports").symlink_to(outside, target_is_directory=True)
+        try:
+            provider_runner.verified_request_artifact_paths(
+                state_root=state_root,
+                run_id=run_id,
+                step_id=step_id,
+                request=request,
+            )
+        except provider_runner.ProviderRunnerError as exc:
+            assert_equal(str(exc), "state_artifact_symlink", "report symlink reason")
+        else:
+            raise AssertionError("symlinked report root must be rejected")
+
+
 if __name__ == "__main__":
     tests = (
         test_fake_provider_success_completes_with_normalized_evidence,
@@ -915,6 +1013,8 @@ if __name__ == "__main__":
         test_direct_runner_accounts_expired_attempt_before_new_claim,
         test_completed_attempt_journal_recovers_without_provider_reinvocation,
         test_failed_attempt_journal_preserves_typed_outcome_without_reinvocation,
+        test_serialized_context_limit_blocks_before_claim_without_retry,
+        test_request_artifact_paths_are_recomputed_and_confined,
     )
     for test in tests:
         test()

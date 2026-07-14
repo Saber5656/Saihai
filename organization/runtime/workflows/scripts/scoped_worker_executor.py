@@ -24,6 +24,7 @@ from typing import Any, Protocol
 import run_lock
 import run_lifecycle
 import run_store
+import safe_paths
 import work_order_builder
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
@@ -459,7 +460,20 @@ def verify_frozen_work_order(
     iteration = expected_iteration if expected_iteration is not None else run.get("iteration")
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
         raise ScopedWorkerError("work_order_snapshot_invalid")
-    snapshot_path = work_order_builder.snapshot_path(state_root, safe_run_id, safe_step_id, iteration)
+    try:
+        snapshot_path = safe_paths.state_artifact_path(
+            state_root,
+            "work-orders",
+            safe_run_id,
+            f"{safe_step_id}-snapshot-{iteration}.json",
+        )
+        snapshot_path = safe_paths.confined_state_path(
+            state_root,
+            snapshot_path,
+            namespaces={"work-orders"},
+        )
+    except safe_paths.SafePathError as exc:
+        raise ScopedWorkerError("state_artifact_path_escape") from exc
     if not snapshot_path.is_file():
         raise ScopedWorkerError("work_order_snapshot_missing")
     try:

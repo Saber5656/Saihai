@@ -420,6 +420,38 @@ def test_expired_provider_attempts_persist_retry_budget_and_reach_human_gate() -
                 assert_equal(journal.stat().st_mode & 0o777, 0o600, "abandoned journal mode")
 
 
+def test_resume_ignores_abandoned_journal_and_accounts_expired_lease() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        store_run(
+            state_root,
+            run_state="waiting_provider",
+            goal_state="active",
+            provider_execution=expired_provider_execution(),
+        )
+        interrupted = run_store.load_run(state_root, "run-lifecycle")
+        retry_allowed, journal_path = run_lifecycle.account_expired_provider_attempt(
+            state_root, interrupted
+        )
+        assert retry_allowed and journal_path is not None
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        assert_equal(journal["abandoned"], True, "abandoned journal marker")
+
+        resumed = run_lifecycle.resume_run(
+            state_root,
+            "run-lifecycle",
+            principal=manual_principal(),
+        )
+        assert_equal(resumed["decision"], "ok", "abandoned journal resume decision")
+        assert_equal(resumed["reason"], "provider_lease_expired", "abandoned journal reason")
+        assert_equal(resumed["workflow_run"]["run_state"], "step_queued", "abandoned journal state")
+        assert_equal(
+            resumed["workflow_run"]["provider_execution"]["retry"]["auto_retries_used"],
+            1,
+            "abandoned journal retry count",
+        )
+
+
 def test_resume_waiting_human_requeue_enforces_p0_concurrency() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -551,6 +583,7 @@ def main() -> None:
         test_resume_waiting_human_requires_flag,
         test_resume_reclaims_expired_lease,
         test_expired_provider_attempts_persist_retry_budget_and_reach_human_gate,
+        test_resume_ignores_abandoned_journal_and_accounts_expired_lease,
         test_resume_waiting_human_requeue_enforces_p0_concurrency,
         test_resume_expired_provider_lease_enforces_p0_concurrency_before_reset,
         test_create_from_unapproved_activation_fails,

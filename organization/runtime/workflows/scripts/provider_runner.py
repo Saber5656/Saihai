@@ -19,6 +19,7 @@ import report_gate
 import run_lifecycle
 import run_lock
 import run_store
+import safe_paths
 import scoped_worker_executor
 import workflow_selector
 
@@ -202,7 +203,33 @@ def load_verified_context_snapshot(context_refs: Any) -> list[dict[str, Any]]:
     return snapshots
 
 
-def secure_directory(path: Path) -> None:
+PRIVATE_STATE_NAMESPACES = {"adapter-requests", "provider-evidence"}
+
+
+def runner_state_artifact_path(
+    state_root: Path,
+    namespace: str,
+    *components: str,
+) -> Path:
+    try:
+        return safe_paths.state_artifact_path(state_root, namespace, *components)
+    except safe_paths.SafePathError as exc:
+        raise ProviderRunnerError(str(exc)) from exc
+
+
+def confined_private_path(state_root: Path, path: Path) -> Path:
+    try:
+        return safe_paths.confined_state_path(
+            state_root,
+            path,
+            namespaces=PRIVATE_STATE_NAMESPACES,
+        )
+    except safe_paths.SafePathError as exc:
+        raise ProviderRunnerError(str(exc)) from exc
+
+
+def secure_directory(state_root: Path, path: Path) -> None:
+    path = confined_private_path(state_root, path)
     parent = path.parent
     if parent == path:
         raise ProviderRunnerError("private_artifact_parent_invalid")
@@ -222,8 +249,9 @@ def secure_directory(path: Path) -> None:
     os.chmod(path, 0o700)
 
 
-def private_atomic_write_json(path: Path, payload: Any) -> None:
-    secure_directory(path.parent)
+def private_atomic_write_json(state_root: Path, path: Path, payload: Any) -> None:
+    path = confined_private_path(state_root, path)
+    secure_directory(state_root, path.parent)
     if path.exists():
         if path.is_symlink():
             raise ProviderRunnerError("private_artifact_symlink")
@@ -253,7 +281,10 @@ def private_atomic_write_json(path: Path, payload: Any) -> None:
         raise ProviderRunnerError("private_artifact_post_write_validation_failed")
 
 
-def secure_artifact_tree(path: Path, root_name: str) -> None:
+def secure_artifact_tree(state_root: Path, path: Path, root_name: str) -> None:
+    if root_name not in PRIVATE_STATE_NAMESPACES:
+        raise ProviderRunnerError("private_artifact_root_missing")
+    path = confined_private_path(state_root, path)
     ancestors = list(path.parents)
     roots = [candidate for candidate in ancestors if candidate.name == root_name]
     if not roots:
@@ -266,7 +297,7 @@ def secure_artifact_tree(path: Path, root_name: str) -> None:
         current = current / part
         chain.append(current)
     for directory in chain:
-        secure_directory(directory)
+        secure_directory(state_root, directory)
 
 
 def append_audit_event(
@@ -328,35 +359,71 @@ def precheck_execution_principal(
 
 
 def work_order_path(state_root: Path, run_id: str, step_id: str) -> Path:
-    return (
-        state_paths(state_root)["work_orders"]
-        / run_store.validate_artifact_id(run_id, "run_id")
-        / f"{run_store.validate_artifact_id(step_id, 'step_id')}.json"
+    return runner_state_artifact_path(
+        state_root,
+        "work-orders",
+        run_store.validate_artifact_id(run_id, "run_id"),
+        f"{run_store.validate_artifact_id(step_id, 'step_id')}.json",
     )
 
 
 def provider_evidence_path(state_root: Path, run_id: str, step_id: str) -> Path:
-    return (
-        state_paths(state_root)["provider_evidence"]
-        / run_store.validate_artifact_id(run_id, "run_id")
-        / f"{run_store.validate_artifact_id(step_id, 'step_id')}-provider-evidence.json"
+    return runner_state_artifact_path(
+        state_root,
+        "provider-evidence",
+        run_store.validate_artifact_id(run_id, "run_id"),
+        f"{run_store.validate_artifact_id(step_id, 'step_id')}-provider-evidence.json",
     )
 
 
 def provider_transcript_path(state_root: Path, run_id: str, step_id: str) -> Path:
-    return (
-        state_paths(state_root)["provider_evidence"]
-        / run_store.validate_artifact_id(run_id, "run_id")
-        / f"{run_store.validate_artifact_id(step_id, 'step_id')}-provider-transcript.json"
+    return runner_state_artifact_path(
+        state_root,
+        "provider-evidence",
+        run_store.validate_artifact_id(run_id, "run_id"),
+        f"{run_store.validate_artifact_id(step_id, 'step_id')}-provider-transcript.json",
+    )
+
+
+def provider_report_path(state_root: Path, run_id: str, step_id: str) -> Path:
+    return runner_state_artifact_path(
+        state_root,
+        "reports",
+        run_store.validate_artifact_id(run_id, "run_id"),
+        f"{run_store.validate_artifact_id(step_id, 'step_id')}-external-review-report.json",
     )
 
 
 def adapter_request_path(state_root: Path, run_id: str, step_id: str, adapter_id: str) -> Path:
-    return (
-        state_paths(state_root)["adapter_requests"]
-        / run_store.validate_artifact_id(run_id, "run_id")
-        / f"{run_store.validate_artifact_id(step_id, 'step_id')}-{run_store.validate_artifact_id(adapter_id, 'adapter_id')}.json"
+    return runner_state_artifact_path(
+        state_root,
+        "adapter-requests",
+        run_store.validate_artifact_id(run_id, "run_id"),
+        f"{run_store.validate_artifact_id(step_id, 'step_id')}-{run_store.validate_artifact_id(adapter_id, 'adapter_id')}.json",
     )
+
+
+def verified_request_artifact_paths(
+    *,
+    state_root: Path,
+    run_id: str,
+    step_id: str,
+    request: dict[str, Any],
+) -> tuple[Path, Path, Path]:
+    """Recompute canonical runner-owned paths instead of trusting request strings."""
+
+    report_path = provider_report_path(state_root, run_id, step_id)
+    evidence_path = provider_evidence_path(state_root, run_id, step_id)
+    transcript_path = provider_transcript_path(state_root, run_id, step_id)
+    expected = {
+        "report_path": report_path,
+        "evidence_path": evidence_path,
+        "transcript_path": transcript_path,
+    }
+    for field, canonical in expected.items():
+        if str(request.get(field) or "") != str(canonical):
+            raise ProviderRunnerError(f"provider_{field.removesuffix('_path')}_path_mismatch")
+    return report_path, evidence_path, transcript_path
 
 
 def load_provider_adapters(registry: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
@@ -470,10 +537,13 @@ def adapter_request(
     step_id = str(work_order["step_id"])
     evidence_path = provider_evidence_path(state_root, run_id, step_id)
     transcript_path = provider_transcript_path(state_root, run_id, step_id)
+    report_path = provider_report_path(state_root, run_id, step_id)
     context_snapshot = load_verified_context_snapshot(work_order.get("context_refs"))
     context_snapshot_digest = "sha256:" + stable_digest(context_snapshot)
     context_json = json.dumps(context_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     context_bytes = context_json.encode("utf-8")
+    if len(context_bytes) > provider_adapters.MAX_CONTEXT_BYTES:
+        raise ProviderRunnerError("context_snapshot_serialized_limit")
     request = {
         "adapter_request_version": "1",
         "adapter": adapter,
@@ -482,7 +552,7 @@ def adapter_request(
         "workflow_id": run["workflow_id"],
         "step_id": step_id,
         "work_order_path": str(work_order_path(state_root, run_id, step_id)),
-        "report_path": work_order["report_path"],
+        "report_path": str(report_path),
         "evidence_path": str(evidence_path),
         "transcript_path": str(transcript_path),
         "instruction": work_order["instruction"],
@@ -522,12 +592,33 @@ def adapter_request(
 
 
 def provider_attempt_paths(state_root: Path, run_id: str, attempt_id: str) -> tuple[Path, Path]:
-    directory = provider_evidence_path(state_root, run_id, "review").parent / "attempts"
+    safe_run = run_store.validate_artifact_id(run_id, "run_id")
     safe_attempt = run_store.validate_artifact_id(attempt_id, "attempt_id")
-    return directory / f"{safe_attempt}-result.json", directory / f"{safe_attempt}-transcript.json"
+    return (
+        runner_state_artifact_path(
+            state_root,
+            "provider-evidence",
+            safe_run,
+            "attempts",
+            f"{safe_attempt}-result.json",
+        ),
+        runner_state_artifact_path(
+            state_root,
+            "provider-evidence",
+            safe_run,
+            "attempts",
+            f"{safe_attempt}-transcript.json",
+        ),
+    )
 
 
-def read_private_json(path: Path, *, artifact_kind: str) -> dict[str, Any]:
+def read_private_json(
+    state_root: Path,
+    path: Path,
+    *,
+    artifact_kind: str,
+) -> dict[str, Any]:
+    path = confined_private_path(state_root, path)
     if path.is_symlink():
         raise ProviderRunnerError(f"{artifact_kind}_symlink")
     try:
@@ -554,6 +645,9 @@ def recover_completed_provider_attempt(
     execution = run.get("provider_execution")
     if not isinstance(execution, dict):
         return None
+    recorded_adapter_id = str(execution.get("adapter_id") or "")
+    if adapter.get("provider_adapter_id") != recorded_adapter_id:
+        raise ProviderRunnerError("provider_adapter_replay_mismatch")
     attempt_id = str(execution.get("attempt_id") or "")
     lease = execution.get("lease") if isinstance(execution.get("lease"), dict) else {}
     lease_id = str(lease.get("lease_id") or "")
@@ -564,13 +658,18 @@ def recover_completed_provider_attempt(
     )
     if not result_path.exists():
         return None
-    journal = read_private_json(result_path, artifact_kind="provider_attempt_result")
+    journal = read_private_json(
+        state_root, result_path, artifact_kind="provider_attempt_result"
+    )
+    if journal.get("abandoned") is True:
+        return None
     expected_bindings = {
         "attempt_id": attempt_id,
         "lease_id": lease_id,
         "work_order_digest": execution.get("work_order_digest"),
         "adapter_request_digest": execution.get("adapter_request_digest"),
         "context_snapshot_digest": execution.get("context_snapshot_digest"),
+        "adapter_id": execution.get("adapter_id"),
     }
     if any(journal.get(key) != value for key, value in expected_bindings.items()):
         raise ProviderRunnerError("provider_attempt_result_binding_mismatch")
@@ -586,7 +685,9 @@ def recover_completed_provider_attempt(
     if Path(str(journal.get("transcript_path") or "")) != attempt_transcript_path:
         raise ProviderRunnerError("provider_attempt_transcript_path_mismatch")
     transcript_payload = read_private_json(
-        attempt_transcript_path, artifact_kind="provider_attempt_transcript"
+        state_root,
+        attempt_transcript_path,
+        artifact_kind="provider_attempt_transcript",
     )
     if journal.get("transcript_sha256") != file_sha256(attempt_transcript_path):
         raise ProviderRunnerError("provider_attempt_transcript_digest_mismatch")
@@ -595,7 +696,7 @@ def recover_completed_provider_attempt(
     request_path = adapter_request_path(
         state_root, str(run["run_id"]), step_id, str(adapter["provider_adapter_id"])
     )
-    request = read_private_json(request_path, artifact_kind="adapter_request")
+    request = read_private_json(state_root, request_path, artifact_kind="adapter_request")
     request_copy = dict(request)
     supplied_digest = str(request_copy.pop("adapter_request_digest", ""))
     if (
@@ -608,12 +709,13 @@ def recover_completed_provider_attempt(
     ):
         raise ProviderRunnerError("adapter_request_digest_mismatch")
 
-    report_path = report_gate.report_path(state_root, str(run["run_id"]), step_id)
-    evidence_path = Path(str(request["evidence_path"]))
-    transcript_path = Path(str(request["transcript_path"]))
-    if transcript_path != provider_transcript_path(state_root, str(run["run_id"]), step_id):
-        raise ProviderRunnerError("provider_transcript_path_mismatch")
-    private_atomic_write_json(transcript_path, transcript_payload)
+    report_path, evidence_path, transcript_path = verified_request_artifact_paths(
+        state_root=state_root,
+        run_id=str(run["run_id"]),
+        step_id=step_id,
+        request=request,
+    )
+    private_atomic_write_json(state_root, transcript_path, transcript_payload)
     recovered_details = dict(details)
     recovered_details["transcript_sha256"] = file_sha256(transcript_path)
     if transcript_payload.get("provider_transcript_version") == "1":
@@ -626,7 +728,7 @@ def recover_completed_provider_attempt(
         outcome=outcome,
         details=recovered_details,
     )
-    private_atomic_write_json(evidence_path, evidence)
+    private_atomic_write_json(state_root, evidence_path, evidence)
     if outcome == "ok":
         report_path.parent.mkdir(parents=True, exist_ok=True)
         run_store.atomic_write_json(report_path, report)
@@ -1002,9 +1104,10 @@ def normalized_evidence(
     return {key: value for key, value in evidence.items() if value is not None}
 
 
-def write_signal_transcript(path: Path, payload: dict[str, Any]) -> None:
-    secure_artifact_tree(path, "provider-evidence")
+def write_signal_transcript(state_root: Path, path: Path, payload: dict[str, Any]) -> None:
+    secure_artifact_tree(state_root, path, "provider-evidence")
     private_atomic_write_json(
+        state_root,
         path,
         {
             "transcript_signal_version": "1",
@@ -1016,6 +1119,7 @@ def write_signal_transcript(path: Path, payload: dict[str, Any]) -> None:
 
 
 def write_live_transcript(
+    state_root: Path,
     path: Path,
     *,
     stdout: bytes,
@@ -1023,7 +1127,7 @@ def write_live_transcript(
     outcome: str,
     exit_code: Any,
 ) -> dict[str, Any]:
-    secure_artifact_tree(path, "provider-evidence")
+    secure_artifact_tree(state_root, path, "provider-evidence")
     payload = {
         "provider_transcript_version": "1",
         "written_at": now_iso(),
@@ -1039,6 +1143,7 @@ def write_live_transcript(
         "raw_content_policy": "confined_provider_evidence_path_only",
     }
     private_atomic_write_json(
+        state_root,
         path,
         payload,
     )
@@ -1111,6 +1216,23 @@ def run_provider(
             run_state = str(run.get("run_state") or "")
             if run_state == "waiting_provider":
                 execution = run.get("provider_execution")
+                recorded_adapter_id = (
+                    str(execution.get("adapter_id") or "")
+                    if isinstance(execution, dict)
+                    else ""
+                )
+                if recorded_adapter_id:
+                    recorded_adapter = adapters.get(recorded_adapter_id)
+                    if recorded_adapter is None:
+                        return {
+                            "schema_version": 1,
+                            "decision": "blocked",
+                            "reason": "recorded_provider_adapter_unavailable",
+                            "workflow_run": run,
+                        }
+                    adapter_id = recorded_adapter_id
+                    adapter = recorded_adapter
+                    subject["adapter_id"] = recorded_adapter_id
                 execution_phase = execution.get("phase") if isinstance(execution, dict) else ""
                 if execution_phase == "result_ready" or not execution_lease_valid(execution):
                     try:
@@ -1339,25 +1461,44 @@ def run_provider(
                     }
             attempt_id = "provider-attempt-" + uuid.uuid4().hex
             lease_id = "provider-lease-" + uuid.uuid4().hex
-            request = adapter_request(
-                state_root=state_root,
-                run=run,
-                work_order=work_order,
-                adapter=adapter,
-                principal=principal,
-                work_order_digest=order_digest,
-                snapshot_path=snapshot_path,
-                attempt_id=attempt_id,
-                lease_id=lease_id,
-                timeout_seconds=timeout_seconds,
-                execution_binding=execution_binding,
-            )
+            try:
+                request = adapter_request(
+                    state_root=state_root,
+                    run=run,
+                    work_order=work_order,
+                    adapter=adapter,
+                    principal=principal,
+                    work_order_digest=order_digest,
+                    snapshot_path=snapshot_path,
+                    attempt_id=attempt_id,
+                    lease_id=lease_id,
+                    timeout_seconds=timeout_seconds,
+                    execution_binding=execution_binding,
+                )
+            except ProviderRunnerError as exc:
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": str(exc),
+                    "workflow_run": run,
+                }
             request_path = adapter_request_path(state_root, run_id, step_id, adapter["provider_adapter_id"])
-            secure_directory(request_path.parent.parent)
-            private_atomic_write_json(request_path, request)
-            report_path = report_gate.report_path(state_root, run_id, step_id)
-            evidence_path = Path(request["evidence_path"])
-            transcript_path = Path(request["transcript_path"])
+            secure_directory(state_root, request_path.parent.parent)
+            private_atomic_write_json(state_root, request_path, request)
+            try:
+                report_path, evidence_path, transcript_path = verified_request_artifact_paths(
+                    state_root=state_root,
+                    run_id=run_id,
+                    step_id=step_id,
+                    request=request,
+                )
+            except ProviderRunnerError as exc:
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": str(exc),
+                    "workflow_run": run,
+                }
             run["provider_execution"] = build_provider_execution(
                 run=run,
                 adapter_id=adapter_id,
@@ -1422,6 +1563,7 @@ def run_provider(
         attempt_result_path, attempt_transcript_path = provider_attempt_paths(state_root, run_id, attempt_id)
         if was_live:
             transcript_payload = write_live_transcript(
+                state_root,
                 attempt_transcript_path,
                 stdout=stdout,
                 stderr=stderr,
@@ -1432,7 +1574,11 @@ def run_provider(
             details["stderr_sha256"] = transcript_payload["stderr_sha256"]
             details["transcript_sha256"] = file_sha256(attempt_transcript_path)
         else:
-            write_signal_transcript(attempt_transcript_path, {"outcome": outcome, "details": details})
+            write_signal_transcript(
+                state_root,
+                attempt_transcript_path,
+                {"outcome": outcome, "details": details},
+            )
             details.setdefault("transcript_sha256", file_sha256(attempt_transcript_path))
         journal = {
             "attempt_result_version": "1",
@@ -1441,6 +1587,7 @@ def run_provider(
             "work_order_digest": request["work_order_digest"],
             "adapter_request_digest": request["adapter_request_digest"],
             "context_snapshot_digest": request["context_snapshot_digest"],
+            "adapter_id": adapter_id,
             "outcome": outcome,
             "reason_class": details.get("reason") or outcome,
             "transcript_path": str(attempt_transcript_path),
@@ -1449,7 +1596,7 @@ def run_provider(
             "report": report,
             "recorded_at": now_iso(),
         }
-        private_atomic_write_json(attempt_result_path, journal)
+        private_atomic_write_json(state_root, attempt_result_path, journal)
 
         with run_lock.hold_global_lock(
             state_root,
@@ -1474,6 +1621,7 @@ def run_provider(
                 }
             if was_live:
                 canonical_payload = write_live_transcript(
+                    state_root,
                     transcript_path,
                     stdout=stdout,
                     stderr=stderr,
@@ -1484,7 +1632,11 @@ def run_provider(
                 details["stderr_sha256"] = canonical_payload["stderr_sha256"]
                 details["transcript_sha256"] = file_sha256(transcript_path)
             else:
-                write_signal_transcript(transcript_path, {"outcome": outcome, "details": details})
+                write_signal_transcript(
+                    state_root,
+                    transcript_path,
+                    {"outcome": outcome, "details": details},
+                )
                 details["transcript_sha256"] = file_sha256(transcript_path)
             evidence = normalized_evidence(
                 request=request,
@@ -1493,7 +1645,7 @@ def run_provider(
                 outcome=outcome,
                 details=details,
             )
-            private_atomic_write_json(evidence_path, evidence)
+            private_atomic_write_json(state_root, evidence_path, evidence)
             execution["last_outcome"] = {
                 "reason_class": details.get("reason") or outcome,
                 "recorded_at": now_iso(),
