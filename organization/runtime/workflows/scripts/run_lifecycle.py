@@ -48,6 +48,7 @@ EXECUTION_PRINCIPAL_TYPES = {
     "manual_operator",
     "harness_runner",
     "orchestrator_start",
+    "scoped_worker_executor",
 }
 
 

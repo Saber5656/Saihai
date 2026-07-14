@@ -21,6 +21,8 @@ TASK_RUNS_RE = re.compile(r"^/orchestrator/tasks/([^/]+)/runs$")
 REQUEST_READ_RE = re.compile(r"^/frontdoor/requests/([^/]+)$")
 BRIDGE_PROJECTION_RE = re.compile(r"^/main-agent/projections/([^/]+)$")
 CHILD_THREAD_CREATE_PATH = "/action-gateway/child-thread-create"
+SCOPED_WORKER_DERIVE_PATH = "/action-gateway/scoped-worker-capabilities"
+SCOPED_WORKER_EXECUTE_PATH = "/action-gateway/scoped-worker-execute"
 BODY_PRINCIPAL_FIELDS = {"principal_type", "principal_id", "authn_method"}
 MAX_BODY_BYTES = 2_000_000
 
@@ -688,6 +690,35 @@ class Handler(BaseHTTPRequestHandler):
                     state_root=self.state_root,
                     plan=body.get("plan") if isinstance(body.get("plan"), dict) else {},
                     result=body.get("result") if isinstance(body.get("result"), dict) else {},
+                    principal=self._channel_principal(body, allowed_channels={"action_gateway"}),
+                )
+                self._send_json(payload)
+                return
+            if self.path == SCOPED_WORKER_DERIVE_PATH:
+                allowed = {"run_id", "step_id"}
+                extra = sorted(set(body) - allowed)
+                if extra:
+                    raise frontdoor.FrontdoorError(
+                        "scoped worker derive unexpected fields: " + ",".join(extra)
+                    )
+                payload = frontdoor.derive_scoped_worker_capability(
+                    state_root=self.state_root,
+                    run_id=str(body["run_id"]),
+                    step_id=str(body["step_id"]),
+                    principal=self._channel_principal(body, allowed_channels={"action_gateway"}),
+                )
+                self._send_json(payload)
+                return
+            if self.path == SCOPED_WORKER_EXECUTE_PATH:
+                allowed = {"capability_id"}
+                extra = sorted(set(body) - allowed)
+                if extra:
+                    raise frontdoor.FrontdoorError(
+                        "scoped worker execute unexpected fields: " + ",".join(extra)
+                    )
+                payload = frontdoor.execute_scoped_worker(
+                    state_root=self.state_root,
+                    capability_id=str(body["capability_id"]),
                     principal=self._channel_principal(body, allowed_channels={"action_gateway"}),
                 )
                 self._send_json(payload)

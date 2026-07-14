@@ -23,6 +23,8 @@ prefix_rule(
         "python3 scripts/configure_organization.py workflow-frontdoor drain --run-id run-example",
         "python3 scripts/configure_organization.py workflow-frontdoor run-provider --run-id run-example --adapter-json adapter.json",
         "python3 scripts/configure_organization.py workflow-frontdoor child-thread-create --plan-json plan.json --result-json result.json",
+        "python3 scripts/configure_organization.py workflow-frontdoor scoped-worker-derive --run-id run-example --step-id implement",
+        "python3 scripts/configure_organization.py workflow-frontdoor scoped-worker-execute --capability-id cap-example",
     ],
 )
 
@@ -44,5 +46,7 @@ prefix_rule(
         "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary drain --run-id run-example",
         "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary run-provider --run-id run-example --adapter-json adapter.json",
         "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary child-thread-create --plan-json plan.json --result-json result.json",
+        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary scoped-worker-derive --run-id run-example --step-id implement",
+        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary scoped-worker-execute --capability-id cap-example",
     ],
 )

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sahai.local/schemas/workflows/scoped-worker-result.schema.json",
+  "title": "Scoped Worker Result",
+  "type": "object",
+  "required": ["result_version", "status", "summary", "changed_paths", "tests", "evidence"],
+  "properties": {
+    "result_version": { "const": "1" },
+    "status": { "type": "string", "enum": ["completed", "failed", "blocked"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "changed_paths": { "type": "array", "items": { "type": "string" } },
+    "tests": { "type": "array", "items": { "type": "object" } },
+    "evidence": { "type": "array", "items": { "type": "object" } }
+  },
+  "additionalProperties": false
+}

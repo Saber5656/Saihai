@@ -13,6 +13,8 @@
       "Bash(python3 scripts/saihai.py frontdoor status *)",
       "Bash(python3 scripts/configure_organization.py workflow-frontdoor approve *)",
       "Bash(python3 scripts/configure_organization.py workflow-frontdoor status *)",
+      "Bash(python3 scripts/configure_organization.py workflow-frontdoor scoped-worker-derive *)",
+      "Bash(python3 scripts/configure_organization.py workflow-frontdoor scoped-worker-execute *)",
       "Read(.env)",
       "Read(.env.*)",
       "Read(**/.env)",

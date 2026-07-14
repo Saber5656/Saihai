@@ -36,6 +36,8 @@ REQUIRED_CLAUDE_DENY_ENTRIES = {
     "Bash(python3 scripts/saihai.py frontdoor status *)",
     "Bash(python3 scripts/configure_organization.py workflow-frontdoor approve *)",
     "Bash(python3 scripts/configure_organization.py workflow-frontdoor status *)",
+    "Bash(python3 scripts/configure_organization.py workflow-frontdoor scoped-worker-derive *)",
+    "Bash(python3 scripts/configure_organization.py workflow-frontdoor scoped-worker-execute *)",
     "Read(.env)",
     "Read(**/.env)",
     "Read(*credential*)",
@@ -222,6 +224,8 @@ def test_codex_rules_allow_only_bridge_prefixes() -> None:
     )
     assert_contains(rules, "run-provider", "negative provider-dispatch example")
     assert_contains(rules, "child-thread-create", "negative child-thread action example")
+    assert_contains(rules, "scoped-worker-derive", "negative scoped capability example")
+    assert_contains(rules, "scoped-worker-execute", "negative scoped execution example")
     assert_contains(rules, "git status", "negative git example")
 
 
@@ -341,6 +345,26 @@ def test_codex_rules_with_installed_execpolicy() -> None:
             "{}",
             "--result-json",
             "{}",
+        ],
+        [
+            "python3",
+            "scripts/configure_organization.py",
+            "workflow-frontdoor",
+            "scoped-worker-derive",
+            "--run-id",
+            "run-example",
+            "--step-id",
+            "implement",
+        ],
+        [
+            "python3",
+            "scripts/configure_organization.py",
+            "workflow-frontdoor",
+            "--state-root",
+            CODEX_CANARY_STATE_ROOT,
+            "scoped-worker-execute",
+            "--capability-id",
+            "cap-example",
         ],
         ["git", "status"],
     ]

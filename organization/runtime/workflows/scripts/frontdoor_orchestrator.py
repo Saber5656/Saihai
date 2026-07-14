@@ -30,6 +30,7 @@ import task_state_bridge
 import work_order_builder
 import workflow_selector
 import provider_runner
+import scoped_worker_executor
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -86,6 +87,17 @@ BRIDGE_FORBIDDEN_FIELDS = {
     "git_command",
     "report_path",
     "shell_command",
+    "command",
+    "command_argv",
+    "raw_cli",
+    "raw_prompt",
+    "worker_prompt",
+    "worker_backend",
+    "branch",
+    "branch_name",
+    "provider",
+    "provider_id",
+    "network",
     "evidence_path",
     "transcript_path",
     "worktree_path",
@@ -413,6 +425,9 @@ def state_paths(state_root: Path) -> dict[str, Path]:
         "signing_keys": state_root / "principal-keys",
         "channel_tokens": state_root / "channel-tokens",
         "child_thread_actions": state_root / "child-thread-actions",
+        "worker_capabilities": state_root / "worker-capabilities",
+        "worker_executions": state_root / "worker-executions",
+        "worker_evidence": state_root / "worker-evidence",
     }
 
 
@@ -596,6 +611,9 @@ def principal_from_authenticated_channel(state_root: Path, channel: str, token: 
     if not hmac.compare_digest(token, expected):
         raise FrontdoorError("invalid orchestrator channel token")
     principal_type, principal_id, authn_method = HTTP_CHANNEL_PRINCIPALS[channel]
+    if channel == "action_gateway":
+        credential_binding = hashlib.sha256(token.encode("utf-8")).hexdigest()[:24]
+        principal_id = f"{principal_id}:{credential_binding}"
     return make_principal(principal_type, principal_id, authn_method=authn_method)
 
 
@@ -1842,6 +1860,10 @@ def build_bridge_projection(
             state_root,
             str(record.get("task_id") or ""),
         ),
+        "worker_execution_summaries": scoped_worker_executor.list_redacted_summaries(
+            state_root,
+            task_id=str(record.get("task_id") or ""),
+        ),
         "redacted_fields": [
             "user_prompt",
             "request_path",
@@ -1856,6 +1878,12 @@ def build_bridge_projection(
             "worktree_path",
             "repo_root",
             "initial_instruction_ref",
+            "worker_instruction",
+            "worker_result",
+            "worker_evidence_path",
+            "capability_nonce",
+            "capability_signature",
+            "executor_key",
         ],
         "transition_effect": "none",
     }, record
@@ -3174,6 +3202,95 @@ def verify_completion(
     return payload
 
 
+def _assert_action_gateway_host(principal: dict[str, Any], *, state_root: Path, transition: str, subject: dict[str, Any]) -> None:
+    assert_allowed_principal(
+        state_root=state_root,
+        principal=principal,
+        allowed_types=ACTION_GATEWAY_PRINCIPAL_TYPES,
+        transition=transition,
+        subject=subject,
+        blocked_reason=f"{transition} requires action gateway executor",
+    )
+
+
+def _scoped_worker_worktree_root() -> Path:
+    configured = os.environ.get("SAIHAI_SCOPED_WORKTREE_ROOT")
+    if not configured:
+        raise FrontdoorError("SAIHAI_SCOPED_WORKTREE_ROOT is required")
+    return Path(configured).expanduser()
+
+
+def _scoped_worker_repo_root() -> Path:
+    configured = os.environ.get("SAIHAI_SCOPED_REPO_ROOT")
+    return Path(configured).expanduser() if configured else REPO_ROOT
+
+
+def derive_scoped_worker_capability(
+    *,
+    state_root: Path,
+    run_id: str,
+    step_id: str,
+    principal: dict[str, Any],
+) -> dict[str, Any]:
+    subject = {"run_id": run_id, "step_id": step_id}
+    _assert_action_gateway_host(
+        principal,
+        state_root=state_root,
+        transition="derive_scoped_worker_capability",
+        subject=subject,
+    )
+    try:
+        capability = scoped_worker_executor.derive_capability_from_state(
+            state_root=state_root,
+            run_id=run_id,
+            step_id=step_id,
+            repo_root=_scoped_worker_repo_root(),
+            repo_full_name="Saber5656/Saihai",
+            worktree_root=_scoped_worker_worktree_root(),
+            principal=scoped_worker_executor.executor_principal(principal),
+            gateway_principal=principal,
+            signing_key=scoped_worker_executor.load_executor_key(),
+        )
+    except scoped_worker_executor.ScopedWorkerError as exc:
+        raise FrontdoorError(exc.reason_class) from exc
+    return {
+        "schema_version": 1,
+        "decision": "ok",
+        "capability_id": capability["capability_id"],
+        "capability_digest": capability["capability_digest"],
+        "task_id": capability["task_id"],
+        "run_id": capability["run_id"],
+        "step_id": capability["step_id"],
+        "backend_id": capability["worker_backend"]["backend_id"],
+        "expires_at": capability["expires_at"],
+    }
+
+
+def execute_scoped_worker(
+    *,
+    state_root: Path,
+    capability_id: str,
+    principal: dict[str, Any],
+) -> dict[str, Any]:
+    subject = {"capability_id": capability_id}
+    _assert_action_gateway_host(
+        principal,
+        state_root=state_root,
+        transition="execute_scoped_worker",
+        subject=subject,
+    )
+    try:
+        return scoped_worker_executor.execute_capability(
+            state_root=state_root,
+            capability_id=capability_id,
+            principal=scoped_worker_executor.executor_principal(principal),
+            gateway_principal=principal,
+            signing_key=scoped_worker_executor.load_executor_key(),
+        )
+    except scoped_worker_executor.ScopedWorkerError as exc:
+        raise FrontdoorError(exc.reason_class) from exc
+
+
 def render_vault_evidence_markdown(block: dict[str, Any]) -> str:
     return completion_gate.render_vault_evidence_markdown(block)
 
@@ -3224,13 +3341,19 @@ def build_work_order(
         refs = run["activation"]["context_scope"]["refs"]
         resolved_refs = [{"type": "repo_file", "value": ref, "path": ref} for ref in refs]
     step_id = str(step["id"])
-    authority_subject = {
-        "request_id": str(run["request_id"]),
-        "run_id": str(run["run_id"]),
-        "workflow_id": str(run["workflow_id"]),
-        "step_id": step_id,
-    }
-    return work_order_builder.build_work_order(
+    worker_execution_plan = None
+    if str(step.get("permission_mode") or "") == "edit" and os.environ.get("SAIHAI_SCOPED_CODEX_EXECUTABLE"):
+        try:
+            worker_execution_plan = scoped_worker_executor.build_execution_plan(
+                task_id=str(run["task_id"]),
+                run_id=str(run["run_id"]),
+                step_id=step_id,
+                repo_root=_scoped_worker_repo_root(),
+                repo_full_name="Saber5656/Saihai",
+            )
+        except scoped_worker_executor.ScopedWorkerError as exc:
+            raise FrontdoorError(exc.reason_class) from exc
+    work_order = work_order_builder.build_work_order(
         run=run,
         request_record=request_record,
         template=template,
@@ -3238,14 +3361,18 @@ def build_work_order(
         issuer_principal_redacted=redacted_principal(issuer_principal),
         resolved_refs=resolved_refs,
         policy_digest_value=policy_digest(request_record["approved_activation"]),
-        signature=sign_transition(
-            state_root=state_root,
-            principal=issuer_principal,
-            transition="issue_work_order",
-            subject=authority_subject,
-        ),
+        signature=None,
         report_path_value=str(report_path(state_root, str(run["run_id"]), step_id)),
+        worker_execution_plan=worker_execution_plan,
     )
+    unsigned_digest = stable_digest(work_order)
+    work_order["work_order_authority"]["signature"] = sign_transition(
+        state_root=state_root,
+        principal=issuer_principal,
+        transition="issue_work_order",
+        subject={"unsigned_work_order_digest": "sha256:" + unsigned_digest},
+    )
+    return work_order
 
 
 def parser() -> argparse.ArgumentParser:

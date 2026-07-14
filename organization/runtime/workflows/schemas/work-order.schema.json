@@ -258,6 +258,17 @@
         }
       },
       "additionalProperties": false
+    },
+    "worker_execution_plan": {
+      "type": "object",
+      "required": ["plan_version", "repository", "worktree", "worker_backend"],
+      "properties": {
+        "plan_version": { "const": "1" },
+        "repository": { "type": "object" },
+        "worktree": { "type": "object" },
+        "worker_backend": { "type": "object" }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,

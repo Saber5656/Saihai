@@ -303,6 +303,34 @@
         }
       },
       "additionalProperties": false
+    },
+    "worker_execution_summary": {
+      "type": "object",
+      "required": [
+        "execution_id",
+        "capability_digest",
+        "task_id",
+        "run_id",
+        "step_id",
+        "backend_id",
+        "status",
+        "result_digest",
+        "evidence_digest",
+        "failure_reason"
+      ],
+      "properties": {
+        "execution_id": { "type": ["string", "null"] },
+        "capability_digest": { "type": ["string", "null"] },
+        "task_id": { "type": ["string", "null"] },
+        "run_id": { "type": ["string", "null"] },
+        "step_id": { "type": ["string", "null"] },
+        "backend_id": { "type": ["string", "null"] },
+        "status": { "type": ["string", "null"] },
+        "result_digest": { "type": ["string", "null"] },
+        "evidence_digest": { "type": ["string", "null"] },
+        "failure_reason": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
     }
   },
   "required": [
@@ -418,6 +446,12 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/child_thread_summary"
+      }
+    },
+    "worker_execution_summaries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/worker_execution_summary"
       }
     },
     "redacted_fields": {

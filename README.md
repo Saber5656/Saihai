@@ -56,6 +56,7 @@ typed report / evidence gate です。
 | Report validation | typed report と normalized provider evidence が canonical result。stdout、provider transcript、tmux pane output は signal only |
 | Main-agent bridge | main agent は request submit、redacted projection read、ack だけが可能。classification、approval、run 作成、adapter 準備、report path 指定は拒否される |
 | Child-thread action gateway | issue-scoped child worktree chat は `child-thread-create` action gateway で記録する。main-agent は raw `create_thread` / `fork_thread` / shell / git 権限を持たず、projection の redacted summary だけを読む |
+| Scoped Worker Executor | 承認済み work order から host が capability を導出し、task worktree に固定した Codex CLI worker を起動する。main-agent は capability 発行・実行 endpoint を呼べず、redacted execution summary だけを読む |
 | Status viewer | ITB session state、queue inbox、reports、role metadata、organization settings を read-only に表示する |
 
 ## 明示的な非スコープ
@@ -200,6 +201,20 @@ python3 scripts/configure_organization.py workflow-frontdoor --help
 default state root は `~/.codex/state/itb/frontdoor-orchestrator` です。
 検証時は `--state-root /tmp/frontdoor-state` のように disposable root を使ってください。
 
+Scoped Worker Executor の live backend は fail-closed で無効です。host operator が次の既存資産を手動設定した場合だけ起動できます。executor は key や credential を生成しません。
+
+| Environment | Purpose |
+|---|---|
+| `SAIHAI_SCOPED_EXECUTOR_KEY_FILE` | capability HMAC key。通常 file、symlink 不可、mode `0600`、32 bytes 以上 |
+| `SAIHAI_SCOPED_WORKTREE_ROOT` | host が task/run binding から worktree path を導出する canonical root |
+| `SAIHAI_SCOPED_REPO_ROOT` | executor 対象 repository の host-owned absolute path。未設定時は Saihai repo root |
+| `SAIHAI_SCOPED_CODEX_EXECUTABLE` | operator が固定する Codex CLI absolute path。digest を work order/capability に binding し、group/world writable binary は拒否 |
+| `SAIHAI_SCOPED_CODEX_HOME` | worker 専用 Codex runtime/auth root。main-agent session の config/profile を継承しない |
+| `SAIHAI_ENABLE_SCOPED_WORKER_LIVE=1` | live Codex CLI 起動の明示 gate。未設定時は deterministic fake harness だけが利用可能 |
+
+初期 v1 は whole task worktree scope のみを機械的に受理します。subpath、commit、push、PR、worker-tool network、任意 provider は fail-closed です。Codex model control-plane は固定 backend の host transport であり、worker tool への network/provider grant ではありません。
+Scoped worker の capability 発行・実行には CLI subcommand を設けず、credential-bound な `action_gateway` HTTP channel だけを host process boundary として使用します。
+
 ## Frontdoor HTTP API
 
 HTTP wrapper は `127.0.0.1` bind を推奨します。
@@ -219,6 +234,8 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
 | `GET /main-agent/projections/{request_id}` | redacted projection read |
 | `POST /main-agent/ack-output` | verified no-op acknowledgement |
 | `POST /action-gateway/child-thread-create` | validated child-thread plan/result の記録。`action_gateway` channel 専用 |
+| `POST /action-gateway/scoped-worker-capabilities` | frozen work order から capability を発行。body は `run_id` / `step_id` のみ、`action_gateway` channel 専用 |
+| `POST /action-gateway/scoped-worker-execute` | capability id を検証・消費して固定 worker を起動。body は `capability_id` のみ、`action_gateway` channel 専用 |
 | `POST /frontdoor/propose` | operator proposal |
 | `POST /frontdoor/approve` | human UI approval |
 | `POST /orchestrator/runs` | create workflow run |
