@@ -49,6 +49,7 @@ def test_local_model_pack_remains_discoverable() -> None:
     assert "dataExtensions:" in pack
     assert "models/**/*.yaml" in pack
     assert "extensible: barrierModel" in model
+    assert '"host_state_root"' in model
     assert "Member[configured_state_root].ReturnValue" in model
     assert "path-injection" in model
 

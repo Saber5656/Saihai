@@ -440,8 +440,8 @@ def test_state_root_catalog_is_loaded_only_from_primary_checkout() -> None:
         subprocess.run(["git", "-C", str(attacker_repo), "init"], check=True, capture_output=True, text=True)
         previous_git_dir = os.environ.get("GIT_DIR")
         os.environ["GIT_DIR"] = str(attacker_repo / ".git")
-        previous_primary_root = frontdoor_module.MANAGED_PRIMARY_CHECKOUT_ROOT
-        frontdoor_module.MANAGED_PRIMARY_CHECKOUT_ROOT = primary
+        previous_primary_root = frontdoor_module.host_state_root.MANAGED_PRIMARY_CHECKOUT_ROOT
+        frontdoor_module.host_state_root.MANAGED_PRIMARY_CHECKOUT_ROOT = primary
         worktree_gitfile = worktree / ".git"
         original_gitfile = worktree_gitfile.read_text(encoding="utf-8")
         worktree_gitfile.write_text(f"gitdir: {attacker_repo / '.git'}\n", encoding="utf-8")
@@ -491,7 +491,7 @@ def test_state_root_catalog_is_loaded_only_from_primary_checkout() -> None:
         assert_equal(missing_catalog, {}, "missing-race default catalog")
         assert_equal(missing_diagnostics["status"], "not_configured", "missing-race status")
 
-        original_parser = frontdoor_module.parse_directory_catalog
+        original_parser = frontdoor_module.host_state_root.parse_directory_catalog
 
         def replace_catalog_after_read(text: str) -> dict[str, str]:
             catalog_path.unlink()
@@ -502,11 +502,11 @@ def test_state_root_catalog_is_loaded_only_from_primary_checkout() -> None:
             catalog_path.chmod(0o644)
             return original_parser(text)
 
-        frontdoor_module.parse_directory_catalog = replace_catalog_after_read
+        frontdoor_module.host_state_root.parse_directory_catalog = replace_catalog_after_read
         try:
             _path, snapshot_catalog, _diagnostics = frontdoor_module.load_primary_directory_catalog(worktree)
         finally:
-            frontdoor_module.parse_directory_catalog = original_parser
+            frontdoor_module.host_state_root.parse_directory_catalog = original_parser
         assert_equal(
             snapshot_catalog["SAIHAI_ORCH_STATE_ROOT"],
             "/tmp/saihai-primary-test-state",
@@ -547,7 +547,7 @@ def test_state_root_catalog_is_loaded_only_from_primary_checkout() -> None:
             assert "catalog_must_be_regular_file" in str(exc)
         else:
             raise AssertionError("symlink primary catalog should be rejected")
-        frontdoor_module.MANAGED_PRIMARY_CHECKOUT_ROOT = previous_primary_root
+        frontdoor_module.host_state_root.MANAGED_PRIMARY_CHECKOUT_ROOT = previous_primary_root
 
 
 def test_state_artifact_category_symlink_is_rejected() -> None:
