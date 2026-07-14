@@ -408,26 +408,26 @@ def _run_files_with_metadata(state_root: Path) -> tuple[list[Path], bool]:
     if not runs_dir.is_dir():
         return [], False
     out: list[Path] = []
+    truncated = False
     try:
         for scanned, path in enumerate(runs_dir.iterdir(), start=1):
             if scanned > MAX_RUN_SCAN_ENTRIES:
-                return sorted(out[:MAX_RUN_DISCOVERY_FILES]), True
+                truncated = True
+                break
             name = path.name
             if name.startswith(".") or not name.endswith(".json"):
                 continue
             if ".error." in name or ".corrupt-" in name:
                 continue
             out.append(path)
-            if len(out) > MAX_RUN_DISCOVERY_FILES:
-                return sorted(out[:MAX_RUN_DISCOVERY_FILES]), True
     except OSError:
-        return sorted(out[:MAX_RUN_DISCOVERY_FILES]), True
-    return sorted(out), False
+        truncated = True
+    return sorted(out), truncated
 
 
 def _run_files(state_root: Path) -> list[Path]:
     paths, _ = _run_files_with_metadata(state_root)
-    return paths
+    return paths[:MAX_RUN_DISCOVERY_FILES]
 
 
 def _iso_to_epoch(value: str) -> float | None:
@@ -453,6 +453,10 @@ def _stale_seconds(value: str) -> int | None:
     return max(0, int(time.time() - epoch))
 
 
+def _workflow_run_sort_key(item: dict) -> tuple[str, str]:
+    return str(item.get("last_transition_at") or ""), str(item.get("run_id") or "")
+
+
 def workflow_run_inventory(
     task_id: str = "",
     session_id: str = "",
@@ -462,7 +466,7 @@ def workflow_run_inventory(
     truncated = False
     for runtime, root in orch_roots():
         paths, root_truncated = _run_files_with_metadata(root)
-        truncated = truncated or root_truncated
+        root_rows: list[dict] = []
         for path in paths:
             row = load_thin_run(path, state_root=root, run_path=path)
             if task_id and str(row.get("task_id") or "") != task_id:
@@ -477,8 +481,14 @@ def workflow_run_inventory(
                 "orch_root": str(root),
                 "stale_seconds": _stale_seconds(str(row.get("last_transition_at") or "")),
             }
-            rows.append(row)
-    rows.sort(key=lambda item: (str(item.get("last_transition_at") or ""), str(item.get("run_id") or "")), reverse=True)
+            root_rows.append(row)
+        root_rows.sort(key=_workflow_run_sort_key, reverse=True)
+        if len(root_rows) > MAX_RUN_DISCOVERY_FILES:
+            root_rows = root_rows[:MAX_RUN_DISCOVERY_FILES]
+            root_truncated = True
+        truncated = truncated or root_truncated
+        rows.extend(root_rows)
+    rows.sort(key=_workflow_run_sort_key, reverse=True)
     return rows, truncated
 
 

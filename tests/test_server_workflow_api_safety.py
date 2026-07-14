@@ -45,13 +45,14 @@ def make_run(
     run_id: str,
     *,
     run_state: str = "step_queued",
+    task_id: str = "TSK-safety",
     session_id: str = "session-safety",
     step_id: str = "review",
 ) -> dict:
     terminal = {"status": "complete", "reason": "report_valid"} if run_state == "complete" else {}
     payload = {
         "run_id": run_id,
-        "task_id": "TSK-safety",
+        "task_id": task_id,
         "request_id": f"req-{run_id}",
         "workflow_id": "single_step_external_review",
         "run_state": run_state,
@@ -413,6 +414,36 @@ def test_discovery_limit_reports_truncation() -> None:
         assert payload["truncated"] is True
 
 
+def test_run_filters_are_applied_before_result_cap() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        for index in range(500):
+            make_run(
+                root,
+                f"run-noise-{index:04d}",
+                task_id="TSK-noise",
+                session_id="session-noise",
+            )
+        make_run(root, "run-task-a", task_id="TSK-target")
+        make_run(root, "run-task-b", task_id="TSK-target")
+        make_run(root, "run-session", session_id="session-target")
+        make_run(root, "run-state", run_state="complete")
+        with http_server(root) as (server, url):
+            paths, scan_truncated = server._run_files_with_metadata(root)
+            task_status, task_payload, _ = request(url, "/api/workflow-runs?task=TSK-target")
+            session_status, session_payload, _ = request(url, "/api/workflow-runs?session=session-target")
+            state_status, state_payload, _ = request(url, "/api/workflow-runs?state=complete")
+        assert len(paths) == 504
+        assert scan_truncated is False
+        assert task_status == session_status == state_status == 200
+        assert [row["run_id"] for row in task_payload["workflow_runs"]] == ["run-task-b", "run-task-a"]
+        assert [row["run_id"] for row in session_payload["workflow_runs"]] == ["run-session"]
+        assert [row["run_id"] for row in state_payload["workflow_runs"]] == ["run-state"]
+        assert task_payload["truncated"] is False
+        assert session_payload["truncated"] is False
+        assert state_payload["truncated"] is False
+
+
 def test_total_directory_scan_is_bounded() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         root = Path(raw_tmp)
@@ -563,6 +594,7 @@ def main() -> None:
         test_lock_owner_uses_safe_projection,
         test_g11_large_inventory_is_fast_and_not_truncated_at_500,
         test_discovery_limit_reports_truncation,
+        test_run_filters_are_applied_before_result_cap,
         test_total_directory_scan_is_bounded,
         test_detail_artifact_count_is_bounded_and_reported,
         test_detail_artifact_byte_limit_counts_json_scalars,
