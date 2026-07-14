@@ -1,8 +1,8 @@
 # Orchestrator Operator Runbook
 
-This runbook is the day-1 operating guide for typed workflow runs.
-It covers the current CLI surface in this directory and marks future commands
-as planned when they are modeled but not implemented.
+This runbook is the day-1 operating guide for typed workflow runs. It separates
+the primary `saihai` CLI, the compatibility `workflow-frontdoor` facade, the
+read-only viewer, and capabilities that remain intentionally unimplemented.
 
 Related issues:
 
@@ -18,11 +18,12 @@ Related issues:
 | Area | Current status |
 |---|---|
 | Current harness | `scripts/configure_organization.py workflow-frontdoor ...` delegates to `organization/runtime/workflows/scripts/frontdoor_orchestrator.py`. |
-| Supported provider path | P0 prepares a bounded `claude_headless_p0` adapter request; live provider execution is outside the harness command set. |
-| Current execution transport | `headless_cli` is the implemented adapter capability. |
+| Supported provider path | `run-provider` supports an explicitly selected offline fake-adapter mode. Live Claude/Codex execution requires `--live`, the exact environment guard, pinned executable bindings, and host-owned confinement configuration. |
+| Current execution transport | `headless_cli` is implemented. Provider credentials and host confinement configuration remain operator-owned. |
 | Legacy tmux transport | `tmux_interactive` is modeled for compatibility only and has no execution path here. |
-| Current scheduler | Invocation-drain, durable state, concurrency 1. The lock policy is represented as `global_advisory_lock` in contracts. |
-| Planned commands | Dedicated `resume`, `abort`, run detail/list, and evidence inspection commands are planned by the implementation issues below. Do not document them as available CLI commands until implemented. |
+| Current scheduler | Invocation-drain, durable state, global advisory lock, concurrency 1, provider leases, heartbeat, bounded retries, resume, and abort are implemented. |
+| Read surfaces | `task-view`, `lock-status`, completion verification, the localhost frontdoor API, and the read-only workflow viewer/API are implemented. |
+| Still planned | Dedicated raw run detail/evidence CLI commands, daemon/watch mode, and tmux worker execution are not implemented. |
 
 ## Day-1 Happy Path
 
@@ -100,10 +101,19 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STAT
 
 Input: `run-id` whose current step has a work order.
 
+Use the fake provider for a reproducible offline day-1 smoke:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" run-provider \
+  --run-id <run_id> \
+  --adapter-id claude_headless_p0 \
+  --fake-provider-mode success
+```
+
 Live execution requires operator-managed pinned executable path/digest values,
 the exact environment guard, and an explicit `--live` flag. Codex additionally
 requires a pinned host confinement wrapper and profile. Credential creation,
-configuration, and inspection remain manual operator work.
+configuration, and inspection remain manual operator work:
 
 ```sh
 SAIHAI_ALLOW_LIVE_PROVIDERS=1 python3 scripts/configure_organization.py workflow-frontdoor \
@@ -116,21 +126,37 @@ output. It grants no provider write authority.
 
 7. Inspect the durable provider result.
 
-The runner owns the typed report, normalized evidence, and owner-only transcript.
+On the `run-provider` path, the host runner owns the typed report, normalized
+evidence, and owner-only transcript. An explicitly approved host-owned
+integration may stage canonical report/evidence for standalone
+`validate-report`; an external provider never receives direct canonical-path
+write authority.
+After a provider attempt succeeds, `run-provider` invokes the report gate and
+returns the resulting terminal or next-action state; a successful fake-provider
+smoke normally reaches `complete` without a second validation command.
 During a long call, `waiting_provider` contains the current attempt/lease,
 heartbeat, timeout, retry counters, and last typed outcome. The global workflow
 lock is not held during the provider subprocess. A single invocation defaults to
 30 minutes and may be configured up to 24 hours; the harness has no cumulative
 deadline. The same retryable failure is automatically retried at most five times.
 
-8. Validate the report.
+Inspect current lock ownership without mutating workflow state:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" lock-status
+```
+
+8. Explicitly validate an externally produced report or replay validation.
 
 Input: `run-id`; optional `--report-path` must match the canonical work-order
 report path and stay under the state root reports directory.
 
-Output: run terminal state. `pass` and `findings` reports complete the run;
-`blocked`, `invalid`, schema errors, missing evidence, or wrong report paths
-block or fail the run.
+Use this command when an approved host-owned integration has placed externally
+produced report/evidence at the canonical paths, or when an operator needs an
+explicit idempotent validation replay. `run-provider` already invokes the same
+report gate. `pass` and
+`findings` reports complete the run; provider-reported `blocked` moves the run
+to `waiting_human`; invalid schema/evidence or wrong paths fail the run.
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" validate-report \
@@ -156,6 +182,17 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STAT
   --request-id req-example
 ```
 
+For the task-linked thin view and final completion decision, use:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" task-view \
+  --task-id TSK-example
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" verify-completion \
+  --run-id <run_id> \
+  --format markdown
+```
+
 ## State Guide
 
 | State | Artifact | Meaning | Operator action |
@@ -164,13 +201,13 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STAT
 | `proposed` | Activation envelope in request `proposal` | Deterministic selection succeeded, but execution has not been explicitly approved. | Review approval view and approve or leave waiting. |
 | `approved` | Request `status` and run `goal_state` | A human/operator approved the bounded workflow. | Create the run. |
 | `created` | Run `run_state` | Durable run exists; no work order has been queued. | Run `drain`. |
-| `step_queued` | Run `run_state` | Work order exists and is ready for an adapter. | Prepare the adapter and dispatch provider work outside the harness. |
-| `waiting_provider` | Run schema state | Modeled state for future provider runner integration. | Inspect adapter/report/evidence paths; planned runner commands must update the runbook when implemented. |
-| `validating` | Run schema state | Modeled state for future validation transition. | Use current `validate-report` command; update runbook when validation state is explicitly persisted. |
+| `step_queued` | Run `run_state` | Work order exists and is ready for an adapter. | Run `run-provider`; use fake mode for offline smoke or the explicitly configured live path. |
+| `waiting_provider` | Run `run_state` | A provider attempt owns a renewable lease and may be running outside the global lock. | Inspect the run, attempt journal, lease, transcript path, and `lock-status`; use `resume` only when the typed result says recovery is required. |
+| `validating` | Run `run_state` | A provider result is ready for typed report/evidence validation. | Run `validate-report`, or `resume` to continue a durable `result_ready` attempt at validation. |
 | `waiting_human` | Request or run state | More human input, classification, approval, or remediation is needed. | Inspect request approval view and audit events. |
 | `complete` | Run `run_state` and terminal status | Typed report and evidence passed validation. | Preserve artifacts and record final evidence. |
-| `failed` | Run `run_state` | Validation failed or provider report returned a blocking result. | Preserve artifacts, inspect errors, and open/follow recovery issue. |
-| `aborted` | Run schema state | Terminal abort is modeled but no dedicated abort command exists yet. | Planned. Do not hand-edit terminal state except as an approved break-glass recovery. |
+| `failed` | Run `run_state` | Provider execution failed terminally, or report/schema/evidence validation was invalid. A schema-valid provider `blocked` result uses `waiting_human` instead. | Preserve artifacts, inspect errors, and open/follow recovery issue. |
+| `aborted` | Run `run_state` | The operator used the typed abort path; the state is terminal. | Preserve artifacts. Replayed aborts do not mutate the terminal run. |
 
 ## Canonical Artifacts
 
@@ -185,7 +222,10 @@ All state is rooted at `--state-root`; the default is
 | Adapter request | `adapter-requests/<run_id>/<step_id>-claude_headless_p0.json` | Provider adapter prompt, evidence path, transcript path, and authority boundary. |
 | Typed report | `reports/<run_id>/<step_id>-external-review-report.json` | Canonical provider result for P0 external review. |
 | Normalized evidence | `provider-evidence/<run_id>/<step_id>-provider-evidence.json` | Canonical provider evidence checked by validation. |
-| Provider transcript | `provider-evidence/<run_id>/<step_id>-claude-transcript.json` | Confined signal only; not authoritative. |
+| Provider transcript | `provider-evidence/<run_id>/<step_id>-provider-transcript.json` | Confined signal only; not authoritative. |
+| Provider attempt journals | `provider-evidence/<run_id>/attempts/<attempt_id>-result.json` | Owner-only durable attempt result used for safe result promotion and recovery. Lease, heartbeat, retry, and current attempt state remain in the run record. |
+| Transition evidence | `transitions/<run_id>/*` | Canonical lifecycle and report-gate transition records. |
+| Scheduler lock | `locks/global-advisory.lock.d/owner.json` | Current mutating operation owner; inspect through `lock-status`. |
 | Audit log | `audit/*.jsonl` | Append-only transition, replay, blocked, approval, and bridge events. |
 | Idempotency record | `idempotency/key-<digest>.json` | Bridge submit replay protection. |
 | Principal keys and channel tokens | `principal-keys/`, `channel-tokens/` | Local signing/authentication material. Preserve permissions and never publish. |
@@ -193,6 +233,36 @@ All state is rooted at `--state-root`; the default is
 Canonical result authority is `typed_report_file` plus
 `normalized_provider_evidence_file`. stdout, tmux pane output, and provider
 transcript are signals only.
+
+## Read-Only Viewer And APIs
+
+The local dashboard lists workflow runs and renders work order, report,
+provider evidence, transition, corrupt-state, and lock information without
+mutating runtime state:
+
+```sh
+python3 server.py --port 8799
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/workflow-runs?session=<id>&task=<id>&state=<state>` | Filtered thin workflow-run summaries. |
+| `GET /api/workflow-run?session=<id>&run=<id>` | Confined run detail, work order, report, evidence, and transition metadata. |
+| `GET /api/workflow-lock` | Read-only lock status for discovered orchestrator roots. |
+
+The authenticated localhost frontdoor API exposes host-owned propose, approve,
+run, resume, abort, completion, and task-view operations. Start it with:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor-server \
+  --state-root "$STATE_ROOT" \
+  --host 127.0.0.1 \
+  --port 8766
+```
+
+The dashboard API remains GET-only. It does not approve activation, run a
+provider, resume or abort a run, change configuration, or expose raw provider
+transcript content.
 
 ## Legacy Queue/Tmux Migration
 
@@ -238,14 +308,30 @@ transcript, and audit JSONL files.
 | Missing typed classification | Request `status = waiting_human`, proposal reason `typed_classification_required`. | Re-run `propose` with the same immutable request data and a valid typed classification, or create a new request id if immutable inputs changed. |
 | Approval challenge mismatch | CLI exits blocked and audit has `approval_challenge_mismatch`. | Read the latest `approval.human_action_id` from the proposal and retry. After rate limit, create a new request id. |
 | Unapproved run creation | `create-run` fails with `approved activation envelope required`. | Approve first; do not fabricate `approved_activation`. |
-| Run not queueable | `drain` returns `drained = false` and `reason = run_state_not_queueable`. | Inspect run state. If terminal, preserve artifacts and stop. If a future runner state is stuck, follow the future resume command once implemented. |
+| Run not queueable | `drain` returns `drained = false` and `reason = run_state_not_queueable`. | Inspect run state. If terminal, preserve artifacts and stop. If non-terminal, run `resume --run-id <id>` and follow its typed next action; use `--requeue` only for operator-approved recovery. |
 | Adapter blocked | `prepare-claude-adapter` returns `work_order_not_adapter_safe`. | Inspect work order permission mode, allowed ops, context refs, and workflow id. Current P0 adapter supports only readonly `single_step_external_review` step `review`. |
-| Provider failure before validation | Missing report/evidence/transcript, provider timeout, or an incomplete provider attempt before `validate-report` terminalizes the run. | Preserve adapter request, transcript, partial report, and evidence. Re-run provider only if the work order and context refs are unchanged. Then run `validate-report`. |
-| Provider report terminalized blocked or invalid | `validate-report` has already set terminal `run_state = failed`, `goal_state = blocked`, and a `provider_report_blocked` / `provider_report_invalid` reason. | Preserve the terminal run and provider artifacts. Create a new request/run for a corrected attempt; rerunning `validate-report` on the terminal run only replays `terminal_run_already_set`. |
+| Provider failure before validation | Missing report/evidence/transcript, provider timeout, or an incomplete attempt leaves a retryable or `waiting_human` run. | Preserve adapter request, transcript, partial report, and evidence. Inspect the typed result and run state. For an approved retry from `waiting_human`, run `resume --run-id <id> --requeue`, then `run-provider`; follow the runner's terminal or next-action result. |
+| Provider reported blocked | The report is schema-valid with `result = blocked`; the report gate sets `run_state = waiting_human` and reason `provider_reported_blocked`. | Preserve the report/evidence and resolve the human decision. Resume/requeue only after the blocking condition is addressed; do not treat the run as terminal failed. |
 | Invalid report | `validate-report` sets run `run_state = failed`, `goal_state = blocked`, terminal reason `invalid_report`. | Preserve the failed report and validation errors. Create a new request/run for a corrected attempt; do not hand-edit the failed run. |
-| Lock contention | Contract says `global_advisory_lock` and concurrency 1, but current P0 has no separate lock-inspection CLI. | Ensure only one operator drains/validates a state root at a time. If a future lock file/API is introduced, this runbook must be updated by that implementation issue. |
+| Lock contention | A mutating command returns `decision = blocked`, `reason = lock_contention`, and owner metadata. | Run `lock-status`. Wait for a live owner. A stale lock is reclaimed by the next mutating operation only after stale-age and owner-liveness checks pass; never delete the lock directory while the owner may be live. |
 | Resume required | Run is non-terminal and provider lease/result state exists. | Run `resume --run-id <id>`. A live lease returns `provider_in_flight`; an expired lease requeues without changing the signed work order; `result_ready` resumes at report validation. |
 | Abort required | Operator must stop a non-terminal run. | Run `abort --run-id <id> --reason <reason>`. Heartbeat detects the lost lease/run state and stops the subprocess; stale worker results are never promoted to canonical artifacts. |
+
+The recovery commands are implemented on the compatibility facade:
+
+```sh
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" resume \
+  --run-id <run_id> \
+  --requeue
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" abort \
+  --run-id <run_id> \
+  --reason "operator cancelled"
+```
+
+Omit `--requeue` when the operator only needs the typed next action. Requeue is
+an explicit recovery choice and does not replace or rewrite the signed work
+order.
 
 Behavior-changing fixes for recovery, locking, resume, abort, provider runners,
 or report validation must update this runbook in the same change.
@@ -273,13 +359,14 @@ Vault record.
 Required after changes to workflow contracts or this runbook:
 
 ```sh
-python3 organization/runtime/workflows/tests/test_workflow_selector.py
-python3 organization/runtime/workflows/scripts/workflow_selector.py validate-contracts
+python3 scripts/validate_all.py
 ```
 
-Recommended when CLI/frontdoor behavior changes:
+Focused commands for selector/frontdoor investigation:
 
 ```sh
+python3 organization/runtime/workflows/tests/test_workflow_selector.py
+python3 organization/runtime/workflows/scripts/workflow_selector.py validate-contracts
 python3 organization/runtime/workflows/tests/test_frontdoor_orchestrator.py
 python3 scripts/configure_organization.py workflow-selector validate-contracts
 ```

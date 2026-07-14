@@ -314,9 +314,13 @@ scope, context refs, and policy digest used for that step attempt. Replaying
 Run contract validation:
 
 ```sh
+python3 scripts/validate_all.py
 python3 organization/runtime/workflows/scripts/workflow_selector.py validate-contracts
 python3 scripts/configure_organization.py workflow-selector validate-contracts
 ```
+
+`scripts/validate_all.py` is the canonical repository-wide offline validation
+command. The selector commands are focused diagnostics for contract work.
 
 Select from typed classification:
 
@@ -356,7 +360,7 @@ control:
 | Group | Commands currently backed on main | Boundary |
 |---|---|---|
 | `frontdoor` | `propose`, `approve`, `status` | Propose and explicitly approve activation artifacts. Never creates workflow runs. |
-| `workflow` | `create-run`, `drain`, `validate-report` | Consumes approved activation/run artifacts. Does not accept raw prompt text as authority. |
+| `workflow` | `create-run`, `drain`, `run-provider`, `validate-report` | Consumes approved activation/run artifacts. Does not accept raw prompt text as authority. |
 
 Commands from the target design whose backing implementations are not yet
 merged are intentionally absent from the parser. There are no dead stubs for
@@ -385,6 +389,11 @@ python3 scripts/saihai.py workflow --state-root /tmp/frontdoor-state create-run 
 
 python3 scripts/saihai.py workflow --state-root /tmp/frontdoor-state drain \
   --run-id <run_id>
+
+python3 scripts/saihai.py workflow --state-root /tmp/frontdoor-state run-provider \
+  --run-id <run_id> \
+  --adapter-id claude_headless_p0 \
+  --fake-provider-mode success
 
 python3 scripts/saihai.py workflow --state-root /tmp/frontdoor-state validate-report \
   --run-id <run_id>
@@ -436,14 +445,23 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
   --run-id <run_id> \
   --adapter-id claude_headless_p0 \
   --fake-provider-mode success
+```
 
-The P0 runner uses fake provider mode for offline validation. Live execution is
+Select `--fake-provider-mode` explicitly for offline validation. Without a fake
+mode or the live gate, provider execution is unavailable by design. Live execution is
 available only with `--live`, `SAIHAI_ALLOW_LIVE_PROVIDERS=1`, pinned executable
 path/digest bindings, and (for Codex) a pinned host confinement wrapper/profile.
 The runner re-verifies the signed frozen work order, exact iteration snapshot,
 bounded context digests, request digest, executable binding, and active lease
 immediately before every provider invocation.
 
+`run-provider` invokes the report gate after a provider result is promoted, so
+its result already carries the terminal or next-action state. Use the standalone
+`validate-report` command when an approved host-owned integration has placed
+externally produced report/evidence at the canonical paths, or for an explicit
+idempotent validation replay:
+
+```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state validate-report \
   --run-id <run_id>
 
@@ -463,8 +481,11 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
 
 `prepare-claude-adapter` is deprecated compatibility output. It returns a
 non-executable artifact with `provider_may_write: []` and points operators to
-`run-provider --live`. Only the live runner may write canonical report,
-evidence, and transcript artifacts.
+`run-provider --live`. Canonical report/evidence artifacts may be placed only by
+the host-owned `run-provider` path or another explicitly approved host-owned
+integration before `validate-report`; external providers receive no direct
+canonical-path write authority. The owner-only transcript artifact is written
+by `run-provider`.
 
 Each CLI invocation has a configurable timeout of 1..86400 seconds (default
 1800). The harness has no cumulative wall-clock deadline. Provider execution is
@@ -651,12 +672,32 @@ server rejects `principal_type`, `principal_id`, and `authn_method` in request
 bodies. Bridge audit events use the authenticated `bridge` channel principal and
 record requester / peer metadata only as non-authoritative details.
 
+## Read-Only Workflow Viewer
+
+The local dashboard is implemented separately from the authenticated frontdoor
+API. It reads confined workflow artifacts and never mutates runtime state:
+
+```sh
+python3 server.py --port 8799
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/workflow-runs?session=<id>&task=<id>&state=<state>` | Filtered thin run summaries. |
+| `GET /api/workflow-run?session=<id>&run=<id>` | Work order, report, provider evidence, transitions, and safe corrupt-state detail. |
+| `GET /api/workflow-lock` | Read-only global lock status for discovered state roots. |
+
+The Workflow Runs panel exposes state badges, task/session filters, stuck-run
+reasons, artifact detail, and lock diagnostics. It does not approve requests,
+start providers, resume or abort runs, change configuration, or return raw
+provider transcript content.
+
 ## Non-Scope
 
 | Non-scope | Reason |
 |---|---|
-| Provider live execution | Runner is a later phase and must be user-owned. |
-| LaunchAgent/watch daemon | P0 fixes the contract first; daemon mode is future work. |
+| Provider credential and host-confinement provisioning | Live execution exists, but credentials, pinned executable configuration, and confinement setup remain manual operator responsibilities. |
+| LaunchAgent/watch daemon | Invocation-driven execution is implemented; daemon mode remains future work. |
 | tmux worker | The adapter schema can represent it, but there is no execution path in P0. |
-| Viewer UI | Artifacts are structured for later Viewer consumption. |
+| Viewer-side mutation controls | The implemented workflow viewer is deliberately read-only. |
 | deploy/push/PR automation | Publication requires a separate gate. |
