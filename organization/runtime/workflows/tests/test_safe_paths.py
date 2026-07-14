@@ -51,6 +51,14 @@ def test_constructor_rejects_traversal_absolute_and_scope_escape() -> None:
             ),
             "state_artifact_namespace_mismatch",
         )
+        expect_rejected(
+            lambda: safe_paths.confined_state_path(
+                root,
+                Path("provider-evidence") / "~" / "result.json",
+                namespaces={"provider-evidence"},
+            ),
+            "unsafe_path_component_1",
+        )
 
 
 def test_confined_path_rejects_symlink_chain() -> None:

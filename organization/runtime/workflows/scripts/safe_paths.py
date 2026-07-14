@@ -72,7 +72,7 @@ def confined_state_path(
         raise SafePathError("unsafe_state_namespace")
     configured_root = state_root.expanduser().absolute()
     root = configured_root.resolve(strict=False)
-    absolute = candidate.expanduser()
+    absolute = candidate
     if not absolute.is_absolute():
         absolute = root / absolute
     else:
