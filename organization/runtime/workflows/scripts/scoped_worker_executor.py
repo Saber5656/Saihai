@@ -24,6 +24,7 @@ from typing import Any, Protocol
 import run_lock
 import run_lifecycle
 import run_store
+import work_order_builder
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -433,10 +434,19 @@ def verify_work_order_signature(state_root: Path, work_order: dict[str, Any]) ->
         raise ScopedWorkerError("work_order_signature_invalid")
 
 
-def load_frozen_work_order(state_root: Path, *, run_id: str, step_id: str) -> tuple[dict[str, Any], str]:
+def verify_frozen_work_order(
+    state_root: Path,
+    *,
+    run_id: str,
+    step_id: str,
+    expected_run_states: set[str],
+    expected_iteration: int | None = None,
+    expected_work_order_digest: str = "",
+) -> tuple[dict[str, Any], str, Path]:
+    """Verify the signed canonical order and its exact iteration snapshot."""
+
     safe_run_id = _artifact_component(run_id, label="run_id")
     safe_step_id = _artifact_component(step_id, label="step_id")
-    order_dir = _state_artifact_path(state_root, "work_orders", safe_run_id)
     order_path = _state_artifact_path(state_root, "work_orders", safe_run_id, f"{safe_step_id}.json")
     try:
         work_order = json.loads(order_path.read_text(encoding="utf-8"))
@@ -445,28 +455,49 @@ def load_frozen_work_order(state_root: Path, *, run_id: str, step_id: str) -> tu
     if not isinstance(work_order, dict):
         raise ScopedWorkerError("work_order_invalid")
     digest = sha256_digest(work_order)
-    snapshots = sorted(
-        path
-        for path in order_dir.iterdir()
-        if path.is_file() and path.name.startswith(f"{safe_step_id}-snapshot-") and path.suffix == ".json"
-    ) if order_dir.is_dir() else []
-    if not snapshots:
+    run = run_store.load_run(state_root, safe_run_id)
+    iteration = expected_iteration if expected_iteration is not None else run.get("iteration")
+    if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
+        raise ScopedWorkerError("work_order_snapshot_invalid")
+    snapshot_path = work_order_builder.snapshot_path(state_root, safe_run_id, safe_step_id, iteration)
+    if not snapshot_path.is_file():
         raise ScopedWorkerError("work_order_snapshot_missing")
     try:
-        snapshot = json.loads(snapshots[-1].read_text(encoding="utf-8"))
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ScopedWorkerError("work_order_snapshot_invalid") from exc
-    if not isinstance(snapshot, dict) or snapshot.get("work_order_digest") != digest or snapshot.get("work_order") != work_order:
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("iteration") != iteration
+        or snapshot.get("run_id") != safe_run_id
+        or snapshot.get("step_id") != safe_step_id
+        or snapshot.get("work_order_digest") != digest
+        or snapshot.get("work_order") != work_order
+        or snapshot.get("activation_scope") != work_order.get("activation_scope")
+        or snapshot.get("context_refs") != work_order.get("context_refs")
+        or snapshot.get("policy_digest") != work_order.get("policy_digest")
+    ):
         raise ScopedWorkerError("work_order_snapshot_mismatch")
-    run = run_store.load_run(state_root, safe_run_id)
+    if expected_work_order_digest and not hmac.compare_digest(digest, expected_work_order_digest):
+        raise ScopedWorkerError("work_order_digest_mismatch")
     for field in ("task_id", "request_id", "run_id"):
         if str(work_order.get(field) or "") != str(run.get(field) or ""):
             raise ScopedWorkerError("work_order_run_binding_mismatch", {"field": field})
     if str(work_order.get("step_id") or "") != safe_step_id or str(run.get("current_step") or "") != safe_step_id:
         raise ScopedWorkerError("work_order_step_binding_mismatch")
-    if run.get("run_state") != "step_queued" or run.get("activation", {}).get("activation_status") != "approved":
+    if run.get("run_state") not in expected_run_states or run.get("activation", {}).get("activation_status") != "approved":
         raise ScopedWorkerError("work_order_not_executable")
     verify_work_order_signature(state_root, work_order)
+    return work_order, digest, snapshot_path
+
+
+def load_frozen_work_order(state_root: Path, *, run_id: str, step_id: str) -> tuple[dict[str, Any], str]:
+    work_order, digest, _snapshot_path = verify_frozen_work_order(
+        state_root,
+        run_id=run_id,
+        step_id=step_id,
+        expected_run_states={"step_queued"},
+    )
     return work_order, digest
 
 

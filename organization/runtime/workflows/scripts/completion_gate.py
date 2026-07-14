@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import base64
+import binascii
+import os
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -196,7 +200,8 @@ def _verify_evidence_digest(
     stdout_sha256 = evidence.get("stdout_sha256")
     provider_evidence = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
     transcript_raw = provider_evidence.get("transcript_path")
-    if not stdout_sha256:
+    transcript_sha256 = evidence.get("transcript_sha256")
+    if not stdout_sha256 and not transcript_sha256:
         skipped.append("digest")
         return
     if not isinstance(transcript_raw, str) or not transcript_raw:
@@ -209,9 +214,38 @@ def _verify_evidence_digest(
     if not transcript_path.exists():
         reasons.append(reason("digest_mismatch", f"transcript file missing: {transcript_path}"))
         return
-    actual = file_sha256(transcript_path)
-    if actual != stdout_sha256:
-        reasons.append(reason("digest_mismatch", f"expected {stdout_sha256}, found {actual}"))
+    if transcript_path.is_symlink():
+        reasons.append(reason("digest_mismatch", "transcript must not be a symlink"))
+        return
+    metadata = transcript_path.stat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        reasons.append(reason("digest_mismatch", "transcript owner or mode is unsafe"))
+        return
+    actual_transcript = file_sha256(transcript_path)
+    expected_transcript = transcript_sha256
+    if expected_transcript and actual_transcript != expected_transcript:
+        reasons.append(
+            reason("digest_mismatch", f"expected transcript {expected_transcript}, found {actual_transcript}")
+        )
+        return
+    if not stdout_sha256:
+        return
+    try:
+        transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+        raw_stdout = base64.b64decode(str(transcript["stdout_base64"]), validate=True)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, binascii.Error) as exc:
+        reasons.append(reason("digest_mismatch", f"invalid bounded transcript: {exc}"))
+        return
+    if len(raw_stdout) > 4_194_304 or transcript.get("stdout_size_bytes") != len(raw_stdout):
+        reasons.append(reason("digest_mismatch", "transcript stdout size is invalid"))
+        return
+    actual_stdout = "sha256:" + hashlib.sha256(raw_stdout).hexdigest()
+    if actual_stdout != stdout_sha256 or transcript.get("stdout_sha256") != stdout_sha256:
+        reasons.append(reason("digest_mismatch", f"expected raw stdout {stdout_sha256}, found {actual_stdout}"))
 
 
 def vault_evidence(state_root: Path, run: dict[str, Any], report: dict[str, Any], evidence: dict[str, Any] | None) -> dict[str, Any]:

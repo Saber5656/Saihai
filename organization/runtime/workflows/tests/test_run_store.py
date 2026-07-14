@@ -316,6 +316,47 @@ def test_extra_keys_are_allowed() -> None:
         assert_equal(run_store.load_run(state_root, "run-future"), run, "future fields")
 
 
+def test_provider_execution_state_is_durable_and_bounded() -> None:
+    execution = {
+        "execution_version": "1",
+        "step_id": "review",
+        "adapter_id": "claude_headless_p0",
+        "work_order_digest": "sha256:" + "a" * 64,
+        "adapter_request_digest": "sha256:" + "b" * 64,
+        "context_snapshot_digest": "sha256:" + "c" * 64,
+        "phase": "invoking",
+        "attempt_number": 1,
+        "attempt_id": "provider-attempt-test",
+        "timeout_seconds": 1800,
+        "lease": {
+            "lease_id": "provider-lease-test",
+            "claimed_by": {"principal_type": "harness_runner"},
+            "claimed_at": "2026-07-14T00:00:00+00:00",
+            "last_heartbeat_at": "2026-07-14T00:00:00+00:00",
+            "lease_expires_at": "2026-07-14T00:01:30+00:00",
+        },
+        "retry": {
+            "last_failure_fingerprint": None,
+            "consecutive_failures": 0,
+            "auto_retries_used": 0,
+            "max_auto_retries": 5,
+        },
+        "last_outcome": None,
+    }
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run = valid_run(provider_execution=execution)
+        run_store.store_run(state_root, run)
+        assert_equal(run_store.load_run(state_root, run["run_id"])["provider_execution"], execution, "execution roundtrip")
+        run["provider_execution"]["timeout_seconds"] = 86401
+        try:
+            run_store.store_run(state_root, run)
+        except run_store.RunStoreError as exc:
+            assert "provider_execution.timeout_seconds must be between 1 and 86400" in exc.errors
+        else:
+            raise AssertionError("provider execution timeout ceiling must be enforced")
+
+
 def main() -> None:
     tests = [
         test_store_and_reload_roundtrip,
@@ -332,6 +373,7 @@ def main() -> None:
         test_terminal_requires_terminal_status,
         test_activation_fields_used_by_drain_are_required,
         test_extra_keys_are_allowed,
+        test_provider_execution_state_is_durable_and_bounded,
     ]
     for test in tests:
         test()
