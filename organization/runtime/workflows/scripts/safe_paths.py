@@ -101,9 +101,4 @@ def confined_state_path(
             raise SafePathError("state_artifact_path_unavailable") from exc
         if stat.S_ISLNK(metadata.st_mode):
             raise SafePathError("state_artifact_symlink")
-    resolved = absolute.resolve(strict=False)
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise SafePathError("state_artifact_path_escape") from exc
-    return resolved
+    return absolute
