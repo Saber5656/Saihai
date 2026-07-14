@@ -33,6 +33,7 @@ EXECUTOR_PRINCIPAL_TYPE = "scoped_worker_executor"
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
 BACKEND_ID = "codex_cli"
 CAPABILITY_VERSION = "1"
+TRANSITION_SIGNATURE_ALGORITHM = "sha256-hmac-sha256-local-principal-key"
 WHOLE_WORKTREE_SCOPE = ["."]
 DEFAULT_TTL_SECONDS = 300
 MAX_TTL_SECONDS = 900
@@ -416,7 +417,18 @@ def verify_work_order_signature(state_root: Path, work_order: dict[str, Any]) ->
         _work_order_signature_key_path(state_root, issuer),
         reason="work_order_signing_key_invalid",
     )
-    expected = "sha256:" + hmac.new(key, canonical_json(material), hashlib.sha256).hexdigest()
+    algorithm = str(signature.get("algorithm") or "") if isinstance(signature, dict) else ""
+    if algorithm == TRANSITION_SIGNATURE_ALGORITHM:
+        keyed_digest = hmac.new(
+            key,
+            canonical_json({"algorithm": TRANSITION_SIGNATURE_ALGORITHM, "material": material}),
+            hashlib.sha256,
+        ).digest()
+        expected = "sha256:" + hashlib.sha256(keyed_digest).hexdigest()
+    elif algorithm == "sha256-local-principal-key":
+        expected = "sha256:" + hmac.new(key, canonical_json(material), hashlib.sha256).hexdigest()
+    else:
+        raise ScopedWorkerError("work_order_signature_invalid")
     if not hmac.compare_digest(supplied, expected):
         raise ScopedWorkerError("work_order_signature_invalid")
 

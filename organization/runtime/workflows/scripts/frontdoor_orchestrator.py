@@ -55,6 +55,7 @@ DEFAULT_STATE_ROOT = HOST_HOME / ".codex" / "state" / "itb" / "frontdoor-orchest
 MANAGED_PRIMARY_CHECKOUT_ROOT = HOST_HOME / "dev" / "Saihai"
 SAFE_HOST_STATE_ROOT_RE = re.compile(r"^/(?:[\w .,'@%+=:~&()-]+/)*[\w .,'@%+=:~&()-]+/?$")
 SCOPED_WORKER_REPO_FULL_NAME = "Saber5656/Saihai"
+TRANSITION_SIGNATURE_ALGORITHM = "sha256-hmac-sha256-local-principal-key"
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
 HTTP_CHANNEL_PRINCIPALS = {
     "bridge": (BRIDGE_PRINCIPAL_TYPE, "http-bridge", "local_http_channel"),
@@ -346,9 +347,18 @@ def sign_transition(
         "transition": transition,
         "subject": subject,
     }
-    signature = hmac.new(principal_key(state_root, principal), canonical_json(material), hashlib.sha256).hexdigest()
+    signature_material = {
+        "algorithm": TRANSITION_SIGNATURE_ALGORITHM,
+        "material": material,
+    }
+    keyed_digest = hmac.new(
+        principal_key(state_root, principal),
+        canonical_json(signature_material),
+        hashlib.sha256,
+    ).digest()
+    signature = hashlib.sha256(keyed_digest).hexdigest()
     return {
-        "algorithm": "sha256-local-principal-key",
+        "algorithm": TRANSITION_SIGNATURE_ALGORITHM,
         "signature": "sha256:" + signature,
         "signed_at": now_iso(),
     }

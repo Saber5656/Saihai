@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -617,6 +619,34 @@ def test_work_order_signature_and_post_execution_git_state() -> None:
         _, drained = create_approved_code_change(state_root, user_prompt="bounded change", worker_repo=repo)
         order_path = state_root / "work-orders" / "run-scoped-e2e" / "implement.json"
         order = json.loads(order_path.read_text(encoding="utf-8"))
+        issuer = order["work_order_authority"]["issuer_principal"]
+        material = {
+            "principal": issuer,
+            "transition": "issue_work_order",
+            "subject": {"unsigned_work_order_digest": executor._unsigned_work_order_digest(order)},
+        }
+        key = executor._read_private_key(
+            executor._work_order_signature_key_path(state_root, issuer),
+            reason="test_signing_key_invalid",
+        )
+        legacy_digest = hmac.new(key, executor.canonical_json(material), hashlib.sha256).digest()
+        legacy = copy.deepcopy(order)
+        legacy["work_order_authority"]["signature"] = {
+            "algorithm": "sha256-local-principal-key",
+            "signature": "sha256:" + legacy_digest.hex(),
+            "signed_at": order["work_order_authority"]["signature"]["signed_at"],
+        }
+        executor.verify_work_order_signature(state_root, legacy)
+        relabeled = copy.deepcopy(legacy)
+        relabeled["work_order_authority"]["signature"] = {
+            "algorithm": executor.TRANSITION_SIGNATURE_ALGORITHM,
+            "signature": "sha256:" + hashlib.sha256(legacy_digest).hexdigest(),
+            "signed_at": order["work_order_authority"]["signature"]["signed_at"],
+        }
+        assert_reason(
+            "work_order_signature_invalid",
+            lambda: executor.verify_work_order_signature(state_root, relabeled),
+        )
         order["instruction"] = "tampered authorization content"
         order_path.write_text(json.dumps(order, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         snapshots = sorted(order_path.parent.glob("implement-snapshot-*.json"))

@@ -212,7 +212,10 @@
           ],
           "properties": {
             "algorithm": {
-              "const": "sha256-local-principal-key"
+              "enum": [
+                "sha256-local-principal-key",
+                "sha256-hmac-sha256-local-principal-key"
+              ]
             },
             "signature": {
               "type": "string",
