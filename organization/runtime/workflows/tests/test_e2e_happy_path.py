@@ -62,6 +62,7 @@ REQUIRED_EVIDENCE_FIELDS = {
     "usage",
     "outcome",
     "raw_transcript_policy",
+    "stdout_sha256",
 }
 
 
@@ -162,9 +163,8 @@ def assert_identity_and_evidence(state_root: Path, run_id: str, request_id: str)
         assert_within_state_root(state_root, value)
 
     transcript = transcript_path.read_bytes()
-    if evidence.get("stdout_sha256"):
-        expected = "sha256:" + hashlib.sha256(transcript).hexdigest()
-        assert evidence["stdout_sha256"] == expected
+    expected = "sha256:" + hashlib.sha256(transcript).hexdigest()
+    assert evidence["stdout_sha256"] == expected
     serialized_run = json.dumps(run, ensure_ascii=False)
     assert transcript.decode("utf-8") not in serialized_run
     assert report["summary"] not in serialized_run
@@ -268,6 +268,8 @@ def test_findings_report_full_loop() -> None:
         assert len(report["findings"]) == 1
         finding = report["findings"][0]
         assert {"finding_id", "severity", "status", "summary", "evidence_refs"} <= set(finding)
+        assert_artifact_inventory(state_root, "run-e2e-findings", "req-e2e-findings")
+        assert_audit_chain(state_root, "run-e2e-findings", "req-e2e-findings")
     finally:
         temporary.cleanup()
 
@@ -358,6 +360,8 @@ def test_cli_parity_happy_path() -> None:
         assert len(task_view["runs"]) == 1
         assert task_view["runs"][0]["run_state"] == "complete"
         assert_identity_and_evidence(state_root, run_id, request_id)
+        assert_artifact_inventory(state_root, run_id, request_id)
+        assert_audit_chain(state_root, run_id, request_id)
 
 
 def main() -> None:
