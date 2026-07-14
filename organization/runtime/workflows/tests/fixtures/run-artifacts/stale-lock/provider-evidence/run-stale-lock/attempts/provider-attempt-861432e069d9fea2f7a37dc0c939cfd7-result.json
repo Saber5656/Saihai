@@ -1,0 +1,42 @@
+{
+  "adapter_id": "claude_headless_p0",
+  "adapter_request_digest": "sha256:d33de95f9ed271d063e1d42880bab517a80f493ce437d784df3c69bf6e246b9f",
+  "attempt_id": "provider-attempt-fixture",
+  "attempt_result_version": "1",
+  "context_snapshot_digest": "sha256:26fd42a2ed13576ef8688949cb11ed8f3bb2125a49817b62d8fa8fd5e49da6a0",
+  "details": {
+    "duration_ms": 0,
+    "transcript_sha256": "sha256:6debcdbdfca345f7b38bcada62a665ec9fee475be3aeb3f7a59c726b022dc7cf"
+  },
+  "lease_id": "provider-lease-fixture",
+  "outcome": "ok",
+  "reason_class": "ok",
+  "recorded_at": "2026-01-01T00:00:00+0000",
+  "report": {
+    "authority": {
+      "canonical_result": "typed_report_file",
+      "raw_transcript_shared": false,
+      "stdout_is_signal_only": true
+    },
+    "findings": [],
+    "provider_evidence": {
+      "effective_model": "claude-sonnet-operator-selected",
+      "evidence_path": "__STATE_ROOT__/provider-evidence/run-stale-lock/review-provider-evidence.json",
+      "provider": "claude_headless",
+      "provider_session_id": "fake-session-run-stale-lock",
+      "request_id": "req-stale-lock",
+      "transcript_path": "__STATE_ROOT__/provider-evidence/run-stale-lock/review-provider-transcript.json"
+    },
+    "report_id": "report-run-stale-lock",
+    "report_version": "1",
+    "request_id": "req-stale-lock",
+    "result": "pass",
+    "run_id": "run-stale-lock",
+    "step_id": "review",
+    "summary": "Fake provider completed the bounded work order.",
+    "workflow_id": "single_step_external_review"
+  },
+  "transcript_path": "__STATE_ROOT__/provider-evidence/run-stale-lock/attempts/provider-attempt-861432e069d9fea2f7a37dc0c939cfd7-transcript.json",
+  "transcript_sha256": "sha256:920a9421f473626d6ceabf933247af2b375d4e0010e60647f7d3fb609a1bd8a5",
+  "work_order_digest": "sha256:59d12355f8404f968b3db8806f23888d5fa3eeb3cdf431293c65523599f558f2"
+}

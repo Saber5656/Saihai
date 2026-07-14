@@ -1,0 +1,52 @@
+{
+  "adapter_id": "claude_headless_p0",
+  "adapter_request_digest": "sha256:ea14761a4ead71e0e1c4f08d08f2e25ed456932451adb8e76023301d62aaceff",
+  "attempt_id": "provider-attempt-fixture",
+  "attempt_result_version": "1",
+  "context_snapshot_digest": "sha256:a57b2096661011a1f69e0f114bed47c2647709fc177be4b2154569b5c8dcede2",
+  "details": {
+    "duration_ms": 0,
+    "transcript_sha256": "sha256:ad081f20fea5d2f5415bc7b7accac31a9442cb30f9cec1d03ef69d889d491038"
+  },
+  "lease_id": "provider-lease-fixture",
+  "outcome": "ok",
+  "reason_class": "ok",
+  "recorded_at": "2026-01-01T00:00:00+0000",
+  "report": {
+    "authority": {
+      "canonical_result": "typed_report_file",
+      "raw_transcript_shared": false,
+      "stdout_is_signal_only": true
+    },
+    "findings": [
+      {
+        "evidence_refs": [
+          "organization/runtime/workflows/README.md"
+        ],
+        "finding_id": "F-1",
+        "severity": "low",
+        "status": "open",
+        "summary": "Fake provider finding."
+      }
+    ],
+    "provider_evidence": {
+      "effective_model": "claude-sonnet-operator-selected",
+      "evidence_path": "__STATE_ROOT__/provider-evidence/run-complete-findings/review-provider-evidence.json",
+      "provider": "claude_headless",
+      "provider_session_id": "fake-session-run-complete-findings",
+      "request_id": "req-complete-findings",
+      "transcript_path": "__STATE_ROOT__/provider-evidence/run-complete-findings/review-provider-transcript.json"
+    },
+    "report_id": "report-run-complete-findings",
+    "report_version": "1",
+    "request_id": "req-complete-findings",
+    "result": "findings",
+    "run_id": "run-complete-findings",
+    "step_id": "review",
+    "summary": "Fake provider completed the bounded work order.",
+    "workflow_id": "single_step_external_review"
+  },
+  "transcript_path": "__STATE_ROOT__/provider-evidence/run-complete-findings/attempts/provider-attempt-af8d1d71b48654fd945432c0978c966a-transcript.json",
+  "transcript_sha256": "sha256:920a9421f473626d6ceabf933247af2b375d4e0010e60647f7d3fb609a1bd8a5",
+  "work_order_digest": "sha256:90dd25233f2ee8108a9513f447343d2e08dec370985b9b6eb97adb3d1dcc100f"
+}

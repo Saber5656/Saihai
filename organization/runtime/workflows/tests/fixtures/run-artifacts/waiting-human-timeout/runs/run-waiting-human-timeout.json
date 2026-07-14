@@ -57,6 +57,42 @@
   "goal_state": "blocked",
   "iteration": 1,
   "max_steps": 1,
+  "provider_execution": {
+    "adapter_id": "claude_headless_p0",
+    "adapter_request_digest": "sha256:bd6316703501d18219462fc1508971c61fc3ad0047e388c80848afe561abca80",
+    "attempt_id": "provider-attempt-fixture",
+    "attempt_number": 6,
+    "context_snapshot_digest": "sha256:e92cba9afba354926b28391cdd68e45e4df874f93e7face3df2a2f21e7e53df7",
+    "execution_version": "1",
+    "last_outcome": {
+      "attempt_result_path": "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/attempts/provider-attempt-bda778a3b92cc4081b46fd427dbb8020-result.json",
+      "evidence_path": "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-evidence.json",
+      "reason_class": "provider_timeout",
+      "recorded_at": "2026-01-01T00:00:00+0000",
+      "transcript_path": "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-transcript.json"
+    },
+    "lease": {
+      "claimed_at": "2026-01-01T00:00:00+0000",
+      "claimed_by": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "last_heartbeat_at": "2026-01-01T00:00:00+0000",
+      "lease_expires_at": "2026-01-01T00:00:00+0000",
+      "lease_id": "provider-lease-fixture"
+    },
+    "phase": "human_gate",
+    "retry": {
+      "auto_retries_used": 5,
+      "consecutive_failures": 6,
+      "last_failure_fingerprint": "sha256:d4ae136bcac9082322e0ff9417893faa31e3d372a4456a0b89634ebc52d6bb69",
+      "max_auto_retries": 5
+    },
+    "step_id": "review",
+    "timeout_seconds": 1800,
+    "work_order_digest": "sha256:bafc18f99a93a0039371b8b9c259712efcaebd13cfc4fe9244f0c019b8e2deb9"
+  },
   "request_id": "req-waiting-human-timeout",
   "requester": {
     "chat_session_id": "harness",
@@ -152,6 +188,7 @@
     {
       "artifact_refs": [
         "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review.json",
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review-snapshot-1.json",
         "__STATE_ROOT__/adapter-requests/run-waiting-human-timeout/review-claude_headless_p0.json"
       ],
       "from_state": "step_queued",
@@ -161,7 +198,7 @@
         "principal_id": "e2e-harness",
         "principal_type": "harness_runner"
       },
-      "reason_class": "provider_invoked",
+      "reason_class": "provider_claimed",
       "run_id": "run-waiting-human-timeout",
       "seq": 2,
       "signature": {
@@ -175,7 +212,257 @@
     },
     {
       "artifact_refs": [
-        "__STATE_ROOT__/adapter-requests/run-waiting-human-timeout/review-claude_headless_p0.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/attempts/provider-attempt-0ad2e6500758fc71dc4c7ed42bb435d7-result.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-evidence.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-transcript.json"
+      ],
+      "from_state": "waiting_provider",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_retry_scheduled",
+      "run_id": "run-waiting-human-timeout",
+      "seq": 3,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:7b15e59a3a802f307288be674c70902cdf895103d27b04b489e2d246ff446ca0",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "step_queued",
+      "transition": "retry_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review.json",
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review-snapshot-1.json",
+        "__STATE_ROOT__/adapter-requests/run-waiting-human-timeout/review-claude_headless_p0.json"
+      ],
+      "from_state": "step_queued",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_claimed",
+      "run_id": "run-waiting-human-timeout",
+      "seq": 4,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:9c8f7f3d28562ae6b0fef72bf9d98b7b1831bafcd43aa6b18bbbbc8d1cd5c0f1",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "waiting_provider",
+      "transition": "run_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/attempts/provider-attempt-2c696630b8863139a5cb5949c5252746-result.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-evidence.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-transcript.json"
+      ],
+      "from_state": "waiting_provider",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_retry_scheduled",
+      "run_id": "run-waiting-human-timeout",
+      "seq": 5,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:d068b4d4ed45d96269c179d53155329f5489fc96e39dc31b55c8e8f6bf1fccf5",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "step_queued",
+      "transition": "retry_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review.json",
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review-snapshot-1.json",
+        "__STATE_ROOT__/adapter-requests/run-waiting-human-timeout/review-claude_headless_p0.json"
+      ],
+      "from_state": "step_queued",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_claimed",
+      "run_id": "run-waiting-human-timeout",
+      "seq": 6,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:e08a60bd7dc8ff187715298f1b7b041c426d32667bd590db9bf9af9d0bde5f25",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "waiting_provider",
+      "transition": "run_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/attempts/provider-attempt-19e5beb0ecf3db5481ec115d4241fd49-result.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-evidence.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-transcript.json"
+      ],
+      "from_state": "waiting_provider",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_retry_scheduled",
+      "run_id": "run-waiting-human-timeout",
+      "seq": 7,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:89379ddfa185fd6d416421422311c7688e6eb77c261e8a192428a7ed7cba328c",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "step_queued",
+      "transition": "retry_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review.json",
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review-snapshot-1.json",
+        "__STATE_ROOT__/adapter-requests/run-waiting-human-timeout/review-claude_headless_p0.json"
+      ],
+      "from_state": "step_queued",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_claimed",
+      "run_id": "run-waiting-human-timeout",
+      "seq": 8,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:8d3c821246f109106e79f806d9e75ff0359d6686f8228d3fb803e7e1a2d4b092",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "waiting_provider",
+      "transition": "run_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/attempts/provider-attempt-23fcd27a4a973d6ffd9920202c973411-result.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-evidence.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-transcript.json"
+      ],
+      "from_state": "waiting_provider",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_retry_scheduled",
+      "run_id": "run-waiting-human-timeout",
+      "seq": 9,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:2b019cffa3e0c98f088490329392e1b70fd44829184412377d5922fec5cc9040",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "step_queued",
+      "transition": "retry_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review.json",
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review-snapshot-1.json",
+        "__STATE_ROOT__/adapter-requests/run-waiting-human-timeout/review-claude_headless_p0.json"
+      ],
+      "from_state": "step_queued",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_claimed",
+      "run_id": "run-waiting-human-timeout",
+      "seq": 10,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:c814614cf98172b9089ff2aae2772fa89747e6d5c9a81a7a0dfcc96422616052",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "waiting_provider",
+      "transition": "run_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/attempts/provider-attempt-08a88cf7abb7dfbb70e80672a4efd680-result.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-evidence.json",
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-transcript.json"
+      ],
+      "from_state": "waiting_provider",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_retry_scheduled",
+      "run_id": "run-waiting-human-timeout",
+      "seq": 11,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:20fa86baaa388e620a7d5fe091b75059d3904919a0f4760d1608a0d0ecca8c0d",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "step_queued",
+      "transition": "retry_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review.json",
+        "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review-snapshot-1.json",
+        "__STATE_ROOT__/adapter-requests/run-waiting-human-timeout/review-claude_headless_p0.json"
+      ],
+      "from_state": "step_queued",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_claimed",
+      "run_id": "run-waiting-human-timeout",
+      "seq": 12,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:7a7deb79fe19d7a6076d907c0d2662f78d2bca6b583429407669e83ac8f1c838",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "waiting_provider",
+      "transition": "run_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/attempts/provider-attempt-bda778a3b92cc4081b46fd427dbb8020-result.json",
         "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-evidence.json",
         "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-transcript.json"
       ],
@@ -188,10 +475,10 @@
       },
       "reason_class": "provider_timeout",
       "run_id": "run-waiting-human-timeout",
-      "seq": 3,
+      "seq": 13,
       "signature": {
         "algorithm": "sha256-local-principal-key",
-        "signature": "sha256:7b15e59a3a802f307288be674c70902cdf895103d27b04b489e2d246ff446ca0",
+        "signature": "sha256:f4b9c5503019301baf0db057eb95835fe4caa1287f168c46e1022379e1415d54",
         "signed_at": "2026-01-01T00:00:00+0000"
       },
       "to_state": "waiting_human",

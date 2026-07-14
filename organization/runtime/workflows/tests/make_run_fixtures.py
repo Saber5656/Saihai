@@ -45,6 +45,7 @@ TIMESTAMP_KEYS = {
     "written_at",
 }
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+RAW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T")
 HARNESS_DIR_RE = re.compile(r"\.tmp/e2e-harness-\d+")
 
@@ -68,10 +69,16 @@ def _normalize_string(value: str, *, state_root: Path, path: tuple[str, ...]) ->
     normalized = HARNESS_DIR_RE.sub(".tmp/e2e-harness-fixture", normalized)
     if SHA256_RE.fullmatch(normalized):
         return _stable_digest(path)
+    if RAW_SHA256_RE.fullmatch(normalized):
+        return hashlib.sha256("/".join(path).encode("utf-8")).hexdigest()
     if normalized.startswith("approve-") and re.fullmatch(r"approve-[0-9a-f]+", normalized):
         return "approve-fixture"
     if re.fullmatch(r"evt-[0-9a-f]+", normalized):
         return "evt-" + hashlib.sha256("/".join(path).encode("utf-8")).hexdigest()[:20]
+    if re.fullmatch(r"provider-attempt-[0-9a-f]+", normalized):
+        return "provider-attempt-fixture"
+    if re.fullmatch(r"provider-lease-[0-9a-f]+", normalized):
+        return "provider-lease-fixture"
     if re.fullmatch(r"provider-[0-9a-f]+", normalized):
         return "provider-fixture"
     return normalized
@@ -178,8 +185,10 @@ def _refresh_transcript_digest(value: Any, state_root: Path) -> Any:
         refreshed = {key: _refresh_transcript_digest(item, state_root) for key, item in value.items()}
         transcript = _placeholder_path(refreshed.get("transcript_path"), state_root)
         is_normalized_evidence = refreshed.get("evidence_version") == "1" and "provider_adapter_id" in refreshed
-        if transcript and transcript.is_file() and ("stdout_sha256" in refreshed or is_normalized_evidence):
-            refreshed["stdout_sha256"] = _file_sha256(transcript)
+        if transcript and transcript.is_file() and (
+            "transcript_sha256" in refreshed or is_normalized_evidence
+        ):
+            refreshed["transcript_sha256"] = _file_sha256(transcript)
         return refreshed
     if isinstance(value, list):
         return [_refresh_transcript_digest(item, state_root) for item in value]

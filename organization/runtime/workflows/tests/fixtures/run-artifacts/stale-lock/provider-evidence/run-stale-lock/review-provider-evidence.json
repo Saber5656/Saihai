@@ -1,4 +1,5 @@
 {
+  "attempt_id": "provider-attempt-fixture",
   "bridge_pattern": "none",
   "duration_ms": 0,
   "effective_model": "claude-sonnet-operator-selected",
@@ -14,7 +15,6 @@
   "reason_class": "ok",
   "request_id": "req-stale-lock",
   "run_id": "run-stale-lock",
-  "stdout_sha256": "sha256:8dbadc94d734b7c92df87dcce8aba9b66ff1bf8b8afef842815cf25f27d43f2b",
   "step_id": "review",
   "surface_metadata": {
     "async_callback_supported": false,
@@ -22,6 +22,7 @@
   },
   "timed_out": false,
   "transcript_path": "__STATE_ROOT__/provider-evidence/run-stale-lock/review-provider-transcript.json",
+  "transcript_sha256": "sha256:bd2f5a6a511f95ed8ea47e42f5eea4d0a63e71ff19fed9735fa8842a641f22dd",
   "transport": "headless_cli",
   "usage": {},
   "workflow_id": "single_step_external_review"

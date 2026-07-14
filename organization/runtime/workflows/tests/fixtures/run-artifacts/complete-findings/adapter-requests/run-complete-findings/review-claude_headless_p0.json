@@ -5,6 +5,12 @@
     "concurrency_unit": "process",
     "context_freshness": "fresh_process",
     "default_model": "claude-sonnet-operator-selected",
+    "default_timeout_seconds": 1800,
+    "environment_policy": "minimal_allowlist",
+    "execution_profile_id": "claude-tools-disabled-pinned-v1",
+    "max_context_bytes": 1000000,
+    "max_output_bytes": 4194304,
+    "max_timeout_seconds": 86400,
     "permission_enforcement": "harness",
     "provider_adapter_id": "claude_headless_p0",
     "provider_target": "claude_headless",
@@ -19,17 +25,24 @@
     "sync_mode": "sync",
     "transport": "headless_cli"
   },
+  "adapter_request_digest": "sha256:95a2e9ec2b23071cb376ba4557d3bf64fe11bc6edd223c6acbec837db93318d3",
   "adapter_request_version": "1",
+  "approved_context": [
+    {
+      "content": "fixture ref\n",
+      "path": ".tmp/e2e-harness-fixture/ref.md",
+      "sha256": "sha256:e8f11d887ce05e0b63deb8cff49b2771595e3be8733bce3df0b53c9522fb3a39",
+      "size_bytes": 12
+    }
+  ],
+  "attempt_id": "provider-attempt-fixture",
   "authority": {
     "issued_by_principal": {
       "authn_method": "local_test",
       "principal_id": "e2e-harness",
       "principal_type": "harness_runner"
     },
-    "provider_may_write": [
-      "typed_report_file",
-      "normalized_provider_evidence_file"
-    ],
+    "provider_may_write": [],
     "provider_must_not": [
       "select_workflow",
       "approve_activation",
@@ -39,6 +52,11 @@
       "push",
       "publish",
       "copy_raw_transcript_to_run_state"
+    ],
+    "runner_writes": [
+      "typed_report_file",
+      "normalized_provider_evidence_file",
+      "provider_transcript_file"
     ],
     "work_order_signature": {
       "algorithm": "sha256-hmac-sha256-local-principal-key",
@@ -54,13 +72,24 @@
       "value": ".tmp/e2e-harness-fixture/ref.md"
     }
   ],
+  "context_snapshot": {
+    "byte_length": 175,
+    "content": "[{\"content\":\"fixture ref\\n\",\"path\":\".tmp/e2e-harness-fixture/ref.md\",\"sha256\":\"sha256:3715fc300486a2972b94fdb98896288b1b5d453a9cae0ed1f88494f5de07a97c\",\"size_bytes\":12}]",
+    "sha256": "06f64d7b0b1a8872d42d88b199f7eff269d1ff5c7b12c28a9ae9c40fb34ced94"
+  },
+  "context_snapshot_digest": "sha256:3da663e01c3fec02d8bf354748256b92d0cb16dfc69ca29e614b70b7f783709c",
   "evidence_path": "__STATE_ROOT__/provider-evidence/run-complete-findings/review-provider-evidence.json",
+  "execution_binding": {},
   "instruction": "Send one bounded readonly review or consultation work order to an external provider adapter and require an authoritative typed report/evidence file. Step 'review' (reviewer): follow the input work order contract and produce external_review_report.",
+  "lease_id": "provider-lease-fixture",
   "report_path": "__STATE_ROOT__/reports/run-complete-findings/review-external-review-report.json",
   "request_id": "req-complete-findings",
   "run_id": "run-complete-findings",
   "step_id": "review",
+  "timeout_seconds": 1800,
   "transcript_path": "__STATE_ROOT__/provider-evidence/run-complete-findings/review-provider-transcript.json",
+  "work_order_digest": "sha256:d07002ffb92f9746771dca70fe795450e49d4f99991551750893dffec83ba4b0",
   "work_order_path": "__STATE_ROOT__/work-orders/run-complete-findings/review.json",
+  "work_order_snapshot_path": "__STATE_ROOT__/work-orders/run-complete-findings/review-snapshot-1.json",
   "workflow_id": "single_step_external_review"
 }

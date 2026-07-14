@@ -202,6 +202,7 @@ def handle_workflow_run_provider(frontdoor: Any, args: argparse.Namespace) -> di
         adapter_id=args.adapter_id,
         timeout_seconds=args.timeout_seconds,
         fake_provider_mode=args.fake_provider_mode,
+        live=args.live,
         principal=principal_from_args(frontdoor, args),
     )
 
@@ -277,7 +278,8 @@ def build_workflow_parser(sub: argparse._SubParsersAction[argparse.ArgumentParse
     provider = workflow_sub.add_parser("run-provider", help="run a bounded headless provider adapter")
     provider.add_argument("--run-id", required=True)
     provider.add_argument("--adapter-id", default="claude_headless_p0")
-    provider.add_argument("--timeout-seconds", type=int, default=60)
+    provider.add_argument("--timeout-seconds", type=int, default=1800)
+    provider.add_argument("--live", action="store_true")
     provider.add_argument(
         "--fake-provider-mode",
         choices=["", "success", "findings", "blocked", "timeout", "nonzero", "malformed", "unavailable"],

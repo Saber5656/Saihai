@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import secrets
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import Any
 
 import run_lock
 import run_store
+import safe_paths
 
 RUN_STATES = run_store.RUN_STATES
 TERMINAL_RUN_STATES = run_store.TERMINAL_RUN_STATES
@@ -270,29 +272,135 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return parsed
 
 
-def _runner_claim_expired(work_order: dict[str, Any]) -> bool:
-    authority = work_order.get("work_order_authority")
-    if not isinstance(authority, dict):
-        return True
-    claim = authority.get("runner_claim")
-    if not isinstance(claim, dict):
-        return True
-    if claim.get("claim_state") != "claimed":
-        return True
-    lease_expires_at = _parse_timestamp(claim.get("lease_expires_at"))
-    if lease_expires_at is None:
-        return True
-    return lease_expires_at <= datetime.now(timezone.utc)
+def _private_attempt_journal(state_root: Path, run: dict[str, Any], payload: dict[str, Any]) -> Path | None:
+    execution = run.get("provider_execution") if isinstance(run.get("provider_execution"), dict) else {}
+    attempt_id = str(execution.get("attempt_id") or "")
+    if not attempt_id:
+        return None
+    run_id = run_store.validate_artifact_id(str(run.get("run_id") or ""), "run_id")
+    safe_attempt = run_store.validate_artifact_id(attempt_id, "attempt_id")
+    try:
+        attempts_dir = safe_paths.state_artifact_path(
+            state_root, "provider-evidence", run_id, "attempts"
+        )
+    except safe_paths.SafePathError as exc:
+        raise LifecycleError("provider_attempt_journal_unsafe") from exc
+    run_dir = attempts_dir.parent
+    evidence_root = run_dir.parent
+    for directory in (evidence_root, run_dir, attempts_dir):
+        if directory.exists():
+            if directory.is_symlink():
+                raise LifecycleError("provider_attempt_journal_unsafe")
+            metadata = directory.stat()
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
+                raise LifecycleError("provider_attempt_journal_unsafe")
+            os.chmod(directory, 0o700)
+        else:
+            directory.mkdir(mode=0o700)
+    path = attempts_dir / f"{safe_attempt}-result.json"
+    if path.exists():
+        if path.is_symlink():
+            raise LifecycleError("provider_attempt_journal_unsafe")
+        metadata = path.stat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise LifecycleError("provider_attempt_journal_unsafe")
+    run_store.atomic_write_json(path, payload)
+    os.chmod(path, 0o600)
+    return path
 
 
-def _reset_runner_claim(work_order: dict[str, Any]) -> None:
-    authority = work_order.setdefault("work_order_authority", {})
-    if not isinstance(authority, dict):
-        raise LifecycleError("invalid_work_order", ["work_order_authority must be an object"])
-    authority["runner_claim"] = {
-        "claim_state": "unclaimed",
-        "lease_expires_at": None,
+def existing_provider_attempt_journal(state_root: Path, run: dict[str, Any]) -> Path | None:
+    """Return a completed attempt result without treating abandoned accounting as output."""
+
+    execution = run.get("provider_execution") if isinstance(run.get("provider_execution"), dict) else {}
+    attempt_id = str(execution.get("attempt_id") or "")
+    if not attempt_id:
+        return None
+    run_id = run_store.validate_artifact_id(str(run.get("run_id") or ""), "run_id")
+    safe_attempt = run_store.validate_artifact_id(attempt_id, "attempt_id")
+    try:
+        path = safe_paths.state_artifact_path(
+            state_root,
+            "provider-evidence",
+            run_id,
+            "attempts",
+            f"{safe_attempt}-result.json",
+        )
+    except safe_paths.SafePathError as exc:
+        raise LifecycleError("provider_attempt_journal_unsafe") from exc
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return path
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        return path
+    try:
+        with path.open(encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return path
+    if isinstance(payload, dict) and payload.get("abandoned") is True:
+        return None
+    return path
+
+
+def account_expired_provider_attempt(state_root: Path, run: dict[str, Any]) -> tuple[bool, Path | None]:
+    """Persist one abandoned attempt and consume the same-failure retry budget."""
+
+    execution = run.get("provider_execution") if isinstance(run.get("provider_execution"), dict) else {}
+    if not execution:
+        return True, None
+    retry = execution.get("retry") if isinstance(execution.get("retry"), dict) else {}
+    fingerprint = "sha256:" + hashlib.sha256(
+        canonical_json(
+            {
+                "adapter_id": str(execution.get("adapter_id") or ""),
+                "reason_class": "provider_lease_expired",
+            }
+        )
+    ).hexdigest()
+    if retry.get("last_failure_fingerprint") == fingerprint:
+        retry["consecutive_failures"] = int(retry.get("consecutive_failures") or 0) + 1
+    else:
+        retry["last_failure_fingerprint"] = fingerprint
+        retry["consecutive_failures"] = 1
+        retry["auto_retries_used"] = 0
+    configured_max = retry.get("max_auto_retries")
+    max_retries = int(configured_max) if isinstance(configured_max, int) and not isinstance(configured_max, bool) else 5
+    auto_retries_used = int(retry.get("auto_retries_used") or 0)
+    retry_allowed = auto_retries_used < max_retries
+    if retry_allowed:
+        retry["auto_retries_used"] = auto_retries_used + 1
+        execution["phase"] = "retry_scheduled"
+    else:
+        execution["phase"] = "human_gate"
+    execution["retry"] = retry
+    journal_payload = {
+        "attempt_result_version": "1",
+        "attempt_id": execution.get("attempt_id"),
+        "lease_id": (execution.get("lease") or {}).get("lease_id"),
+        "work_order_digest": execution.get("work_order_digest"),
+        "adapter_request_digest": execution.get("adapter_request_digest"),
+        "context_snapshot_digest": execution.get("context_snapshot_digest"),
+        "outcome": "provider_unavailable",
+        "reason_class": "provider_lease_expired",
+        "abandoned": True,
+        "recorded_at": now_iso(),
     }
+    journal_path = _private_attempt_journal(state_root, run, journal_payload)
+    execution["last_outcome"] = {
+        "reason_class": "provider_lease_expired",
+        "failure_fingerprint": fingerprint,
+        "recorded_at": now_iso(),
+        "attempt_result_path": str(journal_path) if journal_path else "",
+    }
+    return retry_allowed, journal_path
 
 
 def resume_run(
@@ -373,10 +481,19 @@ def resume_run(
                 "workflow_run": run,
             }
         if run_state == "waiting_provider":
-            step_id = str(run.get("current_step") or "")
-            order_path = work_order_path(state_root, run_id, step_id)
-            work_order = _load_json(order_path) if order_path.exists() else {}
-            if not _runner_claim_expired(work_order):
+            execution = run.get("provider_execution") if isinstance(run.get("provider_execution"), dict) else {}
+            if execution.get("phase") == "result_ready":
+                return {
+                    "schema_version": 1,
+                    "decision": "ok",
+                    "resumed": False,
+                    "reason": "provider_result_ready",
+                    "next_action": "validate_report",
+                    "workflow_run": run,
+                }
+            lease = execution.get("lease") if isinstance(execution.get("lease"), dict) else {}
+            lease_expires_at = _parse_timestamp(lease.get("lease_expires_at"))
+            if lease_expires_at is not None and lease_expires_at > datetime.now(timezone.utc):
                 return {
                     "schema_version": 1,
                     "decision": "blocked",
@@ -384,10 +501,38 @@ def resume_run(
                     "reason": "provider_in_flight",
                     "workflow_run": run,
                 }
+            pending_journal = existing_provider_attempt_journal(state_root, run)
+            if pending_journal is not None:
+                return {
+                    "schema_version": 1,
+                    "decision": "ok",
+                    "resumed": False,
+                    "reason": "provider_attempt_result_pending",
+                    "next_action": "run_provider",
+                    "attempt_result_path": str(pending_journal),
+                    "workflow_run": run,
+                }
             run_lock.assert_p0_concurrency(state_root, target_run_id=run_id)
-            if order_path.exists():
-                _reset_runner_claim(work_order)
-                run_store.atomic_write_json(order_path, work_order)
+            retry_allowed, journal_path = account_expired_provider_attempt(state_root, run)
+            if not retry_allowed:
+                transition = transition_run(
+                    state_root,
+                    run_id,
+                    to_state="waiting_human",
+                    reason_class="provider_retry_exhausted",
+                    transition="resume_run",
+                    principal=principal,
+                    artifact_refs=[str(journal_path)] if journal_path else [],
+                    run=run,
+                )
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "resumed": False,
+                    "reason": "provider_retry_exhausted",
+                    "transition": transition,
+                    "workflow_run": run,
+                }
             transition = transition_run(
                 state_root,
                 run_id,
@@ -395,7 +540,7 @@ def resume_run(
                 reason_class="provider_lease_expired",
                 transition="resume_run",
                 principal=principal,
-                artifact_refs=[str(order_path)] if order_path.exists() else [],
+                artifact_refs=[str(journal_path)] if journal_path else [],
                 run=run,
             )
             return {

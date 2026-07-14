@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
+import hashlib
 import json
 import subprocess
 import sys
@@ -127,7 +129,24 @@ def prepare_terminal_run(
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+    raw_stdout = b"completion-gate-fixture"
+    stdout_sha256 = "sha256:" + hashlib.sha256(raw_stdout).hexdigest()
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "provider_transcript_version": "1",
+                "encoding": "base64",
+                "stdout_size_bytes": len(raw_stdout),
+                "stderr_size_bytes": 0,
+                "stdout_sha256": stdout_sha256,
+                "stderr_sha256": "sha256:" + hashlib.sha256(b"").hexdigest(),
+                "stdout_base64": base64.b64encode(raw_stdout).decode("ascii"),
+                "stderr_base64": "",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     fixed_fields = adapter["evidence_contract"]["fixed_fields"]
     evidence = {
         **fixed_fields,
@@ -137,7 +156,8 @@ def prepare_terminal_run(
         "provider_session_id": f"session-{run_id}",
         "duration_ms": 12,
         "usage": {"input_tokens": 1, "output_tokens": 1},
-        "stdout_sha256": file_sha256(transcript_path),
+        "stdout_sha256": stdout_sha256,
+        "transcript_sha256": file_sha256(transcript_path),
     }
     if evidence_mutator is not None:
         evidence_mutator(evidence)

@@ -57,6 +57,42 @@
   "goal_state": "complete",
   "iteration": 1,
   "max_steps": 1,
+  "provider_execution": {
+    "adapter_id": "claude_headless_p0",
+    "adapter_request_digest": "sha256:22b25e1ee621178065e1a2806da972a439e0e52b7aa5419cdbcca840e26c6b19",
+    "attempt_id": "provider-attempt-fixture",
+    "attempt_number": 1,
+    "context_snapshot_digest": "sha256:62ca0e0f793c97307a562484234c248ed4dfb77821a6ea5111979490afdc2c9b",
+    "execution_version": "1",
+    "last_outcome": {
+      "attempt_result_path": "__STATE_ROOT__/provider-evidence/run-complete-findings/attempts/provider-attempt-af8d1d71b48654fd945432c0978c966a-result.json",
+      "evidence_path": "__STATE_ROOT__/provider-evidence/run-complete-findings/review-provider-evidence.json",
+      "reason_class": "ok",
+      "recorded_at": "2026-01-01T00:00:00+0000",
+      "transcript_path": "__STATE_ROOT__/provider-evidence/run-complete-findings/review-provider-transcript.json"
+    },
+    "lease": {
+      "claimed_at": "2026-01-01T00:00:00+0000",
+      "claimed_by": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "last_heartbeat_at": "2026-01-01T00:00:00+0000",
+      "lease_expires_at": "2026-01-01T00:00:00+0000",
+      "lease_id": "provider-lease-fixture"
+    },
+    "phase": "completed",
+    "retry": {
+      "auto_retries_used": 0,
+      "consecutive_failures": 0,
+      "last_failure_fingerprint": null,
+      "max_auto_retries": 5
+    },
+    "step_id": "review",
+    "timeout_seconds": 1800,
+    "work_order_digest": "sha256:4b266721f571af369cb645feb652d612704f6726ee8f84e21606a8080ab8a63c"
+  },
   "request_id": "req-complete-findings",
   "requester": {
     "chat_session_id": "harness",
@@ -185,6 +221,7 @@
     {
       "artifact_refs": [
         "__STATE_ROOT__/work-orders/run-complete-findings/review.json",
+        "__STATE_ROOT__/work-orders/run-complete-findings/review-snapshot-1.json",
         "__STATE_ROOT__/adapter-requests/run-complete-findings/review-claude_headless_p0.json"
       ],
       "from_state": "step_queued",
@@ -194,7 +231,7 @@
         "principal_id": "e2e-harness",
         "principal_type": "harness_runner"
       },
-      "reason_class": "provider_invoked",
+      "reason_class": "provider_claimed",
       "run_id": "run-complete-findings",
       "seq": 2,
       "signature": {

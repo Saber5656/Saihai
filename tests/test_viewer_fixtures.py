@@ -109,10 +109,10 @@ def _assert_integrity_refs(value, state_root: Path) -> None:
             if artifact and isinstance(digest, str) and artifact.is_file():
                 assert digest == _sha256(artifact), (prefix, path_value)
         transcript = value.get("transcript_path")
-        stdout_digest = value.get("stdout_sha256")
+        transcript_digest = value.get("transcript_sha256")
         transcript_path = _fixture_ref_path(transcript, state_root) if isinstance(transcript, str) else None
-        if transcript_path and isinstance(stdout_digest, str) and transcript_path.is_file():
-            assert stdout_digest == _sha256(transcript_path), transcript
+        if transcript_path and isinstance(transcript_digest, str) and transcript_path.is_file():
+            assert transcript_digest == _sha256(transcript_path), transcript
         for item in value.values():
             _assert_integrity_refs(item, state_root)
     elif isinstance(value, list):
@@ -310,7 +310,7 @@ def test_normalized_content_digests_match_artifacts() -> None:
             normalized_evidence_count += 1
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             transcript = _fixture_ref_path(evidence["transcript_path"], root)
-            assert evidence["stdout_sha256"] == _sha256(transcript)
+            assert evidence["transcript_sha256"] == _sha256(transcript)
     assert normalized_evidence_count == 7
 
 

@@ -437,10 +437,12 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
   --adapter-id claude_headless_p0 \
   --fake-provider-mode success
 
-The P0 runner uses fake provider mode to validate adapter dispatch and
-evidence/report paths. Live `command_argv` adapters are rejected as
-`provider_unavailable` until sandbox/snapshot support can enforce
-harness-owned readonly constraints.
+The P0 runner uses fake provider mode for offline validation. Live execution is
+available only with `--live`, `SAIHAI_ALLOW_LIVE_PROVIDERS=1`, pinned executable
+path/digest bindings, and (for Codex) a pinned host confinement wrapper/profile.
+The runner re-verifies the signed frozen work order, exact iteration snapshot,
+bounded context digests, request digest, executable binding, and active lease
+immediately before every provider invocation.
 
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state validate-report \
   --run-id <run_id>
@@ -459,12 +461,18 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/f
 python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state lock-status
 ```
 
-`prepare-claude-adapter` returns a structured `evidence_contract` and a bounded
-prompt. They name the evidence schema, canonical report/evidence/transcript
-paths, fixed run and adapter fields, provider-supplied runtime fields, closed
-metadata allowlists, and the raw-content prohibition. The manual provider must
-write that normalized evidence artifact before returning the typed report; this
-path does not execute a live provider.
+`prepare-claude-adapter` is deprecated compatibility output. It returns a
+non-executable artifact with `provider_may_write: []` and points operators to
+`run-provider --live`. Only the live runner may write canonical report,
+evidence, and transcript artifacts.
+
+Each CLI invocation has a configurable timeout of 1..86400 seconds (default
+1800). The harness has no cumulative wall-clock deadline. Provider execution is
+split into a short locked claim, an immediate locked dispatch authorization,
+an unlocked subprocess interval with renewable lease/heartbeat, and a short
+locked result promotion. Attempt journals, lease state, and retry counters are
+durable. The same retryable failure receives at most five automatic retries
+before `waiting_human`; resume never mutates the signed work order.
 
 The facade is compatibility-preserving and delegates to the same
 `frontdoor_orchestrator.py` functions as `saihai`. New operator workflows should
@@ -549,7 +557,7 @@ reclaimed automatically.
 ## Day-1 Operator Workflow
 
 Use [operator-runbook.md](operator-runbook.md) for the supported day-1 flow:
-validate contracts, propose, approve, create run, drain, prepare adapter,
+validate contracts, propose, approve, create run, drain, run provider,
 validate report, inspect evidence, and recover or roll back stuck runs with
 `resume` / `abort`.
 

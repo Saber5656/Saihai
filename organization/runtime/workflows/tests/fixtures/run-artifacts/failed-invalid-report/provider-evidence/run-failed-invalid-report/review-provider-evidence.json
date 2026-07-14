@@ -14,7 +14,6 @@
   "reason_class": "ok",
   "request_id": "req-failed-invalid-report",
   "run_id": "run-failed-invalid-report",
-  "stdout_sha256": "sha256:5317f2e2e0e46796f163e8ec44295e215a5714b150d5cf2933ef9d34178bf147",
   "step_id": "review",
   "surface_metadata": {
     "async_callback_supported": false,
@@ -22,6 +21,7 @@
   },
   "timed_out": false,
   "transcript_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-transcript.json",
+  "transcript_sha256": "sha256:5317f2e2e0e46796f163e8ec44295e215a5714b150d5cf2933ef9d34178bf147",
   "transport": "headless_cli",
   "usage": {},
   "workflow_id": "single_step_external_review"

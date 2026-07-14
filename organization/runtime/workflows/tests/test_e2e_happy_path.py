@@ -62,7 +62,7 @@ REQUIRED_EVIDENCE_FIELDS = {
     "usage",
     "outcome",
     "raw_transcript_policy",
-    "stdout_sha256",
+    "transcript_sha256",
 }
 
 
@@ -164,7 +164,7 @@ def assert_identity_and_evidence(state_root: Path, run_id: str, request_id: str)
 
     transcript = transcript_path.read_bytes()
     expected = "sha256:" + hashlib.sha256(transcript).hexdigest()
-    assert evidence["stdout_sha256"] == expected
+    assert evidence["transcript_sha256"] == expected
     serialized_run = json.dumps(run, ensure_ascii=False)
     assert transcript.decode("utf-8") not in serialized_run
     assert report["summary"] not in serialized_run

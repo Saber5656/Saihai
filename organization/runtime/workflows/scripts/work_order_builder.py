@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import run_store
+import safe_paths
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 WORK_ORDER_SCHEMA_PATH = WORKFLOW_ROOT / "schemas/work-order.schema.json"
@@ -46,6 +47,13 @@ _WORK_ORDER_SCHEMA_CACHE: dict[str, Any] | None = None
 
 class WorkOrderError(RuntimeError):
     """Typed work-order failure."""
+
+
+def _state_artifact_path(state_root: Path, namespace: str, *components: str) -> Path:
+    try:
+        return safe_paths.state_artifact_path(state_root, namespace, *components)
+    except safe_paths.SafePathError as exc:
+        raise WorkOrderError("state_artifact_path_escape") from exc
 
 
 def now_iso() -> str:
@@ -182,22 +190,24 @@ def path_is_within(path: Path, parent: Path) -> bool:
 
 
 def report_path(state_root: Path, run_id: str, step_id: str) -> Path:
-    return (
-        state_root
-        / "reports"
-        / run_store.validate_artifact_id(run_id, "run_id")
-        / f"{run_store.validate_artifact_id(step_id, 'step_id')}-external-review-report.json"
+    return _state_artifact_path(
+        state_root,
+        "reports",
+        run_store.validate_artifact_id(run_id, "run_id"),
+        f"{run_store.validate_artifact_id(step_id, 'step_id')}-external-review-report.json",
     )
 
 
 def snapshot_path(state_root: Path, run_id: str, step_id: str, iteration: int) -> Path:
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
         raise WorkOrderError("iteration must be an integer >= 1")
-    return (
-        state_root
-        / "work-orders"
-        / run_store.validate_artifact_id(run_id, "run_id")
-        / f"{run_store.validate_artifact_id(step_id, 'step_id')}-snapshot-{iteration}.json"
+    safe_run_id = run_store.validate_artifact_id(run_id, "run_id")
+    safe_step_id = run_store.validate_artifact_id(step_id, "step_id")
+    return _state_artifact_path(
+        state_root,
+        "work-orders",
+        safe_run_id,
+        f"{safe_step_id}-snapshot-{iteration}.json",
     )
 
 

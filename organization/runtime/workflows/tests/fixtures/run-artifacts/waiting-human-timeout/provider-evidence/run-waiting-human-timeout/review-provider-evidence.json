@@ -1,4 +1,5 @@
 {
+  "attempt_id": "provider-attempt-fixture",
   "bridge_pattern": "none",
   "duration_ms": 0,
   "effective_model": "claude-sonnet-operator-selected",
@@ -14,7 +15,6 @@
   "reason_class": "provider_timeout",
   "request_id": "req-waiting-human-timeout",
   "run_id": "run-waiting-human-timeout",
-  "stdout_sha256": "sha256:4f8c60fa55ebaf6cbf203185db18698eab652dd4f7c2a10fa8d8bb3d80fc8f8b",
   "step_id": "review",
   "surface_metadata": {
     "async_callback_supported": false,
@@ -22,6 +22,7 @@
   },
   "timed_out": true,
   "transcript_path": "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/review-provider-transcript.json",
+  "transcript_sha256": "sha256:40e1a40f84b66ab2ebf2dee86f551d3ae9633c1fe7b3d8becbdf98835f0f66b9",
   "transport": "headless_cli",
   "usage": {},
   "workflow_id": "single_step_external_review"

@@ -57,6 +57,42 @@
   "goal_state": "complete",
   "iteration": 1,
   "max_steps": 1,
+  "provider_execution": {
+    "adapter_id": "claude_headless_p0",
+    "adapter_request_digest": "sha256:7ed5d3a66bb5e4a67f2c75cc10925278e0d9f91fffa3f9a648b70b215749edd7",
+    "attempt_id": "provider-attempt-fixture",
+    "attempt_number": 1,
+    "context_snapshot_digest": "sha256:0860dfb2acb1cd03051ad1b0921845807a40af8645068978c147cf0f6796a2a8",
+    "execution_version": "1",
+    "last_outcome": {
+      "attempt_result_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/attempts/provider-attempt-ed8bce540417405905fdd89559847d8b-result.json",
+      "evidence_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/review-provider-evidence.json",
+      "reason_class": "ok",
+      "recorded_at": "2026-01-01T00:00:00+0000",
+      "transcript_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/review-provider-transcript.json"
+    },
+    "lease": {
+      "claimed_at": "2026-01-01T00:00:00+0000",
+      "claimed_by": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "last_heartbeat_at": "2026-01-01T00:00:00+0000",
+      "lease_expires_at": "2026-01-01T00:00:00+0000",
+      "lease_id": "provider-lease-fixture"
+    },
+    "phase": "completed",
+    "retry": {
+      "auto_retries_used": 0,
+      "consecutive_failures": 0,
+      "last_failure_fingerprint": null,
+      "max_auto_retries": 5
+    },
+    "step_id": "review",
+    "timeout_seconds": 1800,
+    "work_order_digest": "sha256:143386d86e0d327da7cb45b38b7941d17ac4628ce08c01e788627cfec14d4545"
+  },
   "request_id": "req-complete-pass",
   "requester": {
     "chat_session_id": "harness",
@@ -185,6 +221,7 @@
     {
       "artifact_refs": [
         "__STATE_ROOT__/work-orders/run-complete-pass/review.json",
+        "__STATE_ROOT__/work-orders/run-complete-pass/review-snapshot-1.json",
         "__STATE_ROOT__/adapter-requests/run-complete-pass/review-claude_headless_p0.json"
       ],
       "from_state": "step_queued",
@@ -194,7 +231,7 @@
         "principal_id": "e2e-harness",
         "principal_type": "harness_runner"
       },
-      "reason_class": "provider_invoked",
+      "reason_class": "provider_claimed",
       "run_id": "run-complete-pass",
       "seq": 2,
       "signature": {

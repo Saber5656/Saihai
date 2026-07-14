@@ -157,12 +157,17 @@ def test_group_separation_static() -> None:
 
     frontdoor_help = run_cli("frontdoor", "--help").stdout
     workflow_help = run_cli("workflow", "--help").stdout
+    provider_help = run_cli("workflow", "run-provider", "--help").stdout
     for command in module.WORKFLOW_COMMANDS:
         assert command not in frontdoor_help
     for command in module.FRONTDOOR_COMMANDS:
         assert command not in workflow_help
     for command in {"run-step", "resume", "abort", "verify-completion", "task-view", "lock-status", "list"}:
         assert command not in workflow_help
+    assert "--live" in provider_help
+    assert "--fake-provider-mode" in provider_help
+    parsed = module.build_parser().parse_args(["workflow", "run-provider", "--run-id", "run-test"])
+    assert parsed.timeout_seconds == 1800
 
 
 def test_propose_never_approves() -> None:
