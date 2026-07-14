@@ -8,6 +8,7 @@ import io
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -45,23 +46,28 @@ def load_saihai_module():
     return module
 
 
-def run_cli(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run_cli(*args: str, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         [sys.executable, str(CLI), *args],
         cwd=ROOT,
         capture_output=True,
         text=True,
+        env=env,
         check=check,
     )
     return completed
 
 
 def run_frontdoor(state_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return run_cli("frontdoor", "--state-root", str(state_root), *args, check=check)
+    env = dict(os.environ)
+    env["SAIHAI_ORCH_STATE_ROOT"] = str(state_root)
+    return run_cli("frontdoor", "--state-root", str(state_root), *args, check=check, env=env)
 
 
 def run_workflow(state_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return run_cli("workflow", "--state-root", str(state_root), *args, check=check)
+    env = dict(os.environ)
+    env["SAIHAI_ORCH_STATE_ROOT"] = str(state_root)
+    return run_cli("workflow", "--state-root", str(state_root), *args, check=check, env=env)
 
 
 def load_payload(completed: subprocess.CompletedProcess[str]) -> dict:
@@ -338,6 +344,29 @@ def test_workflow_run_provider_store_errors_use_blocked_json() -> None:
         assert "Traceback" not in missing.stderr
 
 
+def test_cli_rejects_state_root_outside_host_configuration() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        configured = root / "configured"
+        requested = root / "main-agent-selected"
+        configured.mkdir()
+        env = dict(os.environ)
+        env["SAIHAI_ORCH_STATE_ROOT"] = str(configured)
+        completed = run_cli(
+            "frontdoor",
+            "--state-root",
+            str(requested),
+            "status",
+            "--request-id",
+            "req-state-root-boundary",
+            check=False,
+            env=env,
+        )
+        assert completed.returncode == 2
+        assert load_payload(completed)["reason"] == "state_root_not_configured"
+        assert not requested.exists(), "rejected state root must not receive artifacts"
+
+
 def main() -> None:
     tests = [
         test_group_separation_static,
@@ -351,6 +380,7 @@ def main() -> None:
         test_exit_code_convention,
         test_runtime_errors_use_json_contract,
         test_workflow_run_provider_store_errors_use_blocked_json,
+        test_cli_rejects_state_root_outside_host_configuration,
     ]
     for test in tests:
         test()

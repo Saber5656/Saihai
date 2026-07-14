@@ -52,6 +52,8 @@ def run_frontdoor(
     check: bool = True,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    process_env = dict(os.environ if env is None else env)
+    process_env["SAIHAI_ORCH_STATE_ROOT"] = str(state_root)
     return subprocess.run(
         [
             sys.executable,
@@ -64,7 +66,7 @@ def run_frontdoor(
         cwd=ROOT,
         capture_output=True,
         text=True,
-        env=env,
+        env=process_env,
         check=check,
     )
 
@@ -316,6 +318,49 @@ def test_channel_token_permissions_are_private() -> None:
             assert "must not be a symlink" in str(exc)
         else:
             raise AssertionError("channel token symlink should be blocked")
+
+
+def test_state_root_is_fixed_by_host_configuration() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    previous = os.environ.get("SAIHAI_ORCH_STATE_ROOT")
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        configured = Path(raw_tmp) / "configured"
+        configured.mkdir()
+        os.environ["SAIHAI_ORCH_STATE_ROOT"] = str(configured)
+        try:
+            assert_equal(frontdoor_module.trusted_state_root(None), configured.resolve(), "configured default")
+            assert_equal(frontdoor_module.trusted_state_root(configured), configured.resolve(), "matching root")
+            try:
+                frontdoor_module.trusted_state_root(Path(raw_tmp) / "arbitrary")
+            except frontdoor_module.FrontdoorError as exc:
+                assert_equal(str(exc), "state_root_not_configured", "arbitrary root rejection")
+            else:
+                raise AssertionError("arbitrary state root should be rejected")
+
+            symlink = Path(raw_tmp) / "configured-link"
+            symlink.symlink_to(configured, target_is_directory=True)
+            os.environ["SAIHAI_ORCH_STATE_ROOT"] = str(symlink)
+            try:
+                frontdoor_module.trusted_state_root(symlink)
+            except frontdoor_module.FrontdoorError as exc:
+                assert "non-symlink directory" in str(exc)
+            else:
+                raise AssertionError("symlink state root should be rejected")
+
+            dangling = Path(raw_tmp) / "dangling-configured-link"
+            dangling.symlink_to(Path(raw_tmp) / "missing-target", target_is_directory=True)
+            os.environ["SAIHAI_ORCH_STATE_ROOT"] = str(dangling)
+            try:
+                frontdoor_module.trusted_state_root(dangling)
+            except frontdoor_module.FrontdoorError as exc:
+                assert "non-symlink directory" in str(exc)
+            else:
+                raise AssertionError("dangling symlink state root should be rejected")
+        finally:
+            if previous is None:
+                os.environ.pop("SAIHAI_ORCH_STATE_ROOT", None)
+            else:
+                os.environ["SAIHAI_ORCH_STATE_ROOT"] = previous
 
 
 def test_principal_key_permissions_are_private() -> None:
@@ -2917,6 +2962,7 @@ def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
 def main() -> None:
     tests = [
         test_channel_token_permissions_are_private,
+        test_state_root_is_fixed_by_host_configuration,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
         test_manual_prepare_evidence_contract_validates_report,

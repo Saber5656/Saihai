@@ -20,7 +20,12 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
+from directory_paths import EnvError as DirectoryPathError
+from directory_paths import load_environment as load_directory_environment
 import run_store
 import run_lock
 import run_lifecycle
@@ -33,7 +38,6 @@ import provider_runner
 import scoped_worker_executor
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_STATE_ROOT = Path.home() / ".codex" / "state" / "itb" / "frontdoor-orchestrator"
 SCOPED_WORKER_REPO_FULL_NAME = "Saber5656/Saihai"
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
@@ -44,6 +48,11 @@ HTTP_CHANNEL_PRINCIPALS = {
     "harness": ("harness_runner", "local-harness", "local_http_channel"),
     "action_gateway": ("action_gateway_executor", "child-thread-gateway", "local_http_channel"),
 }
+
+try:
+    DIRECTORY_ENV_DIAGNOSTICS = load_directory_environment(checkout_root=REPO_ROOT)
+except DirectoryPathError as exc:
+    raise RuntimeError(f"directory_path_environment_invalid:{exc}") from exc
 EXECUTION_PRINCIPAL_TYPES = {
     "human_operator",
     "manual_operator",
@@ -545,6 +554,23 @@ def adapter_request_path(state_root: Path, run_id: str, step_id: str, adapter_id
         / validate_artifact_id(run_id, "run_id")
         / f"{validate_artifact_id(step_id, 'step_id')}-{validate_artifact_id(adapter_id, 'adapter_id')}.json"
     )
+
+
+def configured_state_root() -> Path:
+    configured = os.environ.get("SAIHAI_ORCH_STATE_ROOT", "").strip()
+    root = Path(configured).expanduser() if configured else DEFAULT_STATE_ROOT
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        raise FrontdoorError("configured state root must be a non-symlink directory")
+    return root.resolve(strict=False)
+
+
+def trusted_state_root(requested: str | Path | None) -> Path:
+    configured = configured_state_root()
+    if requested not in (None, ""):
+        candidate = Path(requested).expanduser().resolve(strict=False)
+        if candidate != configured:
+            raise FrontdoorError("state_root_not_configured")
+    return configured
 
 
 def path_is_within(path: Path, parent: Path) -> bool:
@@ -3386,7 +3412,7 @@ def build_work_order(
 
 def parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Host-owned P0 frontdoor orchestrator")
-    parser.add_argument("--state-root", default=str(DEFAULT_STATE_ROOT))
+    parser.add_argument("--state-root", default="")
     sub = parser.add_subparsers(dest="command", required=True)
 
     propose = sub.add_parser("propose")
@@ -3533,8 +3559,8 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
-    state_root = Path(args.state_root).expanduser()
     try:
+        state_root = trusted_state_root(args.state_root)
         if args.command == "propose":
             classification = load_json_arg(args.classification) if args.classification else None
             payload = proposed_request(

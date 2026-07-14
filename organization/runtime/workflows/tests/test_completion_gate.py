@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,8 @@ def run_frontdoor(
     *args: str,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
+    env = dict(os.environ)
+    env["SAIHAI_ORCH_STATE_ROOT"] = str(state_root)
     return subprocess.run(
         [
             sys.executable,
@@ -56,6 +59,7 @@ def run_frontdoor(
         cwd=ROOT,
         capture_output=True,
         text=True,
+        env=env,
         check=check,
     )
 

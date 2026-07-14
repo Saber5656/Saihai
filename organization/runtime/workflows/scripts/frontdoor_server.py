@@ -793,13 +793,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run P0 frontdoor HTTP API")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
-    parser.add_argument("--state-root", default=str(frontdoor.DEFAULT_STATE_ROOT))
+    parser.add_argument("--state-root", default="")
     args = parser.parse_args()
 
+    try:
+        state_root = frontdoor.trusted_state_root(args.state_root)
+    except frontdoor.FrontdoorError as exc:
+        parser.error(str(exc))
     server = FrontdoorServer(
         (args.host, args.port),
         Handler,
-        state_root=Path(args.state_root).expanduser(),
+        state_root=state_root,
     )
     print(f"P0 frontdoor API: http://{args.host}:{server.server_port}/")
     try:

@@ -255,6 +255,8 @@ def test_queue_evidence_view_status_mapping() -> None:
 def test_task_view_cli_shape() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
+        env = dict(os.environ)
+        env["SAIHAI_ORCH_STATE_ROOT"] = str(state_root)
         write_json(state_root / "runs" / "run-cli.json", run_record(run_id="run-cli", task_id="TSK-cli"))
         completed = subprocess.run(
             [
@@ -269,6 +271,7 @@ def test_task_view_cli_shape() -> None:
             cwd=ROOT,
             capture_output=True,
             text=True,
+            env=env,
             check=True,
         )
         payload = json.loads(completed.stdout)
@@ -289,6 +292,7 @@ def test_task_view_cli_shape() -> None:
             cwd=ROOT,
             capture_output=True,
             text=True,
+            env=env,
             check=True,
         )
         empty = json.loads(unknown.stdout)
