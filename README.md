@@ -1,77 +1,143 @@
 # Sahai
 
+[English](README.md) | [Japanese](README.ja.md)
+
+Sahai is a local orchestrator and organization-runtime repository for running
+AI-agent work through typed artifacts, explicit approval, durable state, and
+auditable evidence instead of treating a prompt as execution authority.
+
+The repository still includes the local status viewer inherited from
+Agent-Teams-Viewer (ATV), but the primary product surface is now the
+deterministic frontdoor, durable workflow runs, the constrained main-agent
+bridge, and typed report and evidence gates. Pre-release records may still use
+the ATV name for historical artifacts and compatibility aliases.
+
+Sahai uses only the Python 3.10+ standard library for normal operation. No
+`pip install` step is required.
+
+## Requirements
+
+- Python 3.10 or newer
+- Git 2.37 or newer when the live scoped-worker backend is enabled
+- A writable Agents Vault configured through the primary checkout
+- The checkout is the host-managed primary checkout at `~/dev/Saihai` or a
+  linked worktree whose primary is that checkout; `directory-path.env` and
+  `--state-root` do not make an arbitrary clone valid
+- Provider CLIs and credentials only when an operator intentionally enables a
+  live provider; the offline path does not require them
+
 ## Local environment
 
-Saihai local paths are configured in the primary checkout's
-`directory-path.env`, not by
-editing a shell profile:
+Configure local paths in the primary checkout's untracked
+`directory-path.env`. Do not add them to a shell profile or commit this file.
+Linked worktrees reuse the primary checkout's catalog.
 
-Run `python3 scripts/setup_directory_paths.py --help`, provide all nine required
-directory options, then validate with
-`python3 scripts/setup_directory_paths.py --check`.
+```sh
+python3 scripts/setup_directory_paths.py --help
+# Supply all nine required directory options, then validate the catalog.
+python3 scripts/setup_directory_paths.py --check
+```
 
-The setup is non-destructive and creates an owner-only file. Linked worktrees
-reuse the primary checkout's `directory-path.env`; process variables take
-precedence even when explicitly empty. Never commit `directory-path.env`.
-
-See [Local environment configuration](docs/configuration.md) for resolution,
-compatibility aliases, and recovery, and
+The setup command is non-destructive and writes an owner-only file. Process
+environment values take precedence over catalog values, including values that
+are explicitly empty. See [Local environment configuration](docs/configuration.md)
+for resolution and recovery rules, and
 [Directory path variable inventory](docs/environment-variable-inventory.md)
-for the path audit.
+for the complete path audit.
 
-Sahai は、AI エージェント組織の実行を「プロンプトの勢い」ではなく
-typed artifact、明示承認、監査可能な state で制御するためのローカル
-orchestrator / organization runtime リポジトリです。
+## Repository map
 
-Rename note: pre-release documentation may still mention Agent-Teams-Viewer
-when referring to historical task records or compatibility aliases.
-
-旧 Agent-Teams-Viewer（ATV）由来のローカル状態ビューアは残っていますが、
-現在の主軸は deterministic frontdoor、workflow-run、main-agent bridge、
-typed report / evidence gate です。
-
-## 現在の構成
-
-| 領域 | 主なファイル | 役割 |
+| Area | Primary files | Responsibility |
 |---|---|---|
-| Sahai operator CLI | `scripts/saihai.py` | `frontdoor` と `workflow` を分けた operator 向け CLI。提案・承認と workflow-run 操作を同じ namespace に混ぜない |
-| Organization facade | `scripts/configure_organization.py` | 組織 mode 判定、runtime path 確認、workflow selector/frontdoor/server、既存 ITB 互換 command の入口 |
-| Workflow contracts | `organization/runtime/workflows/` | schema、template、deterministic selector、frontdoor harness、HTTP bridge、durable run store、tests |
-| Organization knowledge | `organization/settings.json`, `organization/policies/`, `organization/roles/`, `organization/runtime/` | 組織運用設定、Policy、Team Role 定義、runtime registry / model registry / team config の repo 内ミラー |
-| Local status viewer | `server.py`, `static/index.html` | `~/.claude/state/itb` / `~/.codex/state/itb` の session、queue、report、role 状態を読むローカル read-only dashboard |
-| Migration notes | `docs/issues/`, `organization/runtime/workflows/operator-runbook.md` | legacy queue/tmux から typed-run へ移行するための現状、制約、未実装範囲 |
+| Operator CLI | `scripts/saihai.py` | Keeps frontdoor proposal/approval separate from workflow-run execution |
+| Organization facade | `scripts/configure_organization.py` | Organization mode, runtime paths, workflow selector/frontdoor/server, validation, and legacy ITB compatibility commands |
+| Workflow runtime | `organization/runtime/workflows/` | Schemas, templates, deterministic selector, frontdoor harness, HTTP bridge, durable run state, provider adapters, and tests |
+| Organization knowledge | `organization/settings.json`, `organization/policies/`, `organization/roles/`, `organization/runtime/` | Repository mirrors of organization settings, policies, team roles, runtime registries, model registries, and team configuration |
+| Local status viewer | `server.py`, `static/index.html` | Read-only dashboard for ITB sessions, queues, reports, roles, and workflow runs |
+| Migration guidance | `docs/issues/`, `organization/runtime/workflows/operator-runbook.md` | Migration from legacy queue/tmux assumptions to typed workflow runs |
 
-依存は Python 3.10+ のみです。通常の利用に `pip install` は不要です。
+## Shipped behavior
 
-## 実装済みの責務
-
-| 機能 | 現在の仕様 |
+| Capability | Current behavior |
 |---|---|
-| Prompt 分類 | `scripts/configure_organization.py classify` と `/api/decide` が `fast` / `strict` / `maintenance` を判定する。どの mode でも task record と Vault 記録は必要 |
-| Workflow selection | `workflow_selector.py` が typed classification を deterministic に workflow template へ対応付ける。raw prompt は workflow 選択の authority ではない |
-| Frontdoor proposal | prompt 起点の request は `proposed` または `waiting_human` まで。`propose` は approved artifact や workflow run を作らない |
-| Approval | `approve` は proposal digest 由来の challenge id を要求する。approved envelope の `activation_source` は `human_ui` / `manual_cli` / `orchestrator-start` のみ。実行 principal は `human_operator` / `manual_operator` / `orchestrator_start` を許可し、Sahai CLI の `frontdoor approve` は `human_operator` / `human-ui` / `local_ui` を既定値にする |
-| Workflow run | approved request から durable `runs/<run_id>.json` を作り、`drain` で bounded work order を作る |
-| Provider runner | `run-provider` が validated work order と adapter descriptor から fake provider または固定argvの `claude_headless_p0` / `codex_cli_openai_p0` を dispatch し、runner-owned typed report、normalized evidence、confined transcript を書く。live は local CLI の `--live` と `SAIHAI_ALLOW_LIVE_PROVIDERS=1` の両方が必要 |
-| Report validation | typed report と normalized provider evidence が canonical result。stdout、provider transcript、tmux pane output は signal only |
-| Main-agent bridge | main agent は request submit、redacted projection read、ack だけが可能。classification、approval、run 作成、adapter 準備、report path 指定は拒否される |
-| Child-thread action gateway | issue-scoped child worktree chat は `child-thread-create` action gateway で記録する。main-agent は raw `create_thread` / `fork_thread` / shell / git 権限を持たず、projection の redacted summary だけを読む |
-| Scoped Worker Executor | 承認済み work order から host が capability を導出し、task worktree に固定した Codex CLI worker を起動する。main-agent は capability 発行・実行 endpoint を呼べず、redacted execution summary だけを読む |
-| Status viewer | ITB session state、queue inbox、reports、role metadata、organization settings を read-only に表示する |
+| Prompt classification | `scripts/configure_organization.py classify` and `/api/decide` classify work as `fast`, `strict`, or `maintenance`. Every mode still requires the applicable task and Vault records. |
+| Workflow selection | `workflow_selector.py` deterministically maps a typed classification to an active workflow template. A raw prompt is never selection authority. |
+| Frontdoor proposal | Prompt-originated requests stop at `proposed` or `waiting_human`, or fail closed as `blocked`. `propose` cannot produce an approved activation or create a workflow run. |
+| Approval | `approve` verifies a challenge derived from the proposal digest. Accepted activation sources are `human_ui`, `manual_cli`, and `orchestrator-start`, with trusted execution principals `human_operator`, `manual_operator`, and `orchestrator_start`. The narrow CLI defaults to `human_operator` / `human-ui` / `local_ui`. |
+| Workflow runs | An approved request creates a durable `runs/<run_id>.json`; `drain` produces a bounded, immutable work order. |
+| Recovery | The compatibility harness provides typed `resume`, `abort`, `task-view`, and `lock-status` operations over durable state. |
+| Provider runner | `run-provider` dispatches the deterministic fake provider or a pinned `claude_headless_p0` / `codex_cli_openai_p0` live adapter and writes runner-owned typed reports, normalized evidence, and confined transcripts. |
+| Report and completion gates | Typed reports and normalized provider evidence are canonical. `verify-completion` separately checks terminal artifacts and produces the thin Vault evidence block. |
+| Main-agent bridge | A main agent may submit a request, read a redacted projection, and acknowledge output. It cannot supply authoritative classification, approval, run creation, adapter preparation, or report paths. |
+| Child-thread action gateway | `child-thread-create` records a validated issue-scoped child-worktree plan and result. Main-agent projections contain only a redacted summary. |
+| Scoped worker executor | A host derives a capability from an approved work order and may run a pinned Codex CLI worker in the task worktree. Capability issuance and execution are restricted to the credential-bound `action_gateway` channel. |
+| Status viewer | The local dashboard reads ITB sessions, queues, reports, role metadata, organization settings, workflow runs, and lock state without mutating runtime state. |
 
-## 明示的な非スコープ
+## Explicit non-goals
 
-| 非スコープ | 理由 |
+| Non-goal | Boundary |
 |---|---|
-| live provider credential setup | credential 生成・登録・検査は operator 側の手動設定に限定する。runner は credential 値を受け取らず、任意argv・shell・model override・任意cwdを許可しない |
-| tmux worker execution | `tmux_interactive` は compatibility model として残るが、この repo の P0 実行 path では使わない |
-| daemon / LaunchAgent | 現在の scheduler は invocation-drain、durable state、concurrency 1 |
-| commit / push / PR automation | publication は別 gate。P0 workflow は publish を直接実行しない |
-| Viewer からの workflow 実行 | local status viewer は read-only。workflow control は CLI / frontdoor HTTP API の責務 |
+| Provider credential provisioning | Operators create and configure credentials manually. The runner accepts neither credential values nor arbitrary argv, shell, model, cwd, or endpoint overrides. |
+| tmux worker execution | `tmux_interactive` remains a compatibility model but is not used by the P0 execution path. |
+| Daemon or LaunchAgent scheduling | The scheduler is invocation-drain with durable state and global concurrency 1. |
+| Implicit commit, push, or PR automation | Publication is a separate gate. A normal P0 workflow does not publish changes directly. |
+| Workflow control from the status viewer | The viewer is read-only. Workflow control belongs to the operator CLI or the authenticated frontdoor HTTP API. |
 
-## Sahai CLI
+## Offline quickstart
 
-`scripts/saihai.py` は operator が使う主 CLI です。
+Run the following flow only from that managed primary checkout or one of its
+linked worktrees. It uses a deterministic fake provider and makes no live
+provider call. Complete [Local environment](#local-environment) first; path
+configuration alone does not authorize a different clone.
+
+```sh
+suffix="$(date +%s)"
+request_id="req-readme-smoke-$suffix"
+run_id="run-readme-smoke-$suffix"
+
+python3 scripts/saihai.py frontdoor propose \
+  --task-id TSK-readme-smoke \
+  --request-id "$request_id" \
+  --prompt "Run a readonly external review." \
+  --ref organization/runtime/workflows/README.md \
+  --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
+
+python3 scripts/saihai.py frontdoor status --request-id "$request_id"
+
+nonce="$(
+  python3 scripts/saihai.py frontdoor status --request-id "$request_id" |
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["request"]["approval"]["human_action_id"])'
+)"
+
+python3 scripts/saihai.py frontdoor approve \
+  --request-id "$request_id" \
+  --nonce "$nonce"
+
+python3 scripts/saihai.py workflow create-run \
+  --request-id "$request_id" \
+  --run-id "$run_id"
+
+python3 scripts/saihai.py workflow drain --run-id "$run_id"
+
+python3 scripts/saihai.py workflow run-provider \
+  --run-id "$run_id" \
+  --adapter-id claude_headless_p0 \
+  --fake-provider-mode success
+
+python3 scripts/configure_organization.py workflow-frontdoor \
+  verify-completion --run-id "$run_id"
+```
+
+The final command must return a typed completion decision. For deeper
+background on blocked states, artifact inspection, recovery, migration, and
+rollback, see the
+[operator runbook](organization/runtime/workflows/operator-runbook.md). The
+command lists in this README have been checked against the current executable
+surfaces.
+
+## Operator CLI
+
+`scripts/saihai.py` is the narrow operator-facing CLI.
 
 ```sh
 python3 scripts/saihai.py --help
@@ -79,42 +145,35 @@ python3 scripts/saihai.py frontdoor --help
 python3 scripts/saihai.py workflow --help
 ```
 
-| Group | Commands | 境界 |
+| Group | Commands | Authority boundary |
 |---|---|---|
-| `frontdoor` | `propose`, `approve`, `status` | activation artifact の提案・明示承認・read-only 状態確認。workflow run は作らない |
-| `workflow` | `create-run`, `drain`, `run-provider`, `validate-report` | approved artifact / run id / typed report を扱う。`--prompt` や `--classification` は受け取らない |
+| `frontdoor` | `propose`, `approve`, `status` | Propose or explicitly approve activation artifacts and read request state. These commands do not create workflow runs. |
+| `workflow` | `create-run`, `drain`, `run-provider`, `validate-report` | Operate on approved request artifacts, run IDs, work orders, and typed reports. These commands do not accept a raw prompt or classification. |
 
-最小の operator flow:
+Recovery and inspection commands are deliberately exposed through the broader
+compatibility harness rather than duplicated in the narrow CLI:
 
 ```sh
-python3 scripts/saihai.py frontdoor propose \
-  --task-id TSK-example \
-  --request-id req-example \
-  --prompt "Run a readonly external review." \
-  --ref organization/runtime/workflows/README.md \
-  --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
+python3 scripts/configure_organization.py workflow-frontdoor resume \
+  --run-id <run_id> --requeue
+python3 scripts/configure_organization.py workflow-frontdoor abort \
+  --run-id <run_id> --reason "operator cancelled"
+python3 scripts/configure_organization.py workflow-frontdoor task-view \
+  --task-id <task_id>
+python3 scripts/configure_organization.py workflow-frontdoor lock-status
+```
 
-python3 scripts/saihai.py frontdoor status \
-  --request-id req-example
+`run-step`, `resume`, `abort`, `verify-completion`, `task-view`, `lock-status`,
+and `list` are not subcommands of `scripts/saihai.py`. Use the compatibility
+harness for the implemented recovery, verification, and inspection commands.
 
-python3 scripts/saihai.py frontdoor approve \
-  --request-id req-example \
-  --nonce <approval.human_action_id>
+## Live provider adapters
 
-python3 scripts/saihai.py workflow create-run \
-  --request-id req-example
+Live readonly execution requires both `--live` and the exact environment
+guard. Provider authentication and all host bindings are configured manually
+by the operator.
 
-python3 scripts/saihai.py workflow drain \
-  --run-id <run_id>
-
-# Offline smoke / tests use fake provider mode and never invoke a provider.
-python3 scripts/saihai.py workflow run-provider \
-  --run-id <run_id> \
-  --adapter-id claude_headless_p0 \
-  --fake-provider-mode success
-
-# Optional live readonly review. Provider authentication and all host bindings are
-# configured manually by the operator. Both the flag and exact guard are required.
+```sh
 SAIHAI_ALLOW_LIVE_PROVIDERS=1 python3 scripts/saihai.py workflow run-provider \
   --run-id <run_id> \
   --adapter-id claude_headless_p0 \
@@ -126,132 +185,146 @@ SAIHAI_ALLOW_LIVE_PROVIDERS=1 python3 scripts/saihai.py workflow run-provider \
   --adapter-id codex_cli_openai_p0 \
   --live \
   --timeout-seconds 1800
+```
 
-live adapter の command boundary は host-owned です。
+The live command boundary is host-owned.
 
 | Adapter | Mechanical boundary |
 |---|---|
-| `claude_headless_p0` | `SAIHAI_CLAUDE_EXECUTABLE_PATH` と `..._SHA256` で固定した absolute executable、owner/mode/digest 再検証、`--print --output-format json`、plan mode、tools/slash commands/MCP 無効、safe mode、session persistence 無効 |
-| `codex_cli_openai_p0` | executable に加え host-owned confinement wrapper/profile の absolute path と digest が必須。isolated cwd、`exec --ephemeral --json`、approval never、read-only sandbox、user config/rules と inherited shell environment 無効。confinement binding がなければ fail-closed |
+| `claude_headless_p0` | Requires an absolute executable pinned by `SAIHAI_CLAUDE_EXECUTABLE_PATH` and its SHA-256 variable. The runner rechecks owner, mode, and digest; uses `--print --output-format json` and plan/safe mode; and disables tools, slash commands, MCP, and session persistence. |
+| `codex_cli_openai_p0` | Requires the pinned executable plus host-owned confinement wrapper and profile paths and digests. It uses an isolated cwd, `exec --ephemeral --json`, approval `never`, a read-only sandbox, and no inherited user rules, configuration, or shell environment. Missing confinement bindings fail closed. |
 
-host binding 用 environment variable は path と digest だけを保持し、credential 値を渡しません。Codex は
-`SAIHAI_CODEX_EXECUTABLE_{PATH,SHA256}`、`SAIHAI_CODEX_CONFINEMENT_WRAPPER_{PATH,SHA256}`、
-`SAIHAI_CODEX_CONFINEMENT_PROFILE_{PATH,SHA256}` を全て要求します。caller は argv、shell、cwd、model、
-provider endpoint、出力pathを指定できません。
+Host-binding variables contain only paths and digests, never credential values.
+Codex requires all of the following bindings:
 
-provider call 前には signed work order、iteration 固定 snapshot、run/request/step binding、context file の
-size/digest、adapter request digest、lease、pinned executable を再検証します。承認済み context は最大20 files、
-各256 KB、合計1 MBまでを canonical JSON として inline 渡し、provider に repository read authority を与えません。
-stdout/stderr は合計4 MiBで打ち切り、owner-only `0700` directory / `0600` transcript にだけ保存します。
-`stdout_sha256` は raw stdout、`transcript_sha256` は transcript JSON 全体を意味します。
+- `SAIHAI_CODEX_EXECUTABLE_{PATH,SHA256}`
+- `SAIHAI_CODEX_CONFINEMENT_WRAPPER_{PATH,SHA256}`
+- `SAIHAI_CODEX_CONFINEMENT_PROFILE_{PATH,SHA256}`
 
-1回の provider CLI timeout は既定30分、範囲1秒〜24時間です。ハーネス全体には累積 wall-clock timeoutを置きません。
-実行中は durable claim/lease を30秒ごとに heartbeatし、global workflow lock は provider subprocess 中に保持しません。
-attempt journal と retry counter は永続化され、同一障害は初回後最大5回自動再試行してから `waiting_human` へ移ります。
-host/process 再起動後も `resume` / 再度の `run-provider` から継続できます。
+Callers cannot choose argv, shell, cwd, model, provider endpoint, or output
+paths. Before a provider call, the runner revalidates the signed work order,
+iteration-frozen snapshot, run/request/step binding, context-file sizes and
+digests, adapter-request digest, lease, and pinned executable.
 
-# If a provider writes report/evidence outside the runner, validate it explicitly.
-python3 scripts/saihai.py workflow validate-report \
-  --run-id <run_id>
-```
+Live context is limited to 20 files, 256 KB per file, and 1 MB total. It is
+passed as canonical inline JSON, so the provider receives no repository-read
+authority. Combined stdout/stderr is capped at 4 MiB and stored only in an
+owner-only `0700` directory and `0600` transcript. `stdout_sha256` covers raw
+stdout; `transcript_sha256` covers the full transcript JSON.
 
-未実装 command を README に載せない方針です。現在 `run-step`、`resume`、
-`abort`、`verify-completion`、`task-view`、`lock-status`、`list` は
-`scripts/saihai.py` の parser には存在しません。
+Each provider CLI invocation defaults to 30 minutes and accepts values from 1
+second through 24 hours. The harness itself has no cumulative wall-clock
+timeout. A durable claim is heartbeated every 30 seconds, and the global
+workflow lock is not held during the provider subprocess. Attempt journals and
+retry counters survive restarts; the same failure is retried at most five times
+after the initial attempt before moving to `waiting_human`. Operators can
+continue after a host or process restart with `resume` or another
+`run-provider` invocation.
 
-## Organization Facade
+## Organization facade and frontdoor harness
 
-`scripts/configure_organization.py` は skills / automation / 既存 runtime のための
-互換 facade です。Sahai CLI より広い surface を持ちます。
+`scripts/configure_organization.py` is the compatibility facade used by
+skills, automation, and the existing runtime.
 
 ```sh
 python3 scripts/configure_organization.py status
 python3 scripts/configure_organization.py runtime-paths
-python3 scripts/configure_organization.py classify --prompt "最近の天気予報を調べる"
-AGENT_ORG_MAINTENANCE=1 python3 scripts/configure_organization.py classify --prompt "Hookを直す"
+python3 scripts/configure_organization.py classify --prompt "Review the latest forecast"
+AGENT_ORG_MAINTENANCE=1 python3 scripts/configure_organization.py classify --prompt "Repair a hook"
 python3 scripts/configure_organization.py validate-all
 python3 scripts/configure_organization.py workflow-selector validate-contracts
+python3 scripts/configure_organization.py workflow-frontdoor --help
 ```
 
-主な command:
-
-| Command | 用途 |
+| Command | Purpose |
 |---|---|
-| `status` | `organization/settings.json`、role count、policy count、repo root を JSON で出す |
-| `runtime-paths` | ITB runtime、workflow selector/frontdoor/server、Sahai CLI、registry mirror の存在確認 |
-| `classify` | prompt を `fast` / `strict` / `maintenance` に分類する |
-| `validate-all` | offline validation suite、workflow contract validation、Python compile check をまとめて実行する |
-| `workflow-selector` | workflow contract validation、selection、activation envelope helper |
-| `workflow-frontdoor` | frontdoor harness の full compatibility surface |
-| `workflow-frontdoor-server` | Agent UI / bridge 用の localhost HTTP API |
-| `itb`, `itd-monitor`, `agent-call`, `agent-switch`, `provider-failover` など | legacy / compatibility runtime の入口 |
+| `status` | Print organization settings, role and policy counts, and repository root as JSON. |
+| `runtime-paths` | Verify the ITB runtime, workflow selector/frontdoor/server, operator CLI, and registry mirrors. |
+| `classify` | Classify a prompt as `fast`, `strict`, or `maintenance`. |
+| `validate-all` | Run the offline suites, contract validation, and Python compile check. |
+| `workflow-selector` | Validate workflow contracts and perform deterministic selection and activation-envelope operations. |
+| `workflow-frontdoor` | Provide the complete host-owned frontdoor and recovery surface. |
+| `workflow-frontdoor-server` | Run the localhost frontdoor HTTP API. |
+| `itb`, `itd-monitor`, `agent-call`, `agent-surfaces`, `agent-switch`, `provider-failover`, `transport-status` | Preserve legacy or compatibility runtime entry points. |
 
-## Offline Validation
+The frontdoor harness currently implements:
 
-ローカルの offline validation suite は次の1コマンドで実行します。
+| Command | Purpose |
+|---|---|
+| `propose`, `approve`, `orchestrator-start-approve`, `manual-approve` | Create and explicitly approve bounded activation artifacts through trusted channels. |
+| `create-run`, `drain` | Create durable runs and immutable work orders. |
+| `resume`, `abort` | Recover or terminate durable non-terminal runs. |
+| `adapter-capability` | Print a provider adapter capability descriptor. |
+| `prepare-claude-adapter` | Create a deprecated, non-executable compatibility artifact. Live execution is consolidated under `run-provider --live`. |
+| `run-provider`, `validate-report` | Execute a bounded fake or pinned readonly adapter and pass runner-owned artifacts through the report gate. |
+| `verify-completion` | Verify terminal typed artifacts and produce a thin final-evidence decision. |
+| `task-view`, `lock-status` | Read task-linked run evidence and the global lock state. |
+| `bridge-submit-request`, `bridge-read-projection`, `bridge-ack-output` | Operate the constrained main-agent bridge. |
+| `child-thread-create` | Record a validated child-thread plan and result through the action gateway. |
+| `channel-token` | Create an owner-only local HTTP channel-token file. |
+
+The default orchestrator state root is
+`~/.codex/state/itb/frontdoor-orchestrator`. To place it elsewhere, set
+`SAIHAI_ORCH_STATE_ROOT` in the primary checkout's owner-only (`0600`)
+`directory-path.env`. The catalog must be a regular file owned by the current
+user, and the state root must be a validated absolute path. This
+security-sensitive key cannot be overridden by the process environment.
+
+Linked worktrees consult only the host-managed primary checkout at
+`~/dev/Saihai`; they do not rediscover the catalog through Git metadata or a
+fallback path. `--state-root` confirms the configured canonical root and cannot
+select an arbitrary location.
+
+### Scoped worker backend
+
+The live scoped-worker backend fails closed until a host operator manually
+configures the following assets. Sahai never generates keys or credentials.
+
+| Environment variable | Purpose |
+|---|---|
+| `SAIHAI_SCOPED_EXECUTOR_KEY_FILE` | Capability HMAC key in a regular, non-symlink, `0600` file containing at least 32 bytes. |
+| `SAIHAI_SCOPED_WORKTREE_ROOT` | Canonical root from which the host derives the task/run-bound worktree path. |
+| `SAIHAI_SCOPED_REPO_ROOT` | Host-owned absolute repository path. Defaults to the Sahai repository root. |
+| `SAIHAI_SCOPED_CODEX_EXECUTABLE` | Absolute pinned Codex CLI path whose digest is bound into the work order and capability. Group/world-writable binaries are rejected. |
+| `SAIHAI_SCOPED_CODEX_HOME` | Dedicated worker runtime/auth root; the main-agent profile is not inherited. |
+| `SAIHAI_ENABLE_SCOPED_WORKER_LIVE=1` | Explicit live-execution gate. Without it, only the deterministic fake harness is available. |
+
+The initial v1 mechanically accepts only the whole task worktree as scope.
+Subpath grants, commit, push, PR publication, worker-tool network, and arbitrary
+providers fail closed. The fixed Codex model control plane is host transport,
+not a network or provider grant to worker tools. Capability issuance and
+execution are available only through the credential-bound `action_gateway`
+HTTP channel, not through a CLI subcommand.
+
+## Offline validation
+
+Run every offline suite with one command:
 
 ```sh
 python3 scripts/validate_all.py
 ```
 
-組織設定 CLI の facade からも同じ suite を実行できます。
+The organization facade exposes the same validation:
 
 ```sh
 python3 scripts/configure_organization.py validate-all
 ```
 
-この検証は stdlib の self-runner test、workflow contract validation、Python
-compile check をまとめて実行し、最後に summary JSON を1行出力します。子プロセスでは
-`SAIHAI_ALLOW_LIVE_PROVIDERS` を空にして、live provider token や network 前提に依存しません。adapter tests は
-recorded fixture と patched subprocess/binary discovery のみを使い、live provider を呼びません。
+The harness runs standard-library self-runner tests, validates workflow
+contracts, compiles Python sources, and prints a final one-line JSON summary.
+Child processes clear `SAIHAI_ALLOW_LIVE_PROVIDERS`, so validation never
+depends on live provider tokens or network access. Adapter tests use recorded
+fixtures and patched subprocess/binary discovery only.
 
-## Frontdoor Harness
-
-`workflow-frontdoor` は `frontdoor_orchestrator.py` に委譲し、Sahai CLI には出していない
-adapter / bridge / token 操作も提供します。
+For a quick contract-only check:
 
 ```sh
-python3 scripts/configure_organization.py workflow-frontdoor --help
+python3 scripts/configure_organization.py workflow-selector validate-contracts
 ```
-
-実装済み command:
-
-| Command | 用途 |
-|---|---|
-| `propose` | typed classification と bounded refs から proposed request を作る |
-| `approve` | challenge id を検証して approved activation を記録する |
-| `create-run` | approved request から workflow-run を作る |
-| `drain` | run から work order を作る |
-| `adapter-capability` | provider adapter capability descriptor を出す |
-| `prepare-claude-adapter` | deprecated/non-executable な互換 artifact のみ作る。provider write authority はなく、live execution は `run-provider --live` に一本化 |
-| `run-provider` | validated work order と provider adapter descriptor から fake provider または固定argvの readonly live adapter を実行し、runner-owned evidence/report を report gate に渡す。live は local CLI の `--live` + environment guard が必須 |
-| `validate-report` | typed report と evidence を検証して run を terminal state へ進める |
-| `bridge-submit-request` | main-agent bridge から request を submit する |
-| `bridge-read-projection` | redacted orchestrator projection を読む |
-| `bridge-ack-output` | projection digest 一致時だけ inert ack を記録する |
-| `child-thread-create` | action gateway executor が検証済み child-thread plan と作成/再利用結果を記録する |
-| `channel-token` | local HTTP channel token を生成する |
-
-default state root は `~/.codex/state/itb/frontdoor-orchestrator` です。実パスを切り離す場合は、primary checkout の owner-only (`0600`) なローカル `directory-path.env` に `SAIHAI_ORCH_STATE_ROOT` を設定します。このファイルは regular file、current user owner、validated absolute path でなければ fail-closed です。catalog value は source や main-agent projection へ複製しません。この security-sensitive key に process environment override は適用せず、task worktree の catalog も参照しません。linked worktree からは host-managed primary checkout `~/dev/Saihai` だけを参照し、Git metadataからの再探索やfallbackは行いません。`--state-root` は configured canonical root との一致確認用であり、任意 path への切替には使えません。
-
-Scoped Worker Executor の live backend は fail-closed で無効です。host operator が次の既存資産を手動設定した場合だけ起動できます。executor は key や credential を生成しません。
-Live scoped workers require Git 2.37 or newer for stable NUL-delimited worktree discovery.
-
-| Environment | Purpose |
-|---|---|
-| `SAIHAI_SCOPED_EXECUTOR_KEY_FILE` | capability HMAC key。通常 file、symlink 不可、mode `0600`、32 bytes 以上 |
-| `SAIHAI_SCOPED_WORKTREE_ROOT` | host が task/run binding から worktree path を導出する canonical root |
-| `SAIHAI_SCOPED_REPO_ROOT` | executor 対象 repository の host-owned absolute path。未設定時は Saihai repo root |
-| `SAIHAI_SCOPED_CODEX_EXECUTABLE` | operator が固定する Codex CLI absolute path。digest を work order/capability に binding し、group/world writable binary は拒否 |
-| `SAIHAI_SCOPED_CODEX_HOME` | worker 専用 Codex runtime/auth root。main-agent session の config/profile を継承しない |
-| `SAIHAI_ENABLE_SCOPED_WORKER_LIVE=1` | live Codex CLI 起動の明示 gate。未設定時は deterministic fake harness だけが利用可能 |
-
-初期 v1 は whole task worktree scope のみを機械的に受理します。subpath、commit、push、PR、worker-tool network、任意 provider は fail-closed です。Codex model control-plane は固定 backend の host transport であり、worker tool への network/provider grant ではありません。
-Scoped worker の capability 発行・実行には CLI subcommand を設けず、credential-bound な `action_gateway` HTTP channel だけを host process boundary として使用します。
 
 ## Frontdoor HTTP API
 
-HTTP wrapper は `127.0.0.1` bind を推奨します。
+Run the authenticated local API on loopback:
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor-server \
@@ -259,139 +332,151 @@ python3 scripts/configure_organization.py workflow-frontdoor-server \
   --port 8766
 ```
 
-| Endpoint | 役割 |
+| Endpoint | Purpose |
 |---|---|
-| `GET /` | main-agent output confirmation UI |
-| `GET /healthz` | health check |
-| `POST /main-agent/submit-request` | bridge request submit |
-| `GET /main-agent/projections/{request_id}` | redacted projection read |
-| `POST /main-agent/ack-output` | verified no-op acknowledgement |
-| `POST /action-gateway/child-thread-create` | validated child-thread plan/result の記録。`action_gateway` channel 専用 |
-| `POST /action-gateway/scoped-worker-capabilities` | frozen work order から capability を発行。body は `run_id` / `step_id` のみ、`action_gateway` channel 専用 |
-| `POST /action-gateway/scoped-worker-execute` | capability id を検証・消費して固定 worker を起動。body は `capability_id` のみ、`action_gateway` channel 専用 |
-| `POST /frontdoor/propose` | operator proposal |
-| `POST /frontdoor/approve` | human UI approval |
-| `POST /orchestrator/runs` | create workflow run |
-| `POST /orchestrator/runs/{run_id}/drain` | drain run into work order |
-| `POST /provider/claude/prepare` | prepare bounded Claude adapter request |
-| `POST /provider/reports/validate` | validate typed provider report |
+| `GET /` | Main-agent output-confirmation UI. |
+| `GET /healthz` | Health check. |
+| `POST /main-agent/submit-request` | Submit a bridge request. |
+| `GET /main-agent/projections/{request_id}` | Read a redacted bridge projection. |
+| `POST /main-agent/ack-output` | Record a verified, inert acknowledgement. |
+| `POST /action-gateway/child-thread-create` | Record a validated child-thread plan/result; `action_gateway` only. |
+| `POST /action-gateway/scoped-worker-capabilities` | Derive a capability from a frozen work order; body contains only `run_id` and `step_id`; `action_gateway` only. |
+| `POST /action-gateway/scoped-worker-execute` | Consume a capability and start the pinned worker; body contains only `capability_id`; `action_gateway` only. |
+| `POST /frontdoor/propose` | Create an operator proposal. |
+| `POST /frontdoor/approve` | Record human-UI approval. |
+| `POST /orchestrator/runs` | Create a workflow run. |
+| `POST /orchestrator/runs/{run_id}/drain` | Drain a run into a work order. |
+| `POST /orchestrator/runs/{run_id}/resume` | Resume or requeue a durable run. |
+| `POST /orchestrator/runs/{run_id}/abort` | Abort a non-terminal run with an operator reason. |
+| `GET /orchestrator/runs/{run_id}/verify-completion` | Verify terminal artifacts as an operator or harness principal. |
+| `GET /orchestrator/tasks/{task_id}/runs` | Read the thin task-linked run and evidence view as an operator. |
+| `POST /provider/claude/prepare` | Create the bounded compatibility adapter request. |
+| `POST /provider/reports/validate` | Validate a typed provider report as a harness principal. |
 
-raw request / run read endpoints（`/frontdoor/requests/{request_id}` と
-`/orchestrator/runs/{run_id}`）は現在 403 を返します。main-agent には
-redacted projection を使い、operator は dedicated read API が実装されるまで
-`--state-root` 配下の canonical artifacts を直接確認します。
+Raw request and run reads at `/frontdoor/requests/{request_id}` and
+`/orchestrator/runs/{run_id}` return `403`. Main agents use redacted
+projections; operators use the dedicated task/completion views or inspect
+canonical artifacts under the configured state root.
 
-channel token は次の command で作ります。
+Create a local channel token with:
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor channel-token \
   --channel bridge
 ```
 
-この command は token 自体を stdout へ出さず、owner-only token file の path だけを返します。host operator が必要な client へ token を設定する場合は、その file をローカルで明示的に読み取ります。
+The command prints only the path of the owner-only token file. An operator must
+explicitly read and configure the token for the intended client. The API derives
+principals from `X-Orchestrator-Channel` and `X-Orchestrator-Token`; it rejects
+`principal_type`, `principal_id`, and `authn_method` fields in request bodies as
+authority.
 
-HTTP API は `X-Orchestrator-Channel` と `X-Orchestrator-Token` から principal を決めます。
-request body の `principal_type`、`principal_id`、`authn_method` は authority として受け取りません。
+## Local status viewer
 
-## Local Status Viewer
-
-旧 ATV dashboard は、現在も read-only viewer として利用できます。
+The ATV-derived dashboard remains available as a local, read-only viewer.
 
 ```sh
 python3 server.py
 python3 server.py --port 8799
 ```
 
-起動先は `http://127.0.0.1:8765/` です。`ThreadingHTTPServer` は
-`127.0.0.1` に bind し、`Host` は `127.0.0.1` / `localhost` / `::1` のみ許可します。
-認証はないため、リモート公開しないでください。
+The default URL is `http://127.0.0.1:8765/`. The server binds to loopback and
+accepts only `127.0.0.1`, `localhost`, or `::1` Host values. It has no
+authentication; never expose it remotely.
 
-Viewer API:
+ITB session discovery reads `~/.claude/state/itb` and
+`~/.codex/state/itb`. Workflow-run discovery defaults to each root's
+`frontdoor-orchestrator` child; the viewer may additionally read a
+process-level `SAIHAI_ORCH_STATE_ROOT`. This viewer-only discovery behavior is
+not execution authority: the host workflow CLI still accepts only the
+canonical root loaded from the primary checkout catalog.
 
-| Endpoint | 説明 |
+### Viewer API
+
+| Endpoint | Response |
 |---|---|
-| `GET /api/sessions` | `~/.claude/state/itb` / `~/.codex/state/itb` から監視可能 session を列挙する |
-| `GET /api/org?session=<id>` | team 別 role 状態、active task、busy count を返す |
-| `GET /api/role?session=<id>&role=<role_id>` | role metadata、inbox、latest report、provider evidence を返す |
-| `GET /api/config` | organization settings、role count、policy count、policy index を返す |
-| `GET /api/decide?prompt=<text>` | prompt を `fast` / `strict` / `maintenance` に判定する |
-| `GET /api/workflow-runs?session=<id>&task=<id>&state=<state>` | workflow-run の thin summary を read-only に列挙する |
-| `GET /api/workflow-run?session=<id>&run=<id>` | workflow-run detail、work order、report、provider evidence、transition metadata を read-only に返す |
-| `GET /api/workflow-lock` | orchestrator state root ごとの global workflow lock 状態を read-only に返す |
+| `GET /api/sessions` | Observable sessions under `~/.claude/state/itb` and `~/.codex/state/itb`. |
+| `GET /api/org?session=<id>` | Team role state, active task, and busy count. |
+| `GET /api/role?session=<id>&role=<role_id>` | Role metadata, inbox, latest report, and provider evidence. |
+| `GET /api/config` | Organization settings and role/policy indexes. |
+| `GET /api/decide?prompt=<text>` | `fast`, `strict`, or `maintenance` classification. |
+| `GET /api/workflow-runs?session=<id>&task=<id>&state=<state>` | Thin read-only workflow-run summaries. |
+| `GET /api/workflow-run?session=<id>&run=<id>` | Work order, report, provider evidence, and transition metadata. |
+| `GET /api/workflow-lock` | Global workflow-lock status for each configured orchestrator root. |
 
-Viewer UI:
+The UI contains an organization-control summary, the existing team board, and
+a Workflow Runs panel with state badges, a stale-lock banner, and read-only
+work-order/report/evidence/transition details. It never starts a provider,
+changes configuration, or mutates workflow state.
 
-| Panel | 表示内容 | 境界 |
+Viewer role states are derived as follows:
+
+| State | Condition |
+|---|---|
+| `working` | The latest report is less than 120 seconds old, or report/provider evidence is in progress. |
+| `processing` | A queue inbox or report is `processing`, `running`, or `invoked`. |
+| `pending` | The queue inbox contains a pending message. |
+| `ready` | A queue-consumer role is available. |
+| `deferred` | A lazy/on-call role is outside the current task. |
+| `offline` | Session metadata or the context pointer is missing. |
+
+## Canonical artifacts
+
+| Artifact | Path | Authority |
 |---|---|---|
-| Organization Control | organization mode / hook policy / prompt decision | read-only status と `/api/decide` の判定のみ |
-| Team board | session ごとの role cards、inbox、latest report、provider evidence | role detail は既存 queue/report の thin view |
-| Workflow Runs | run list、state badge、lock banner、work order / report / evidence / transition detail | read-only。provider 実行、config 変更、state mutation は行わない |
+| Organization settings | `organization/settings.json` | Organization mode, strict/fast behavior, hook observer, and provider-transport policy. |
+| Policy mirror | `organization/policies/*.md`, `organization/policy-index.json` | Repository policy mirror and checksum index. |
+| Role mirror | `organization/roles/<role>/skill.md`, `organization/role-index.json` | Team-role definitions and checksum/team index. |
+| Runtime registry | `organization/runtime/infra-team-bootstrap/config/role-agent-registry.yaml`, `organization/runtime/role-agent-registry.yaml` | Compatible role-registry paths until cleanup completes. |
+| Workflow contracts | `organization/runtime/workflows/registry.yaml`, `templates/`, `schemas/` | Deterministic workflow contract source. |
+| Request record | `<state_root>/requests/<request_id>.json` | Request, bounded refs, proposal, approval, and bridge metadata. |
+| Workflow run | `<state_root>/runs/<run_id>.json` | Durable run state, current step, terminal status, and transition provenance. |
+| Work order | `<state_root>/work-orders/<run_id>/<step_id>.json` | Bounded instruction and canonical report path. |
+| Adapter request | `<state_root>/adapter-requests/<run_id>/<step_id>-<adapter_id>.json` | Provider prompt, evidence/transcript paths, and authority boundary for adapters such as `claude_headless_p0` and `codex_cli_openai_p0`. |
+| Typed report | `<state_root>/reports/<run_id>/<step_id>-external-review-report.json` | Canonical P0 external-review result. |
+| Provider evidence | `<state_root>/provider-evidence/<run_id>/*` | Normalized evidence and signal-only transcript. |
+| Session run index | `<session_dir>/orchestrator-runs.json` | Rebuildable viewer projection, not canonical run state. |
+| Task view | `workflow-frontdoor task-view` / `GET /orchestrator/tasks/{task_id}/runs` | Derived thin links/status and queue-shaped evidence. |
+| Role queue files | `<session_dir>/queue/inbox`, `<session_dir>/queue/tasks`, `<session_dir>/queue/reports` | Canonical ITB role-queue evidence; the orchestrator does not write it. |
+| Audit log | `<state_root>/audit/*.jsonl` | Principal-scoped transition, replay, rejection, and acknowledgement evidence. |
 
-Viewer の status 判定:
+## Workflow contracts
 
-| status | 条件 |
+| Template | Purpose |
 |---|---|
-| `working` | latest report が直近 120 秒以内、または report / provider evidence が進行中 |
-| `processing` | queue inbox / report が `processing` / `running` / `invoked` |
-| `pending` | queue inbox に `pending` message がある |
-| `ready` | queue consumer role として待機可能 |
-| `deferred` | lazy / on-call role で現タスク対象外 |
-| `offline` | session metadata または context pointer が見つからない |
+| `single_step_external_review` | Read-only external review. |
+| `research_only` | No-diff research, design, or source review. |
+| `standard_code_change` | Bounded code change without publication. |
+| `publication_required` | Code change or publication that requires a separate publication gate. |
+| `policy_or_permission_change` | Changes to policy, permissions, hooks, or governance. |
+| `security_sensitive_change` | Changes requiring explicit security review and risk evidence. |
 
-## Canonical Artifacts
+The readonly external-review path is the primary end-to-end P0 path. The other
+templates have active contracts and deterministic routing, but their presence
+does not grant an LLM direct write, shell, commit, push, network, or provider
+authority. Those effects remain behind explicit host-owned gates.
 
-| 種別 | パス | Authority |
-|---|---|---|
-| Organization settings | `organization/settings.json` | 組織 enabled / disabled / maintenance、fast / strict、Hook observer、provider transport policy |
-| Policy mirror | `organization/policies/*.md`, `organization/policy-index.json` | repo 内 policy mirror と checksum index |
-| Role mirror | `organization/roles/<role>/skill.md`, `organization/role-index.json` | Team Role 定義 mirror と checksum / team index |
-| Runtime registry | `organization/runtime/infra-team-bootstrap/config/role-agent-registry.yaml`, `organization/runtime/role-agent-registry.yaml` | role registry。cleanup 完了までは両方が互換対象 |
-| Workflow contracts | `organization/runtime/workflows/registry.yaml`, `templates/`, `schemas/` | deterministic workflow contract 正本 |
-| Request record | `<state_root>/requests/<request_id>.json` | request、bounded refs、proposal、approval、bridge metadata |
-| Workflow run | `<state_root>/runs/<run_id>.json` | durable run state、current step、terminal status、transition provenance |
-| Work order | `<state_root>/work-orders/<run_id>/<step_id>.json` | bounded step instruction と canonical report path |
-| Adapter request | `<state_root>/adapter-requests/<run_id>/<step_id>-claude_headless_p0.json` | provider prompt、evidence path、transcript path、authority boundary |
-| Typed report | `<state_root>/reports/<run_id>/<step_id>-external-review-report.json` | P0 external review の canonical provider result |
-| Provider evidence | `<state_root>/provider-evidence/<run_id>/*` | normalized evidence と signal-only transcript |
-| Session run index | `<session_dir>/orchestrator-runs.json` | viewer 向け rebuildable view。canonical run state ではない |
-| Task-view output | `workflow-frontdoor task-view` / `GET /orchestrator/tasks/{task_id}/runs` | derived view。thin links/status と queue-shaped evidence のみ |
-| Role queue files | `<session_dir>/queue/inbox|tasks|reports` | ITB role-queue の canonical evidence。orchestrator は書き込まない |
-| Audit log | `<state_root>/audit/*.jsonl` | principal-scoped transition / replay / rejection / ack evidence |
+## Security boundaries
 
-## Workflow Contracts
+- A raw prompt is not workflow-selection or execution authority.
+- Prompt-originated activation stops at `proposed` or `waiting_human`, or
+  fails closed as `blocked`.
+- The main-agent bridge cannot supply authoritative classification, approval,
+  run IDs, report paths, adapter requests, or workflow definitions.
+- Context references must resolve within the repository root. Symlink escape,
+  `.git`, `.env*`, and key/token/secret/credential paths are rejected, as are
+  count and byte-limit violations.
+- Provider output is a signal. Only a validated typed report and normalized
+  evidence can authorize completion.
+- The local viewer is mechanically loopback-only. The frontdoor HTTP API
+  defaults to loopback and should remain bound there, but its `--host` option
+  does not mechanically prevent a remote bind. Screen sharing may still expose
+  prompts, evidence, or internal paths.
 
-`organization/runtime/workflows/` は typed orchestrator の contract surface です。
+## Focused tests
 
-| Template | 用途 |
-|---|---|
-| `single_step_external_review` | readonly external review |
-| `research_only` | no-diff research / design / source review |
-| `standard_code_change` | publication なしの bounded code change |
-| `publication_required` | publication gate が必要な code change / publication |
-| `policy_or_permission_change` | policy、permission、hook、governance 影響のある変更 |
-| `security_sensitive_change` | security review が必要な変更 |
-
-注意: 現在 end-to-end に運用可能な P0 path は readonly external review が中心です。
-code change / publication / policy / security workflow は contract と routing を持ちますが、
-write / shell / commit / push / network / provider dispatch を LLM に直接渡す action gateway は
-この README 時点では実装済みとして扱いません。
-
-## セキュリティ境界
-
-- raw prompt は workflow 選択や実行の authority ではありません。
-- prompt 起点の activation は `proposed` / `waiting_human` までです。
-- main-agent bridge は classification、approval、run id、report path、adapter request、
-  workflow definition を authority として送れません。
-- context refs は repo root 配下に解決され、symlink escape、`.git`、`.env*`、
-  key / token / secret / credential 系 path、件数上限、byte 上限を拒否します。
-- provider output は signal です。typed report と normalized evidence の検証結果だけが
-  completion authority です。
-- local viewer と HTTP API は localhost 前提です。画面共有時は prompt、evidence、
-  internal path が映る可能性に注意してください。
-
-## テスト
-
-主要 regression test:
+The one-command validation above is authoritative. Useful focused entry points
+include:
 
 ```sh
 python3 tests/test_configure_organization.py
@@ -402,23 +487,17 @@ python3 organization/runtime/workflows/tests/test_task_state_bridge.py
 python3 organization/runtime/workflows/tests/test_frontdoor_orchestrator.py
 ```
 
-contract validation だけを素早く見る場合:
+## Additional documentation
 
-```sh
-python3 scripts/configure_organization.py workflow-selector validate-contracts
-```
-
-## 参考ドキュメント
-
-| ドキュメント | 内容 |
+| Document | Contents |
 |---|---|
-| `organization/README.md` | organization knowledge mirror の layout と migration rule |
-| `organization/runtime/workflows/README.md` | workflow contracts、CLI、HTTP API、bridge の詳細 |
-| `organization/runtime/workflows/frontdoor-orchestrator-protocol.md` | authority boundary と protocol invariant |
-| `organization/runtime/workflows/operator-runbook.md` | day-1 operator workflow、artifact inspection、legacy queue/tmux migration |
-| `docs/issues/main-agent-output-confirmation-ui.md` | main-agent を output confirmation UI に制限するための実装記録 |
-| `docs/issues/runtime-cleanup-obsolete-files.md` | legacy ITB / mirror cleanup 候補と移行前提 |
+| [Organization layout](organization/README.md) | Organization knowledge-mirror layout and migration rules. |
+| [Workflow runtime](organization/runtime/workflows/README.md) | Detailed contracts, CLI, HTTP API, bridge, runner, and state behavior. |
+| [Frontdoor protocol](organization/runtime/workflows/frontdoor-orchestrator-protocol.md) | Authority boundaries and protocol invariants. |
+| [Operator runbook](organization/runtime/workflows/operator-runbook.md) | Day-one operation, blocked-state recovery, artifact inspection, legacy migration, and rollback. |
+| [Main-agent output UI](docs/issues/main-agent-output-confirmation-ui.md) | Implementation record for restricting the main agent to output confirmation. |
+| [Runtime cleanup](docs/issues/runtime-cleanup-obsolete-files.md) | Legacy ITB and mirror cleanup candidates and migration prerequisites. |
 
-## ライセンス
+## License
 
-MIT License（[LICENSE](LICENSE) を参照）。
+MIT License. See [LICENSE](LICENSE).
