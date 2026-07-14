@@ -580,6 +580,7 @@ def run_provider(
             fake_provider_mode=fake_provider_mode,
         )
         write_signal_transcript(transcript_path, {"outcome": outcome, "details": details})
+        details = {**details, "stdout_sha256": file_sha256(transcript_path)}
         evidence = normalized_evidence(
             request=request,
             adapter=adapter,
