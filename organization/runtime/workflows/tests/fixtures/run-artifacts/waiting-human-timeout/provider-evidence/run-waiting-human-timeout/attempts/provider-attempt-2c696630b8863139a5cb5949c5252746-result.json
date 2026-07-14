@@ -1,0 +1,20 @@
+{
+  "adapter_id": "claude_headless_p0",
+  "adapter_request_digest": "sha256:12660c03a5ee8a38fd1369f459515921b8994b7a93fd1d094707fd6d77ba5ade",
+  "attempt_id": "provider-attempt-fixture",
+  "attempt_result_version": "1",
+  "context_snapshot_digest": "sha256:e42826396b64906ddef377f4458fbea4bfa8a4f0c85e0954db1b01aeba861151",
+  "details": {
+    "duration_ms": 0,
+    "timed_out": true,
+    "transcript_sha256": "sha256:bd9c8f1251b7287519055efeacd106286ef017993b5e68fde2e662004df39dee"
+  },
+  "lease_id": "provider-lease-fixture",
+  "outcome": "provider_timeout",
+  "reason_class": "provider_timeout",
+  "recorded_at": "2026-01-01T00:00:00+0000",
+  "report": null,
+  "transcript_path": "__STATE_ROOT__/provider-evidence/run-waiting-human-timeout/attempts/provider-attempt-2c696630b8863139a5cb5949c5252746-transcript.json",
+  "transcript_sha256": "sha256:9a13bdc0259f9424cf37646b8ee8455375b0f759b0656997c3f3aec382ca6311",
+  "work_order_digest": "sha256:06f641ea55394a560eff2a81fbac962e050b1dd88c4af53adfe1d336f42c6185"
+}

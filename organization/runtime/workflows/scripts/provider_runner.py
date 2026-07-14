@@ -1459,8 +1459,28 @@ def run_provider(
                         "transition": transition,
                         "workflow_run": run,
                     }
-            attempt_id = "provider-attempt-" + uuid.uuid4().hex
-            lease_id = "provider-lease-" + uuid.uuid4().hex
+            if fake_provider_mode:
+                previous_execution = (
+                    run.get("provider_execution")
+                    if isinstance(run.get("provider_execution"), dict)
+                    else {}
+                )
+                attempt_number = int(previous_execution.get("attempt_number") or 0) + 1
+                fake_binding = {
+                    "run_id": run_id,
+                    "step_id": step_id,
+                    "adapter_id": adapter_id,
+                    "attempt_number": attempt_number,
+                }
+                attempt_id = "provider-attempt-" + stable_digest(
+                    {**fake_binding, "binding": "attempt"}
+                )[:32]
+                lease_id = "provider-lease-" + stable_digest(
+                    {**fake_binding, "binding": "lease"}
+                )[:32]
+            else:
+                attempt_id = "provider-attempt-" + uuid.uuid4().hex
+                lease_id = "provider-lease-" + uuid.uuid4().hex
             try:
                 request = adapter_request(
                     state_root=state_root,

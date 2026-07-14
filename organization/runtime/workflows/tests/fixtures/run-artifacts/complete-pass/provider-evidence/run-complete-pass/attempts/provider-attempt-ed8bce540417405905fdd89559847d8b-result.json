@@ -1,0 +1,42 @@
+{
+  "adapter_id": "claude_headless_p0",
+  "adapter_request_digest": "sha256:8d170adfb8df3fe1bf0ef3df12cf48961d1282d1de0e18e4de8ab5710e38b174",
+  "attempt_id": "provider-attempt-fixture",
+  "attempt_result_version": "1",
+  "context_snapshot_digest": "sha256:04fa8843e141b6dbb00a4a1670a782396c680f3eb378564c3b9930c8712b4047",
+  "details": {
+    "duration_ms": 0,
+    "transcript_sha256": "sha256:8a1f743a73a4e8b17f0166d1149fa6eb646f970d36804a738976d692f6c95719"
+  },
+  "lease_id": "provider-lease-fixture",
+  "outcome": "ok",
+  "reason_class": "ok",
+  "recorded_at": "2026-01-01T00:00:00+0000",
+  "report": {
+    "authority": {
+      "canonical_result": "typed_report_file",
+      "raw_transcript_shared": false,
+      "stdout_is_signal_only": true
+    },
+    "findings": [],
+    "provider_evidence": {
+      "effective_model": "claude-sonnet-operator-selected",
+      "evidence_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/review-provider-evidence.json",
+      "provider": "claude_headless",
+      "provider_session_id": "fake-session-run-complete-pass",
+      "request_id": "req-complete-pass",
+      "transcript_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/review-provider-transcript.json"
+    },
+    "report_id": "report-run-complete-pass",
+    "report_version": "1",
+    "request_id": "req-complete-pass",
+    "result": "pass",
+    "run_id": "run-complete-pass",
+    "step_id": "review",
+    "summary": "Fake provider completed the bounded work order.",
+    "workflow_id": "single_step_external_review"
+  },
+  "transcript_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/attempts/provider-attempt-ed8bce540417405905fdd89559847d8b-transcript.json",
+  "transcript_sha256": "sha256:920a9421f473626d6ceabf933247af2b375d4e0010e60647f7d3fb609a1bd8a5",
+  "work_order_digest": "sha256:b06cc20f4831c3639ba67beb0950324dd7155f49663cb8599c93fef828fc0db3"
+}

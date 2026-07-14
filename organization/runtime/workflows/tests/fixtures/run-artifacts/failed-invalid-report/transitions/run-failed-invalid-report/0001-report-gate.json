@@ -1,0 +1,30 @@
+{
+  "errors": [
+    "result invalid"
+  ],
+  "evidence_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-evidence.json",
+  "evidence_sha256": "sha256:849180691ec9049a536615f0b26939f6d5960309f0f2309c69852ec9151d3ee8",
+  "from_state": "validating",
+  "gate": "report_gate",
+  "iteration": 1,
+  "occurred_at": "2026-01-01T00:00:00+0000",
+  "on": "report_invalid",
+  "outcome": "report_invalid",
+  "principal": {
+    "authn_method": "local_cli",
+    "principal_id": "local-harness",
+    "principal_type": "harness_runner"
+  },
+  "reason_class": "invalid_report",
+  "report_path": "__STATE_ROOT__/reports/run-failed-invalid-report/review-external-review-report.json",
+  "report_sha256": "sha256:775f331c856bce279cd29d1f411768e4a8f04e25c29c5858406a88fef23a0c5d",
+  "run_id": "run-failed-invalid-report",
+  "signature": {
+    "algorithm": "sha256-local-principal-key",
+    "signature": "sha256:1c8db7464c3f8770cb9f698a9885f96af93c665adb88cfa2fe9e5a297741ab9e",
+    "signed_at": "2026-01-01T00:00:00+0000"
+  },
+  "step_id": "review",
+  "to_state": "failed",
+  "transition_artifact_version": "1"
+}

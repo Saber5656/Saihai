@@ -1,0 +1,248 @@
+{
+  "allowed_paths": [],
+  "approval": {
+    "approval_view_version": "1",
+    "classification_provenance": {
+      "confidence": 1.0,
+      "evidence_refs": [
+        "e2e-harness-fixture"
+      ],
+      "selector_threshold": 0.85,
+      "source": "deterministic_fixture",
+      "tie_break": "deterministic_status_order:selected_waiting_human_blocked"
+    },
+    "human_action_id": "approve-fixture",
+    "main_agent_prose_used": false,
+    "next_action": "keep_draft",
+    "rate_limit": {
+      "failed_attempts": 0,
+      "max_failed_attempts": 3
+    },
+    "source": "orchestrator_structured_state",
+    "what_will_execute": {
+      "allowed_paths": [],
+      "context_refs": [
+        ".tmp/e2e-harness-fixture/ref.md"
+      ],
+      "denied_ops": [
+        "commit",
+        "edit",
+        "network",
+        "push"
+      ],
+      "initial_step": "review",
+      "permission_mode": "readonly",
+      "provider_adapter": "claude_headless_p0",
+      "ref_boundary": {
+        "max_ref_count": 50,
+        "max_ref_file_bytes": 1000000,
+        "max_ref_total_bytes": 5000000,
+        "workspace_root": "__REPO_ROOT__"
+      },
+      "resolved_allowed_paths": [],
+      "resolved_context_refs": [
+        {
+          "digest": "sha256:efc713d07ef520f1496bcdfbe982a0cb1be456870264fde80fa8ec9e17f07606",
+          "path": ".tmp/e2e-harness-fixture/ref.md",
+          "size_bytes": 12,
+          "type": "repo_file"
+        }
+      ],
+      "step_budget": 1,
+      "workflow_id": "single_step_external_review"
+    }
+  },
+  "approval_rate_limit": {
+    "failed_attempts": 0
+  },
+  "approval_record": {
+    "activation_source": "human_ui",
+    "approval_record_version": "1",
+    "approved_at": "2026-01-01T00:00:00+0000",
+    "approved_by_principal": {
+      "authn_method": "local_ui",
+      "principal_id": "human-ui",
+      "principal_type": "human_operator"
+    },
+    "display_digest": "sha256:aaeed7bf9ba444908ace134aff68c036b58fce6d93e559606f3d478aa7ab0c47",
+    "human_action_id": "approve-fixture",
+    "proposal_digest": "sha256:76aca725592907ce187c506928c4444c3687082fccdc9cdbb686127401aede9d",
+    "refs_digest": "sha256:0a0c53ba99f1d18717d4024183bfffbaa85df055e8a5431fd1d04cbcc9d37e2e",
+    "request_digest": "sha256:5c63f1ae4c37f1f139258977fd4e7c33ce7c20591abe9177e864b45de3c8cc79",
+    "signature": {
+      "algorithm": "sha256-hmac-sha256-local-principal-key",
+      "signature": "sha256:1ba4d05c16cbb3e2e2b290ffe6ca521294aec26219be4f94f92466df95b32755",
+      "signed_at": "2026-01-01T00:00:00+0000"
+    }
+  },
+  "approved_activation": {
+    "activation_scope": {
+      "allowed_ops": {
+        "commit": false,
+        "edit": false,
+        "network": false,
+        "push": false
+      },
+      "allowed_paths": [],
+      "expires_at": "run_terminal",
+      "step_budget": 1
+    },
+    "activation_source": "human_ui",
+    "activation_status": "approved",
+    "activation_version": "1",
+    "approved_at": "2026-01-01T00:00:00+0000",
+    "approved_by": "human_ui_action",
+    "classification_provenance": {
+      "confidence": 1.0,
+      "evidence_refs": [
+        "e2e-harness-fixture"
+      ],
+      "selector_threshold": 0.85,
+      "source": "deterministic_fixture",
+      "tie_break": "deterministic_status_order:selected_waiting_human_blocked"
+    },
+    "context_scope": {
+      "mode": "bounded_refs",
+      "raw_transcript_sharing": "forbidden",
+      "refs": [
+        ".tmp/e2e-harness-fixture/ref.md"
+      ]
+    },
+    "goal_state_transition": {
+      "from": "proposed",
+      "to": "approved"
+    },
+    "next_action": "create_workflow_run",
+    "policy": {
+      "bounded_provider_transport": "allowed",
+      "destructive_operations": "not_approved",
+      "publication": "not_required"
+    },
+    "request_id": "req-waiting-human-timeout",
+    "task_id": "TSK-waiting-human-timeout",
+    "workflow_selection": {
+      "initial_step": "review",
+      "optional_expansions": [],
+      "publication_gate_required": false,
+      "required_gates": [
+        "entry.activation_approved",
+        "entry.work_order_valid",
+        "exit.typed_report_valid"
+      ],
+      "required_safety_class": "readonly",
+      "safety_class": "readonly",
+      "status": "selected",
+      "workflow_id": "single_step_external_review"
+    }
+  },
+  "classification": {
+    "classification_confidence": 1.0,
+    "classification_evidence": [
+      "e2e-harness-fixture"
+    ],
+    "classification_source": "deterministic_fixture",
+    "classification_version": "1",
+    "context_scope": "refs_only",
+    "destructive_operation": false,
+    "expected_artifacts": [
+      "typed_report"
+    ],
+    "external_provider_required": true,
+    "permission_required": "readonly",
+    "publication_required": false,
+    "security_sensitive": false,
+    "task_kind": "external_review"
+  },
+  "context_refs": [
+    ".tmp/e2e-harness-fixture/ref.md"
+  ],
+  "created_at": "2026-01-01T00:00:00+0000",
+  "expires_at": "run_terminal",
+  "human_action_id": "approve-fixture",
+  "linked_runs": [
+    "run-waiting-human-timeout"
+  ],
+  "proposal": {
+    "activation_scope": {
+      "allowed_ops": {
+        "commit": false,
+        "edit": false,
+        "network": false,
+        "push": false
+      },
+      "allowed_paths": [],
+      "expires_at": "run_terminal",
+      "step_budget": 1
+    },
+    "activation_source": "frontdoor_prompt",
+    "activation_status": "proposed",
+    "activation_version": "1",
+    "classification_provenance": {
+      "confidence": 1.0,
+      "evidence_refs": [
+        "e2e-harness-fixture"
+      ],
+      "selector_threshold": 0.85,
+      "source": "deterministic_fixture",
+      "tie_break": "deterministic_status_order:selected_waiting_human_blocked"
+    },
+    "context_scope": {
+      "mode": "bounded_refs",
+      "raw_transcript_sharing": "forbidden",
+      "refs": [
+        ".tmp/e2e-harness-fixture/ref.md"
+      ]
+    },
+    "goal_state_transition": {
+      "from": "draft",
+      "to": "proposed"
+    },
+    "next_action": "keep_draft",
+    "policy": {
+      "bounded_provider_transport": "allowed",
+      "destructive_operations": "not_approved",
+      "publication": "not_required"
+    },
+    "request_id": "req-waiting-human-timeout",
+    "task_id": "TSK-waiting-human-timeout",
+    "workflow_selection": {
+      "initial_step": "review",
+      "optional_expansions": [],
+      "publication_gate_required": false,
+      "required_gates": [
+        "entry.activation_approved",
+        "entry.work_order_valid",
+        "exit.typed_report_valid"
+      ],
+      "required_safety_class": "readonly",
+      "safety_class": "readonly",
+      "status": "selected",
+      "workflow_id": "single_step_external_review"
+    }
+  },
+  "request_id": "req-waiting-human-timeout",
+  "request_version": "1",
+  "requested_allowed_paths": [],
+  "requested_context_refs": [
+    ".tmp/e2e-harness-fixture/ref.md"
+  ],
+  "requester": {
+    "chat_session_id": "harness",
+    "frontdoor": "codex"
+  },
+  "resolved_allowed_paths": [],
+  "resolved_context_refs": [
+    {
+      "digest": "sha256:e314b0c531cab27132d9f7bd9207bf8bb91353fe67b6d7ca68cb2398d6b5e510",
+      "original": ".tmp/e2e-harness-fixture/ref.md",
+      "path": ".tmp/e2e-harness-fixture/ref.md",
+      "size_bytes": 12,
+      "type": "repo_file"
+    }
+  ],
+  "run_id": "run-waiting-human-timeout",
+  "status": "approved",
+  "task_id": "TSK-waiting-human-timeout",
+  "updated_at": "2026-01-01T00:00:00+0000",
+  "user_prompt": "Run bounded offline external review."
+}

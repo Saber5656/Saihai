@@ -1,0 +1,65 @@
+{
+  "envelope": {
+    "activation_scope": {
+      "allowed_ops": {
+        "commit": false,
+        "edit": false,
+        "network": false,
+        "push": false
+      },
+      "allowed_paths": [],
+      "expires_at": "run_terminal",
+      "step_budget": 1
+    },
+    "activation_source": "human_ui",
+    "activation_status": "approved",
+    "activation_version": "1",
+    "approved_at": "2026-01-01T00:00:00+0000",
+    "approved_by": "human_ui_action",
+    "classification_provenance": {
+      "confidence": 1.0,
+      "evidence_refs": [
+        "e2e-harness-fixture"
+      ],
+      "selector_threshold": 0.85,
+      "source": "deterministic_fixture",
+      "tie_break": "deterministic_status_order:selected_waiting_human_blocked"
+    },
+    "context_scope": {
+      "mode": "bounded_refs",
+      "raw_transcript_sharing": "forbidden",
+      "refs": [
+        ".tmp/e2e-harness-fixture/ref.md"
+      ]
+    },
+    "goal_state_transition": {
+      "from": "proposed",
+      "to": "approved"
+    },
+    "next_action": "create_workflow_run",
+    "policy": {
+      "bounded_provider_transport": "allowed",
+      "destructive_operations": "not_approved",
+      "publication": "not_required"
+    },
+    "request_id": "req-stale-lock",
+    "task_id": "TSK-stale-lock",
+    "workflow_selection": {
+      "initial_step": "review",
+      "optional_expansions": [],
+      "publication_gate_required": false,
+      "required_gates": [
+        "entry.activation_approved",
+        "entry.work_order_valid",
+        "exit.typed_report_valid"
+      ],
+      "required_safety_class": "readonly",
+      "safety_class": "readonly",
+      "status": "selected",
+      "workflow_id": "single_step_external_review"
+    }
+  },
+  "request_id": "req-stale-lock",
+  "snapshot_version": "1",
+  "written_at": "2026-01-01T00:00:00+0000"
+}

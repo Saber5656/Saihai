@@ -1,0 +1,294 @@
+{
+  "activation": {
+    "activation_scope": {
+      "allowed_ops": {
+        "commit": false,
+        "edit": false,
+        "network": false,
+        "push": false
+      },
+      "allowed_paths": [],
+      "expires_at": "run_terminal",
+      "step_budget": 1
+    },
+    "activation_source": "human_ui",
+    "activation_status": "approved",
+    "activation_version": "1",
+    "approved_at": "2026-01-01T00:00:00+0000",
+    "approved_by": "human_ui_action",
+    "classification_provenance": {
+      "confidence": 1.0,
+      "evidence_refs": [
+        "e2e-harness-fixture"
+      ],
+      "selector_threshold": 0.85,
+      "source": "deterministic_fixture",
+      "tie_break": "deterministic_status_order:selected_waiting_human_blocked"
+    },
+    "context_scope": {
+      "mode": "bounded_refs",
+      "raw_transcript_sharing": "forbidden",
+      "refs": [
+        ".tmp/e2e-harness-fixture/ref.md"
+      ]
+    },
+    "next_action": "create_workflow_run",
+    "workflow_selection": {
+      "initial_step": "review",
+      "optional_expansions": [],
+      "publication_gate_required": false,
+      "required_gates": [
+        "entry.activation_approved",
+        "entry.work_order_valid",
+        "exit.typed_report_valid"
+      ],
+      "required_safety_class": "readonly",
+      "safety_class": "readonly",
+      "status": "selected",
+      "workflow_id": "single_step_external_review"
+    }
+  },
+  "context_sharing": {
+    "provider_transcript": "confined_evidence_path_only",
+    "shared_run_state": "typed_durable_state",
+    "step_local_snapshot": "immutable_step_attempt_snapshot"
+  },
+  "current_step": "review",
+  "goal_state": "complete",
+  "iteration": 1,
+  "max_steps": 1,
+  "provider_execution": {
+    "adapter_id": "claude_headless_p0",
+    "adapter_request_digest": "sha256:846e74584c7d824cc87dc4393e14282e436e51694c5643417935de49243cebfb",
+    "attempt_id": "provider-attempt-fixture",
+    "attempt_number": 1,
+    "context_snapshot_digest": "sha256:6a5e9f2da9809039a58784bac9c565beec0223faaa4d30423ec0a3a23c3fd9f6",
+    "execution_version": "1",
+    "last_outcome": {
+      "attempt_result_path": "__STATE_ROOT__/provider-evidence/run-traversal/attempts/provider-attempt-d8a98e3542261b4d25a9441562358683-result.json",
+      "evidence_path": "__STATE_ROOT__/provider-evidence/run-traversal/review-provider-evidence.json",
+      "reason_class": "ok",
+      "recorded_at": "2026-01-01T00:00:00+0000",
+      "transcript_path": "__STATE_ROOT__/provider-evidence/run-traversal/review-provider-transcript.json"
+    },
+    "lease": {
+      "claimed_at": "2026-01-01T00:00:00+0000",
+      "claimed_by": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "last_heartbeat_at": "2026-01-01T00:00:00+0000",
+      "lease_expires_at": "2026-01-01T00:00:00+0000",
+      "lease_id": "provider-lease-fixture"
+    },
+    "phase": "completed",
+    "retry": {
+      "auto_retries_used": 0,
+      "consecutive_failures": 0,
+      "last_failure_fingerprint": null,
+      "max_auto_retries": 5
+    },
+    "step_id": "review",
+    "timeout_seconds": 1800,
+    "work_order_digest": "sha256:a7b71fdeefcff96000fe0d6a4f5f762a288c82a2343379aa40ee619031bfbb5a"
+  },
+  "request_id": "req-traversal",
+  "requester": {
+    "chat_session_id": "harness",
+    "frontdoor": "codex"
+  },
+  "run_id": "run-traversal",
+  "run_state": "complete",
+  "run_version": "1",
+  "scheduling": {
+    "concurrency": 1,
+    "concurrency_group": "global",
+    "lock_policy": "global_advisory_lock",
+    "resume_policy": "manual",
+    "scheduler_mode": "invocation-drain",
+    "state_persistence": "durable_state"
+  },
+  "step_history": [
+    {
+      "principal": {
+        "authn_method": "local_cli",
+        "principal_id": "manual-cli",
+        "principal_type": "manual_operator"
+      },
+      "queued_at": "2026-01-01T00:00:00+0000",
+      "signature": {
+        "algorithm": "sha256-hmac-sha256-local-principal-key",
+        "signature": "sha256:da88e78a53264dc4f6c91d80ce47faf12f7a444a3d50d482e80eb00528124c4a",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "status": "queued",
+      "step_id": "review",
+      "work_order_path": "__STATE_ROOT__/work-orders/run-traversal/review.json"
+    },
+    {
+      "checked_at": "2026-01-01T00:00:00+0000",
+      "outcome": "report_valid",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "report_path": "__STATE_ROOT__/reports/run-traversal/review-external-review-report.json",
+      "result": "pass",
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:5a98978b2dbc5fcda62ea8870e0541649c5c3f21bfb00f24077d739d21c33b3c",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "status": "complete",
+      "step_id": "review"
+    }
+  ],
+  "task_id": "TSK-traversal",
+  "terminal": {
+    "reason": "report_valid",
+    "status": "complete"
+  },
+  "transition_provenance": [
+    {
+      "principal": {
+        "authn_method": "local_cli",
+        "principal_id": "manual-cli",
+        "principal_type": "manual_operator"
+      },
+      "signature": {
+        "algorithm": "sha256-hmac-sha256-local-principal-key",
+        "signature": "sha256:44a3aac729cd02ba60f0d42844d221caf7259c1d92f5992b655690f336834541",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "transition": "create_run"
+    },
+    {
+      "principal": {
+        "authn_method": "local_cli",
+        "principal_id": "manual-cli",
+        "principal_type": "manual_operator"
+      },
+      "signature": {
+        "algorithm": "sha256-hmac-sha256-local-principal-key",
+        "signature": "sha256:1b524c398840b60205347f173c37f2bb5a8a67a4981cee4a661edcd0cdfc5fd8",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "transition": "drain_run"
+    },
+    {
+      "outcome": "report_valid",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "result": "complete",
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:c9e8a0bd1c89f4be688996efe4a6d766ba2bfe0c4d4305512c37b289d3eb7be9",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "transition": "validate_report"
+    }
+  ],
+  "transitions": [
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/work-orders/run-traversal/review.json",
+        "__STATE_ROOT__/work-orders/run-traversal/review-snapshot-1.json"
+      ],
+      "from_state": "created",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_cli",
+        "principal_id": "manual-cli",
+        "principal_type": "manual_operator"
+      },
+      "reason_class": "step_queued",
+      "run_id": "run-traversal",
+      "seq": 1,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:cc2729a35dea69f8ea3807de78e3268439830a9f565692fb2c6bddcb712b718b",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "step_queued",
+      "transition": "drain_run",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/work-orders/run-traversal/review.json",
+        "__STATE_ROOT__/work-orders/run-traversal/review-snapshot-1.json",
+        "__STATE_ROOT__/adapter-requests/run-traversal/review-claude_headless_p0.json"
+      ],
+      "from_state": "step_queued",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "provider_claimed",
+      "run_id": "run-traversal",
+      "seq": 2,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:3429f7047bb955ad129787fd4beea029165023707bcd0dc2b28b6cb48bd92e32",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "waiting_provider",
+      "transition": "run_provider",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/reports/run-traversal/review-external-review-report.json"
+      ],
+      "from_state": "waiting_provider",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "report_received",
+      "run_id": "run-traversal",
+      "seq": 3,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:644edcfe30cb2fffe70d519fb2b2392545454e8b89716d0f86720032bc999100",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "validating",
+      "transition": "validate_report",
+      "transition_version": "1"
+    },
+    {
+      "artifact_refs": [
+        "__STATE_ROOT__/reports/run-traversal/review-external-review-report.json"
+      ],
+      "from_state": "validating",
+      "occurred_at": "2026-01-01T00:00:00+0000",
+      "principal": {
+        "authn_method": "local_test",
+        "principal_id": "e2e-harness",
+        "principal_type": "harness_runner"
+      },
+      "reason_class": "report_valid",
+      "run_id": "run-traversal",
+      "seq": 4,
+      "signature": {
+        "algorithm": "sha256-local-principal-key",
+        "signature": "sha256:8b500d5f57f9ad4cad55bb6c5bc49616c2759eb6a683de4d0d6671fc08c7dcec",
+        "signed_at": "2026-01-01T00:00:00+0000"
+      },
+      "to_state": "complete",
+      "transition": "validate_report",
+      "transition_version": "1"
+    }
+  ],
+  "workflow_id": "single_step_external_review"
+}
