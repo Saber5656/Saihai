@@ -17,6 +17,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts" / "saihai.py"
+SAIHAI_TEST_WRAPPER = """
+import importlib.util
+import sys
+from pathlib import Path
+cli_path = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("saihai_cli_test", cli_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+frontdoor = module.frontdoor_module()
+frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
+module.frontdoor_module = lambda: frontdoor
+raise SystemExit(module.main(sys.argv[3:]))
+"""
 
 
 def external_review_classification(**overrides):
@@ -46,9 +59,17 @@ def load_saihai_module():
     return module
 
 
-def run_cli(*args: str, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_cli(
+    *args: str,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+    catalog_state_root: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = [sys.executable, str(CLI), *args]
+    if catalog_state_root is not None:
+        command = [sys.executable, "-c", SAIHAI_TEST_WRAPPER, str(CLI), str(catalog_state_root), *args]
     completed = subprocess.run(
-        [sys.executable, str(CLI), *args],
+        command,
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -59,15 +80,25 @@ def run_cli(*args: str, check: bool = True, env: dict[str, str] | None = None) -
 
 
 def run_frontdoor(state_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    env["SAIHAI_ORCH_STATE_ROOT"] = str(state_root)
-    return run_cli("frontdoor", "--state-root", str(state_root), *args, check=check, env=env)
+    return run_cli(
+        "frontdoor",
+        "--state-root",
+        str(state_root),
+        *args,
+        check=check,
+        catalog_state_root=state_root,
+    )
 
 
 def run_workflow(state_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    env["SAIHAI_ORCH_STATE_ROOT"] = str(state_root)
-    return run_cli("workflow", "--state-root", str(state_root), *args, check=check, env=env)
+    return run_cli(
+        "workflow",
+        "--state-root",
+        str(state_root),
+        *args,
+        check=check,
+        catalog_state_root=state_root,
+    )
 
 
 def load_payload(completed: subprocess.CompletedProcess[str]) -> dict:
@@ -351,7 +382,7 @@ def test_cli_rejects_state_root_outside_host_configuration() -> None:
         requested = root / "main-agent-selected"
         configured.mkdir()
         env = dict(os.environ)
-        env["SAIHAI_ORCH_STATE_ROOT"] = str(configured)
+        env["SAIHAI_ORCH_STATE_ROOT"] = str(requested)
         completed = run_cli(
             "frontdoor",
             "--state-root",
@@ -361,6 +392,7 @@ def test_cli_rejects_state_root_outside_host_configuration() -> None:
             "req-state-root-boundary",
             check=False,
             env=env,
+            catalog_state_root=configured,
         )
         assert completed.returncode == 2
         assert load_payload(completed)["reason"] == "state_root_not_configured"

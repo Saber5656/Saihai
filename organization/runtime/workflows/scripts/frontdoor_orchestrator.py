@@ -25,6 +25,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from directory_paths import EnvError as DirectoryPathError
+from directory_paths import default_catalog_path
 from directory_paths import load_environment as load_directory_environment
 import run_store
 import run_lock
@@ -49,10 +50,21 @@ HTTP_CHANNEL_PRINCIPALS = {
     "action_gateway": ("action_gateway_executor", "child-thread-gateway", "local_http_channel"),
 }
 
-try:
-    DIRECTORY_ENV_DIAGNOSTICS = load_directory_environment(checkout_root=REPO_ROOT)
-except DirectoryPathError as exc:
-    raise RuntimeError(f"directory_path_environment_invalid:{exc}") from exc
+def load_primary_directory_catalog(repo_root: Path) -> tuple[Path, dict[str, str], dict[str, object]]:
+    catalog_path = default_catalog_path(repo_root)
+    catalog: dict[str, str] = {}
+    try:
+        diagnostics = load_directory_environment(
+            checkout_root=catalog_path.parent,
+            environ=catalog,
+            load_runtime=False,
+        )
+    except DirectoryPathError as exc:
+        raise RuntimeError(f"directory_path_environment_invalid:{exc}") from exc
+    return catalog_path, catalog, diagnostics
+
+
+PRIMARY_DIRECTORY_CATALOG_PATH, DIRECTORY_CATALOG, DIRECTORY_ENV_DIAGNOSTICS = load_primary_directory_catalog(REPO_ROOT)
 EXECUTION_PRINCIPAL_TYPES = {
     "human_operator",
     "manual_operator",
@@ -549,15 +561,16 @@ def provider_transcript_path(state_root: Path, run_id: str, step_id: str) -> Pat
 
 
 def adapter_request_path(state_root: Path, run_id: str, step_id: str, adapter_id: str) -> Path:
-    return (
-        state_paths(state_root)["adapter_requests"]
-        / validate_artifact_id(run_id, "run_id")
-        / f"{validate_artifact_id(step_id, 'step_id')}-{validate_artifact_id(adapter_id, 'adapter_id')}.json"
+    return state_artifact_path(
+        state_root,
+        "adapter_requests",
+        validate_artifact_id(run_id, "run_id"),
+        f"{validate_artifact_id(step_id, 'step_id')}-{validate_artifact_id(adapter_id, 'adapter_id')}.json",
     )
 
 
 def configured_state_root() -> Path:
-    configured = os.environ.get("SAIHAI_ORCH_STATE_ROOT", "").strip()
+    configured = DIRECTORY_CATALOG.get("SAIHAI_ORCH_STATE_ROOT", "").strip()
     root = Path(configured).expanduser() if configured else DEFAULT_STATE_ROOT
     if root.is_symlink() or (root.exists() and not root.is_dir()):
         raise FrontdoorError("configured state root must be a non-symlink directory")
@@ -573,12 +586,32 @@ def trusted_state_root(requested: str | Path | None) -> Path:
     return configured
 
 
-def path_is_within(path: Path, parent: Path) -> bool:
+def state_artifact_path(state_root: Path, category: str, *components: str) -> Path:
+    root = state_root.resolve(strict=False)
+    raw_base = state_paths(root)[category]
+    if raw_base.is_symlink():
+        raise FrontdoorError("state artifact category must not be a symlink")
+    base = raw_base.resolve(strict=False)
+    candidate = base.joinpath(*components).resolve(strict=False)
     try:
-        path.resolve().relative_to(parent.resolve())
-    except ValueError:
-        return False
-    return True
+        base.relative_to(root)
+        candidate.relative_to(root)
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise FrontdoorError("state artifact path must stay within configured root") from exc
+    return candidate
+
+
+def resolve_contained_path(raw_path: str, *, parent: Path, label: str) -> Path:
+    base = parent.resolve(strict=True)
+    candidate = Path(raw_path).expanduser()
+    candidate = candidate if candidate.is_absolute() else base / candidate
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(base)
+    except ValueError as exc:
+        raise FrontdoorError(f"{label} must stay within repo_root") from exc
+    return resolved
 
 
 def channel_token_path(state_root: Path, channel: str) -> Path:
@@ -1103,13 +1136,19 @@ def attach_approval_summary(record: dict[str, Any]) -> None:
 
 
 def idempotency_path(state_root: Path, key: str) -> Path:
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return state_paths(state_root)["idempotency"] / f"key-{digest}.json"
+    return state_paths(state_root)["idempotency"] / f"key-{idempotency_key_digest(key).removeprefix('sha256:')}.json"
 
 
 def child_thread_idempotency_path(state_root: Path, key: str) -> Path:
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return state_paths(state_root)["child_thread_actions"] / "idempotency" / f"key-{digest}.json"
+    return (
+        state_paths(state_root)["child_thread_actions"]
+        / "idempotency"
+        / f"key-{idempotency_key_digest(key).removeprefix('sha256:')}.json"
+    )
+
+
+def idempotency_key_digest(key: str) -> str:
+    return "sha256:" + hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
 def child_thread_action_path(state_root: Path, action_id: str) -> Path:
@@ -1147,11 +1186,7 @@ def validate_child_thread_path(raw_path: Any, *, repo_root: Path, label: str, mu
         raise FrontdoorError(f"{label} must be non-empty")
     if "\x00" in text:
         raise FrontdoorError(f"{label} cannot contain NUL bytes")
-    candidate = Path(text).expanduser()
-    resolved = candidate if candidate.is_absolute() else repo_root / candidate
-    resolved = resolved.resolve(strict=False)
-    if not path_is_within(resolved, repo_root):
-        raise FrontdoorError(f"{label} must stay within repo_root")
+    resolved = resolve_contained_path(text, parent=repo_root, label=label)
     if must_exist and not resolved.is_file():
         raise FrontdoorError(f"{label} must exist as a file")
     return str(resolved)
@@ -1437,6 +1472,7 @@ def child_thread_create_action(
     normalized_result = validate_child_thread_result(result, normalized_plan)
     result_digest = child_thread_result_digest(normalized_result)
     idempotency_key = normalized_plan["idempotency_key"]
+    idempotency_digest = idempotency_key_digest(idempotency_key)
     idempotency_file = child_thread_idempotency_path(state_root, idempotency_key)
     subject = {
         "task_id": normalized_plan["task_id"],
@@ -1514,7 +1550,10 @@ def child_thread_create_action(
         "principal": redacted_principal(actor),
         "plan_digest": plan_digest,
         "result_digest": result_digest,
-        "plan": normalized_plan,
+        "plan": {
+            **{key: value for key, value in normalized_plan.items() if key != "idempotency_key"},
+            "idempotency_key_digest": idempotency_digest,
+        },
         "result": normalized_result,
         "authority": {
             "orchestrator_role": "validated_action_plan_only",
@@ -1530,7 +1569,7 @@ def child_thread_create_action(
         idempotency_file,
         {
             "idempotency_version": "1",
-            "idempotency_key": idempotency_key,
+            "idempotency_key_digest": idempotency_digest,
             "action_id": action_id,
             "plan_digest": plan_digest,
             "result_digest": result_digest,
@@ -1664,6 +1703,7 @@ def bridge_submit_request(
 
     digest = request_digest(payload)
     idempotency_key = str(payload["idempotency_key"])
+    idempotency_digest = idempotency_key_digest(idempotency_key)
     idempotency_file = idempotency_path(state_root, idempotency_key)
     if idempotency_file.exists():
         existing = read_json(idempotency_file)
@@ -1701,7 +1741,7 @@ def bridge_submit_request(
                 frontdoor=frontdoor_name,
                 chat_session_id=chat_session_id,
                 peer=peer,
-                extra={"idempotency_key": idempotency_key},
+                    extra={"idempotency_key_digest": idempotency_digest},
             ),
         )
         return projection
@@ -1798,7 +1838,7 @@ def bridge_submit_request(
         idempotency_file,
         {
             "idempotency_version": "1",
-            "idempotency_key": idempotency_key,
+            "idempotency_key_digest": idempotency_digest,
             "request_id": str(payload["request_id"]),
             "request_digest": digest,
             "created_at": now,
@@ -3714,13 +3754,13 @@ def main() -> None:
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "channel-token":
-            token = channel_token(state_root, args.channel)
+            channel_token(state_root, args.channel)
             payload = {
                 "schema_version": 1,
                 "decision": "ok",
                 "channel": args.channel,
                 "token_path": str(channel_token_path(state_root, args.channel)),
-                "token": token,
+                "token_exposed": False,
             }
         else:
             raise FrontdoorError(f"unsupported command: {args.command}")

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -15,9 +14,16 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
-FACADE = ROOT / "scripts" / "configure_organization.py"
 SCRIPT_DIR = ROOT / "organization/runtime/workflows/scripts"
 SERVER_SCRIPT = SCRIPT_DIR / "frontdoor_server.py"
+FRONTDOOR_TEST_WRAPPER = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import frontdoor_orchestrator as frontdoor
+frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
+sys.argv = [sys.argv[0], *sys.argv[3:]]
+frontdoor.main()
+"""
 
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -45,13 +51,13 @@ def run_frontdoor(
     *args: str,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
-    env["SAIHAI_ORCH_STATE_ROOT"] = str(state_root)
     return subprocess.run(
         [
             sys.executable,
-            str(FACADE),
-            "workflow-frontdoor",
+            "-c",
+            FRONTDOOR_TEST_WRAPPER,
+            str(SCRIPT_DIR),
+            str(state_root),
             "--state-root",
             str(state_root),
             *args,
@@ -59,7 +65,6 @@ def run_frontdoor(
         cwd=ROOT,
         capture_output=True,
         text=True,
-        env=env,
         check=check,
     )
 
