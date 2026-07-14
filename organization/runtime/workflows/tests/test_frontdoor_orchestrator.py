@@ -2530,21 +2530,25 @@ def test_validate_report_rejects_noncanonical_report_and_stale_evidence() -> Non
         assert any("must match current run evidence path" in item for item in payload["errors"])
 
 
-def test_validate_report_missing_report_does_not_record_report_received() -> None:
+def test_validate_report_missing_report_waits_for_human() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         prepare_review_handoff(state_root, request_id="req-missing-report", run_id="run-missing-report")
         run_path = state_root / "runs" / "run-missing-report.json"
-        before = json.loads(run_path.read_text(encoding="utf-8"))
-
         missing = run_frontdoor(state_root, "validate-report", "--run-id", "run-missing-report", check=False)
         payload = load_payload(missing)
         assert_equal(missing.returncode, 2, "missing report exit")
-        assert "missing file:" in payload["reason"]
+        assert_equal(payload["reason"], "report_not_written", "missing report reason")
+        assert_equal(payload["outcome"], "report_not_written", "missing report outcome")
 
         after = json.loads(run_path.read_text(encoding="utf-8"))
-        assert_equal(after["run_state"], before["run_state"], "missing report run state unchanged")
-        assert_equal(after["transitions"], before["transitions"], "missing report transitions unchanged")
+        assert_equal(after["run_state"], "waiting_human", "missing report run state")
+        assert_equal(after["transitions"][-1]["reason_class"], "report_not_written", "missing report transition")
+        assert_equal(
+            any(item["reason_class"] == "report_received" for item in after["transitions"]),
+            False,
+            "missing report never records report_received",
+        )
 
 
 def test_validate_report_rejects_malformed_findings() -> None:
@@ -3208,7 +3212,7 @@ def main() -> None:
         test_context_ref_boundary_blocks_exfiltration_paths,
         test_work_order_revalidates_refs_before_provider_handoff,
         test_validate_report_rejects_noncanonical_report_and_stale_evidence,
-        test_validate_report_missing_report_does_not_record_report_received,
+        test_validate_report_missing_report_waits_for_human,
         test_validate_report_rejects_malformed_findings,
         test_bridge_rejects_path_unsafe_ids_and_missing_refs,
         test_bridge_principal_cannot_execute_or_change_workflow_definitions,

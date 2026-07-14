@@ -480,6 +480,59 @@ def test_result_invalid_fails() -> None:
         assert_equal(payload["reason"], "invalid_report", "invalid result reason")
 
 
+def test_malformed_report_json_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        adapter = prepare_review_handoff(state_root, request_id="req-malformed-json", run_id="run-malformed-json")
+        report_path = Path(adapter["report_path"])
+        report_path.write_text("{not-json\n", encoding="utf-8")
+
+        blocked = run_frontdoor(state_root, "validate-report", "--run-id", "run-malformed-json", check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "malformed json exit")
+        assert_equal(payload["outcome"], "report_invalid", "malformed json outcome")
+        assert_equal(payload["reason"], "invalid_report", "malformed json reason")
+        assert_equal(payload["workflow_run"]["run_state"], "failed", "malformed json state")
+        assert_equal(payload["errors"], ["report unreadable: JSONDecodeError"], "malformed json error")
+        assert_equal(bool(rejection_artifacts(state_root, "run-malformed-json")), True, "malformed json rejection artifact")
+
+
+def test_unreadable_report_shapes_fail_closed() -> None:
+    cases = (
+        ("utf8", b"\xff\xfe", "report unreadable: UnicodeDecodeError"),
+        ("array", b"[]\n", "report must be object"),
+    )
+    for suffix, content, expected_error in cases:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = f"run-report-{suffix}"
+            adapter = prepare_review_handoff(state_root, request_id=f"req-report-{suffix}", run_id=run_id)
+            Path(adapter["report_path"]).write_bytes(content)
+
+            blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
+            payload = load_payload(blocked)
+            assert_equal(blocked.returncode, 2, f"{suffix} report exit")
+            assert_equal(payload["outcome"], "report_invalid", f"{suffix} report outcome")
+            assert_equal(payload["workflow_run"]["run_state"], "failed", f"{suffix} report state")
+            assert_equal(payload["errors"], [expected_error], f"{suffix} report error")
+
+
+def test_missing_report_waits_for_human() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        adapter = prepare_review_handoff(state_root, request_id="req-report-missing", run_id="run-report-missing")
+        report_path = Path(adapter["report_path"])
+        if report_path.exists():
+            report_path.unlink()
+
+        blocked = run_frontdoor(state_root, "validate-report", "--run-id", "run-report-missing", check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "missing report exit")
+        assert_equal(payload["outcome"], "report_not_written", "missing report outcome")
+        assert_equal(payload["reason"], "report_not_written", "missing report reason")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "missing report state")
+
+
 def test_terminal_replay_does_not_write_new_transition_artifact() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -516,6 +569,9 @@ def main() -> None:
         test_missing_identity_is_invalid_report,
         test_provider_blocked_waits_human,
         test_result_invalid_fails,
+        test_malformed_report_json_fails_closed,
+        test_unreadable_report_shapes_fail_closed,
+        test_missing_report_waits_for_human,
         test_terminal_replay_does_not_write_new_transition_artifact,
     ]
     for test in tests:
