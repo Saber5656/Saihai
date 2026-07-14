@@ -772,9 +772,55 @@ def gate_report(
             if path.resolve() != canonical_report_path.resolve():
                 raise ReportGateError("report path must match canonical work order report path")
 
-            report = read_json(path)
+            if run_state == "waiting_provider" and run_lifecycle.provider_claim_is_live(run, work_order):
+                append_audit_event(
+                    state_root=state_root,
+                    event_type="validate_report",
+                    principal=actor,
+                    subject=subject,
+                    outcome="blocked",
+                    details={"reason": "provider_in_flight", "run_state": run_state},
+                )
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "validated": False,
+                    "report_status": "waiting_provider",
+                    "reason": "provider_in_flight",
+                    "errors": [],
+                    "outcome": "provider_in_flight",
+                    "transition_artifact_path": None,
+                    "rejection_artifact_path": None,
+                    "run_path": str(run_file),
+                    "workflow_run": run,
+                }
 
-            if run_state == "step_queued":
+            report_read_outcome: str | None = None
+            report_read_error: str | None = None
+            report_digest: str | None = None
+            try:
+                if not path.is_file():
+                    raise OSError("report path is not a regular file")
+                raw_report = path.read_bytes()
+            except OSError:
+                report = {}
+                report_read_outcome = "report_not_written"
+                report_read_error = "report file is unavailable"
+            else:
+                report_digest = "sha256:" + hashlib.sha256(raw_report).hexdigest()
+                try:
+                    report = json.loads(raw_report.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    report = {}
+                    report_read_outcome = "report_invalid"
+                    report_read_error = f"report unreadable: {type(exc).__name__}"
+                else:
+                    if not isinstance(report, dict):
+                        report = {}
+                        report_read_outcome = "report_invalid"
+                        report_read_error = "report must be object"
+
+            if run_state == "step_queued" and report_read_outcome != "report_not_written":
                 run_lifecycle.transition_run(
                     state_root,
                     run_id,
@@ -786,7 +832,7 @@ def gate_report(
                     run=run,
                 )
                 run_state = "waiting_provider"
-            if run_state == "waiting_provider":
+            if run_state == "waiting_provider" and report_read_outcome != "report_not_written":
                 run_lifecycle.transition_run(
                     state_root,
                     run_id,
@@ -799,7 +845,10 @@ def gate_report(
                 )
                 run_state = "validating"
 
-            outcome, errors = classify_report_outcome(report, run=run, work_order=work_order, state_root=state_root)
+            if report_read_outcome is not None:
+                outcome, errors = report_read_outcome, [str(report_read_error)]
+            else:
+                outcome, errors = classify_report_outcome(report, run=run, work_order=work_order, state_root=state_root)
             if outcome == "report_valid":
                 to_state = "complete"
                 report_status = "complete"
@@ -824,6 +873,15 @@ def gate_report(
                 terminal_status = None
                 terminal_reason = None
                 reason_class = "scope_violation"
+                decision = "blocked"
+                history_status = "blocked"
+                audit_outcome = "blocked"
+            elif outcome == "report_not_written":
+                to_state = "waiting_human"
+                report_status = "waiting_human"
+                terminal_status = None
+                terminal_reason = None
+                reason_class = "report_not_written"
                 decision = "blocked"
                 history_status = "blocked"
                 audit_outcome = "blocked"
@@ -906,7 +964,6 @@ def gate_report(
                 terminal_reason=terminal_reason,
                 run=run,
             )
-            report_digest = file_sha256(path)
             evidence_path = (
                 report.get("provider_evidence", {}).get("evidence_path")
                 if isinstance(report.get("provider_evidence"), dict)

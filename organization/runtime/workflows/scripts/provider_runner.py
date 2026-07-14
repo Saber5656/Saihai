@@ -519,6 +519,10 @@ def validate_work_order_for_runner(
     return errors
 
 
+def runner_claim_is_live(work_order: dict[str, Any]) -> bool:
+    return run_lifecycle.provider_claim_is_live({}, work_order)
+
+
 def adapter_request(
     *,
     state_root: Path,
@@ -1160,10 +1164,16 @@ def transition_failure(
     artifact_refs: list[str],
 ) -> dict[str, Any]:
     current = str(run.get("run_state") or "")
+    recoverable_reasons = {
+        "provider_unavailable",
+        "provider_timeout",
+        "provider_nonzero_exit",
+        "report_not_written",
+    }
     if current == "step_queued":
-        target = "waiting_human" if reason_class in {"provider_unavailable", "provider_timeout"} else "failed"
+        target = "waiting_human" if reason_class in recoverable_reasons else "failed"
     elif current == "waiting_provider":
-        target = "waiting_human" if reason_class in {"provider_unavailable", "provider_timeout"} else "failed"
+        target = "waiting_human" if reason_class in recoverable_reasons else "failed"
     else:
         target = "failed"
     terminal_status = "blocked" if target == "failed" else None
@@ -1215,6 +1225,20 @@ def run_provider(
             run = run_store.load_run(state_root, run_id)
             run_state = str(run.get("run_state") or "")
             if run_state == "waiting_provider":
+                claimed_step_id = str(run.get("current_step") or "")
+                claimed_order_path = work_order_path(state_root, run_id, claimed_step_id)
+                try:
+                    claimed_work_order = read_json(claimed_order_path)
+                except ProviderRunnerError:
+                    claimed_work_order = {}
+                if runner_claim_is_live(claimed_work_order):
+                    return {
+                        "schema_version": 1,
+                        "decision": "blocked",
+                        "reason": "provider_in_flight",
+                        "run_state": run_state,
+                        "workflow_run": run,
+                    }
                 execution = run.get("provider_execution")
                 recorded_adapter_id = (
                     str(execution.get("adapter_id") or "")
@@ -1388,6 +1412,26 @@ def run_provider(
                 }
             step_id = str(run.get("current_step") or "")
             order_path = work_order_path(state_root, run_id, step_id)
+            try:
+                claimed_work_order = read_json(order_path)
+            except ProviderRunnerError:
+                claimed_work_order = {}
+            if runner_claim_is_live(claimed_work_order):
+                append_audit_event(
+                    state_root=state_root,
+                    event_type="run_provider",
+                    principal=principal,
+                    subject=subject,
+                    outcome="blocked",
+                    details={"reason": "provider_in_flight", "run_state": run_state},
+                )
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": "provider_in_flight",
+                    "run_state": run_state,
+                    "workflow_run": run,
+                }
             try:
                 work_order, order_digest, snapshot_path = scoped_worker_executor.verify_frozen_work_order(
                     state_root,
@@ -1574,6 +1618,10 @@ def run_provider(
                     principal=principal,
                 ),
             )
+
+        if outcome == "ok" and report is None:
+            outcome = "report_not_written"
+            details = {**details, "reason": "report_not_written"}
 
         raw_stdout = details.pop("_raw_stdout", b"")
         raw_stderr = details.pop("_raw_stderr", b"")

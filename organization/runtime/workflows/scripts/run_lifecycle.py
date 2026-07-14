@@ -239,12 +239,18 @@ def transition_run(
 
 
 def work_order_path(state_root: Path, run_id: str, step_id: str) -> Path:
-    return (
-        state_root
-        / "work-orders"
-        / run_store.validate_artifact_id(run_id, "run_id")
-        / f"{run_store.validate_artifact_id(step_id, 'step_id')}.json"
-    )
+    try:
+        validated_run_id = run_store.validate_artifact_id(run_id, "run_id")
+        validated_step_id = run_store.validate_artifact_id(step_id, "step_id")
+        return safe_paths.state_artifact_path(
+            state_root,
+            "work-orders",
+            validated_run_id,
+            f"{validated_step_id}.json",
+        )
+    except (run_store.RunStoreError, safe_paths.SafePathError) as exc:
+        errors = exc.errors if isinstance(exc, run_store.RunStoreError) else [str(exc)]
+        raise LifecycleError("invalid_work_order", errors) from exc
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -270,6 +276,24 @@ def _parse_timestamp(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def provider_claim_is_live(run: dict[str, Any], work_order: dict[str, Any]) -> bool:
+    execution = run.get("provider_execution")
+    if isinstance(execution, dict):
+        if execution.get("phase") == "result_ready":
+            return False
+        lease = execution.get("lease")
+        if isinstance(lease, dict):
+            lease_expires_at = _parse_timestamp(lease.get("lease_expires_at"))
+            return lease_expires_at is not None and lease_expires_at > datetime.now(timezone.utc)
+
+    authority = work_order.get("work_order_authority")
+    claim = authority.get("runner_claim") if isinstance(authority, dict) else None
+    if not isinstance(claim, dict) or claim.get("claim_state") != "claimed":
+        return False
+    lease_expires_at = _parse_timestamp(claim.get("lease_expires_at"))
+    return lease_expires_at is not None and lease_expires_at > datetime.now(timezone.utc)
 
 
 def _private_attempt_journal(state_root: Path, run: dict[str, Any], payload: dict[str, Any]) -> Path | None:
@@ -481,6 +505,17 @@ def resume_run(
                 "workflow_run": run,
             }
         if run_state == "waiting_provider":
+            step_id = str(run.get("current_step") or "")
+            order_path = work_order_path(state_root, run_id, step_id)
+            work_order = _load_json(order_path) if order_path.exists() else {}
+            if provider_claim_is_live({}, work_order):
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "resumed": False,
+                    "reason": "provider_in_flight",
+                    "workflow_run": run,
+                }
             execution = run.get("provider_execution") if isinstance(run.get("provider_execution"), dict) else {}
             if execution.get("phase") == "result_ready":
                 return {
