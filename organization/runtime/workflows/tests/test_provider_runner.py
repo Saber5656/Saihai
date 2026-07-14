@@ -342,6 +342,78 @@ def test_provider_unavailable_waits_for_human() -> None:
         assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "run state")
 
 
+def test_provider_nonzero_exit_waits_for_human() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        prepare_run(state_root, request_id="req-provider-nonzero", run_id="run-provider-nonzero")
+
+        blocked = run_provider(
+            state_root,
+            run_id="run-provider-nonzero",
+            mode="nonzero",
+            check=False,
+        )
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "nonzero exit")
+        assert_equal(payload["reason"], "provider_nonzero_exit", "reason")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "run state")
+
+
+def test_missing_provider_report_waits_for_human() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        prepare_run(state_root, request_id="req-provider-no-report", run_id="run-provider-no-report")
+        original_execute_provider = provider_runner.execute_provider
+        provider_runner.execute_provider = lambda **_kwargs: ("ok", None, {"duration_ms": 1})
+        try:
+            payload = provider_runner.run_provider_step(
+                state_root=state_root,
+                run_id="run-provider-no-report",
+                adapter="fake_pass",
+            )
+        finally:
+            provider_runner.execute_provider = original_execute_provider
+
+        assert_equal(payload["decision"], "blocked", "missing report decision")
+        assert_equal(payload["reason"], "report_not_written", "missing report reason")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "missing report state")
+        evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
+        assert_equal(evidence["outcome"], "report_not_written", "missing report evidence")
+
+
+def test_live_runner_claim_blocks_second_provider() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-claimed"
+        prepare_run(state_root, request_id="req-provider-claimed", run_id=run_id)
+        run = run_store.load_run(state_root, run_id)
+        run_lifecycle.transition_run(
+            state_root,
+            run_id,
+            to_state="waiting_provider",
+            reason_class="provider_invoked",
+            transition="test_provider_claim",
+            principal={"principal_type": "harness_runner", "principal_id": "first-runner", "authn_method": "local_test"},
+            run=run,
+        )
+        order_path = run_lifecycle.work_order_path(state_root, run_id, "review")
+        work_order = json.loads(order_path.read_text(encoding="utf-8"))
+        work_order["work_order_authority"]["runner_claim"] = {
+            "claim_state": "claimed",
+            "lease_id": "lease-first-runner",
+            "lease_expires_at": "2999-01-01T00:00:00+0000",
+        }
+        run_store.atomic_write_json(order_path, work_order)
+        before = run_store.run_path(state_root, run_id).read_bytes()
+
+        blocked = run_provider(state_root, run_id=run_id, check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "claimed provider exit")
+        assert_equal(payload["reason"], "provider_in_flight", "claimed provider reason")
+        assert_equal(payload["run_state"], "waiting_provider", "claimed provider state")
+        assert_equal(run_store.run_path(state_root, run_id).read_bytes(), before, "claimed run unchanged")
+
+
 def test_malformed_provider_output_fails_without_raw_stdout_in_run() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -452,6 +524,9 @@ if __name__ == "__main__":
         test_completion_rejects_tampered_runner_evidence_identity_path_and_type,
         test_hermes_evidence_records_bridge_pattern_without_async_claim,
         test_provider_unavailable_waits_for_human,
+        test_provider_nonzero_exit_waits_for_human,
+        test_missing_provider_report_waits_for_human,
+        test_live_runner_claim_blocks_second_provider,
         test_malformed_provider_output_fails_without_raw_stdout_in_run,
         test_run_provider_rejects_non_runnable_run_state,
         test_runner_rejects_noncanonical_report_path_before_provider_output,

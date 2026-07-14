@@ -106,7 +106,8 @@
         "provider_timeout",
         "provider_nonzero_exit",
         "provider_malformed_output",
-        "provider_unavailable"
+        "provider_unavailable",
+        "report_not_written"
       ]
     },
     "reason_class": {

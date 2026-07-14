@@ -262,6 +262,14 @@ def validate_work_order_for_runner(
     return errors
 
 
+def runner_claim_is_live(work_order: dict[str, Any]) -> bool:
+    authority = work_order.get("work_order_authority")
+    claim = authority.get("runner_claim") if isinstance(authority, dict) else None
+    return isinstance(claim, dict) and claim.get("claim_state") == "claimed" and not run_lifecycle._runner_claim_expired(
+        work_order
+    )
+
+
 def adapter_request(
     *,
     state_root: Path,
@@ -461,10 +469,16 @@ def transition_failure(
     artifact_refs: list[str],
 ) -> dict[str, Any]:
     current = str(run.get("run_state") or "")
+    recoverable_reasons = {
+        "provider_unavailable",
+        "provider_timeout",
+        "provider_nonzero_exit",
+        "report_not_written",
+    }
     if current == "step_queued":
-        target = "waiting_human" if reason_class in {"provider_unavailable", "provider_timeout"} else "failed"
+        target = "waiting_human" if reason_class in recoverable_reasons else "failed"
     elif current == "waiting_provider":
-        target = "waiting_human" if reason_class in {"provider_unavailable", "provider_timeout"} else "failed"
+        target = "waiting_human" if reason_class in recoverable_reasons else "failed"
     else:
         target = "failed"
     terminal_status = "blocked" if target == "failed" else None
@@ -538,6 +552,22 @@ def run_provider(
                 "reason": "work_order_not_provider_safe",
                 "errors": work_order_errors,
             }
+        if runner_claim_is_live(work_order):
+            append_audit_event(
+                state_root=state_root,
+                event_type="run_provider",
+                principal=principal,
+                subject=subject,
+                outcome="blocked",
+                details={"reason": "provider_in_flight", "run_state": run_state},
+            )
+            return {
+                "schema_version": 1,
+                "decision": "blocked",
+                "reason": "provider_in_flight",
+                "run_state": run_state,
+                "workflow_run": run,
+            }
         if run_state == "waiting_provider":
             run_lifecycle.transition_run(
                 state_root,
@@ -579,6 +609,9 @@ def run_provider(
             timeout_seconds=timeout_seconds,
             fake_provider_mode=fake_provider_mode,
         )
+        if outcome == "ok" and report is None:
+            outcome = "report_not_written"
+            details = {**details, "reason": "report_not_written"}
         write_signal_transcript(transcript_path, {"outcome": outcome, "details": details})
         evidence = normalized_evidence(
             request=request,
