@@ -640,7 +640,7 @@ def test_work_order_signature_and_post_execution_git_state() -> None:
         relabeled = copy.deepcopy(legacy)
         relabeled["work_order_authority"]["signature"] = {
             "algorithm": executor.TRANSITION_SIGNATURE_ALGORITHM,
-            "signature": "sha256:" + hashlib.sha256(legacy_digest).hexdigest(),
+            "signature": "sha256:" + hashlib.new("sha256", legacy_digest).hexdigest(),
             "signed_at": order["work_order_authority"]["signature"]["signed_at"],
         }
         assert_reason(

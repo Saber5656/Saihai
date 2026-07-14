@@ -424,7 +424,7 @@ def verify_work_order_signature(state_root: Path, work_order: dict[str, Any]) ->
             canonical_json({"algorithm": TRANSITION_SIGNATURE_ALGORITHM, "material": material}),
             hashlib.sha256,
         ).digest()
-        expected = "sha256:" + hashlib.sha256(keyed_digest).hexdigest()
+        expected = "sha256:" + hashlib.new("sha256", keyed_digest).hexdigest()
     elif algorithm == "sha256-local-principal-key":
         expected = "sha256:" + hmac.new(key, canonical_json(material), hashlib.sha256).hexdigest()
     else:

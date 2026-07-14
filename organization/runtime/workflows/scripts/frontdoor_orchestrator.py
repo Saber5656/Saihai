@@ -356,7 +356,7 @@ def sign_transition(
         canonical_json(signature_material),
         hashlib.sha256,
     ).digest()
-    signature = hashlib.sha256(keyed_digest).hexdigest()
+    signature = hashlib.new("sha256", keyed_digest).hexdigest()
     return {
         "algorithm": TRANSITION_SIGNATURE_ALGORITHM,
         "signature": "sha256:" + signature,
