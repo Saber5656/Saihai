@@ -78,9 +78,9 @@ def _schema_errors(value: Any, schema: dict[str, Any], path: str = "$") -> list[
         pattern = schema.get("pattern")
         if isinstance(pattern, str) and not re.search(pattern, value):
             errors.append(f"schema:{path}:pattern")
-    if isinstance(value, int | float) and not isinstance(value, bool):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         minimum = schema.get("minimum")
-        if isinstance(minimum, int | float) and value < minimum:
+        if isinstance(minimum, (int, float)) and value < minimum:
             errors.append(f"schema:{path}:minimum")
     if isinstance(value, dict):
         required = schema.get("required")

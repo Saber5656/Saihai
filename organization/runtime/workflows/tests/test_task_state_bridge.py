@@ -37,8 +37,15 @@ def assert_equal(actual, expected, label: str) -> None:
 
 
 def write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    task_state_bridge.run_store.ensure_private_directory(path.parent)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def write_private_text(path: Path, text: str) -> None:
+    task_state_bridge.run_store.ensure_private_directory(path.parent)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o600)
 
 
 def load_json(path: Path) -> dict:
@@ -187,7 +194,7 @@ def test_runs_for_task_filters_and_sorts() -> None:
         write_json(state_root / "runs" / "run-b.json", run_record(run_id="run-b", task_id="TSK-sort"))
         write_json(state_root / "runs" / "run-a.json", run_record(run_id="run-a", task_id="TSK-sort"))
         write_json(state_root / "runs" / "run-c.json", run_record(run_id="run-c", task_id="TSK-other"))
-        (state_root / "runs" / "run-corrupt.json").write_text('{"run_id": tru', encoding="utf-8")
+        write_private_text(state_root / "runs" / "run-corrupt.json", '{"run_id": tru')
 
         rows = task_state_bridge.runs_for_task(state_root, "TSK-sort")
         assert_equal(
@@ -261,7 +268,7 @@ def test_queue_evidence_view_status_mapping() -> None:
 
 def test_task_view_cli_shape() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
-        state_root = Path(raw_tmp)
+        state_root = Path(raw_tmp).resolve()
         write_json(state_root / "runs" / "run-cli.json", run_record(run_id="run-cli", task_id="TSK-cli"))
         completed = subprocess.run(
             [

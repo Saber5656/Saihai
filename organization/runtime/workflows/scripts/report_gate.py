@@ -287,9 +287,7 @@ def append_audit_event(
         "details": details or {},
     }
     path = state_paths(state_root)["audit"] / "events.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+    run_store.append_json_line(path, event)
     return event
 
 
@@ -670,7 +668,7 @@ def validate_authority(value: Any) -> list[str]:
 
 
 def next_numbered_artifact(path: Path, suffix: str) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
+    run_store.ensure_private_directory(path)
     existing = sorted(path.glob(f"*-{suffix}.json"))
     return path / f"{len(existing) + 1:04d}-{suffix}.json"
 

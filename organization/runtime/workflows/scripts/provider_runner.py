@@ -233,7 +233,10 @@ def secure_directory(state_root: Path, path: Path) -> None:
     parent = path.parent
     if parent == path:
         raise ProviderRunnerError("private_artifact_parent_invalid")
-    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        run_store.ensure_private_directory(parent)
+    except run_store.RunStoreError as exc:
+        raise ProviderRunnerError("private_artifact_parent_unsafe") from exc
     if path.exists():
         if path.is_symlink():
             raise ProviderRunnerError("private_artifact_directory_symlink")
@@ -327,9 +330,7 @@ def append_audit_event(
         "details": details or {},
     }
     path = state_paths(state_root)["audit"] / "events.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+    run_store.append_json_line(path, event)
     return event
 
 
@@ -734,7 +735,7 @@ def recover_completed_provider_attempt(
     )
     private_atomic_write_json(state_root, evidence_path, evidence)
     if outcome == "ok":
-        report_path.parent.mkdir(parents=True, exist_ok=True)
+        run_store.ensure_private_directory(report_path.parent)
         run_store.atomic_write_json(report_path, report)
         execution["phase"] = "result_ready"
     execution["last_outcome"] = {
@@ -1722,7 +1723,7 @@ def run_provider(
                 "transcript_path": str(transcript_path),
             }
             if outcome == "ok" and report is not None:
-                report_path.parent.mkdir(parents=True, exist_ok=True)
+                run_store.ensure_private_directory(report_path.parent)
                 run_store.atomic_write_json(report_path, report)
                 execution["phase"] = "result_ready"
                 run_store.store_run(state_root, current_run, expected_current_state="waiting_provider")

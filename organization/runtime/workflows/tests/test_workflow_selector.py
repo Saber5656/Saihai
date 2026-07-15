@@ -116,7 +116,34 @@ def test_contract_validation() -> None:
     contracts = selector.validate_contracts()
     assert_equal(contracts["decision"], "ok", f"contracts errors: {contracts['errors']}")
     assert_equal(contracts["workflow_contracts"]["template_count"], 6, "template count")
-    assert_equal(contracts["workflow_contracts"]["schema_count"], 20, "schema count")
+    expected_schemas = [
+        "activation-envelope.schema.json",
+        "agent-integration-assurance.schema.json",
+        "agent-integration-attestation.schema.json",
+        "agent-integration-evidence.schema.json",
+        "audit-event.schema.json",
+        "child-thread-create.schema.json",
+        "child-thread-plan.schema.json",
+        "code-change-report.schema.json",
+        "codex-main-agent-deployment.schema.json",
+        "external-review-report.schema.json",
+        "main-agent-bridge-request.schema.json",
+        "orchestrator-projection.schema.json",
+        "policy-change-report.schema.json",
+        "provider-adapter-capability.schema.json",
+        "provider-evidence.schema.json",
+        "publication-result.schema.json",
+        "research-report.schema.json",
+        "scoped-worker-capability.schema.json",
+        "scoped-worker-result.schema.json",
+        "security-review-report.schema.json",
+        "typed-classification.schema.json",
+        "work-order.schema.json",
+        "workflow-run.schema.json",
+        "workflow-template.schema.json",
+    ]
+    assert_equal(contracts["workflow_contracts"]["schema_names"], expected_schemas, "schema names")
+    assert_equal(contracts["workflow_contracts"]["schema_count"], len(expected_schemas), "schema count")
 
 
 def test_registry_gate_profiles_and_active_templates() -> None:

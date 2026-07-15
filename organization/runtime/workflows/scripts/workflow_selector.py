@@ -135,7 +135,7 @@ def validate_classification(candidate: dict[str, Any]) -> tuple[bool, list[str]]
         errors.append(f"classification_source unsupported: {source!r}")
 
     confidence = candidate.get("classification_confidence")
-    if not isinstance(confidence, int | float) or isinstance(confidence, bool):
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         errors.append("classification_confidence must be number")
     elif not 0 <= confidence <= 1:
         errors.append("classification_confidence must be between 0 and 1")
@@ -1068,12 +1068,14 @@ def validate_contracts() -> dict[str, Any]:
         if fragment not in projection_text:
             errors.append(f"orchestrator projection missing redaction/no-op constraint: {fragment}")
 
+    schema_names = sorted(path.name for path in SCHEMA_ROOT.glob("*.json"))
     return {
         "schema_version": 1,
         "decision": "ok" if not errors else "blocked",
         "workflow_contracts": {
             "registry_path": relative_to_repo(REGISTRY_PATH),
-            "schema_count": len(list(SCHEMA_ROOT.glob("*.json"))),
+            "schema_count": len(schema_names),
+            "schema_names": schema_names,
             "template_count": len(registered_templates),
         },
         "errors": errors,

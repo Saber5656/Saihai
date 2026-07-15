@@ -53,15 +53,16 @@ def run_frontdoor(
     *args: str,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
+    canonical_state_root = state_root.resolve(strict=False)
     return subprocess.run(
         [
             sys.executable,
             "-c",
             FRONTDOOR_TEST_WRAPPER,
             str(SCRIPT_DIR),
-            str(state_root),
+            str(canonical_state_root),
             "--state-root",
-            str(state_root),
+            str(canonical_state_root),
             *args,
         ],
         cwd=ROOT,
@@ -126,9 +127,17 @@ def prepare_terminal_run(
     evidence_path = Path(adapter["evidence_path"])
     transcript_path = Path(adapter["transcript_path"])
     report_path = Path(adapter["report_path"])
-    evidence_path.parent.mkdir(parents=True, exist_ok=True)
-    transcript_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_directories = {
+        evidence_path.parent,
+        evidence_path.parent.parent,
+        transcript_path.parent,
+        transcript_path.parent.parent,
+        report_path.parent,
+        report_path.parent.parent,
+    }
+    for parent in sorted(artifact_directories, key=lambda item: len(item.parts)):
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        parent.chmod(0o700)
     raw_stdout = b"completion-gate-fixture"
     stdout_sha256 = "sha256:" + hashlib.sha256(raw_stdout).hexdigest()
     transcript_path.write_text(
@@ -147,6 +156,7 @@ def prepare_terminal_run(
         + "\n",
         encoding="utf-8",
     )
+    transcript_path.chmod(0o600)
     fixed_fields = adapter["evidence_contract"]["fixed_fields"]
     evidence = {
         **fixed_fields,
@@ -162,6 +172,7 @@ def prepare_terminal_run(
     if evidence_mutator is not None:
         evidence_mutator(evidence)
     evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
+    evidence_path.chmod(0o600)
     report = {
         "report_version": "1",
         "report_id": f"report-{run_id}",
@@ -187,6 +198,7 @@ def prepare_terminal_run(
         },
     }
     report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+    report_path.chmod(0o600)
     validation = load_payload(
         run_frontdoor(
             state_root,

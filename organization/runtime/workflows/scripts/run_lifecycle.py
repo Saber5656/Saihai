@@ -114,8 +114,7 @@ def _read_private_file_text(path: Path, *, label: str) -> str:
 
 def principal_key(state_root: Path, principal: dict[str, Any]) -> bytes:
     path = signing_key_path(state_root, principal)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
+    run_store.ensure_private_directory(path.parent)
     if not path.exists():
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
@@ -309,18 +308,10 @@ def _private_attempt_journal(state_root: Path, run: dict[str, Any], payload: dic
         )
     except safe_paths.SafePathError as exc:
         raise LifecycleError("provider_attempt_journal_unsafe") from exc
-    run_dir = attempts_dir.parent
-    evidence_root = run_dir.parent
-    for directory in (evidence_root, run_dir, attempts_dir):
-        if directory.exists():
-            if directory.is_symlink():
-                raise LifecycleError("provider_attempt_journal_unsafe")
-            metadata = directory.stat()
-            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o022:
-                raise LifecycleError("provider_attempt_journal_unsafe")
-            os.chmod(directory, 0o700)
-        else:
-            directory.mkdir(mode=0o700)
+    try:
+        run_store.ensure_private_directory(attempts_dir)
+    except run_store.RunStoreError as exc:
+        raise LifecycleError("provider_attempt_journal_unsafe") from exc
     path = attempts_dir / f"{safe_attempt}-result.json"
     if path.exists():
         if path.is_symlink():

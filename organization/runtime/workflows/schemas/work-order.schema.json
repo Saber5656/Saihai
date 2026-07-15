@@ -134,11 +134,62 @@
           "enum": [
             "codex",
             "claude",
+            "cursor",
+            "grok",
             "manual"
           ]
         },
         "chat_session_id": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "frontend_request_binding": {
+      "type": "object",
+      "required": [
+        "owner_principal",
+        "checkout_identity_digest"
+      ],
+      "properties": {
+        "owner_principal": {
+          "type": "object",
+          "required": [
+            "principal_type",
+            "principal_id",
+            "authn_method"
+          ],
+          "properties": {
+            "principal_type": { "const": "main_agent_bridge" },
+            "principal_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+            },
+            "authn_method": { "const": "installed_frontend_profile" }
+          },
+          "additionalProperties": false
+        },
+        "checkout_identity_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "projection_binding": {
+      "$ref": "#/$defs/projectionBinding"
+    },
+    "frontend_launch_session_binding": {
+      "type": "object",
+      "required": [
+        "launch_session_identity",
+        "launch_session_digest"
+      ],
+      "properties": {
+        "launch_session_identity": { "$ref": "#/$defs/launchSessionIdentity" },
+        "launch_session_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
         }
       },
       "additionalProperties": false
@@ -263,18 +314,194 @@
       "additionalProperties": false
     },
     "worker_execution_plan": {
-      "type": "object",
-      "required": ["plan_version", "repository", "worktree", "worker_backend"],
-      "properties": {
-        "plan_version": { "const": "1" },
-        "repository": { "type": "object" },
-        "worktree": { "type": "object" },
-        "worker_backend": { "type": "object" }
-      },
-      "additionalProperties": false
+      "$ref": "#/$defs/workerExecutionPlan"
     }
   },
   "additionalProperties": false,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "workerRuntimeBinding": {
+      "type": "object",
+      "required": [
+        "binding_version", "runtime_realpath", "runtime_digest", "profile_mode",
+        "profile_realpath", "profile_digest", "codex_home_realpath", "environment",
+        "environment_digest", "argv_template", "argv_digest", "runner_profile_digest"
+      ],
+      "properties": {
+        "binding_version": { "const": "1" },
+        "runtime_realpath": { "type": "string", "pattern": "^/" },
+        "runtime_digest": { "$ref": "#/$defs/sha256" },
+        "profile_mode": { "const": "ignored_by_fixed_argv" },
+        "profile_realpath": { "type": "null" },
+        "profile_digest": { "$ref": "#/$defs/sha256" },
+        "codex_home_realpath": { "type": "string", "pattern": "^/" },
+        "environment": {
+          "type": "object",
+          "required": ["PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL", "TMPDIR"],
+          "properties": {
+            "PATH": { "const": "/usr/bin:/bin" },
+            "HOME": { "type": "string", "pattern": "^/" },
+            "CODEX_HOME": { "type": "string", "pattern": "^/" },
+            "LANG": { "const": "C" },
+            "LC_ALL": { "const": "C" },
+            "TMPDIR": { "const": "/tmp" }
+          },
+          "additionalProperties": false
+        },
+        "environment_digest": { "$ref": "#/$defs/sha256" },
+        "argv_template": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "argv_digest": { "$ref": "#/$defs/sha256" },
+        "runner_profile_digest": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "workerBackend": {
+      "type": "object",
+      "required": [
+        "backend_id", "adapter_version", "executable_path", "executable_digest",
+        "runner_profile_digest", "provider_id", "runtime_binding"
+      ],
+      "properties": {
+        "backend_id": { "const": "codex_cli" },
+        "adapter_version": { "const": "1" },
+        "executable_path": { "type": "string", "pattern": "^/" },
+        "executable_digest": { "$ref": "#/$defs/sha256" },
+        "runner_profile_digest": { "$ref": "#/$defs/sha256" },
+        "provider_id": { "const": "openai-codex" },
+        "runtime_binding": { "$ref": "#/$defs/workerRuntimeBinding" }
+      },
+      "additionalProperties": false
+    },
+    "projectionBinding": {
+      "type": "object",
+      "required": [
+        "request_id", "task_id", "owner_principal_digest", "checkout_identity_digest"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+        },
+        "task_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+        },
+        "owner_principal_digest": { "$ref": "#/$defs/sha256" },
+        "checkout_identity_digest": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "workerExecutionPlan": {
+      "type": "object",
+      "required": [
+        "plan_version", "projection_binding", "repository", "worktree", "worker_backend"
+      ],
+      "properties": {
+        "plan_version": { "const": "1" },
+        "projection_binding": { "$ref": "#/$defs/projectionBinding" },
+        "repository": {
+          "type": "object",
+          "required": ["repo_full_name", "repo_root", "git_common_dir_digest", "base_revision"],
+          "properties": {
+            "repo_full_name": { "type": "string" },
+            "repo_root": { "type": "string", "pattern": "^/" },
+            "git_common_dir_digest": { "$ref": "#/$defs/sha256" },
+            "base_revision": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "worktree": {
+          "type": "object",
+          "required": ["worktree_key", "branch", "scope"],
+          "properties": {
+            "worktree_key": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$" },
+            "branch": { "type": "string", "pattern": "^codex/scoped-[A-Za-z0-9_.-]+$" },
+            "scope": { "const": "whole_task_worktree" }
+          },
+          "additionalProperties": false
+        },
+        "worker_backend": { "$ref": "#/$defs/workerBackend" }
+      },
+      "additionalProperties": false
+    },
+    "launchSessionIdentity": {
+      "type": "object",
+      "required": [
+        "launch_session_version", "session_id", "deployment_id", "profile_id",
+        "principal_id", "workspace_id", "subject_pid", "process_start_token",
+        "native_realpath", "native_digest", "profile_realpath", "profile_digest",
+        "launch_argv_digest", "checkout_realpath", "checkout_identity_digest",
+        "issued_at", "valid_until", "status", "session_kind",
+        "commissioning_launch_reference", "commissioning_launch_digest", "supervisor_pid",
+        "supervisor_start_token", "record_reference", "record_digest"
+      ],
+      "properties": {
+        "launch_session_version": { "const": "2" },
+        "session_id": { "type": "string" },
+        "deployment_id": { "type": "string" },
+        "profile_id": { "type": "string" },
+        "principal_id": { "type": "string" },
+        "workspace_id": { "type": "string" },
+        "subject_pid": { "type": "integer", "minimum": 1 },
+        "process_start_token": { "type": "string", "pattern": "^proc-[0-9a-f]{64}$" },
+        "native_realpath": { "type": "string" },
+        "native_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "profile_realpath": { "type": "string" },
+        "profile_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "launch_argv_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "checkout_realpath": { "type": "string" },
+        "checkout_identity_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "issued_at": { "type": "string" },
+        "valid_until": { "type": "string" },
+        "status": { "const": "active" },
+        "session_kind": { "enum": ["standard", "commissioning"] },
+        "commissioning_launch_reference": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^commissioning-launches/[A-Za-z0-9_.-]+\\.json$" }
+          ]
+        },
+        "commissioning_launch_digest": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/sha256" }
+          ]
+        },
+        "supervisor_pid": { "type": "integer", "minimum": 1 },
+        "supervisor_start_token": { "type": "string", "pattern": "^proc-[0-9a-f]{64}$" },
+        "record_reference": { "type": "string", "pattern": "^launch-sessions/[A-Za-z0-9_.-]+\\.json$" },
+        "record_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "session_kind": { "const": "standard" } } },
+          "then": {
+            "properties": {
+              "commissioning_launch_reference": { "type": "null" },
+              "commissioning_launch_digest": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "session_kind": { "const": "commissioning" } } },
+          "then": {
+            "properties": {
+              "commissioning_launch_reference": { "type": "string", "pattern": "^commissioning-launches/[A-Za-z0-9_.-]+\\.json$" },
+              "commissioning_launch_digest": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        }
+      ]
+    }
+  },
   "allOf": [
     {
       "if": {
