@@ -15,6 +15,31 @@ the ATV name for historical artifacts and compatibility aliases.
 Sahai uses only the Python 3.10+ standard library for normal operation. No
 `pip install` step is required.
 
+## Release
+
+Release history and the merged pull requests included in v0.1.0 are recorded
+in the [changelog](CHANGELOG.md). Tagging and GitHub Release publication are
+human-owned operations and are separate from merging a release-preparation PR.
+
+The v0.1.0 certainty and authority boundary is deliberately narrow:
+
+- A frontend/main agent can submit a typed request, read a redacted projection,
+  and acknowledge output. It cannot supply authoritative classification or
+  approval, create runs, choose raw commands or paths, or publish changes.
+- A host-owned executor may derive a capability from an approved work order and
+  launch a pinned, bounded Codex CLI worker in the planned task worktree.
+- The shipped scoped-worker executor rejects all network and provider grants.
+  The opt-in live provider adapters are a separate host-owned readonly path.
+- Commit, push, and pull-request publication remain behind separate review,
+  approval, and publication gates.
+- The supported checkout is the host-managed primary checkout at `~/dev/Saihai`
+  or one of its linked worktrees. An arbitrary fresh clone does not satisfy the
+  checkout identity contract.
+
+Daemon scheduling, tmux worker execution, package distribution, automatic
+publication, credential provisioning, and release publication are outside the
+v0.1.0 runtime boundary.
+
 ## Requirements
 
 - Python 3.10 or newer
