@@ -12,6 +12,9 @@ Related issues:
 | [#36](https://github.com/Saber5656/Saihai/issues/36) | Day-1 operator workflow |
 | [#37](https://github.com/Saber5656/Saihai/issues/37) | Queue/tmux legacy migration and compatibility cleanup |
 | [#38](https://github.com/Saber5656/Saihai/issues/38) | Stuck-run recovery and rollback procedures |
+| [#50](https://github.com/Saber5656/Saihai/issues/50) | Template-coverage acceptance verification and closeout |
+| [#54](https://github.com/Saber5656/Saihai/issues/54) | Enforced frontend-session tool profile |
+| [#81](https://github.com/Saber5656/Saihai/issues/81) | Host-verified capability and scoped worker execution |
 
 ## Status Boundary
 
@@ -24,6 +27,22 @@ Related issues:
 | Current scheduler | Invocation-drain, durable state, global advisory lock, concurrency 1, provider leases, heartbeat, bounded retries, resume, and abort are implemented. |
 | Read surfaces | `task-view`, `lock-status`, completion verification, the localhost frontdoor API, and the read-only workflow viewer/API are implemented. |
 | Still planned | Dedicated raw run detail/evidence CLI commands, daemon/watch mode, and tmux worker execution are not implemented. |
+
+The enforced frontend profile from #54 and the scoped worker executor from #81
+serve different authority boundaries. An orchestrator-frontend session starts
+through the enforced launcher and remains limited to typed request submission,
+redacted projection reads, and result acknowledgement. It does not inherit
+implementation, shell, Git, worktree, provider, or publication authority.
+
+After approval, only the host-owned executor may verify a canonical capability
+derived from the work order, create or select its planned task worktree, and
+launch the bounded Codex CLI worker. The worker receives only the capability's
+explicit operations, paths, network, provider, and execution limits. Commit,
+push, and pull-request publication remain subject to their separate approval
+and publication gates. The shipped executor rejects all network and provider
+grants; any future external execution remains outside this capability and must
+use a separately approved gate. See [the main-agent enforcement runbook](../../../docs/runbooks/main-agent-enforcement.md)
+for launcher and canary verification procedures.
 
 ## Day-1 Happy Path
 
@@ -408,3 +427,8 @@ python3 scripts/configure_organization.py workflow-selector validate-contracts
 | [#43](https://github.com/Saber5656/Saihai/issues/43) | Live Claude/Codex headless adapter execution. |
 | [#44](https://github.com/Saber5656/Saihai/issues/44) | ITB task state and queue evidence bridge. |
 | [#45](https://github.com/Saber5656/Saihai/issues/45) | Final-gate and Vault evidence checks for completion. |
+| [#50](https://github.com/Saber5656/Saihai/issues/50) | Template-coverage acceptance verification and closeout. |
+| [#54](https://github.com/Saber5656/Saihai/issues/54) | Enforced frontend-session tool profile and launcher. |
+| [#73](https://github.com/Saber5656/Saihai/issues/73) | Fake-provider evidence and completion-verification alignment. |
+| [#74](https://github.com/Saber5656/Saihai/issues/74) | Codex frontend exec-policy state-root enforcement. |
+| [#81](https://github.com/Saber5656/Saihai/issues/81) | Host-verified scoped worker capabilities and bounded CLI execution. |
