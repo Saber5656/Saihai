@@ -1,0 +1,318 @@
+{
+  "contract_version": "2",
+  "failure_policy": {
+    "missing_evidence": "suppress",
+    "invalid_evidence": "suppress",
+    "stale_evidence": "suppress",
+    "configuration_drift": "suppress",
+    "claim_downgrade": "forbidden"
+  },
+  "profiles": [
+    {
+      "profile_version": "2",
+      "profile_id": "codex-main-agent-a-prime",
+      "agent_family": "codex",
+      "surface_role": "main_agent",
+      "integration_state": "configured",
+      "transports": ["cli", "mcp", "native_policy"],
+      "target_claims": ["action_enforced"],
+      "operation_requirements": {
+        "typed_request_submit": "saihai_gateway_only",
+        "redacted_projection_read": "saihai_gateway_only",
+        "output_acknowledge": "saihai_gateway_only",
+        "filesystem_write": "denied",
+        "shell_exec": "denied",
+        "process_spawn": "denied",
+        "network_egress": "denied",
+        "external_mutation": "denied",
+        "provider_dispatch": "denied",
+        "git_commit": "denied",
+        "git_push": "denied",
+        "pr_create": "denied",
+        "release_publish": "denied",
+        "credential_access": "denied",
+        "agent_spawn": "denied",
+        "surface_launch": "ambient"
+      },
+      "configuration_requirements": {
+        "deployment_manifest_path": "/Library/Application Support/Saihai/Manifests/codex-main-agent.deployment.json",
+        "required_artifact_roles": [
+          "deployment_manifest",
+          "runtime_config",
+          "requirements",
+          "bridge_wrapper",
+          "instructions",
+          "profile_snapshot",
+          "observer",
+          "supervisor"
+        ]
+      },
+      "evidence_policy": {
+        "max_age_seconds": 900,
+        "future_skew_seconds": 30,
+        "required_bindings": [
+          "configuration_digest",
+          "runtime_binary_digest",
+          "tool_inventory_digest",
+          "checkout_digest"
+        ]
+      },
+      "tool_validator": {
+        "validator_id": "codex-main-agent-a-prime-tools",
+        "validator_version": "1",
+        "validator_kind": "declarative_tool_classification",
+        "validator_digest": "sha256:4b1e1dcd1287c2133ce8084bd569b6c4968a24fc8b1502e4782f8707827e8aa6",
+        "classification_requirements": {
+          "server_backed_mcp_tools": {"mode": "exact", "values": ["ack_output", "read_projection", "submit_request"], "alternatives": []},
+          "reviewed_internal_tools": {"mode": "subset", "values": ["list_mcp_resource_templates", "list_mcp_resources", "read_mcp_resource", "request_user_input", "update_plan", "view_image"], "alternatives": []},
+          "active_external_mutation_tools": {"mode": "exact", "values": [], "alternatives": []},
+          "mechanically_denied_tools": {"mode": "exact", "values": ["apply_patch"], "alternatives": []},
+          "dynamic_tools": {"mode": "exact", "values": [], "alternatives": []},
+          "extension_tools": {"mode": "exact", "values": [], "alternatives": []},
+          "multi_agent_tools": {"mode": "exact", "values": [], "alternatives": []}
+        },
+        "manifest_enabled_tools": ["ack_output", "read_projection", "submit_request"],
+        "operation_tool_names": {
+          "filesystem_write": ["apply_patch", "filesystem", "write_file"],
+          "shell_exec": ["exec_command", "functions.exec", "shell"],
+          "process_spawn": ["exec_command", "functions.exec", "process", "spawn_agent"],
+          "network_egress": ["fetch", "network", "web__run"],
+          "external_mutation": ["external_mutation"],
+          "provider_dispatch": ["provider_dispatch"],
+          "git_commit": ["git_commit"],
+          "git_push": ["git_push"],
+          "pr_create": ["pr_create"],
+          "release_publish": ["release_publish"],
+          "credential_access": ["credential_access"],
+          "agent_spawn": ["spawn_agent"]
+        }
+      },
+      "launch_validator": {
+        "validator_id": "codex-root-supervisor-session",
+        "validator_version": "1",
+        "module": "codex_main_agent_supervisor",
+        "function": "validate_session_record_shape",
+        "fields_constant": "SESSION_RECORD_FIELDS",
+        "validator_digest": "sha256:5d8e29aca8b382e21fe19a202b21b0c277203607a5f965a8ef9cb2db99844fd4"
+      },
+      "execution_binding_validator": null,
+      "rationale": "A-prime targets only the release-pinned stock Codex CLI process started by the root-owned Saihai launcher; Codex App and IDE surfaces are outside this claim because their app-server clients can inject dynamic tools. The bridge configuration does not claim mechanical interception of every prompt entrypoint. Independent host evidence must prove denial of every direct action surface before action_enforced activates; static configuration alone never activates the claim. The credential_access result is limited to the exact credential-capable tool classification, requirements denial of the known legacy and dedicated CODEX_HOME auth.json paths, and dedicated CODEX_HOME separation; it does not claim that every user-readable secret file is inaccessible."
+    },
+    {
+      "profile_version": "2",
+      "profile_id": "claude-main-agent-advisory",
+      "agent_family": "claude",
+      "surface_role": "main_agent",
+      "integration_state": "available_advisory",
+      "transports": ["native_policy"],
+      "target_claims": [],
+      "operation_requirements": {
+        "typed_request_submit": "ambient",
+        "redacted_projection_read": "unverified",
+        "output_acknowledge": "unverified",
+        "filesystem_write": "ambient",
+        "shell_exec": "ambient",
+        "process_spawn": "ambient",
+        "network_egress": "unverified",
+        "external_mutation": "unverified",
+        "provider_dispatch": "unverified",
+        "git_commit": "ambient",
+        "git_push": "ambient",
+        "pr_create": "unverified",
+        "release_publish": "unverified",
+        "credential_access": "unverified",
+        "agent_spawn": "unverified",
+        "surface_launch": "ambient"
+      },
+      "configuration_requirements": {
+        "deployment_manifest_path": null,
+        "required_artifact_roles": []
+      },
+      "evidence_policy": {
+        "max_age_seconds": 900,
+        "future_skew_seconds": 30,
+        "required_bindings": [
+          "configuration_digest",
+          "runtime_binary_digest",
+          "tool_inventory_digest",
+          "checkout_digest"
+        ]
+      },
+      "tool_validator": null,
+      "launch_validator": null,
+      "execution_binding_validator": null,
+      "rationale": "Claude is currently an advisory surface only. An empty target_claims set is the sole representation that computes advisory status."
+    },
+    {
+      "profile_version": "2",
+      "profile_id": "cursor-main-agent-candidate",
+      "agent_family": "cursor",
+      "surface_role": "main_agent",
+      "integration_state": "candidate",
+      "transports": ["unknown"],
+      "target_claims": ["ingress_enforced", "action_enforced"],
+      "operation_requirements": {
+        "typed_request_submit": "saihai_gateway_only",
+        "redacted_projection_read": "saihai_gateway_only",
+        "output_acknowledge": "saihai_gateway_only",
+        "filesystem_write": "denied",
+        "shell_exec": "denied",
+        "process_spawn": "denied",
+        "network_egress": "denied",
+        "external_mutation": "denied",
+        "provider_dispatch": "denied",
+        "git_commit": "denied",
+        "git_push": "denied",
+        "pr_create": "denied",
+        "release_publish": "denied",
+        "credential_access": "denied",
+        "agent_spawn": "denied",
+        "surface_launch": "ambient"
+      },
+      "configuration_requirements": {
+        "deployment_manifest_path": null,
+        "required_artifact_roles": []
+      },
+      "evidence_policy": {
+        "max_age_seconds": 900,
+        "future_skew_seconds": 30,
+        "required_bindings": [
+          "configuration_digest",
+          "runtime_binary_digest",
+          "tool_inventory_digest",
+          "checkout_digest"
+        ]
+      },
+      "tool_validator": null,
+      "launch_validator": null,
+      "execution_binding_validator": null,
+      "rationale": "Cursor records the same portable target requirements, but remains a non-activatable candidate until a supported host integration and current evidence exist."
+    },
+    {
+      "profile_version": "2",
+      "profile_id": "grok-main-agent-unavailable",
+      "agent_family": "grok",
+      "surface_role": "main_agent",
+      "integration_state": "unavailable",
+      "transports": ["unknown"],
+      "target_claims": ["ingress_enforced", "action_enforced"],
+      "operation_requirements": {
+        "typed_request_submit": "saihai_gateway_only",
+        "redacted_projection_read": "saihai_gateway_only",
+        "output_acknowledge": "saihai_gateway_only",
+        "filesystem_write": "denied",
+        "shell_exec": "denied",
+        "process_spawn": "denied",
+        "network_egress": "denied",
+        "external_mutation": "denied",
+        "provider_dispatch": "denied",
+        "git_commit": "denied",
+        "git_push": "denied",
+        "pr_create": "denied",
+        "release_publish": "denied",
+        "credential_access": "denied",
+        "agent_spawn": "denied",
+        "surface_launch": "ambient"
+      },
+      "configuration_requirements": {
+        "deployment_manifest_path": null,
+        "required_artifact_roles": []
+      },
+      "evidence_policy": {
+        "max_age_seconds": 900,
+        "future_skew_seconds": 30,
+        "required_bindings": [
+          "configuration_digest",
+          "runtime_binary_digest",
+          "tool_inventory_digest",
+          "checkout_digest"
+        ]
+      },
+      "tool_validator": null,
+      "launch_validator": null,
+      "execution_binding_validator": null,
+      "rationale": "Grok records future target requirements without claiming an available or attested integration."
+    },
+    {
+      "profile_version": "2",
+      "profile_id": "codex-scoped-worker",
+      "agent_family": "codex",
+      "surface_role": "bounded_worker",
+      "integration_state": "configured",
+      "transports": ["cli", "api"],
+      "target_claims": ["managed_worker"],
+      "operation_requirements": {
+        "typed_request_submit": "not_applicable",
+        "redacted_projection_read": "not_applicable",
+        "output_acknowledge": "not_applicable",
+        "filesystem_write": "capability_scoped",
+        "shell_exec": "capability_scoped",
+        "process_spawn": "capability_scoped",
+        "network_egress": "denied",
+        "external_mutation": "denied",
+        "provider_dispatch": "denied",
+        "git_commit": "denied",
+        "git_push": "denied",
+        "pr_create": "denied",
+        "release_publish": "denied",
+        "credential_access": "denied",
+        "agent_spawn": "denied",
+        "surface_launch": "saihai_gateway_only"
+      },
+      "configuration_requirements": {
+        "deployment_manifest_path": null,
+        "required_artifact_roles": []
+      },
+      "evidence_policy": {
+        "max_age_seconds": 900,
+        "future_skew_seconds": 30,
+        "required_bindings": [
+          "configuration_digest",
+          "runtime_binary_digest",
+          "tool_inventory_digest",
+          "checkout_digest"
+        ]
+      },
+      "tool_validator": {
+        "validator_id": "codex-scoped-worker-tools",
+        "validator_version": "1",
+        "validator_kind": "declarative_tool_classification",
+        "validator_digest": "sha256:e861b8a4226baeb9e40e80cf2869821cf51389aca1305e73034cc93e09f09840",
+        "classification_requirements": {
+          "server_backed_mcp_tools": {"mode": "exact", "values": [], "alternatives": []},
+          "reviewed_internal_tools": {"mode": "exact", "values": [], "alternatives": []},
+          "active_external_mutation_tools": {"mode": "exact", "values": ["filesystem", "process", "shell"], "alternatives": []},
+          "mechanically_denied_tools": {"mode": "exact", "values": [], "alternatives": []},
+          "dynamic_tools": {"mode": "exact", "values": [], "alternatives": []},
+          "extension_tools": {"mode": "exact", "values": [], "alternatives": []},
+          "multi_agent_tools": {"mode": "exact", "values": [], "alternatives": []}
+        },
+        "manifest_enabled_tools": null,
+        "operation_tool_names": {
+          "filesystem_write": ["filesystem"],
+          "shell_exec": ["shell"],
+          "process_spawn": ["process"],
+          "network_egress": ["network"],
+          "external_mutation": ["external_mutation"],
+          "provider_dispatch": ["provider_dispatch"],
+          "git_commit": ["git_commit"],
+          "git_push": ["git_push"],
+          "pr_create": ["pr_create"],
+          "release_publish": ["release_publish"],
+          "credential_access": ["credential_access"],
+          "agent_spawn": ["agent_spawn"]
+        }
+      },
+      "launch_validator": null,
+      "execution_binding_validator": {
+        "validator_id": "codex-scoped-worker-execution-binding",
+        "validator_version": "1",
+        "module": "scoped_worker_executor",
+        "function": "verify_worker_runtime_binding",
+        "fields_constant": "WORKER_RUNTIME_BINDING_FIELDS",
+        "validator_digest": "sha256:5b551f6f2d30f921a03cd1de0b5ea74fd1aee0f97fd5cfd08d682a0d6e880e7b"
+      },
+      "rationale": "The shipped Codex worker is a target for capability-bound launch and action boundaries. Its minimal-read, workspace-write permission profile configures root, temporary, Git metadata, dedicated auth, and network denies as defense in depth, but current host-domain evidence does not prove generic same-rootfs external-mutation denial and explicitly records that network denial alone does not deny a same-rootfs local Git push. A clean post-execution HEAD also does not prove commit denial, and configured dedicated auth-path denial does not prove generic credential denial. Live managed_worker therefore remains mechanically suppressed until a separately isolated worker domain supplies stronger evidence for every blocked operation and the launch binding."
+    }
+  ]
+}
