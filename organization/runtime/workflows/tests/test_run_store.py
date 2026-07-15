@@ -95,6 +95,15 @@ def assert_equal(actual, expected, label: str) -> None:
     assert actual == expected, f"{label}: expected {expected!r}, got {actual!r}"
 
 
+def write_private_fixture(path: Path, payload: str | bytes) -> None:
+    run_store.ensure_private_directory(path.parent)
+    if isinstance(payload, bytes):
+        path.write_bytes(payload)
+    else:
+        path.write_text(payload, encoding="utf-8")
+    path.chmod(0o600)
+
+
 def test_store_and_reload_roundtrip() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -166,9 +175,8 @@ def test_load_corrupt_json_quarantines() -> None:
         state_root = Path(raw_tmp)
         run_id = "run-corrupt"
         canonical = state_root / "runs" / f"{run_id}.json"
-        canonical.parent.mkdir(parents=True, exist_ok=True)
         for index in (1, 2):
-            canonical.write_text('{"run_id": tru', encoding="utf-8")
+            write_private_fixture(canonical, '{"run_id": tru')
             try:
                 run_store.load_run(state_root, run_id)
             except run_store.RunStoreError as exc:
@@ -186,8 +194,7 @@ def test_load_non_utf8_payload_quarantines() -> None:
         state_root = Path(raw_tmp)
         run_id = "run-non-utf8"
         canonical = state_root / "runs" / f"{run_id}.json"
-        canonical.parent.mkdir(parents=True, exist_ok=True)
-        canonical.write_bytes(b"\xff\xfe\xfa")
+        write_private_fixture(canonical, b"\xff\xfe\xfa")
         try:
             run_store.load_run(state_root, run_id)
         except run_store.RunStoreError as exc:
@@ -203,8 +210,7 @@ def test_load_rejects_embedded_run_id_mismatch() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         canonical = state_root / "runs" / "run-requested.json"
-        canonical.parent.mkdir(parents=True, exist_ok=True)
-        canonical.write_text(json.dumps(valid_run(run_id="run-embedded")) + "\n", encoding="utf-8")
+        write_private_fixture(canonical, json.dumps(valid_run(run_id="run-embedded")) + "\n")
         try:
             run_store.load_run(state_root, "run-requested")
         except run_store.RunStoreError as exc:
@@ -220,7 +226,7 @@ def test_interrupted_write_preserves_previous_state() -> None:
         run = valid_run(run_id="run-interrupt")
         run_store.store_run(state_root, run)
         tmp = state_root / "runs" / ".run-interrupt.json.deadbeef.tmp"
-        tmp.write_text("{garbage", encoding="utf-8")
+        write_private_fixture(tmp, "{garbage")
         assert_equal(run_store.load_run(state_root, "run-interrupt"), run, "canonical run after tmp")
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import time
 import uuid
 from pathlib import Path
@@ -64,32 +65,271 @@ def validate_artifact_id(value: str, label: str) -> str:
     return value
 
 
-def atomic_write_json(path: Path, payload: Any) -> None:
-    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+def _ensure_private_directory(path: Path) -> None:
+    """Create a no-symlink directory chain with private new components."""
+
+    absolute = path.expanduser()
+    if not absolute.is_absolute():
+        absolute = absolute.absolute()
+    resolved = absolute.resolve(strict=False)
+    if resolved != absolute:
+        macos_var_alias = (
+            str(absolute).startswith("/var/")
+            and str(resolved) == "/private" + str(absolute)
+        )
+        if not macos_var_alias:
+            raise RunStoreError("io_error", ["private directory symlink redirection forbidden"])
+        absolute = resolved
+    components: list[Path] = []
+    current = Path(absolute.anchor)
+    components.append(current)
+    for part in absolute.parts[1:]:
+        current = current / part
+        components.append(current)
+
+    private_subtree = False
+    old_umask = os.umask(0o077)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tmp.open("w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        for component in components:
+            created = False
+            try:
+                metadata = component.lstat()
+            except FileNotFoundError:
+                try:
+                    component.mkdir(mode=0o700)
+                    created = True
+                    metadata = component.lstat()
+                except OSError as exc:
+                    raise RunStoreError("io_error", [str(exc)]) from exc
+            except OSError as exc:
+                raise RunStoreError("io_error", [str(exc)]) from exc
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+                raise RunStoreError("io_error", ["private directory chain contains non-directory"])
+            mode = stat.S_IMODE(metadata.st_mode)
+            if created or (metadata.st_uid == os.getuid() and mode == 0o700):
+                private_subtree = True
+            if private_subtree:
+                if metadata.st_uid != os.getuid() or mode != 0o700:
+                    raise RunStoreError(
+                        "io_error",
+                        [f"owned state directory chain must be exact mode 0700:{component.name}"],
+                    )
+            elif metadata.st_mode & 0o022 and not (
+                metadata.st_uid == 0 and mode & stat.S_ISVTX
+            ):
+                raise RunStoreError(
+                    "io_error",
+                    ["private directory ancestor is writable by another principal"],
+                )
+    finally:
+        os.umask(old_umask)
+
+    try:
+        metadata = absolute.lstat()
+    except OSError as exc:
+        raise RunStoreError("io_error", [str(exc)]) from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise RunStoreError("io_error", ["artifact parent must be owned mode 0700"])
+
+
+def ensure_private_directory(path: Path) -> None:
+    old_umask = os.umask(0o077)
+    try:
+        _ensure_private_directory(path)
+    finally:
+        os.umask(old_umask)
+
+
+def _open_parent(path: Path) -> tuple[int, str]:
+    if not path.name or path.name in {".", ".."} or os.path.basename(path.name) != path.name:
+        raise RunStoreError("io_error", ["artifact filename is unsafe"])
+    _ensure_private_directory(path.parent)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path.parent, flags)
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        raise RunStoreError("io_error", [str(exc)]) from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        os.close(descriptor)
+        raise RunStoreError("io_error", ["artifact parent descriptor is unsafe"])
+    return descriptor, path.name
+
+
+def _validate_open_artifact(descriptor: int, parent_descriptor: int) -> None:
+    artifact = os.fstat(descriptor)
+    parent = os.fstat(parent_descriptor)
+    if (
+        not stat.S_ISREG(artifact.st_mode)
+        or artifact.st_uid != parent.st_uid
+        or stat.S_IMODE(artifact.st_mode) != 0o600
+    ):
+        raise RunStoreError("io_error", ["artifact ownership or mode is unsafe"])
+
+
+def read_bytes(path: Path, *, max_bytes: int = 64 * 1024 * 1024) -> bytes:
+    """Read a private regular artifact through no-follow descriptors."""
+
+    parent_fd, name = _open_parent(path)
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+        _validate_open_artifact(descriptor, parent_fd)
+        metadata = os.fstat(descriptor)
+        if metadata.st_size > max_bytes:
+            raise RunStoreError("io_error", ["artifact exceeds read boundary"])
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, max_bytes - total + 1))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise RunStoreError("io_error", ["artifact exceeds read boundary"])
+        return b"".join(chunks)
+    except OSError as exc:
+        raise RunStoreError("io_error", [str(exc)]) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def read_json(path: Path, *, max_bytes: int = 64 * 1024 * 1024) -> Any:
+    try:
+        return json.loads(read_bytes(path, max_bytes=max_bytes).decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RunStoreError("corrupt_json", [str(exc)]) from exc
+
+
+def atomic_write_json(path: Path, payload: Any) -> None:
+    tmp_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    parent_fd = -1
+    descriptor = -1
+    old_umask = os.umask(0o077)
+    try:
+        encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        parent_fd, name = _open_parent(path)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(tmp_name, flags, 0o600, dir_fd=parent_fd)
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        dir_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        os.replace(tmp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
     except (TypeError, ValueError) as exc:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise RunStoreError("schema_invalid", [f"payload must be JSON serializable: {exc}"]) from exc
     except OSError as exc:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise RunStoreError("io_error", [str(exc)]) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_fd >= 0:
+            try:
+                os.unlink(tmp_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            os.close(parent_fd)
+        os.umask(old_umask)
+
+
+def append_json_line(path: Path, payload: Any, *, max_file_bytes: int = 16 * 1024 * 1024) -> None:
+    """Append one fsynced JSON line to a private no-follow regular file."""
+
+    try:
+        encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise RunStoreError("schema_invalid", [f"payload must be JSON serializable: {exc}"]) from exc
+    parent_fd = -1
+    descriptor = -1
+    old_umask = os.umask(0o077)
+    try:
+        parent_fd, name = _open_parent(path)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
+        _validate_open_artifact(descriptor, parent_fd)
+        if os.fstat(descriptor).st_size + len(encoded) > max_file_bytes:
+            raise RunStoreError("io_error", ["append artifact exceeds size boundary"])
+        os.write(descriptor, encoded)
+        os.fsync(descriptor)
+        os.fsync(parent_fd)
+    except OSError as exc:
+        raise RunStoreError("io_error", [str(exc)]) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+        os.umask(old_umask)
+
+
+def read_and_unlink_private_file(
+    path: Path,
+    *,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> bytes:
+    """Read and unlink one exact private file through a stable parent fd."""
+
+    parent_fd, name = _open_parent(path)
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+        _validate_open_artifact(descriptor, parent_fd)
+        before = os.fstat(descriptor)
+        if before.st_nlink != 1 or before.st_size > max_bytes:
+            raise RunStoreError("io_error", ["unlink artifact identity is unsafe"])
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, max_bytes - total + 1))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise RunStoreError("io_error", ["unlink artifact exceeds boundary"])
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        ):
+            raise RunStoreError("io_error", ["unlink artifact changed during read"])
+        os.unlink(name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        return b"".join(chunks)
+    except OSError as exc:
+        raise RunStoreError("io_error", [str(exc)]) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
 
 
 def _is_int_at_least(value: Any, minimum: int) -> bool:
@@ -357,7 +597,7 @@ def quarantine_corrupt_run(state_root: Path, run_id: str) -> Path:
             break
         index += 1
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(target.parent)
         os.replace(source, target)
     except OSError as exc:
         raise RunStoreError("io_error", [str(exc)]) from exc
@@ -370,15 +610,14 @@ def load_run(state_root: Path, run_id: str) -> dict[str, Any]:
     if not path.exists():
         raise RunStoreError("run_not_found")
     try:
-        with path.open(encoding="utf-8") as handle:
-            run = json.load(handle)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        errors = [str(exc)]
+        run = read_json(path)
+    except RunStoreError as exc:
+        if exc.reason_class != "corrupt_json":
+            raise
+        errors = list(exc.errors)
         quarantine_corrupt_run(state_root, run_id)
         write_error_artifact(state_root, run_id, reason_class="corrupt_json", errors=errors, operation="load")
         raise RunStoreError("corrupt_json", errors) from exc
-    except OSError as exc:
-        raise RunStoreError("io_error", [str(exc)]) from exc
 
     errors = validate_run_record(run)
     if isinstance(run, dict) and run.get("run_id") != run_id:

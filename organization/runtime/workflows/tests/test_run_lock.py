@@ -103,7 +103,7 @@ def assert_equal(actual, expected, label: str) -> None:
 
 def write_stale_lock(state_root: Path, *, pid: int, owner_overrides: dict | None = None) -> Path:
     lock_path = run_lock.global_lock_path(state_root)
-    lock_path.mkdir(parents=True)
+    run_store.ensure_private_directory(lock_path)
     owner = {
         "lock_version": "1",
         "lock_type": "workflow-run-global",

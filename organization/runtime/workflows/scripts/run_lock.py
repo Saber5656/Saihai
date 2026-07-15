@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import socket
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -21,6 +23,7 @@ GLOBAL_LOCK_NAME = "global-advisory.lock.d"
 DEFAULT_TIMEOUT_SECONDS = 5.0
 DEFAULT_STALE_AFTER_SECONDS = 300.0
 INFLIGHT_RUN_STATES = {"step_queued", "waiting_provider", "validating"}
+_PROCESS_GLOBAL_LOCK = threading.RLock()
 
 
 class LockContentionError(RuntimeError):
@@ -63,9 +66,9 @@ def process_start_token(pid: int) -> str:
         return ""
     try:
         completed = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
             capture_output=True,
-            text=True,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
             timeout=1,
             check=False,
         )
@@ -73,14 +76,16 @@ def process_start_token(pid: int) -> str:
         return ""
     if completed.returncode != 0:
         return ""
-    return completed.stdout.strip()
+    observed = completed.stdout.strip()
+    if not observed:
+        return ""
+    return "proc-" + hashlib.sha256(observed).hexdigest()
 
 
 def read_lock_owner(lock_path: Path) -> dict[str, Any]:
     try:
-        with (lock_path / "owner.json").open(encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, ValueError):
+        payload = run_store.read_json(lock_path / "owner.json", max_bytes=64 * 1024)
+    except (OSError, ValueError, run_store.RunStoreError):
         return {}
     return payload if isinstance(payload, dict) else {}
 
@@ -138,8 +143,9 @@ def stale_lock_reason(lock_path: Path, *, stale_after_seconds: float) -> str:
 def try_reclaim_stale_lock(lock_path: Path, *, stale_after_seconds: float) -> bool:
     reclaim_lock = lock_path.with_name(f"{lock_path.name}.reclaim.lock.d")
     try:
-        reclaim_lock.mkdir()
-    except OSError:
+        run_store.ensure_private_directory(reclaim_lock.parent)
+        reclaim_lock.mkdir(mode=0o700)
+    except (OSError, run_store.RunStoreError):
         return False
     try:
         before = lock_snapshot(lock_path)
@@ -195,8 +201,8 @@ def acquire_global_lock(
 
     while True:
         try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_path.mkdir()
+            run_store.ensure_private_directory(lock_path.parent)
+            lock_path.mkdir(mode=0o700)
         except FileExistsError:
             if try_reclaim_stale_lock(lock_path, stale_after_seconds=stale_after_seconds):
                 continue
@@ -237,18 +243,22 @@ def hold_global_lock(
     timeout_seconds: float | None = None,
     stale_after_seconds: float | None = None,
 ) -> Iterator[dict[str, Any]]:
-    owner = acquire_global_lock(
-        state_root,
-        operation=operation,
-        run_id=run_id,
-        principal=principal,
-        timeout_seconds=DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds,
-        stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS if stale_after_seconds is None else stale_after_seconds,
-    )
-    try:
-        yield owner
-    finally:
-        release_global_lock(state_root)
+    # Threads in one host process must queue before starting the cross-process
+    # timeout.  Otherwise a burst of valid idempotent requests can all spend
+    # their timeout waiting behind work owned by the same PID.
+    with _PROCESS_GLOBAL_LOCK:
+        owner = acquire_global_lock(
+            state_root,
+            operation=operation,
+            run_id=run_id,
+            principal=principal,
+            timeout_seconds=DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds,
+            stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS if stale_after_seconds is None else stale_after_seconds,
+        )
+        try:
+            yield owner
+        finally:
+            release_global_lock(state_root)
 
 
 def inspect_global_lock(
@@ -281,9 +291,8 @@ def count_inflight_runs(state_root: Path, *, exclude_run_id: str = "") -> list[s
         if name.startswith(".") or name.endswith(".error.json") or ".corrupt-" in name or name.endswith(".tmp"):
             continue
         try:
-            with path.open(encoding="utf-8") as handle:
-                run = json.load(handle)
-        except (OSError, ValueError):
+            run = run_store.read_json(path)
+        except (OSError, ValueError, run_store.RunStoreError):
             continue
         if not isinstance(run, dict):
             continue
