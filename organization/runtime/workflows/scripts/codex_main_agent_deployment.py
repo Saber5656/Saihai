@@ -3017,6 +3017,7 @@ def _rollback_frozen_deployment_transaction(
         "backup_complete",
         "activated",
         "rolled_back",
+        "uninstalled",
     }:
         raise DeploymentError("activation_journal_invalid")
     if journal["backup_manifest"] != str(BACKUP_ROOT / request["transaction_id"] / BACKUP_MANIFEST_NAME):
@@ -3059,7 +3060,7 @@ def _rollback_frozen_deployment_transaction(
     final_epoch_state = (
         "restored_uncommissioned" if operation == "rollback" else "uninstalled"
     )
-    if journal["state"] == "rolled_back":
+    if journal["state"] == "rolled_back" and operation == "rollback":
         finalized_epoch = _finalize_deployment_epoch(
             epoch,
             state=final_epoch_state,
@@ -3074,15 +3075,30 @@ def _rollback_frozen_deployment_transaction(
             "deployment_epoch_id": finalized_epoch["epoch_id"],
             "deployment_epoch_state": finalized_epoch["state"],
         }
-    if journal["state"] == "preflight_complete":
+    backup_manifest_path = Path(journal["backup_manifest"])
+    missing_backup_after_rollback = (
+        journal["state"] == "rolled_back"
+        and operation == "uninstall"
+        and not (backup_manifest_path.exists() or backup_manifest_path.is_symlink())
+    )
+    if journal["state"] == "preflight_complete" or missing_backup_after_rollback:
+        prior_specs: list[dict[str, Any]] = []
         if journal["prior_deployment_present"]:
-            if sha256_file(MANIFEST_PATH) != journal["prior_manifest_sha256"]:
+            if not (MANIFEST_PATH.exists() or MANIFEST_PATH.is_symlink()) or sha256_file(
+                MANIFEST_PATH
+            ) != journal["prior_manifest_sha256"]:
                 raise DeploymentError("preflight_recovery_manifest_drift")
             verify_deployment(
                 MANIFEST_PATH, uid_reader=uid_reader, verify_ancestors=verify_ancestors
             )
+            prior_specs = _prior_specs(load_manifest(MANIFEST_PATH), admin_uid=admin_uid)
         elif any(Path(target["path"]).exists() or Path(target["path"]).is_symlink() for target in journal["new_targets"]):
-            raise DeploymentError("preflight_recovery_target_collision")
+            reason = (
+                "uninstall_target_unrecognized"
+                if missing_backup_after_rollback
+                else "preflight_recovery_target_collision"
+            )
+            raise DeploymentError(reason)
         partial_backup = BACKUP_ROOT / request["transaction_id"]
         if partial_backup.exists() or partial_backup.is_symlink():
             observed = partial_backup.lstat()
@@ -3093,24 +3109,36 @@ def _rollback_frozen_deployment_transaction(
             ):
                 raise DeploymentError("preflight_recovery_backup_invalid")
             shutil.rmtree(partial_backup)
-        journal["state"] = "rolled_back"
-        _write_atomic_json(journal_path, journal, mode=0o600, uid=admin_uid, gid=admin_gid)
-        finalized_epoch = _finalize_deployment_epoch(
-            epoch,
-            state=final_epoch_state,
+        if operation == "rollback":
+            journal["state"] = "rolled_back"
+            _write_atomic_json(
+                journal_path, journal, mode=0o600, uid=admin_uid, gid=admin_gid
+            )
+            finalized_epoch = _finalize_deployment_epoch(
+                epoch,
+                state=final_epoch_state,
+                admin_uid=admin_uid,
+                admin_gid=admin_gid,
+                verify_ancestors=verify_ancestors,
+            )
+            return {
+                "decision": "rolled_back",
+                "transaction_id": request["transaction_id"],
+                "operation": operation,
+                "deployment_epoch_id": finalized_epoch["epoch_id"],
+                "deployment_epoch_state": finalized_epoch["state"],
+            }
+        _backup_prior_deployment(
+            prior_specs,
+            backup_root=partial_backup,
+            transaction_id=request["transaction_id"],
             admin_uid=admin_uid,
             admin_gid=admin_gid,
-            verify_ancestors=verify_ancestors,
         )
-        return {
-            "decision": "rolled_back",
-            "transaction_id": request["transaction_id"],
-            "operation": operation,
-            "deployment_epoch_id": finalized_epoch["epoch_id"],
-            "deployment_epoch_state": finalized_epoch["state"],
-        }
+        journal["state"] = "backup_complete"
+        _write_atomic_json(journal_path, journal, mode=0o600, uid=admin_uid, gid=admin_gid)
     backup = _load_backup_manifest(
-        Path(journal["backup_manifest"]), request["transaction_id"], admin_uid=admin_uid
+        backup_manifest_path, request["transaction_id"], admin_uid=admin_uid
     )
     for target in journal["new_targets"]:
         _remove_transaction_temporary(
@@ -3128,26 +3156,72 @@ def _rollback_frozen_deployment_transaction(
         ):
             raise DeploymentError("rollback_manifest_candidate_invalid")
         candidate.unlink()
+    descriptor_fields = ("kind", "path", "sha256", "mode", "uid", "gid")
     prior_by_path = {entry["path"]: entry for entry in backup["entries"]}
-    for target in reversed(journal["new_targets"]):
-        path = Path(target["path"])
-        if not (path.exists() or path.is_symlink()):
-            continue
-        prior = prior_by_path.get(target["path"])
-        if _descriptor_matches(path, target):
-            _remove_regular_or_tree(path, target["kind"])
-        elif prior is not None and _descriptor_matches(path, {key: prior[key] for key in ("kind", "path", "sha256", "mode", "uid", "gid")}):
-            continue
-        else:
-            raise DeploymentError("rollback_target_unrecognized", target["name"])
-    for entry in backup["entries"]:
-        target = Path(entry["path"])
-        descriptor = {key: entry[key] for key in ("kind", "path", "sha256", "mode", "uid", "gid")}
-        if target.exists() and _descriptor_matches(target, descriptor):
-            continue
-        if target.exists() or target.is_symlink():
-            raise DeploymentError("rollback_restore_collision", entry["name"])
-        _restore_backup_entry(entry, transaction_id=request["transaction_id"])
+    if operation == "rollback":
+        for target in reversed(journal["new_targets"]):
+            path = Path(target["path"])
+            if not (path.exists() or path.is_symlink()):
+                continue
+            prior = prior_by_path.get(target["path"])
+            if _descriptor_matches(path, target):
+                _remove_regular_or_tree(path, target["kind"])
+            elif prior is not None and _descriptor_matches(
+                path, {key: prior[key] for key in descriptor_fields}
+            ):
+                continue
+            else:
+                raise DeploymentError("rollback_target_unrecognized", target["name"])
+        for entry in backup["entries"]:
+            target = Path(entry["path"])
+            descriptor = {key: entry[key] for key in descriptor_fields}
+            if target.exists() and _descriptor_matches(target, descriptor):
+                continue
+            if target.exists() or target.is_symlink():
+                raise DeploymentError("rollback_restore_collision", entry["name"])
+            _restore_backup_entry(entry, transaction_id=request["transaction_id"])
+    else:
+        descriptors_by_path: dict[str, list[dict[str, Any]]] = {}
+        names_by_path: dict[str, str] = {}
+        ordered_paths: list[str] = []
+        for target in reversed(journal["new_targets"]):
+            path_text = target["path"]
+            if path_text not in descriptors_by_path:
+                ordered_paths.append(path_text)
+                descriptors_by_path[path_text] = []
+                names_by_path[path_text] = target["name"]
+            descriptors_by_path[path_text].append(target)
+        for entry in reversed(backup["entries"]):
+            path_text = entry["path"]
+            if path_text not in descriptors_by_path:
+                ordered_paths.append(path_text)
+                descriptors_by_path[path_text] = []
+                names_by_path[path_text] = entry["name"]
+            descriptors_by_path[path_text].append(
+                {key: entry[key] for key in descriptor_fields}
+            )
+        for path_text in ordered_paths:
+            path = Path(path_text)
+            if not (path.exists() or path.is_symlink()):
+                continue
+            matching = next(
+                (
+                    descriptor
+                    for descriptor in descriptors_by_path[path_text]
+                    if _descriptor_matches(path, descriptor)
+                ),
+                None,
+            )
+            if matching is None:
+                raise DeploymentError(
+                    "uninstall_target_unrecognized", names_by_path[path_text]
+                )
+            _remove_regular_or_tree(path, matching["kind"])
+        if any(
+            Path(path_text).exists() or Path(path_text).is_symlink()
+            for path_text in ordered_paths
+        ):
+            raise DeploymentError("uninstall_target_removal_incomplete")
     for directory_text in reversed(journal["created_directories"]):
         directory = Path(directory_text)
         try:
@@ -3163,7 +3237,7 @@ def _rollback_frozen_deployment_transaction(
             # make a Saihai-created directory non-empty. Never delete it
             # recursively during rollback/uninstall.
             continue
-    journal["state"] = "rolled_back"
+    journal["state"] = "rolled_back" if operation == "rollback" else "uninstalled"
     _write_atomic_json(journal_path, journal, mode=0o600, uid=admin_uid, gid=admin_gid)
     finalized_epoch = _finalize_deployment_epoch(
         epoch,
@@ -3173,7 +3247,7 @@ def _rollback_frozen_deployment_transaction(
         verify_ancestors=verify_ancestors,
     )
     return {
-        "decision": "rolled_back",
+        "decision": "rolled_back" if operation == "rollback" else "uninstalled",
         "transaction_id": request["transaction_id"],
         "operation": operation,
         "deployment_epoch_id": finalized_epoch["epoch_id"],

@@ -1981,6 +1981,310 @@ def test_activation_backup_manifest_binds_prior_digest_owner_mode_and_restores()
             assert deployment.tree_digest(Path(manifest["artifacts"]["runtime_bundle"]["path"])) == before["runtime"]
 
 
+def test_uninstall_removes_new_and_restored_prior_deployments() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for suffix, rollback_first in (("direct", False), ("after-rollback", True)):
+            with patched_layout(root / suffix):
+                frozen, digest, _request, manifest = frozen_deployment_fixture(
+                    root / suffix, keep_installed_targets=True
+                )
+                activated = deployment.activate_frozen_deployment(
+                    frozen,
+                    digest,
+                    admin_uid=os.getuid(),
+                    admin_gid=os.getgid(),
+                    uid_reader=fixture_uid_reader(manifest),
+                    verify_ancestors=False,
+                    enforce_production_root=False,
+                )
+                backup = json.loads(
+                    Path(activated["backup_manifest"]).read_text(encoding="utf-8")
+                )
+                journal_path = frozen / deployment.ACTIVATION_JOURNAL_NAME
+                journal = json.loads(journal_path.read_text(encoding="utf-8"))
+                managed_paths = {
+                    *[Path(target["path"]) for target in journal["new_targets"]],
+                    *[Path(entry["path"]) for entry in backup["entries"]],
+                }
+                if rollback_first:
+                    deployment.rollback_frozen_deployment(
+                        frozen,
+                        digest,
+                        admin_uid=os.getuid(),
+                        admin_gid=os.getgid(),
+                        verify_ancestors=False,
+                        enforce_production_root=False,
+                    )
+                    assert deployment.MANIFEST_PATH.exists()
+                uninstalled = deployment.rollback_frozen_deployment(
+                    frozen,
+                    digest,
+                    admin_uid=os.getuid(),
+                    admin_gid=os.getgid(),
+                    verify_ancestors=False,
+                    enforce_production_root=False,
+                    operation="uninstall",
+                )
+                assert uninstalled["decision"] == "uninstalled"
+                assert uninstalled["deployment_epoch_state"] == "uninstalled"
+                assert json.loads(journal_path.read_text(encoding="utf-8"))["state"] == "uninstalled"
+                assert all(not path.exists() and not path.is_symlink() for path in managed_paths)
+
+                repeated = deployment.rollback_frozen_deployment(
+                    frozen,
+                    digest,
+                    admin_uid=os.getuid(),
+                    admin_gid=os.getgid(),
+                    verify_ancestors=False,
+                    enforce_production_root=False,
+                    operation="uninstall",
+                )
+                assert repeated["decision"] == "uninstalled"
+                assert all(not path.exists() and not path.is_symlink() for path in managed_paths)
+
+
+def test_uninstall_retry_and_unknown_target_are_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        with patched_layout(root / "retry"):
+            frozen, digest, _request, manifest = frozen_deployment_fixture(
+                root / "retry", keep_installed_targets=True
+            )
+            activated = deployment.activate_frozen_deployment(
+                frozen,
+                digest,
+                admin_uid=os.getuid(),
+                admin_gid=os.getgid(),
+                uid_reader=fixture_uid_reader(manifest),
+                verify_ancestors=False,
+                enforce_production_root=False,
+            )
+            journal = json.loads(
+                (frozen / deployment.ACTIVATION_JOURNAL_NAME).read_text(encoding="utf-8")
+            )
+            backup = json.loads(
+                Path(activated["backup_manifest"]).read_text(encoding="utf-8")
+            )
+            managed_paths = {
+                *[Path(target["path"]) for target in journal["new_targets"]],
+                *[Path(entry["path"]) for entry in backup["entries"]],
+            }
+            original_remove = deployment._remove_regular_or_tree  # noqa: SLF001
+            calls = 0
+
+            def interrupted_remove(path, kind):
+                nonlocal calls
+                original_remove(path, kind)
+                calls += 1
+                if calls == 1:
+                    raise deployment.DeploymentError("test_uninstall_interrupted")
+
+            deployment._remove_regular_or_tree = interrupted_remove  # noqa: SLF001
+            try:
+                expect_blocked(
+                    "test_uninstall_interrupted",
+                    lambda: deployment.rollback_frozen_deployment(
+                        frozen,
+                        digest,
+                        admin_uid=os.getuid(),
+                        admin_gid=os.getgid(),
+                        verify_ancestors=False,
+                        enforce_production_root=False,
+                        operation="uninstall",
+                    ),
+                )
+            finally:
+                deployment._remove_regular_or_tree = original_remove  # noqa: SLF001
+            assert any(not path.exists() and not path.is_symlink() for path in managed_paths)
+            retried = deployment.rollback_frozen_deployment(
+                frozen,
+                digest,
+                admin_uid=os.getuid(),
+                admin_gid=os.getgid(),
+                verify_ancestors=False,
+                enforce_production_root=False,
+                operation="uninstall",
+            )
+            assert retried["decision"] == "uninstalled"
+            assert all(not path.exists() and not path.is_symlink() for path in managed_paths)
+
+        with patched_layout(root / "unknown"):
+            frozen, digest, _request, manifest = frozen_deployment_fixture(
+                root / "unknown", keep_installed_targets=True
+            )
+            deployment.activate_frozen_deployment(
+                frozen,
+                digest,
+                admin_uid=os.getuid(),
+                admin_gid=os.getgid(),
+                uid_reader=fixture_uid_reader(manifest),
+                verify_ancestors=False,
+                enforce_production_root=False,
+            )
+            unknown = deployment.CODEX_LAUNCHER_PATH
+            unknown.unlink()
+            write_file(unknown, b"unknown replacement\n", 0o555)
+            expect_blocked(
+                "uninstall_target_unrecognized",
+                lambda: deployment.rollback_frozen_deployment(
+                    frozen,
+                    digest,
+                    admin_uid=os.getuid(),
+                    admin_gid=os.getgid(),
+                    verify_ancestors=False,
+                    enforce_production_root=False,
+                    operation="uninstall",
+                ),
+            )
+            assert unknown.read_bytes() == b"unknown replacement\n"
+
+
+def test_preflight_interruption_can_be_uninstalled_without_restoring_prior() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        with patched_layout(root):
+            frozen, digest, request, manifest = frozen_deployment_fixture(
+                root, keep_installed_targets=True
+            )
+            original_backup = deployment._backup_prior_deployment  # noqa: SLF001
+
+            def interrupted_backup(
+                prior_specs,
+                *,
+                backup_root,
+                transaction_id,
+                admin_uid,
+                admin_gid,
+            ):
+                del prior_specs, transaction_id
+                backup_root.mkdir(parents=True)
+                backup_root.chmod(0o700)
+                os.chown(backup_root, admin_uid, admin_gid)
+                write_file(backup_root / "partial", b"partial\n", 0o600)
+                raise deployment.DeploymentError("test_prior_backup_interrupted")
+
+            deployment._backup_prior_deployment = interrupted_backup  # noqa: SLF001
+            try:
+                expect_blocked(
+                    "test_prior_backup_interrupted",
+                    lambda: deployment.activate_frozen_deployment(
+                        frozen,
+                        digest,
+                        admin_uid=os.getuid(),
+                        admin_gid=os.getgid(),
+                        uid_reader=fixture_uid_reader(manifest),
+                        verify_ancestors=False,
+                        enforce_production_root=False,
+                    ),
+                )
+            finally:
+                deployment._backup_prior_deployment = original_backup  # noqa: SLF001
+            assert (deployment.BACKUP_ROOT / request["transaction_id"] / "partial").exists()
+            uninstalled = deployment.rollback_frozen_deployment(
+                frozen,
+                digest,
+                admin_uid=os.getuid(),
+                admin_gid=os.getgid(),
+                uid_reader=fixture_uid_reader(manifest),
+                verify_ancestors=False,
+                enforce_production_root=False,
+                operation="uninstall",
+            )
+            assert uninstalled["decision"] == "uninstalled"
+            journal = json.loads(
+                (frozen / deployment.ACTIVATION_JOURNAL_NAME).read_text(encoding="utf-8")
+            )
+            backup = json.loads(Path(journal["backup_manifest"]).read_text(encoding="utf-8"))
+            managed_paths = {
+                *[Path(target["path"]) for target in journal["new_targets"]],
+                *[Path(entry["path"]) for entry in backup["entries"]],
+            }
+            assert all(not path.exists() and not path.is_symlink() for path in managed_paths)
+
+
+def test_preflight_rollback_without_backup_can_later_uninstall_prior() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        with patched_layout(root):
+            frozen, digest, request, manifest = frozen_deployment_fixture(
+                root, keep_installed_targets=True
+            )
+            original_backup = deployment._backup_prior_deployment  # noqa: SLF001
+
+            def interrupted_backup(
+                prior_specs,
+                *,
+                backup_root,
+                transaction_id,
+                admin_uid,
+                admin_gid,
+            ):
+                del prior_specs, transaction_id
+                backup_root.mkdir(parents=True)
+                backup_root.chmod(0o700)
+                os.chown(backup_root, admin_uid, admin_gid)
+                write_file(backup_root / "partial", b"partial\n", 0o600)
+                raise deployment.DeploymentError("test_prior_backup_interrupted")
+
+            deployment._backup_prior_deployment = interrupted_backup  # noqa: SLF001
+            try:
+                expect_blocked(
+                    "test_prior_backup_interrupted",
+                    lambda: deployment.activate_frozen_deployment(
+                        frozen,
+                        digest,
+                        admin_uid=os.getuid(),
+                        admin_gid=os.getgid(),
+                        uid_reader=fixture_uid_reader(manifest),
+                        verify_ancestors=False,
+                        enforce_production_root=False,
+                    ),
+                )
+            finally:
+                deployment._backup_prior_deployment = original_backup  # noqa: SLF001
+
+            rolled_back = deployment.rollback_frozen_deployment(
+                frozen,
+                digest,
+                admin_uid=os.getuid(),
+                admin_gid=os.getgid(),
+                uid_reader=fixture_uid_reader(manifest),
+                verify_ancestors=False,
+                enforce_production_root=False,
+            )
+            assert rolled_back["decision"] == "rolled_back"
+            backup_manifest = (
+                deployment.BACKUP_ROOT
+                / request["transaction_id"]
+                / deployment.BACKUP_MANIFEST_NAME
+            )
+            assert not backup_manifest.exists()
+            assert deployment.MANIFEST_PATH.exists()
+
+            uninstalled = deployment.rollback_frozen_deployment(
+                frozen,
+                digest,
+                admin_uid=os.getuid(),
+                admin_gid=os.getgid(),
+                uid_reader=fixture_uid_reader(manifest),
+                verify_ancestors=False,
+                enforce_production_root=False,
+                operation="uninstall",
+            )
+            assert uninstalled["decision"] == "uninstalled"
+            journal = json.loads(
+                (frozen / deployment.ACTIVATION_JOURNAL_NAME).read_text(encoding="utf-8")
+            )
+            backup = json.loads(Path(journal["backup_manifest"]).read_text(encoding="utf-8"))
+            managed_paths = {
+                *[Path(target["path"]) for target in journal["new_targets"]],
+                *[Path(entry["path"]) for entry in backup["entries"]],
+            }
+            assert journal["state"] == "uninstalled"
+            assert all(not path.exists() and not path.is_symlink() for path in managed_paths)
+
+
 def main() -> None:
     tests = [
         test_example_matches_schema_and_manual_validator,
@@ -2010,6 +2314,10 @@ def main() -> None:
         test_deployment_epoch_rotates_before_journal_and_never_reverts_on_failure,
         test_activation_collision_interruption_and_fresh_rollback,
         test_activation_backup_manifest_binds_prior_digest_owner_mode_and_restores,
+        test_uninstall_removes_new_and_restored_prior_deployments,
+        test_uninstall_retry_and_unknown_target_are_fail_closed,
+        test_preflight_interruption_can_be_uninstalled_without_restoring_prior,
+        test_preflight_rollback_without_backup_can_later_uninstall_prior,
     ]
     for test in tests:
         test()
