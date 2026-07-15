@@ -8,6 +8,20 @@ Sahai は、プロンプトを実行権限として扱うのではなく、typed
 
 通常の利用では Python 3.10+ の標準ライブラリだけを使用します。`pip install` は不要です。
 
+## Release
+
+v0.1.0 に含まれる変更履歴とmerge済みpull requestは [changelog](CHANGELOG.md) に記録しています。tag作成とGitHub Release公開は人間が行う操作であり、release-preparation PRのmergeとは別のgateです。
+
+v0.1.0のcertainty / authority boundaryは意図的に限定されています。
+
+- frontend/main agentが行えるのは、typed requestのsubmit、redacted projectionのread、outputのacknowledgeです。authoritative classificationやapproval、run作成、raw command/path選択、変更のpublicationは行えません。
+- host-owned executorは、approved work orderからcapabilityを導出し、planned task worktreeでpinnedかつboundedなCodex CLI workerを起動できます。
+- shipped scoped-worker executorは、すべてのnetwork/provider grantを拒否します。opt-in live provider adapterは、これとは別のhost-owned readonly pathです。
+- commit、push、pull-request publicationには、別のreview、approval、publication gateが必要です。
+- supported checkoutは、host-managed primary checkoutの `~/dev/Saihai` またはそのlinked worktreeです。任意のfresh cloneはcheckout identity contractを満たしません。
+
+daemon scheduling、tmux worker execution、package distribution、automatic publication、credential provisioning、release publicationはv0.1.0 runtime boundaryの対象外です。
+
 ## 必要環境
 
 - Python 3.10 以上
@@ -70,7 +84,7 @@ setup command は非破壊的で、owner-only file を書き込みます。proce
 
 ## Offline quickstart
 
-次の flow は、上記の managed primary checkout またはその linked worktree からのみ実行してください。deterministic fake provider を使用し、live provider call は行いません。先に[ローカル環境](#local-environment)の設定を完了してください。path 設定だけでは、別の clone に実行権限は与えられません。
+次の flow は、上記の managed primary checkout またはその linked worktree からのみ実行してください。deterministic fake provider を使用し、live provider call は行いません。先に[ローカル環境](#ローカル環境)の設定を完了してください。path 設定だけでは、別の clone に実行権限は与えられません。
 
 ```sh
 suffix="$(date +%s)"
