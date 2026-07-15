@@ -51,6 +51,10 @@ def test_local_model_pack_remains_discoverable() -> None:
     assert "extensible: barrierModel" in model
     assert '"host_state_root"' in model
     assert "Member[configured_state_root].ReturnValue" in model
+    assert (
+        '["host_state_root", "Member[resolve_configured_state_root].ReturnValue", "path-injection"]'
+        in model
+    )
     assert '"safe_paths"' in model
     assert "Member[confined_state_path].ReturnValue" in model
     assert "path-injection" in model
