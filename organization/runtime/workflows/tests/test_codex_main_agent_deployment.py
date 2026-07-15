@@ -604,13 +604,18 @@ def test_safe_ancestors_reject_symlink_directory() -> None:
         real_parent.mkdir()
         linked_parent = root / "linked-parent"
         linked_parent.symlink_to(real_parent, target_is_directory=True)
-        expect_blocked(
-            "artifact_parent_invalid",
-            lambda: deployment._verify_safe_ancestors(  # noqa: SLF001 - security contract test
-                linked_parent / "artifact",
-                uid_reader=lambda _path: 0,
-            ),
-        )
+        original_ancestors = deployment._ancestors  # noqa: SLF001 - security contract test
+        deployment._ancestors = lambda _path: [root, linked_parent]  # noqa: SLF001
+        try:
+            expect_blocked(
+                "artifact_parent_invalid",
+                lambda: deployment._verify_safe_ancestors(  # noqa: SLF001 - security contract test
+                    linked_parent / "artifact",
+                    uid_reader=lambda _path: 0,
+                ),
+            )
+        finally:
+            deployment._ancestors = original_ancestors  # noqa: SLF001
 
 
 def test_verifier_accepts_exact_fixture_and_rejects_tamper() -> None:
