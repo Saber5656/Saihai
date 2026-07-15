@@ -6,6 +6,7 @@
   "type": "object",
   "required": [
     "task_id",
+    "request_id",
     "issue_id",
     "repo_full_name",
     "repo_root",
@@ -20,6 +21,10 @@
   ],
   "properties": {
     "task_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    },
+    "request_id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
     },

@@ -84,8 +84,16 @@ def load_cli_payload(completed: subprocess.CompletedProcess[str]) -> dict[str, A
 
 
 def run_saihai_cli(state_root: Path, *args: str) -> dict[str, Any]:
+    canonical_state_root = state_root.resolve(strict=False)
     completed = subprocess.run(
-        [sys.executable, "-c", SAIHAI_TEST_WRAPPER, str(SAIHAI_CLI), str(state_root), *args],
+        [
+            sys.executable,
+            "-c",
+            SAIHAI_TEST_WRAPPER,
+            str(SAIHAI_CLI),
+            str(canonical_state_root),
+            *args,
+        ],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -95,8 +103,16 @@ def run_saihai_cli(state_root: Path, *args: str) -> dict[str, Any]:
 
 
 def run_frontdoor_cli(state_root: Path, *args: str) -> dict[str, Any]:
+    canonical_state_root = state_root.resolve(strict=False)
     completed = subprocess.run(
-        [sys.executable, "-c", FRONTDOOR_TEST_WRAPPER, str(FRONTDOOR_CLI), str(state_root), *args],
+        [
+            sys.executable,
+            "-c",
+            FRONTDOOR_TEST_WRAPPER,
+            str(FRONTDOOR_CLI),
+            str(canonical_state_root),
+            *args,
+        ],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -276,7 +292,7 @@ def test_findings_report_full_loop() -> None:
 
 def test_cli_parity_happy_path() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
-        state_root = Path(raw_tmp)
+        state_root = Path(raw_tmp).resolve()
         request_id = "req-e2e-cli"
         run_id = "run-e2e-cli"
         classification = OrchestratorHarness(state_root).classification()

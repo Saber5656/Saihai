@@ -339,6 +339,7 @@
     "projection_version",
     "safe_for_principal",
     "request_id",
+    "idempotency_key_digest",
     "request_status",
     "next_allowed_bridge_actions",
     "context",
@@ -361,6 +362,10 @@
     "request_id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    },
+    "idempotency_key_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "task_id": {
       "type": "string",
