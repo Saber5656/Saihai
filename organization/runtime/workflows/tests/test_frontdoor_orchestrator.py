@@ -3483,7 +3483,7 @@ def test_state_permission_repair_is_dry_run_by_default_and_fail_closed() -> None
 
 def test_host_launch_session_live_identity_negative_matrix() -> None:
     frontdoor = load_server_module().frontdoor
-    with tempfile.TemporaryDirectory() as raw_tmp:
+    with tempfile.TemporaryDirectory(dir=ROOT) as raw_tmp:
         root = Path(raw_tmp).resolve()
         sessions = root / "launch-sessions"
         sessions.mkdir(mode=0o700)
