@@ -1000,14 +1000,22 @@ def test_native_executable_override_is_explicit_in_installer_cli() -> None:
 
 
 def test_version_spoof_with_wrong_distribution_digest_is_rejected() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        fake = Path(tmp) / "codex"
-        write_file(fake, FAKE_NATIVE_CODEX, 0o555)
-        assert deployment._native_codex_version(fake) == deployment.NATIVE_CODEX_VERSION  # noqa: SLF001
-        expect_blocked(
-            "native_codex_distribution_digest_mismatch",
-            lambda: deployment._assert_trusted_native_codex_distribution(fake),  # noqa: SLF001
-        )
+    native_platform = deployment.NATIVE_CODEX_PLATFORM
+    native_architecture = deployment.NATIVE_CODEX_ARCHITECTURE
+    deployment.NATIVE_CODEX_PLATFORM = sys.platform
+    deployment.NATIVE_CODEX_ARCHITECTURE = deployment.platform.machine()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "codex"
+            write_file(fake, FAKE_NATIVE_CODEX, 0o555)
+            assert deployment._native_codex_version(fake) == deployment.NATIVE_CODEX_VERSION  # noqa: SLF001
+            expect_blocked(
+                "native_codex_distribution_digest_mismatch",
+                lambda: deployment._assert_trusted_native_codex_distribution(fake),  # noqa: SLF001
+            )
+    finally:
+        deployment.NATIVE_CODEX_PLATFORM = native_platform
+        deployment.NATIVE_CODEX_ARCHITECTURE = native_architecture
 
 
 def test_freeze_gate_rejects_request_bootstrap_payload_and_seal_tamper() -> None:
