@@ -210,7 +210,7 @@ def write_approved_child_request(
     request_owner = owner or frontdoor.bridge_principal("codex", "")
     checkout_identity = frontdoor.resolve_checkout_identity(
         workspace_id="Saber5656/Saihai",
-        managed_primary=frontdoor.MANAGED_PRIMARY_CHECKOUT_ROOT,
+        managed_primary=ROOT,
         checkout_root=ROOT,
     )
     created_at = frontdoor.now_iso()

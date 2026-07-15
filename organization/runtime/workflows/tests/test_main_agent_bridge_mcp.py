@@ -81,15 +81,23 @@ def assert_equal(actual: Any, expected: Any, label: str) -> None:
 
 
 @contextmanager
-def canonical_temp_state() -> Iterator[Path]:
+def canonical_temp_state(
+    *,
+    managed_primary: Path = ROOT,
+    checkout_root: Path = ROOT,
+) -> Iterator[Path]:
     catalog = mcp.frontdoor.host_state_root.DIRECTORY_CATALOG
     previous = dict(catalog)
     previous_verifier = mcp.LAUNCH_SESSION_VERIFIER
+    previous_managed_primary = mcp.MANAGED_PRIMARY_ROOT
+    previous_checkout_root = mcp.CHECKOUT_ROOT
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp).resolve()
         catalog.clear()
         catalog["SAIHAI_ORCH_STATE_ROOT"] = str(state_root)
         mcp.LAUNCH_SESSION_VERIFIER = FixtureLaunchSessionVerifier()
+        mcp.MANAGED_PRIMARY_ROOT = managed_primary
+        mcp.CHECKOUT_ROOT = checkout_root
         try:
             assert_equal(mcp._canonical_state_root(), state_root, "canonical test state root")
             yield state_root
@@ -97,6 +105,8 @@ def canonical_temp_state() -> Iterator[Path]:
             catalog.clear()
             catalog.update(previous)
             mcp.LAUNCH_SESSION_VERIFIER = previous_verifier
+            mcp.MANAGED_PRIMARY_ROOT = previous_managed_primary
+            mcp.CHECKOUT_ROOT = previous_checkout_root
 
 
 def rpc(request_id: int, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -662,7 +672,10 @@ def test_registered_primary_and_linked_worktree_identity_acceptance_and_clone_re
         try:
             mcp.MANAGED_PRIMARY_ROOT = primary
             mcp.CHECKOUT_ROOT = linked
-            with canonical_temp_state() as state_root:
+            with canonical_temp_state(
+                managed_primary=primary,
+                checkout_root=linked,
+            ) as state_root:
                 submitted = call_tool(
                     69,
                     "submit_request",

@@ -30,6 +30,4 @@ jobs:
           TASK_WORKTREE_ROOT: ${{ runner.temp }}/worktrees
         run: |
           mkdir -p "$AGENTS_VAULT_ROOT" "$USER_VAULT_ROOT" "$DEV_WORKTREES_ROOT"
-          mkdir -p "$HOME/dev"
-          ln -s "$GITHUB_WORKSPACE" "$HOME/dev/Saihai"
           python3 scripts/validate_all.py
