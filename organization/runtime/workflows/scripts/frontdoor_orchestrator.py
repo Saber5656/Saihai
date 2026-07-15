@@ -95,6 +95,11 @@ BRIDGE_TERMINAL_RETENTION_SECONDS = 7 * 24 * 60 * 60
 BRIDGE_AUDIT_ROTATE_BYTES = 8 * 1024 * 1024
 BRIDGE_AUDIT_ROTATION_RETENTION_SECONDS = 30 * 24 * 60 * 60
 BRIDGE_TERMINAL_STATUSES = {"complete", "failed", "aborted", "rejected"}
+RUN_REQUEST_TERMINAL_STATUS = {
+    "complete": "complete",
+    "failed": "failed",
+    "aborted": "aborted",
+}
 BRIDGE_SUBMIT_ALLOWED_FIELDS = {
     "task_id",
     "request_id",
@@ -2666,6 +2671,9 @@ def bridge_pending_usage(
             continue
         if str(record.get("status") or "") not in BRIDGE_PENDING_REQUEST_STATUSES:
             continue
+        record = reconcile_pending_request_terminal_run(state_root, record)
+        if str(record.get("status") or "") not in BRIDGE_PENDING_REQUEST_STATUSES:
+            continue
         count += 1
         try:
             total_bytes += path.stat().st_size
@@ -4038,6 +4046,86 @@ def link_request_run(record: dict[str, Any], run_id: str) -> bool:
     return True
 
 
+def sync_terminal_request_locked(
+    state_root: Path,
+    run: dict[str, Any],
+    *,
+    request_record: dict[str, Any] | None = None,
+) -> bool:
+    """Synchronize one exactly linked request after its run becomes terminal."""
+
+    run_state = str(run.get("run_state") or "")
+    request_status = RUN_REQUEST_TERMINAL_STATUS.get(run_state)
+    if request_status is None:
+        return False
+    run_id = validate_artifact_id(str(run.get("run_id") or ""), "run_id")
+    request_id = validate_artifact_id(str(run.get("request_id") or ""), "request_id")
+    path = request_path(state_root, request_id)
+    record = request_record if request_record is not None else read_json(path)
+    if record.get("request_id") != request_id:
+        raise FrontdoorError("terminal request run binding invalid")
+    if record.get("run_id") != run_id or record.get("linked_runs") != [run_id]:
+        raise FrontdoorError("terminal request run binding invalid")
+    current_status = str(record.get("status") or "")
+    if current_status == request_status:
+        return False
+    if current_status in BRIDGE_TERMINAL_STATUSES:
+        raise FrontdoorError("terminal request status conflicts with terminal run")
+    if current_status not in BRIDGE_PENDING_REQUEST_STATUSES:
+        raise FrontdoorError("terminal request status is not synchronizable")
+    record["status"] = request_status
+    record["updated_at"] = now_iso()
+    write_json(path, record)
+    return True
+
+
+def synchronize_terminal_request(
+    *,
+    state_root: Path,
+    run_id: str,
+    principal: dict[str, Any],
+    operation: str,
+) -> bool:
+    validate_artifact_id(run_id, "run_id")
+    with run_lock.hold_global_lock(
+        state_root,
+        operation=operation,
+        run_id=run_id,
+        principal=principal,
+    ):
+        run = run_store.load_run(state_root, run_id)
+        return sync_terminal_request_locked(state_root, run)
+
+
+def reconcile_pending_request_terminal_run(
+    state_root: Path,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    """Repair a stale pending status only when its terminal run binding is exact."""
+
+    run_id = record.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return record
+    if record.get("linked_runs") != [run_id]:
+        return record
+    try:
+        validate_artifact_id(run_id, "run_id")
+        run = run_store.load_run(state_root, run_id)
+    except (FrontdoorError, run_store.RunStoreError):
+        return record
+    if (
+        run.get("run_id") != run_id
+        or run.get("request_id") != record.get("request_id")
+        or str(run.get("run_state") or "") not in RUN_REQUEST_TERMINAL_STATUS
+    ):
+        return record
+    try:
+        sync_terminal_request_locked(state_root, run, request_record=record)
+    except FrontdoorError:
+        return record
+    return record
+
+
 def create_run(
     *,
     state_root: Path,
@@ -4093,6 +4181,7 @@ def create_run(
                     record["run_id"] = effective_run_id
                     record["updated_at"] = now_iso()
                     write_json(request_path(state_root, request_id), record)
+                sync_terminal_request_locked(state_root, existing)
                 link_status = record_run_link_status(state_root, existing)
                 append_audit_event(
                     state_root=state_root,
@@ -4437,6 +4526,12 @@ def resume_run(
         raise
 
     workflow_run = payload.get("workflow_run") if isinstance(payload.get("workflow_run"), dict) else {}
+    synchronize_terminal_request(
+        state_root=state_root,
+        run_id=run_id,
+        principal=actor,
+        operation="resume_run_terminal_request_sync",
+    )
     subject = {"run_id": run_id, "request_id": str(workflow_run.get("request_id") or "")}
     outcome = "ok"
     if payload.get("decision") == "blocked":
@@ -4504,6 +4599,12 @@ def abort_run(
         raise
 
     workflow_run = payload.get("workflow_run") if isinstance(payload.get("workflow_run"), dict) else {}
+    synchronize_terminal_request(
+        state_root=state_root,
+        run_id=run_id,
+        principal=actor,
+        operation="abort_run_terminal_request_sync",
+    )
     subject = {"run_id": run_id, "request_id": str(workflow_run.get("request_id") or "")}
     append_audit_event(
         state_root=state_root,
@@ -4861,7 +4962,7 @@ def validate_report(
 ) -> dict[str, Any]:
     actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
     try:
-        return report_gate.gate_report(
+        payload = report_gate.gate_report(
             state_root,
             run_id,
             report_path_arg=report_path_arg,
@@ -4869,6 +4970,13 @@ def validate_report(
         )
     except report_gate.ReportGateError as exc:
         raise FrontdoorError(str(exc)) from exc
+    synchronize_terminal_request(
+        state_root=state_root,
+        run_id=run_id,
+        principal=actor,
+        operation="validate_report_terminal_request_sync",
+    )
+    return payload
 
 
 def run_provider(
@@ -4883,7 +4991,7 @@ def run_provider(
 ) -> dict[str, Any]:
     actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
     try:
-        return provider_runner.run_provider(
+        payload = provider_runner.run_provider(
             state_root=state_root,
             run_id=run_id,
             adapter_id=adapter_id,
@@ -4894,6 +5002,13 @@ def run_provider(
         )
     except provider_runner.ProviderRunnerError as exc:
         raise FrontdoorError(str(exc)) from exc
+    synchronize_terminal_request(
+        state_root=state_root,
+        run_id=run_id,
+        principal=actor,
+        operation="run_provider_terminal_request_sync",
+    )
+    return payload
 
 
 def verify_completion(

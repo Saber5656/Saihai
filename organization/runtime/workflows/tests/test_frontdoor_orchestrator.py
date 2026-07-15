@@ -934,6 +934,15 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(validated["report_status"], "complete", "report validation status")
         assert_equal(validated["workflow_run"]["run_state"], "complete", "validated run state")
         assert_equal(validated["workflow_run"]["goal_state"], "complete", "validated goal state")
+        assert_equal(
+            json.loads(
+                (state_root / "requests" / "req-frontdoor.json").read_text(
+                    encoding="utf-8"
+                )
+            )["status"],
+            "complete",
+            "validated run synchronizes request",
+        )
         transitions = validated["workflow_run"]["transitions"]
         assert_equal([item["seq"] for item in transitions], [1, 2, 3, 4], "lifecycle transition seq")
         assert_equal(
@@ -1680,6 +1689,88 @@ def test_create_run_validates_resume_policy_and_binds_request() -> None:
         )
         assert_equal(second.returncode, 2, "second run id blocked")
         assert "already bound" in load_payload(second)["reason"]
+
+
+def test_terminal_run_synchronizes_request_and_releases_pending_quota() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-terminal-sync"
+        run_id = "run-terminal-sync"
+        create_approved_run(state_root, request_id=request_id, run_id=run_id)
+        request_file = frontdoor_module.request_path(state_root, request_id)
+
+        aborted = frontdoor_module.abort_run(
+            state_root=state_root,
+            run_id=run_id,
+            reason="terminal sync fixture",
+        )
+        assert_equal(aborted["workflow_run"]["run_state"], "aborted", "run aborted")
+        assert_equal(
+            frontdoor_module.read_json(request_file)["status"],
+            "aborted",
+            "abort synchronizes request",
+        )
+
+        stale = frontdoor_module.read_json(request_file)
+        stale["status"] = "approved"
+        frontdoor_module.write_json(request_file, stale)
+        replayed_create = frontdoor_module.create_run(
+            state_root=state_root,
+            request_id=request_id,
+            run_id=run_id,
+            resume_policy="manual",
+        )
+        assert_equal(replayed_create["created"], False, "terminal create replay")
+        assert_equal(
+            frontdoor_module.read_json(request_file)["status"],
+            "aborted",
+            "create replay repairs stale request",
+        )
+
+        stale = frontdoor_module.read_json(request_file)
+        stale["status"] = "approved"
+        frontdoor_module.write_json(request_file, stale)
+        resumed = frontdoor_module.resume_run(state_root=state_root, run_id=run_id)
+        assert_equal(resumed["reason"], "terminal_run_already_set", "terminal resume replay")
+        assert_equal(
+            frontdoor_module.read_json(request_file)["status"],
+            "aborted",
+            "resume replay repairs stale request",
+        )
+
+        owner = frontdoor_module.bridge_principal("codex", "")
+        stale = frontdoor_module.read_json(request_file)
+        stale["status"] = "approved"
+        stale["owner_principal"] = frontdoor_module.redacted_principal(owner)
+        stale["principal"] = frontdoor_module.redacted_principal(owner)
+        frontdoor_module.write_json(request_file, stale)
+        pending_count, pending_bytes = frontdoor_module.bridge_pending_usage(
+            state_root, owner
+        )
+        assert_equal(pending_count, 0, "terminal run releases pending quota")
+        assert_equal(pending_bytes, 0, "terminal run releases pending bytes")
+        assert_equal(
+            frontdoor_module.read_json(request_file)["status"],
+            "aborted",
+            "quota scan repairs stale request",
+        )
+
+        no_run_id = "req-approved-without-run"
+        frontdoor_module.write_json(
+            frontdoor_module.request_path(state_root, no_run_id),
+            {
+                "request_id": no_run_id,
+                "status": "approved",
+                "owner_principal": frontdoor_module.redacted_principal(owner),
+                "principal": frontdoor_module.redacted_principal(owner),
+            },
+        )
+        pending_count, pending_bytes = frontdoor_module.bridge_pending_usage(
+            state_root, owner
+        )
+        assert_equal(pending_count, 1, "approved request without run stays pending")
+        assert pending_bytes > 0, "approved request without run must consume pending bytes"
 
 
 def test_approval_uses_requested_ref_forms_without_leaking_original_paths() -> None:
@@ -4291,6 +4382,7 @@ def main() -> None:
         test_execution_principal_precheck_does_not_quarantine_corrupt_runs,
         test_propose_updates_waiting_request_and_blocks_duplicate_overwrite,
         test_create_run_validates_resume_policy_and_binds_request,
+        test_terminal_run_synchronizes_request_and_releases_pending_quota,
         test_approval_uses_requested_ref_forms_without_leaking_original_paths,
         test_frontdoor_blocks_unapproved_and_unbounded_requests,
         test_http_frontdoor_api_flow,
