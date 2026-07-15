@@ -16,11 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 PROFILE_ROOT = ROOT / "organization/runtime/workflows/profiles"
 CLAUDE_PROFILE = PROFILE_ROOT / "claude-main-agent.settings.example.json"
 CODEX_PROFILE = PROFILE_ROOT / "codex-main-agent.config.example.toml"
+CODEX_REQUIREMENTS = PROFILE_ROOT / "codex-main-agent.requirements.example.toml"
 CODEX_RULES = PROFILE_ROOT / "codex-main-agent.rules.example"
 LAUNCHER = PROFILE_ROOT / "saihai-frontend-session.sh"
 VERIFY_DOC = PROFILE_ROOT / "verify_enforcement.md"
 RUNBOOK = ROOT / "docs/runbooks/main-agent-enforcement.md"
-CODEX_CANARY_STATE_ROOT = "/tmp/saihai-frontdoor-canary"
+ARBITRARY_STATE_ROOT = "/tmp/saihai-frontdoor-canary"
 
 APPROVED_CLAUDE_BASH_PREFIXES = (
     "Bash(python3 scripts/configure_organization.py workflow-frontdoor bridge-submit-request*)",
@@ -55,47 +56,34 @@ REQUIRED_CLAUDE_DENY_ENTRIES = {
     "Read(*.pem)",
     "Read(**/*.pem)",
 }
+REQUIRED_CODEX_CLI_FEATURE_DENIES = {
+    "multi_agent_v2",
+    "enable_fanout",
+    "code_mode",
+    "code_mode_only",
+    "memories",
+    "exec_permission_approvals",
+    "standalone_web_search",
+    "realtime_conversation",
+    "artifact",
+    "prevent_idle_sleep",
+}
 
 
 def load_claude_profile() -> dict:
     return json.loads(CLAUDE_PROFILE.read_text(encoding="utf-8"))
 
 
-def parse_scalar(value: str) -> object:
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    if value.startswith('"') and value.endswith('"'):
-        return value[1:-1]
-    raise AssertionError(f"unsupported TOML scalar in test parser: {value!r}")
-
-
-def parse_simple_toml(text: str) -> dict:
-    parsed: dict[str, object] = {}
-    current: dict[str, object] = parsed
-    for raw_line in text.splitlines():
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            section = line[1:-1]
-            current = {}
-            parsed[section] = current
-            continue
-        if "=" not in line:
-            raise AssertionError(f"unsupported TOML line in test parser: {raw_line!r}")
-        key, value = (part.strip() for part in line.split("=", 1))
-        current[key] = parse_scalar(value)
-    return parsed
-
-
-def load_codex_profile() -> dict:
+def load_toml(path: Path) -> dict | None:
     try:
         import tomllib  # type: ignore[import-not-found]
     except ModuleNotFoundError:
-        return parse_simple_toml(CODEX_PROFILE.read_text(encoding="utf-8"))
-    return tomllib.loads(CODEX_PROFILE.read_text(encoding="utf-8"))
+        return None
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def load_codex_profile() -> dict | None:
+    return load_toml(CODEX_PROFILE)
 
 
 def assert_equal(actual, expected, label: str) -> None:
@@ -116,13 +104,9 @@ def make_stub(bin_dir: Path, name: str, marker: Path) -> None:
 
 
 def install_codex_profile(codex_home: Path) -> None:
-    (codex_home / "rules").mkdir(parents=True, exist_ok=True)
+    codex_home.mkdir(parents=True, exist_ok=True)
     (codex_home / "saihai-main-agent.config.toml").write_text(
         CODEX_PROFILE.read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    (codex_home / "rules/saihai-main-agent.rules").write_text(
-        CODEX_RULES.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
 
@@ -151,7 +135,10 @@ def run_launcher(
 def test_profiles_parse() -> None:
     assert "permissions" in load_claude_profile()
     codex = load_codex_profile()
-    assert_equal(codex["approval_policy"], "on-request", "codex approval policy")
+    if codex is None:
+        assert_contains(CODEX_PROFILE.read_text(encoding="utf-8"), 'approval_policy = "never"', "codex approval policy")
+        return
+    assert_equal(codex["approval_policy"], "never", "codex approval policy")
 
 
 def test_claude_deny_covers_mutation_tools() -> None:
@@ -182,11 +169,126 @@ def test_claude_disables_bypass_mode() -> None:
 
 def test_codex_profile_pins_readonly_and_approval() -> None:
     profile = load_codex_profile()
-    assert_equal(profile["approval_policy"], "on-request", "Codex approval policy")
+    if profile is None:
+        return
+    assert_equal(profile["approval_policy"], "never", "Codex approval policy")
     assert_equal(profile["approvals_reviewer"], "user", "Codex approvals reviewer")
-    assert_equal(profile["default_permissions"], ":read-only", "Codex default permissions")
+    assert_equal(profile["default_permissions"], "saihai_frontend", "Codex default permissions")
+    assert "sandbox_mode" not in profile
     assert_equal(profile["allow_login_shell"], False, "Codex login shell")
     assert_equal(profile["web_search"], "disabled", "Codex web search")
+    assert_equal(profile["notify"], [], "Codex legacy notify argv")
+    for feature in [
+        "shell_tool",
+        "shell_snapshot",
+        "unified_exec",
+        "code_mode_host",
+        "apps",
+        "plugins",
+        "remote_plugin",
+        "plugin_sharing",
+        "tool_suggest",
+        "multi_agent",
+        "in_app_browser",
+        "browser_use",
+        "browser_use_full_cdp_access",
+        "browser_use_external",
+        "computer_use",
+        "auth_elicitation",
+        "tool_call_mcp_elicitation",
+        "guardian_approval",
+        "workspace_dependencies",
+        "hooks",
+    ]:
+        assert_equal(profile["features"][feature], False, f"Codex feature {feature}")
+    for feature in REQUIRED_CODEX_CLI_FEATURE_DENIES:
+        assert_equal(profile["features"][feature], False, f"Codex CLI feature {feature}")
+    bridge = profile["mcp_servers"]["saihai_bridge"]
+    assert_equal(bridge["required"], True, "Saihai MCP required")
+    assert_equal(
+        bridge["enabled_tools"],
+        ["submit_request", "read_projection", "ack_output"],
+        "Saihai MCP tools",
+    )
+    assert_equal(
+        bridge["command"],
+        "/usr/local/libexec/saihai-codex-main-agent-bridge",
+        "Saihai MCP root-owned wrapper",
+    )
+    assert_equal(bridge["args"], [], "Saihai MCP client argv")
+    assert {"approve", "execute", "shell"}.issubset(set(bridge["disabled_tools"]))
+    assert "model_instructions_file" not in profile
+    assert profile["developer_instructions"] == "@@SAIHAI_DEVELOPER_INSTRUCTIONS@@"
+
+
+def test_codex_requirements_pin_action_boundary() -> None:
+    requirements = load_toml(CODEX_REQUIREMENTS)
+    if requirements is None:
+        text = CODEX_REQUIREMENTS.read_text(encoding="utf-8")
+        for needle in [
+            'default_permissions = "saihai_frontend"',
+            'allowed_web_search_modes = []',
+            '[mcp_servers.saihai_bridge.identity]',
+            'executable = "/usr/local/libexec/saihai-codex-main-agent-bridge"',
+        ]:
+            assert_contains(text, needle, "Codex requirements")
+        return
+    assert_equal(requirements["default_permissions"], "saihai_frontend", "managed default permissions")
+    assert_equal(requirements["allowed_approval_policies"], ["never"], "managed approval policy")
+    assert "allowed_sandbox_modes" not in requirements
+    assert_equal(requirements["allowed_permission_profiles"], {"saihai_frontend": True}, "managed profile allowlist")
+    assert_equal(requirements["allowed_web_search_modes"], [], "managed web search")
+    assert_equal(requirements["allow_appshots"], False, "managed appshots")
+    assert_equal(requirements["allow_remote_control"], False, "managed remote control")
+    assert_equal(requirements["features"]["shell_tool"], False, "managed shell tool")
+    assert_equal(requirements["features"]["unified_exec"], False, "managed unified exec")
+    assert_equal(requirements["features"]["code_mode_host"], False, "managed code mode host")
+    assert_equal(requirements["features"]["apps"], False, "managed apps")
+    assert_equal(requirements["features"]["plugins"], False, "managed plugins")
+    for feature in REQUIRED_CODEX_CLI_FEATURE_DENIES:
+        assert_equal(
+            requirements["features"][feature],
+            False,
+            f"managed Codex CLI feature {feature}",
+        )
+    identity = requirements["mcp_servers"]["saihai_bridge"]["identity"]["command"]
+    assert_equal(
+        identity["executable"],
+        "/usr/local/libexec/saihai-codex-main-agent-bridge",
+        "managed MCP executable",
+    )
+    assert_equal(identity["args"], [], "managed MCP zero argv matcher")
+    deny_read = requirements["permissions"]["filesystem"]["deny_read"]
+    for token in [
+        ".ssh",
+        ".aws",
+        ".codex/auth.json",
+        ".codex-saihai-main-agent/auth.json",
+        ".git-credentials",
+        "Keychains",
+    ]:
+        assert any(token in item for item in deny_read), f"managed deny-read missing {token}"
+    assert_equal(requirements["plugins"], {}, "managed plugin requirements")
+    assert_equal(
+        requirements["marketplaces"],
+        {"restrict_to_allowed_sources": True},
+        "managed marketplace deny-all",
+    )
+
+
+def test_codex_notify_limit_is_documented_without_overclaim() -> None:
+    profile_text = CODEX_PROFILE.read_text(encoding="utf-8")
+    requirements_text = CODEX_REQUIREMENTS.read_text(encoding="utf-8")
+    # ConfigToml has a top-level `notify` argv, while ConfigRequirementsToml in
+    # stock Codex 0.144.1 has no matching constraint. The fixed root launcher
+    # must inject the empty argv; a profile file alone cannot prove the claim.
+    assert_contains(profile_text, "fixed root launcher must inject", "profile notify limit")
+    assert_contains(profile_text, "not claim evidence", "profile claim limit")
+    assert_contains(requirements_text, "requirements schema cannot constrain", "requirements notify limit")
+    assert_contains(requirements_text, "not action-enforcement claim evidence", "requirements claim limit")
+    requirements = load_toml(CODEX_REQUIREMENTS)
+    if requirements is not None:
+        assert "notify" not in requirements, "requirements must not pretend to constrain notify"
 
 
 def test_codex_rules_allow_only_bridge_prefixes() -> None:
@@ -197,17 +299,13 @@ def test_codex_rules_allow_only_bridge_prefixes() -> None:
         "bridge command alternatives",
     )
     assert_contains(rules, 'decision = "allow"', "allow decision")
+    assert_equal(rules.count("prefix_rule("), 1, "only the root-omitting bridge rule is allowed")
     assert '"--state-root", "*"' not in rules, "Codex rules must not treat '*' as a wildcard"
-    assert_contains(
-        rules,
-        f'"--state-root", "{CODEX_CANARY_STATE_ROOT}"',
-        "fixed canary state-root bridge rule",
-    )
     assert "scripts/saihai.py\", \"frontdoor" not in rules
     assert_contains(
         rules,
-        f"workflow-frontdoor --state-root {CODEX_CANARY_STATE_ROOT} bridge-read-projection",
-        "canary state-root bridge match",
+        f"workflow-frontdoor --state-root {ARBITRARY_STATE_ROOT} bridge-read-projection",
+        "explicit state-root negative example",
     )
     assert_contains(
         rules,
@@ -217,11 +315,6 @@ def test_codex_rules_allow_only_bridge_prefixes() -> None:
     assert_contains(rules, "frontdoor approve", "negative direct frontdoor approval example")
     assert_contains(rules, "frontdoor status", "negative direct frontdoor status example")
     assert_contains(rules, "workflow-frontdoor create-run", "negative facade example")
-    assert_contains(
-        rules,
-        f"workflow-frontdoor --state-root {CODEX_CANARY_STATE_ROOT} create-run",
-        "negative canary-root facade example",
-    )
     assert_contains(rules, "run-provider", "negative provider-dispatch example")
     assert_contains(rules, "child-thread-create", "negative child-thread action example")
     assert_contains(rules, "scoped-worker-derive", "negative scoped capability example")
@@ -278,16 +371,6 @@ def test_codex_rules_with_installed_execpolicy() -> None:
             "--request-id",
             "req-example",
         ],
-        [
-            "python3",
-            "scripts/configure_organization.py",
-            "workflow-frontdoor",
-            "--state-root",
-            CODEX_CANARY_STATE_ROOT,
-            "bridge-read-projection",
-            "--request-id",
-            "req-example",
-        ],
     ]
     for command in allowed:
         payload = run_codex_execpolicy(binary, command)
@@ -317,7 +400,17 @@ def test_codex_rules_with_installed_execpolicy() -> None:
             "scripts/configure_organization.py",
             "workflow-frontdoor",
             "--state-root",
-            CODEX_CANARY_STATE_ROOT,
+            ARBITRARY_STATE_ROOT,
+            "bridge-read-projection",
+            "--request-id",
+            "req-example",
+        ],
+        [
+            "python3",
+            "scripts/configure_organization.py",
+            "workflow-frontdoor",
+            "--state-root",
+            ARBITRARY_STATE_ROOT,
             "drain",
             "--run-id",
             "run-example",
@@ -327,7 +420,7 @@ def test_codex_rules_with_installed_execpolicy() -> None:
             "scripts/configure_organization.py",
             "workflow-frontdoor",
             "--state-root",
-            CODEX_CANARY_STATE_ROOT,
+            ARBITRARY_STATE_ROOT,
             "run-provider",
             "--run-id",
             "run-example",
@@ -339,7 +432,7 @@ def test_codex_rules_with_installed_execpolicy() -> None:
             "scripts/configure_organization.py",
             "workflow-frontdoor",
             "--state-root",
-            CODEX_CANARY_STATE_ROOT,
+            ARBITRARY_STATE_ROOT,
             "child-thread-create",
             "--plan-json",
             "{}",
@@ -361,7 +454,7 @@ def test_codex_rules_with_installed_execpolicy() -> None:
             "scripts/configure_organization.py",
             "workflow-frontdoor",
             "--state-root",
-            CODEX_CANARY_STATE_ROOT,
+            ARBITRARY_STATE_ROOT,
             "scoped-worker-execute",
             "--capability-id",
             "cap-example",
@@ -393,8 +486,8 @@ def test_launcher_refuses_bypass_flags() -> None:
             ["--codex", "--dangerously-bypass-approvals-and-sandbox"],
             ["--codex", "--yolo"],
             ["--codex", "--sandbox", "workspace-write"],
-            ["--codex", "-a", "never"],
-            ["--codex", "--config", "approval_policy='never'"],
+            ["--codex", "-a", "on-request"],
+            ["--codex", "--config", "features.shell_tool=true"],
             ["--codex", "--profile", "other"],
         ]
         for args in cases:
@@ -422,10 +515,11 @@ def test_launcher_passes_clean_args() -> None:
         codex = run_launcher(["--codex", "hello"], marker, tmp_path, codex_home=codex_home)
         assert_equal(codex.returncode, 0, "Codex launcher clean args")
         second = marker.read_text(encoding="utf-8").splitlines()[-1]
-        assert_contains(second, "codex --profile saihai-main-agent", "Codex profile arg")
-        assert_contains(second, "--sandbox read-only", "Codex sandbox arg")
-        assert_contains(second, "--ask-for-approval on-request", "Codex approval arg")
-        assert_contains(second, 'default_permissions=":read-only"', "Codex permissions override")
+        assert_contains(second, "codex --strict-config --profile saihai-main-agent", "Codex profile arg")
+        assert_contains(second, "--strict-config", "Codex strict config arg")
+        assert "--sandbox" not in second
+        assert_contains(second, "--ask-for-approval never", "Codex approval arg")
+        assert_contains(second, 'default_permissions="saihai_frontend"', "Codex permissions override")
 
 
 def test_launcher_requires_installed_codex_profile() -> None:
@@ -443,31 +537,43 @@ def test_launcher_requires_installed_codex_profile() -> None:
 def test_runbook_references_profiles_and_canary() -> None:
     runbook = RUNBOOK.read_text(encoding="utf-8")
     for path in [
-        "claude-main-agent.settings.example.json",
+        "main_agent_bridge_mcp.py",
         "codex-main-agent.config.example.toml",
+        "codex-main-agent.requirements.example.toml",
         "codex-main-agent.rules.example",
         "saihai-frontend-session.sh",
         "verify_enforcement.md",
+        "agent-integration-canary.md",
     ]:
         assert_contains(runbook, path, "runbook profile reference")
     for phrase in [
-        "Ask the session to edit a scratch file",
-        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary bridge-read-projection --request-id req-canary",
-        "git status",
-        "explicitly refused by the profile",
-        "Any other explicit state root",
-        "R57 action gateway",
+        "does not require Saihai to own every product's normal UI",
+        "Codex App and IDE sessions are outside that claim",
+        "`advisory`",
+        "`ingress_enforced`",
+        "`action_enforced`",
+        "`managed_worker`",
+        "/etc/codex/requirements.toml",
+        "The file is machine-wide",
+        "Another repository is unsupported",
     ]:
         assert_contains(runbook, phrase, "runbook canary/limits")
 
 
 def test_verify_doc_copy_pasteable() -> None:
     text = VERIFY_DOC.read_text(encoding="utf-8")
-    assert_contains(text, "saihai-frontend-session.sh", "verify launcher")
-    assert_contains(text, "--codex", "verify codex launcher")
-    assert_contains(text, "exact disposable canary root", "verify Codex canary root")
-    assert_contains(text, "Bypass detector", "verify bypass detector")
-    assert_contains(text, "Hooks may log", "verify hook boundary")
+    for needle in [
+        "commission-begin",
+        "commission-run-frontend",
+        "commission-observe-worker",
+        "commission-seal",
+        "/usr/bin/sudo /usr/local/bin/saihai-codex-main-agent",
+        "waiting_human",
+        "worker_denial_facts_not_promotable",
+        "no automatic transport",
+        "accepted as blocking evidence",
+    ]:
+        assert_contains(text, needle, "verify action canary")
 
 
 def test_launcher_is_posix_sh() -> None:
@@ -486,6 +592,8 @@ def main() -> None:
         test_claude_pins_default_mode,
         test_claude_disables_bypass_mode,
         test_codex_profile_pins_readonly_and_approval,
+        test_codex_requirements_pin_action_boundary,
+        test_codex_notify_limit_is_documented_without_overclaim,
         test_codex_rules_allow_only_bridge_prefixes,
         test_codex_rules_with_installed_execpolicy,
         test_launcher_refuses_bypass_flags,

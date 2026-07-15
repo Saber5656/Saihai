@@ -360,6 +360,8 @@ def test_lock_owner_uses_safe_projection() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         root = Path(raw_tmp)
         lock = root / "locks" / "global-advisory.lock.d"
+        lock.mkdir(parents=True, mode=0o700)
+        lock.parent.chmod(0o700)
         write_json(
             lock / "owner.json",
             {
@@ -376,6 +378,7 @@ def test_lock_owner_uses_safe_projection() -> None:
                 "unexpected": "LOCK-UNEXPECTED-LEAK",
             },
         )
+        (lock / "owner.json").chmod(0o600)
         with http_server(root) as (_, url):
             status, payload, raw = request(url, "/api/workflow-lock")
         assert status == 200

@@ -67,7 +67,14 @@ def run_cli(
 ) -> subprocess.CompletedProcess[str]:
     command = [sys.executable, str(CLI), *args]
     if catalog_state_root is not None:
-        command = [sys.executable, "-c", SAIHAI_TEST_WRAPPER, str(CLI), str(catalog_state_root), *args]
+        command = [
+            sys.executable,
+            "-c",
+            SAIHAI_TEST_WRAPPER,
+            str(CLI),
+            str(catalog_state_root.resolve(strict=False)),
+            *args,
+        ]
     completed = subprocess.run(
         command,
         cwd=ROOT,
@@ -80,24 +87,26 @@ def run_cli(
 
 
 def run_frontdoor(state_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    canonical_state_root = state_root.resolve(strict=False)
     return run_cli(
         "frontdoor",
         "--state-root",
-        str(state_root),
+        str(canonical_state_root),
         *args,
         check=check,
-        catalog_state_root=state_root,
+        catalog_state_root=canonical_state_root,
     )
 
 
 def run_workflow(state_root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    canonical_state_root = state_root.resolve(strict=False)
     return run_cli(
         "workflow",
         "--state-root",
-        str(state_root),
+        str(canonical_state_root),
         *args,
         check=check,
-        catalog_state_root=state_root,
+        catalog_state_root=canonical_state_root,
     )
 
 
@@ -382,10 +391,10 @@ def test_workflow_run_provider_store_errors_use_blocked_json() -> None:
 
 def test_cli_rejects_state_root_outside_host_configuration() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
-        root = Path(raw_tmp)
+        root = Path(raw_tmp).resolve()
         configured = root / "configured"
         requested = root / "main-agent-selected"
-        configured.mkdir()
+        configured.mkdir(mode=0o700)
         env = dict(os.environ)
         env["SAIHAI_ORCH_STATE_ROOT"] = str(requested)
         completed = run_cli(
