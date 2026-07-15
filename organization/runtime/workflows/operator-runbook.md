@@ -26,30 +26,208 @@ Related issues:
 | Legacy tmux transport | `tmux_interactive` is modeled for compatibility only and has no execution path here. |
 | Current scheduler | Invocation-drain, durable state, global advisory lock, concurrency 1, provider leases, heartbeat, bounded retries, resume, and abort are implemented. |
 | Read surfaces | `task-view`, `lock-status`, completion verification, the localhost frontdoor API, and the read-only workflow viewer/API are implemented. |
+| Main-agent adapter assurance | The machine-readable registry distinguishes independent `advisory`, `ingress_enforced`, `action_enforced`, and `managed_worker` states. Missing, failed, stale, or drifted evidence suppresses the targeted claim. |
+| Scoped worker | Capability derivation, single-use execution, and the Codex backend contracts are implemented. `managed_worker` remains suppressed: same-rootfs Codex 0.144.1 `external_mutation`, `git_commit`, `git_push`, and `credential_access` facts are failed/inconclusive and non-promotable. Only an isolated worker domain with stronger evidence may activate it, and v0.1.0 has no automatic cross-domain transport to that domain. |
 | Still planned | Dedicated raw run detail/evidence CLI commands, daemon/watch mode, and tmux worker execution are not implemented. |
 
-The enforced frontend profile from #54 and the scoped worker executor from #81
-serve different authority boundaries. An orchestrator-frontend session starts
-through the enforced launcher and remains limited to typed request submission,
-redacted projection reads, and result acknowledgement. It does not inherit
-implementation, shell, Git, worktree, provider, or publication authority.
+The action-restricted frontend profile and the scoped worker executor from #81
+serve different authority boundaries. Under the portable A-prime (`A′`) model,
+Saihai does not need to own every product's UI or session lifecycle, but each
+adapter must define an enforceable launch boundary. The first target is only a
+release-pinned Codex CLI 0.144.1 process started by the root-owned Saihai
+launcher; Codex App and IDE sessions are outside its claim. A frontend is
+promoted to `action_enforced` only after its
+native policy and runtime canaries prove that direct implementation, shell,
+network, Git, provider, and publication paths are denied.  The Saihai bridge
+then exposes only typed request submission, redacted projection reads, and
+result acknowledgement.
 
 After approval, only the host-owned executor may verify a canonical capability
 derived from the work order, create or select its planned task worktree, and
-launch the bounded Codex CLI worker. The worker receives only the capability's
+launch the bounded Codex CLI worker, and only while both assurance claims
+verify. No current same-rootfs `managed_worker` generation can pass that gate.
+The worker receives only the capability's
 explicit operations, paths, network, provider, and execution limits. Commit,
 push, and pull-request publication remain subject to their separate approval
 and publication gates. The shipped executor rejects all network and provider
 grants; any future external execution remains outside this capability and must
-use a separately approved gate. See [the main-agent enforcement runbook](../../../docs/runbooks/main-agent-enforcement.md)
-for launcher and canary verification procedures.
+use a separately approved gate. The local action-gateway endpoints do not by
+themselves deliver work across the required frontend/worker policy-domain
+boundary. See [the main-agent enforcement runbook](../../../docs/runbooks/main-agent-enforcement.md)
+for the assurance contract, Codex profile, administrator-policy limitation,
+and canary procedure.
+
+## Main-Agent Bridge Adapter
+
+The Codex MCP adapter is a concrete transport for the existing platform-neutral
+bridge contract.  Its complete server-backed MCP tool inventory is:
+
+| Tool | Effect |
+|---|---|
+| `submit_request` | Stores one typed `agent_task_request` and returns a redacted `waiting_human` projection containing an idempotency digest, never the raw key. |
+| `read_projection` | Reads only the current redacted projection. |
+| `ack_output` | Records receipt of an exact projection digest; `transition_effect` remains `none`. |
+
+The MCP adapter has no classification, approval, run, capability, worker,
+shell, Git, provider, network, or publication tool.  It accepts only the
+supported `Saber5656/Saihai` workspace binding and the canonical host state
+root.  Unsupported repositories remain blocked until a host-owned workspace
+binding is designed and attested.
+
+Use
+`python3 organization/runtime/workflows/scripts/agent_integration_assurance.py report`
+to see the truthful shipped state.  A target profile with pending, failed,
+missing, stale, or drifted evidence is suppressed; it does not fall back to an
+unrestricted agent.
+
+### Assurance status and activation
+
+The registry records a target; it does not activate that target by itself.
+The shipped status before a current active generation is:
+
+| Surface | Target claim | Effective status before current evidence |
+|---|---|---|
+| Fixed-launcher Codex CLI 0.144.1 frontend | `action_enforced` only | suppressed; no `ingress_enforced` claim |
+| Codex App / IDE | none | unsupported for enforcement; client-supplied dynamic tools are not requirements-constrained |
+| Claude main-agent frontend | none | `advisory` |
+| Cursor frontend | future `ingress_enforced` and `action_enforced` | suppressed candidate |
+| Grok frontend | future `ingress_enforced` and `action_enforced` | suppressed unavailable |
+| Scoped Codex worker | `managed_worker` | suppressed; current same-rootfs commissioning cannot seal it |
+
+An implemented bridge or executor protocol is not the same as an active
+assurance claim. The Codex frontend claim requires a reviewed, root-owned
+deployment, fixed root-observed direct-action probes, and an exact-one typed
+submit that stops at `waiting_human` without downstream execution. The worker
+claim independently requires its fixed launch probe and capability-bound
+operation evidence. Same-rootfs Codex 0.144.1 cannot prove generic
+external-mutation, absolute local `git_push`, or credential denial, so its weak
+facts are intentionally non-promotable. Specifically, `external_mutation`,
+`git_commit`, `git_push`, and `credential_access` have `result=fail` with
+inconclusive host observations. The exact policy fact names
+`workspace_profile_and_network_disabled_not_same_rootfs_isolation` and
+`dedicated_auth_deny_configured_not_mechanically_proven` are explicit
+non-claims. Agent prose, repository configuration alone, or a mutable user
+profile is not evidence.
+
+For the fixed-launcher frontend, `credential_access = denied` is limited to the
+two known Codex auth paths, the dedicated `CODEX_HOME`, and absence of
+credential-capable tool classes in the fixed inventory. It does not claim that
+every user-readable secret-bearing file is inaccessible and cannot be reused
+as the worker's generic credential-denial evidence.
+
+Production uses these canonical paths:
+
+| Artifact | Canonical path |
+|---|---|
+| Deployment manifest | `/Library/Application Support/Saihai/Manifests/codex-main-agent.deployment.json` |
+| Runtime configuration | `/Library/Application Support/Saihai/Config/codex-main-agent.runtime.json` |
+| Release-pinned runtime | `/Library/Application Support/Saihai/Runtime/<release_commit>/` |
+| Zero-argument bridge wrapper | `/usr/local/libexec/saihai-codex-main-agent-bridge` |
+| Fixed Codex CLI launcher | `/usr/local/bin/saihai-codex-main-agent` |
+| Machine-wide Codex requirements | `/private/etc/codex/requirements.toml`; `/etc/codex/requirements.toml` is a discovery alias, not a second managed target |
+| Private commissioning record | `/Library/Application Support/Saihai/Assurance/commissioning/<profile_id>/<commissioning_id>.json` |
+| Immutable generation | `/Library/Application Support/Saihai/Assurance/generations/<profile_id>/<generation_id>/` |
+| Active generation pointer | `/Library/Application Support/Saihai/Assurance/active/<profile_id>.json` |
+| Standard launch session | `/Library/Application Support/Saihai/Assurance/launch-sessions/<session_id>.json` |
+| Commissioning launch session | `/Library/Application Support/Saihai/Assurance/commissioning-launches/<session_id>.json` |
+| Deployment epoch | `/Library/Application Support/Saihai/Assurance/epochs/<profile_id>.json` |
+
+The preparer emits a review directory and JSON plan but never runs `sudo`. A
+human administrator executes the generated two-phase
+freeze/check/seal/activate commands. The root observer then runs only fixed
+commissioning probes, freezes the exact generation manifest, seals its
+attestation, and atomically replaces the active pointer. Follow
+[`profiles/verify_enforcement.md`](profiles/verify_enforcement.md) for
+deployment verification and
+[`profiles/agent-integration-canary.md`](profiles/agent-integration-canary.md)
+for the lower-level evidence contract and final routing-only acceptance
+procedure.
+
+Prepare, activation preflight, and deployment verification share one
+runtime-home validator: the home must be absolute, canonical, non-symlink,
+runtime-uid-owned, safe through its ancestors, and not group- or world-writable.
+Activation creates the dedicated `CODEX_HOME`; the human verifies it read-only
+and performs login only after activation.
+
+Public assurance directories/files (`launch-sessions`,
+`commissioning-launches`, `epochs`, `generations`, and `active`) use exact
+`0755`/`0644`.
+Private `commissioning/**` uses exact `0700`/`0600`, and lock files use `0600`.
+Owner or mode drift suppresses the claim. Activate, rollback, and uninstall
+rotate the epoch before target mutation; every completed transition requires
+fresh commissioning and sealing, while an interrupted transition remains
+fail-closed.
+
+Run each commissioning from the installed, release-pinned runtime. The frontend
+sequence consumes a current standard launch-session record and creates its own
+fixed commissioning-launch record:
+
+```sh
+RUNTIME_ROOT="/Library/Application Support/Saihai/Runtime/<release_commit>"
+OBSERVER="$RUNTIME_ROOT/organization/runtime/workflows/scripts/agent_integration_observer.py"
+
+/usr/bin/sudo /usr/bin/python3 -I -B "$OBSERVER" commission-begin \
+  --profile codex-main-agent-a-prime \
+  --launch-session 'launch-sessions/<session_id>.json'
+
+/usr/bin/sudo /usr/bin/python3 -I -B "$OBSERVER" commission-run-frontend \
+  --commissioning 'commissioning/codex-main-agent-a-prime/<commissioning_id>.json'
+
+/usr/bin/sudo /usr/bin/python3 -I -B "$OBSERVER" commission-seal \
+  --commissioning 'commissioning/codex-main-agent-a-prime/<commissioning_id>.json'
+```
+
+The worker sequence runs only in its separately governed policy domain. Its
+runtime binding is administrator-reviewed input, and the fixed probe takes only
+the commissioning ID:
+
+```sh
+WORKER_EXECUTOR="$RUNTIME_ROOT/organization/runtime/workflows/scripts/scoped_worker_executor.py"
+
+/usr/bin/sudo /usr/bin/python3 -I -B "$OBSERVER" commission-begin \
+  --profile codex-scoped-worker \
+  --worker-runtime-binding /ABSOLUTE/ROOT-OWNED/worker-runtime-binding.json
+
+/usr/bin/sudo /usr/bin/python3 -I -B "$WORKER_EXECUTOR" commissioning-probe \
+  --commissioning-id '<commissioning_id>'
+
+/usr/bin/sudo /usr/bin/python3 -I -B "$OBSERVER" commission-observe-worker \
+  --commissioning 'commissioning/codex-scoped-worker/<commissioning_id>.json'
+
+/usr/bin/sudo /usr/bin/python3 -I -B "$OBSERVER" commission-seal \
+  --commissioning 'commissioning/codex-scoped-worker/<commissioning_id>.json'
+```
+
+The `managed_worker` generation is runtime-global. Its `checkout_digest` is the
+sentinel for `checkout_binding=capability_per_execution` and
+`repository_scope=host_verified_work_order`; capability derive and pre-exec
+separately bind and revalidate the actual work-order repository/worktree.
+On the current same-rootfs target, the final command must fail closed with
+`worker_denial_facts_not_promotable`; it must not create or select an active
+`managed_worker` generation. Minimal reads, exact workspace writes, and fixed
+external-mutation/git/credential/outside-workspace probes are defense in depth,
+not promotable proof of generic mutation, absolute local `git_push`, or
+credential denial. Commissioning neither creates nor configures credentials.
 
 ## Day-1 Happy Path
 
-Use a disposable state root while testing:
+This is an offline contract smoke. It uses the configured canonical state root
+and the deterministic fake provider; it is not the production root-owned
+deployment, a live-provider test, or assurance evidence. Arbitrary roots such
+as `/tmp/frontdoor-state` are rejected with `state_root_not_configured`.
+
+Resolve the canonical root through the read-only permission report and create
+unique identifiers so repeated smokes do not collide with durable evidence:
 
 ```sh
-STATE_ROOT=/tmp/frontdoor-state
+STATE_ROOT="$(
+  python3 scripts/configure_organization.py workflow-frontdoor state-permission-repair |
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["permission_report"]["state_root"])'
+)"
+STAMP="$(date +%s)"
+TASK_ID="TSK-day1-$STAMP"
+REQUEST_ID="req-day1-$STAMP"
+RUN_ID="run-day1-$STAMP"
 ```
 
 1. Validate static workflow contracts.
@@ -70,8 +248,8 @@ typed classification remains `waiting_human`.
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" propose \
-  --task-id TSK-example \
-  --request-id req-example \
+  --task-id "$TASK_ID" \
+  --request-id "$REQUEST_ID" \
   --prompt "Run a readonly external review." \
   --ref organization/runtime/workflows/README.md \
   --classification '{"classification_version":"1","classification_source":"deterministic_fixture","classification_confidence":1.0,"classification_evidence":["operator-reviewed-context"],"task_kind":"external_review","permission_required":"readonly","external_provider_required":true,"publication_required":false,"security_sensitive":false,"destructive_operation":false,"context_scope":"refs_only","expected_artifacts":["typed_report"]}'
@@ -86,7 +264,7 @@ Output: the request record gains an `approved_activation` and
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" approve \
-  --request-id req-example \
+  --request-id "$REQUEST_ID" \
   --human-action-id <approval.human_action_id>
 ```
 
@@ -100,7 +278,8 @@ Output: run JSON under `runs/`.
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" create-run \
-  --request-id req-example \
+  --request-id "$REQUEST_ID" \
+  --run-id "$RUN_ID" \
   --resume-policy manual
 ```
 
@@ -113,7 +292,7 @@ moves from `created` to `step_queued`.
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" drain \
-  --run-id <run_id>
+  --run-id "$RUN_ID"
 ```
 
 6. Run the provider through the host-owned runner.
@@ -124,7 +303,7 @@ Use the fake provider for a reproducible offline day-1 smoke:
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" run-provider \
-  --run-id <run_id> \
+  --run-id "$RUN_ID" \
   --adapter-id claude_headless_p0 \
   --fake-provider-mode success
 ```
@@ -137,7 +316,7 @@ configuration, and inspection remain manual operator work:
 ```sh
 SAIHAI_ALLOW_LIVE_PROVIDERS=1 python3 scripts/configure_organization.py workflow-frontdoor \
   --state-root "$STATE_ROOT" run-provider \
-  --run-id <run_id> --adapter-id claude_headless_p0 --live --timeout-seconds 1800
+  --run-id "$RUN_ID" --adapter-id claude_headless_p0 --live --timeout-seconds 1800
 ```
 
 `prepare-claude-adapter` remains only as deprecated, non-executable compatibility
@@ -179,7 +358,7 @@ to `waiting_human`; invalid schema/evidence or wrong paths fail the run.
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" validate-report \
-  --run-id <run_id>
+  --run-id "$RUN_ID"
 ```
 
 9. Inspect canonical artifacts.
@@ -187,30 +366,101 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STAT
 Until a dedicated read-only inspect command exists, inspect the files directly:
 
 ```sh
-python3 -m json.tool "$STATE_ROOT/requests/req-example.json"
-python3 -m json.tool "$STATE_ROOT/runs/<run_id>.json"
-python3 -m json.tool "$STATE_ROOT/work-orders/<run_id>/<step_id>.json"
-python3 -m json.tool "$STATE_ROOT/reports/<run_id>/<step_id>-external-review-report.json"
-python3 -m json.tool "$STATE_ROOT/provider-evidence/<run_id>/<step_id>-provider-evidence.json"
+python3 -m json.tool "$STATE_ROOT/requests/$REQUEST_ID.json"
+python3 -m json.tool "$STATE_ROOT/runs/$RUN_ID.json"
+python3 -m json.tool "$STATE_ROOT/work-orders/$RUN_ID/review.json"
+python3 -m json.tool "$STATE_ROOT/reports/$RUN_ID/review-external-review-report.json"
+python3 -m json.tool "$STATE_ROOT/provider-evidence/$RUN_ID/review-provider-evidence.json"
 ```
 
-For main-agent bridge status, use the implemented projection surface:
+The request above is owned by the manual-operator principal. Do not pass that
+request ID to `bridge-read-projection`: a bridge principal cannot read an
+operator-owned projection. To smoke the bridge surface, create a separate
+bridge-owned request and read it with the same frontend principal:
 
 ```sh
+BRIDGE_TASK_ID="TSK-bridge-$STAMP"
+BRIDGE_REQUEST_ID="req-bridge-$STAMP"
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" bridge-submit-request \
+  --task-id "$BRIDGE_TASK_ID" \
+  --request-id "$BRIDGE_REQUEST_ID" \
+  --request-kind external_review_request \
+  --prompt "Run a readonly external review." \
+  --ref organization/runtime/workflows/README.md \
+  --idempotency-key "$BRIDGE_REQUEST_ID-v1"
+
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" bridge-read-projection \
-  --request-id req-example
+  --request-id "$BRIDGE_REQUEST_ID"
 ```
+
+This separate bridge request remains `waiting_human` and is not the approved
+operator request used by the Day-1 run. The raw idempotency input is digested
+immediately and is neither emitted nor stored.
 
 For the task-linked thin view and final completion decision, use:
 
 ```sh
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" task-view \
-  --task-id TSK-example
+  --task-id "$TASK_ID"
 
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" verify-completion \
-  --run-id <run_id> \
+  --run-id "$RUN_ID" \
   --format markdown
 ```
+
+## Fresh-Thread Simple Research Acceptance
+
+After the administrator deployment and frontend `action_enforced` generation
+are current, start a new Codex thread in the supported Saihai primary checkout
+or one of its registered linked worktrees. The suppressed `managed_worker`
+claim is not a prerequisite for this non-executing frontend check. Use this
+ordinary prompt; do not invoke a Saihai command in the prompt:
+
+```sh
+cd "$HOME/dev/Saihai"
+/usr/bin/sudo /usr/local/bin/saihai-codex-main-agent
+```
+
+The zero-argument launcher creates a standard supervisor session and then drops
+the Codex child to the configured runtime user. Do not substitute a direct
+Codex, App/IDE, or commissioning launch.
+
+```text
+Saihai v0.1.0のREADMEとCHANGELOGを読み、実装済み機能と未対応の境界を3点ずつ、根拠path付きで調査して。
+```
+
+The expected first transition is bridge submission, not research execution.
+The main agent calls `submit_request` exactly once with bounded `README.md` then
+`CHANGELOG.md` refs and `allowed_paths=[]`. It receives a redacted
+`waiting_human` projection whose reason requires typed classification from a
+non-bridge principal and whose `idempotency_key_digest` identifies the matching
+artifact without exposing the raw key. The durable evidence is exactly one new request, one new
+idempotency record, and one successful submit audit event:
+
+```text
+<state_root>/requests/<request_id>.json
+<state_root>/idempotency/key-<idempotency_key_sha256>.json
+<state_root>/audit/*.jsonl
+```
+
+A completed `bridge-transactions/` journal is removed after the atomic commit.
+If the agent reads or acknowledges the projection, the read is audit-only and
+an acknowledgement additionally creates
+`<state_root>/acks/<request_id>-<digest>.json` with
+`transition_effect: none`. Before human classification and approval there must
+be no matching `runs/<run_id>.json`, work order, capability, worker execution,
+provider evidence, or report. A direct answer produced by ambient tools instead
+of this bridge transition fails the acceptance test. Use the exact
+`routing-begin` / `routing-finish --idempotency-key-digest <sha256:...>`
+procedure in
+[`profiles/agent-integration-canary.md`](profiles/agent-integration-canary.md).
+See [`profiles/verify_enforcement.md`](profiles/verify_enforcement.md) for the
+deployment entrypoint and direct-action/gateway prerequisites.
+The checkout marker must also remain unchanged. Passing this single prompt
+verifies that configured routing instance and its
+bridge artifacts; it does not prove that every prompt entrypoint is
+`ingress_enforced`.
 
 ## State Guide
 
@@ -230,8 +480,23 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STAT
 
 ## Canonical Artifacts
 
-All state is rooted at `--state-root`; the default is
-`~/.codex/state/itb/frontdoor-orchestrator`.
+All state is rooted at the canonical host state root. Omitting `--state-root`
+selects it automatically; an explicit value must match it exactly. The default
+is `~/.codex/state/itb/frontdoor-orchestrator`, and the owner-only primary
+checkout catalog may configure another validated absolute path.
+
+The runtime user owns this private tree. Directories must be exact `0700` and
+regular files exact `0600`; symlinks, hard-linked or special files, owner drift,
+identity races, and unexpected modes fail closed. Bridge admission is bounded
+to 128 pending requests / 8 MiB per principal and 10,000 regular durable
+artifacts / 128 MiB for the state root. Projection reads are limited to
+240/minute and acknowledgements to 120/minute. Audit JSONL rotates at 8 MiB.
+
+Child-thread and worker summaries are visible to the frontend only when their
+request id, task id, owner-principal digest, and checkout digest exactly match
+the current request. Missing, legacy-unbound, or mismatched records are hidden.
+Arbitrary write access to this private state root could forge those fields and
+is outside the same-uid trust boundary.
 
 | Artifact | Path | Authority |
 |---|---|---|
@@ -247,7 +512,11 @@ All state is rooted at `--state-root`; the default is
 | Scheduler lock | `locks/global-advisory.lock.d/owner.json` | Current mutating operation owner; inspect through `lock-status`. |
 | Audit log | `audit/*.jsonl` | Append-only transition, replay, blocked, approval, and bridge events. |
 | Idempotency record | `idempotency/key-<digest>.json` | Bridge submit replay protection. |
+| Bridge acknowledgement | `acks/<request_id>-<digest>.json` | Optional digest-bound receipt with `transition_effect: none`; it does not approve or advance a run. |
+| Worker capability | `worker-capabilities/<capability_id>.json` | Single-use capability derived by the credential-bound action gateway after both assurance claims verify. |
+| Worker execution/evidence | `worker-executions/<execution_id>.json`, `worker-evidence/<run_id>/<step_id>-<execution_id>.json` | Host-owned bounded-worker state and canonical evidence; the frontend receives only redacted summaries and digests. |
 | Principal keys and channel tokens | `principal-keys/`, `channel-tokens/` | Local signing/authentication material. Preserve permissions and never publish. |
+| Permission-repair evidence | `permission-repair-evidence/<report_id>.json` | Durable report written only by explicit local manual-operator `state-permission-repair --apply`; dry-run reports remain stdout-only. |
 
 Canonical result authority is `typed_report_file` plus
 `normalized_provider_evidence_file`. stdout, tmux pane output, and provider
@@ -335,6 +604,8 @@ transcript, and audit JSONL files.
 | Lock contention | A mutating command returns `decision = blocked`, `reason = lock_contention`, and owner metadata. | Run `lock-status`. Wait for a live owner. A stale lock is reclaimed by the next mutating operation only after stale-age and owner-liveness checks pass; never delete the lock directory while the owner may be live. |
 | Resume required | Run is non-terminal and provider lease/result state exists. | Run `resume --run-id <id>`. A live lease returns `provider_in_flight`; an expired lease requeues without changing the signed work order; `result_ready` resumes at report validation. |
 | Abort required | Operator must stop a non-terminal run. | Run `abort --run-id <id> --reason <reason>`. Heartbeat detects the lost lease/run state and stops the subprocess; stale worker results are never promoted to canonical artifacts. |
+| Legacy private modes | `state-permission-repair` returns `decision = repair_required` and exits 2 in dry-run mode. | Review the complete nofollow audit. If the owner, link, and artifact findings are understood, rerun the local manual-operator command with `--apply`; preserve its private report and audit event. |
+| Bridge retention due | Terminal prompts or bridge indexes exceed retention, or rotated audits accumulate. | Run `bridge-retention-purge`. Defaults are seven days for terminal bridge data and 30 days for rotated audits; active authority artifacts are never deleted. |
 
 The recovery commands are implemented on the compatibility facade:
 
@@ -346,6 +617,13 @@ python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STAT
 python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" abort \
   --run-id <run_id> \
   --reason "operator cancelled"
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" state-permission-repair
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" state-permission-repair \
+  --apply
+
+python3 scripts/configure_organization.py workflow-frontdoor --state-root "$STATE_ROOT" bridge-retention-purge
 ```
 
 Omit `--requeue` when the operator only needs the typed next action. Requeue is
@@ -366,12 +644,23 @@ destroying typed-run evidence.
 | Broken docs or operator command sequence | Restore the previous documented command sequence, then update this runbook with the corrected boundary. |
 | Broken provider adapter rollout | Keep request/run/work-order artifacts. Disable provider dispatch and use typed report/evidence files only when they can be validated. |
 | Queue bridge regression | Keep `agent-call` compatibility docs and queue views active until [#12](https://github.com/Saber5656/Saihai/issues/12) and [#44](https://github.com/Saber5656/Saihai/issues/44) are fixed. |
-| Accidental state mutation | Preserve the mutated state root, audit logs, and shell history. Create a fresh state root for retry rather than editing canonical artifacts in place. |
+| Accidental state mutation | Preserve the mutated canonical root, audit logs, and shell history. Use a fresh root only after an administrator configures it in the primary checkout's owner-only catalog; never improvise a one-off `--state-root` override or edit canonical artifacts in place. |
+| Main-agent deployment activation failure | Use only the generated `rollback_command` from the same reviewed frozen transaction. Preserve the quarantine and activation journal; do not improvise copies into production paths. |
+| Remove the managed deployment | Use only the generated `uninstall_command` from the same reviewed frozen transaction. This removes deployment artifacts, not runtime evidence or credentials. |
 
 Rollback must not delete `requests/`, `runs/`, `work-orders/`, `reports/`,
 `provider-evidence/`, or `audit/` for affected runs. If deletion is required for
 local cleanup, archive the state root first and record evidence in the task or
 Vault record.
+
+Deployment rollback or uninstall does not roll the assurance active pointer
+back to an older generation. Restored binary/configuration drift suppresses the
+claim. Before using the restored frontend deployment, begin a fresh
+commissioning, run the fixed frontend suite, and seal a new generation. A
+worker may use the equivalent recommissioning flow only in a separately
+isolated policy domain with promotable denial evidence; the current
+same-rootfs worker suite still cannot seal. Never edit or reactivate an old
+immutable generation to bypass recommissioning.
 
 ## Validation Commands
 

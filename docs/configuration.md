@@ -54,9 +54,13 @@ The loader locates the catalog in this order:
 4. `directory-path.env` in the primary checkout of a linked Git worktree;
 5. no file.
 
-For each path, precedence is `process environment > directory-path.env`.
-An explicitly empty process value still wins. This allows an individual test
-or subprocess to override one path without copying the entire catalog.
+For each ordinary path, precedence is
+`process environment > directory-path.env`. An explicitly empty process value
+still wins. This allows an individual test or subprocess to override one path
+without copying the entire catalog. `SAIHAI_ORCH_STATE_ROOT` is the deliberate
+authority exception: the workflow frontdoor ignores process-environment
+overrides, resolves the owner-only primary-checkout catalog or fixed default,
+and requires an explicit `--state-root` to match that canonical value exactly.
 
 The primary-checkout lookup is what lets code running in another Saihai
 worktree, branch, or project reuse the same local path source of truth.
