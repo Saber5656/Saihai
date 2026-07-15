@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import subprocess
@@ -155,6 +156,45 @@ def _expect(reason: str, action) -> None:
             raise AssertionError(f"expected {reason!r}, got {exc.reason!r}") from exc
         return
     raise AssertionError(f"expected ObserverError containing {reason!r}")
+
+
+def test_public_commissioning_projection_keeps_nonce_private() -> None:
+    with worker_commissioning_fixture() as fixture:
+        reference = fixture["begun"]["commissioning_reference"]
+        record_path = fixture["root"] / reference
+        private_before = json.loads(record_path.read_text(encoding="utf-8"))
+        raw_nonce = private_before["single_use_nonce"]
+        projection = observer._public_commissioning_projection(private_before)
+
+        assert set(projection) == observer.COMMISSIONING_FIELDS - {"single_use_nonce"}
+        assert "single_use_nonce" not in projection
+        assert raw_nonce not in json.dumps(projection, sort_keys=True)
+        assert private_before["single_use_nonce"] == raw_nonce
+        assert record_path.stat().st_mode & 0o777 == 0o600
+
+        observed = observer.observe_worker_commissioning_evidence(
+            fixture["root"],
+            commissioning_reference=reference,
+            registry=fixture["registry"],
+            trust_policy=fixture["policy"],
+            now=fixture["now"],
+            observer_binary=fixture["observer_binary"],
+        )
+        assert set(observed["commissioning"]) == observer.COMMISSIONING_FIELDS - {
+            "single_use_nonce"
+        }
+        assert raw_nonce not in json.dumps(observed, sort_keys=True)
+        private_after = json.loads(record_path.read_text(encoding="utf-8"))
+        assert private_after["single_use_nonce"] == raw_nonce
+        assert record_path.stat().st_mode & 0o777 == 0o600
+
+    for function in (
+        observer.observe_frontend_common_identity,
+        observer.finalize_frontend_commissioning_suite,
+        observer.observe_worker_commissioning_evidence,
+        observer.seal_commissioning_generation,
+    ):
+        assert "_public_commissioning_projection(" in inspect.getsource(function)
 
 
 def test_worker_weak_denial_facts_cannot_seal_or_activate() -> None:
@@ -626,6 +666,7 @@ def test_public_gateway_receipt_linkage_retains_only_idempotency_digest() -> Non
 
 def main() -> None:
     tests = [
+        test_public_commissioning_projection_keeps_nonce_private,
         test_worker_weak_denial_facts_cannot_seal_or_activate,
         test_worker_suite_missing_extra_and_replay_fail_closed,
         test_worker_probe_event_tamper_and_grant_reuse_fail_closed,

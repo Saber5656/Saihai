@@ -256,6 +256,36 @@ def _validate_commissioning_shape(value: Any) -> dict[str, Any]:
     return record
 
 
+def _public_commissioning_projection(value: Any) -> dict[str, Any]:
+    """Return the exact public commissioning fields without the raw nonce."""
+
+    record = _validate_commissioning_shape(value)
+    return {
+        "commissioning_version": record["commissioning_version"],
+        "commissioning_id": record["commissioning_id"],
+        "profile_id": record["profile_id"],
+        "generation_id": record["generation_id"],
+        "purpose": record["purpose"],
+        "operation": record["operation"],
+        "launch_session_reference": record["launch_session_reference"],
+        "launch_session_digest": record["launch_session_digest"],
+        "runtime_binding": record["runtime_binding"],
+        "runtime_binding_digest": record["runtime_binding_digest"],
+        "execution_binding": record["execution_binding"],
+        "execution_binding_digest": record["execution_binding_digest"],
+        "probe_argv_digest": record["probe_argv_digest"],
+        "marker_target_sha256": record["marker_target_sha256"],
+        "issued_at": record["issued_at"],
+        "valid_until": record["valid_until"],
+        "state": record["state"],
+        "claimed_at": record["claimed_at"],
+        "completed_at": record["completed_at"],
+        "consumer_event_digest": record["consumer_event_digest"],
+        "generation_manifest_digest": record["generation_manifest_digest"],
+        "record_digest": record["record_digest"],
+    }
+
+
 def _prepare_directory(
     root: Path,
     parts: Sequence[str],
@@ -1024,7 +1054,7 @@ def observe_frontend_common_identity(
     )
     return {
         "decision": "common_identity_observed",
-        "commissioning": claimed,
+        "commissioning": _public_commissioning_projection(claimed),
         "receipt_reference": reference,
         "common_evidence": common["evidence"],
     }
@@ -2030,7 +2060,7 @@ def finalize_frontend_commissioning_suite(
     )
     return {
         "decision": "commissioning_suite_observed",
-        "commissioning": observed,
+        "commissioning": _public_commissioning_projection(observed),
         "consumer_event_digest": event_digest,
         "evidence_references": [
             item["reference"] for item in suite["references"]
@@ -2600,7 +2630,7 @@ def observe_worker_commissioning_evidence(
     )
     return {
         "decision": "worker_commissioning_suite_observed",
-        "commissioning": record,
+        "commissioning": _public_commissioning_projection(record),
         "common_evidence": common["evidence"],
         "operation_evidence": operations,
         "evidence_references": [
@@ -2692,7 +2722,7 @@ def seal_commissioning_generation(
         raise ObserverError("commissioning_generation_seal_failed") from exc
     return {
         "decision": "commissioning_generation_active",
-        "commissioning": record,
+        "commissioning": _public_commissioning_projection(record),
         "generation_manifest_digest": manifest["manifest_digest"],
         **result,
     }
