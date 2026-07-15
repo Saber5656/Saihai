@@ -1,6 +1,10 @@
 #!/bin/sh
-# Saihai enforced orchestrator-frontend launcher.
-# Verified with Claude Code 2.1.172 and codex-cli 0.141.0 on 2026-07-08.
+# Optional Saihai orchestrator-frontend launcher.
+#
+# This wrapper and its named profile/requirements are migration conveniences;
+# they do not establish an action_enforced boundary.  A mechanical claim also
+# requires the root-owned deployment attestation, launch session, and bridge
+# gate.  This wrapper remains only a CLI flag guard for deliberate migration.
 
 set -u
 
@@ -16,7 +20,6 @@ script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
 codex_home="${CODEX_HOME:-$HOME/.codex}"
 codex_profile_name="saihai-main-agent"
 codex_profile_path="$codex_home/$codex_profile_name.config.toml"
-codex_rules_path="$codex_home/rules/$codex_profile_name.rules"
 
 refuse() {
   echo "refused: $1 is forbidden in orchestrator-frontend sessions" >&2
@@ -46,14 +49,10 @@ if [ ! -r "$codex_profile_path" ]; then
   refuse "missing Codex profile $codex_profile_path"
 fi
 
-if [ ! -r "$codex_rules_path" ]; then
-  refuse "missing Codex rules $codex_rules_path"
-fi
-
 exec codex \
+  --strict-config \
   --profile "$codex_profile_name" \
-  --sandbox read-only \
-  --ask-for-approval on-request \
-  --config 'default_permissions=":read-only"' \
+  --ask-for-approval never \
+  --config 'default_permissions="saihai_frontend"' \
   --config 'approvals_reviewer="user"' \
   "$@"
