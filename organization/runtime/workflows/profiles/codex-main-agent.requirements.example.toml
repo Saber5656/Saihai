@@ -1,0 +1,97 @@
+# Administrator-enforced Codex requirements for a Saihai main-agent frontend.
+#
+# Codex discovers this as /etc/codex/requirements.toml. On macOS, install and
+# verify it through canonical /private/etc/codex/requirements.toml so every
+# symlink ancestor remains forbidden. Replace /Users/YOU, then verify the
+# Python executable and Saihai primary-checkout paths. Codex App, CLI, and IDE
+# processes on the host load this machine-wide policy, but only the fixed
+# stock-CLI launcher is an assurance target: current App/IDE clients can inject
+# dynamic tools outside this requirements schema. The policy does not apply to
+# arbitrary non-Codex programs and must not be installed on a host where a
+# Codex scoped worker needs a broader permission profile.
+#
+# Codex 0.144.1's requirements schema cannot constrain the top-level `notify`
+# argv. The fixed root launcher must therefore inject and verify `notify = []`
+# in the rendered profile. This requirements file and the sample profile alone
+# are not action-enforcement claim evidence.
+
+allowed_approval_policies = ["never"]
+allowed_approvals_reviewers = ["user"]
+# The pinned Codex release uses managed permission profiles exclusively.
+# Legacy `allowed_sandbox_modes`, `sandbox_mode`, and `--sandbox` selectors are
+# intentionally absent because they do not compose with permission profiles.
+default_permissions = "saihai_frontend"
+allowed_web_search_modes = []
+allow_appshots = false
+allow_remote_control = false
+allow_managed_hooks_only = true
+
+[allowed_permission_profiles]
+saihai_frontend = true
+
+[permissions.saihai_frontend]
+description = "Saihai bridge-only main-agent frontend"
+extends = ":read-only"
+
+# Supported by Codex 0.144.1 requirements parsing. These requirements-level
+# deny-read paths apply in addition to the selected read-only profile.
+[permissions.filesystem]
+deny_read = [
+  "/Users/YOU/.ssh/**",
+  "/Users/YOU/.aws/**",
+  "/Users/YOU/.config/gcloud/**",
+  "/Users/YOU/.config/gh/**",
+  "/Users/YOU/.codex/auth.json",
+  "/Users/YOU/.codex-saihai-main-agent/auth.json",
+  "/Users/YOU/.netrc",
+  "/Users/YOU/.git-credentials",
+  "/Users/YOU/Library/Keychains/**",
+]
+
+[features]
+shell_tool = false
+shell_snapshot = false
+unified_exec = false
+code_mode = false
+code_mode_host = false
+code_mode_only = false
+apps = false
+plugins = false
+remote_plugin = false
+plugin_sharing = false
+tool_suggest = false
+multi_agent = false
+multi_agent_v2 = false
+enable_fanout = false
+memories = false
+exec_permission_approvals = false
+standalone_web_search = false
+realtime_conversation = false
+artifact = false
+prevent_idle_sleep = false
+image_generation = false
+in_app_browser = false
+browser_use = false
+browser_use_full_cdp_access = false
+browser_use_external = false
+computer_use = false
+skill_mcp_dependency_install = false
+request_permissions_tool = false
+auth_elicitation = false
+tool_call_mcp_elicitation = false
+guardian_approval = false
+workspace_dependencies = false
+hooks = false
+goals = false
+
+[mcp_servers.saihai_bridge.identity]
+command = { executable = "/usr/local/libexec/saihai-codex-main-agent-bridge", args = [] }
+
+# Installed plugins remain disabled by the feature pin.  The empty plugin
+# requirements table grants no plugin-owned MCP identity.
+[plugins]
+
+# Prevent adding or refreshing any user marketplace source while this
+# machine-wide frontend policy is active.
+[marketplaces]
+restrict_to_allowed_sources = true

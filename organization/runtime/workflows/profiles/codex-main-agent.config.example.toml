@@ -1,27 +1,88 @@
-# Saihai orchestrator-frontend Codex profile example.
-# Verified against codex-cli 0.141.0 with `codex --help` and the official
-# Codex manual fetched on 2026-07-08.
+# Saihai action-restricted Codex frontend profile.
 #
-# Install as:
-#   cp organization/runtime/workflows/profiles/codex-main-agent.config.example.toml \
-#      "$CODEX_HOME/saihai-main-agent.config.toml"
-#   mkdir -p "$CODEX_HOME/rules"
-#   cp organization/runtime/workflows/profiles/codex-main-agent.rules.example \
-#      "$CODEX_HOME/rules/saihai-main-agent.rules"
-#   codex --profile saihai-main-agent
+# This user/profile layer is intentionally redundant with the administrator
+# requirements template in this directory.  The profile supplies the bridge
+# endpoint and safe defaults.  Only requirements.toml can prevent a user or a
+# higher-precedence CLI/config layer from weakening those defaults.
 #
-# The launcher in this directory requires this profile and the matching rules
-# file to be installed, then also pins high-authority settings with CLI flags
-# and -c overrides.
+# Render RELEASE_ID with the reviewed release commit before installation. The
+# MCP server exposes exactly submit_request, read_projection, and ack_output.
 
-approval_policy = "on-request"
+approval_policy = "never"
 approvals_reviewer = "user"
-default_permissions = ":read-only"
+# `saihai_frontend` is defined and allowlisted by the administrator-owned
+# requirements file. Do not add `sandbox_mode` or pass `--sandbox`: Codex
+# permission profiles and the legacy sandbox selector do not compose.
+default_permissions = "saihai_frontend"
 allow_login_shell = false
 web_search = "disabled"
+# Codex 0.144.1 loads `notify` as a top-level profile key, then the legacy
+# notification hook executes a configured argv on the host. requirements.toml
+# has no constraint for this key, so the fixed root launcher must inject and
+# verify this exact empty list. This profile by itself is not claim evidence.
+notify = []
+# The staging tool replaces this marker with the exact contents of the
+# manifest-digested, root-owned instruction artifact. `developer_instructions`
+# augments Codex instructions; `model_instructions_file` is intentionally not
+# used because it replaces base model instructions in Codex 0.144.1.
+developer_instructions = '''@@SAIHAI_DEVELOPER_INSTRUCTIONS@@'''
 
 [features]
-hooks = true
+shell_tool = false
+shell_snapshot = false
+unified_exec = false
+code_mode = false
+code_mode_host = false
+code_mode_only = false
+apps = false
+plugins = false
+remote_plugin = false
+plugin_sharing = false
+tool_suggest = false
+multi_agent = false
+multi_agent_v2 = false
+enable_fanout = false
+memories = false
+exec_permission_approvals = false
+standalone_web_search = false
+realtime_conversation = false
+artifact = false
+prevent_idle_sleep = false
+image_generation = false
+in_app_browser = false
+browser_use = false
+browser_use_full_cdp_access = false
+browser_use_external = false
+computer_use = false
+skill_mcp_dependency_install = false
+request_permissions_tool = false
+auth_elicitation = false
+tool_call_mcp_elicitation = false
+guardian_approval = false
+workspace_dependencies = false
+hooks = false
+goals = false
 
-# Command-prefix auto-approval is a Codex rules concern, not a TOML key.
-# See codex-main-agent.rules.example for the allowed bridge/frontdoor prefixes.
+[mcp_servers.saihai_bridge]
+# The production MCP identity is a root-owned, zero-argument wrapper. It pins
+# the release bundle, frontend principal, managed primary checkout, workspace,
+# assurance/config paths, and the active registered worktree binding.
+command = "/usr/local/libexec/saihai-codex-main-agent-bridge"
+args = []
+# Deliberately omit `cwd`: Codex 0.144.1 launches an MCP server without an
+# explicit server cwd from the active turn cwd. The wrapper passes that `pwd -P`
+# value to the strict managed-primary/registered-worktree validator.
+enabled = true
+required = true
+startup_timeout_sec = 10
+tool_timeout_sec = 30
+enabled_tools = ["submit_request", "read_projection", "ack_output"]
+disabled_tools = [
+  "approve",
+  "classify",
+  "create_run",
+  "execute",
+  "provider_dispatch",
+  "shell",
+]
+default_tools_approval_mode = "auto"

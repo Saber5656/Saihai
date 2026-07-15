@@ -1,0 +1,136 @@
+{
+  "deployment_version": "1",
+  "deployment_id": "codex-main-agent-a-prime",
+  "release_commit": "0000000000000000000000000000000000000000",
+  "platform": "macos",
+  "expected_admin_uid": 0,
+  "topology": {
+    "frontend_policy_domain": "codex-main-agent-host",
+    "write_capable_worker_policy_domain": "saihai-worker-isolated",
+    "shared_rootfs": false,
+    "worker_isolation": "separate_host_vm_or_container"
+  },
+  "bindings": {
+    "frontdoor": "codex",
+    "principal_id": "codex-main-agent-a-prime",
+    "workspace_id": "Saber5656/Saihai",
+    "managed_primary": "/Users/YOU/dev/Saihai",
+    "checkout_binding": "launch_cwd_registered_worktree",
+    "workspace_catalog": "git_worktree_list",
+    "assurance_root": "/Library/Application Support/Saihai/Assurance",
+    "state_root_catalog": "/Users/YOU/dev/Saihai/directory-path.env",
+    "deployment_manifest_path": "/Library/Application Support/Saihai/Manifests/codex-main-agent.deployment.json",
+    "runtime_config_path": "/Library/Application Support/Saihai/Config/codex-main-agent.runtime.json",
+    "instructions_path": "/Library/Application Support/Saihai/Runtime/0000000000000000000000000000000000000000/organization/runtime/workflows/profiles/codex-main-agent.instructions.md",
+    "developer_instructions_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "runtime_user_uid": 501,
+    "runtime_user_name": "YOU",
+    "runtime_user_home": "/Users/YOU",
+    "codex_home": "/Users/YOU/.codex-saihai-main-agent",
+    "state_root": "/Users/YOU/.codex/state/itb/frontdoor-orchestrator",
+    "state_root_source": "default",
+    "state_root_catalog_observation": {
+      "status": "absent",
+      "device": 0,
+      "inode": 0,
+      "uid": 501,
+      "mode": "0000",
+      "size": 0,
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "artifacts": {
+    "runtime_bundle": {
+      "kind": "tree",
+      "path": "/Library/Application Support/Saihai/Runtime/0000000000000000000000000000000000000000",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0755",
+      "digest_algorithm": "saihai-tree-sha256-v1",
+      "entrypoint": "organization/runtime/workflows/scripts/main_agent_bridge_mcp.py",
+      "verifier": "organization/runtime/workflows/scripts/codex_main_agent_verify.py",
+      "deployment_module": "organization/runtime/workflows/scripts/codex_main_agent_deployment.py"
+    },
+    "bridge_wrapper": {
+      "kind": "file",
+      "path": "/usr/local/libexec/saihai-codex-main-agent-bridge",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0555"
+    },
+    "python_executable": {
+      "kind": "file",
+      "path": "/usr/bin/python3",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0755"
+    },
+    "runtime_config": {
+      "kind": "file",
+      "path": "/Library/Application Support/Saihai/Config/codex-main-agent.runtime.json",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0644"
+    },
+    "requirements": {
+      "kind": "file",
+      "path": "/private/etc/codex/requirements.toml",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0644"
+    },
+    "instructions": {
+      "kind": "file",
+      "path": "/Library/Application Support/Saihai/Runtime/0000000000000000000000000000000000000000/organization/runtime/workflows/profiles/codex-main-agent.instructions.md",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0644"
+    },
+    "codex_launcher": {
+      "kind": "file",
+      "path": "/usr/local/bin/saihai-codex-main-agent",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0555"
+    },
+    "codex_profile": {
+      "kind": "file",
+      "path": "/Users/YOU/.codex-saihai-main-agent/saihai-main-agent.config.toml",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0600"
+    },
+    "native_codex": {
+      "kind": "file",
+      "path": "/Library/Application Support/Saihai/Runtime/0000000000000000000000000000000000000000/bin/codex",
+      "sha256": "sha256:29915529b97697def1a957b0505e770aa6a45744435d62fc263e98d7619e167a",
+      "mode": "0555",
+      "version": "codex-cli 0.144.1",
+      "package": "@openai/codex",
+      "package_version": "0.144.1-darwin-arm64",
+      "package_integrity": "sha512-dABeDK+ATqMG54MGBd3VjpKfh5EOoqx9PKVQB2QYDaEXx3F6CdUCXue5QIMfr4OxziUj8pUcLAQyd+KFqiTUFw==",
+      "platform": "darwin",
+      "architecture": "arm64"
+    },
+    "supervisor": {
+      "kind": "file",
+      "path": "/Library/Application Support/Saihai/Runtime/0000000000000000000000000000000000000000/organization/runtime/workflows/scripts/codex_main_agent_supervisor.py",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0644"
+    },
+    "observer": {
+      "kind": "file",
+      "path": "/Library/Application Support/Saihai/Runtime/0000000000000000000000000000000000000000/organization/runtime/workflows/scripts/agent_integration_observer.py",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "0555"
+    }
+  },
+  "tool_contract": {
+    "server_name": "saihai_bridge",
+    "enabled_tools": [
+      "submit_request",
+      "read_projection",
+      "ack_output"
+    ],
+    "forbidden_tools": [
+      "approve",
+      "classify",
+      "create_run",
+      "execute",
+      "provider_dispatch",
+      "shell"
+    ]
+  }
+}

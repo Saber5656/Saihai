@@ -2,9 +2,9 @@
 # Verified against codex-cli 0.141.0 on 2026-07-12.
 #
 # State-root policy is intentionally fail-closed:
-# - omitting --state-root uses the runtime default and is allowed below;
-# - the exact disposable canary root is allowed for startup verification;
-# - every other explicit state root falls through to ask/deny.
+# - omitting --state-root resolves the configured canonical root and is allowed;
+# - every explicit state root falls through to ask/deny because execpolicy
+#   cannot prove that a dynamic catalog value is the configured canonical root.
 
 prefix_rule(
     pattern = ["python3", "scripts/configure_organization.py", "workflow-frontdoor", ["bridge-submit-request", "bridge-read-projection", "bridge-ack-output"]],
@@ -25,28 +25,7 @@ prefix_rule(
         "python3 scripts/configure_organization.py workflow-frontdoor child-thread-create --plan-json plan.json --result-json result.json",
         "python3 scripts/configure_organization.py workflow-frontdoor scoped-worker-derive --run-id run-example --step-id implement",
         "python3 scripts/configure_organization.py workflow-frontdoor scoped-worker-execute --capability-id cap-example",
-    ],
-)
-
-prefix_rule(
-    pattern = ["python3", "scripts/configure_organization.py", "workflow-frontdoor", "--state-root", "/tmp/saihai-frontdoor-canary", ["bridge-submit-request", "bridge-read-projection", "bridge-ack-output"]],
-    decision = "allow",
-    justification = "Main-agent bridge commands are allowed only with the fixed disposable canary state root; arbitrary roots and execution/action-gateway commands are not.",
-    match = [
-        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary bridge-submit-request --request-json request.json",
-        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary bridge-read-projection --request-id req-example",
-        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary bridge-ack-output --request-id req-example",
-    ],
-    not_match = [
-        "git status",
-        "python3 scripts/saihai.py frontdoor status --request-id req-example",
-        "python3 scripts/saihai.py frontdoor approve --request-id req-example --nonce nonce-example",
         "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/frontdoor-state bridge-read-projection --request-id req-example",
-        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary create-run --request-id req-example",
-        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary drain --run-id run-example",
-        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary run-provider --run-id run-example --adapter-json adapter.json",
-        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary child-thread-create --plan-json plan.json --result-json result.json",
-        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary scoped-worker-derive --run-id run-example --step-id implement",
-        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary scoped-worker-execute --capability-id cap-example",
+        "python3 scripts/configure_organization.py workflow-frontdoor --state-root /tmp/saihai-frontdoor-canary bridge-read-projection --request-id req-example",
     ],
 )

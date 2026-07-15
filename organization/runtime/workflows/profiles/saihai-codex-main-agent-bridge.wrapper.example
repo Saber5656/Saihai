@@ -1,0 +1,61 @@
+#!/bin/sh
+# Rendered and installed by codex_main_agent_install.py. Do not execute this
+# template directly. The installed wrapper accepts no client arguments.
+
+set -eu
+
+if [ "$#" -ne 0 ]; then
+  echo "refused: Saihai bridge wrapper accepts no arguments" >&2
+  exit 64
+fi
+
+python_executable=@@PYTHON_EXECUTABLE@@
+python_sha256=@@PYTHON_SHA256@@
+verifier=@@VERIFIER@@
+verifier_sha256=@@VERIFIER_SHA256@@
+deployment_module=@@DEPLOYMENT_MODULE@@
+deployment_module_sha256=@@DEPLOYMENT_MODULE_SHA256@@
+manifest=@@MANIFEST@@
+entrypoint=@@ENTRYPOINT@@
+frontdoor=@@FRONTDOOR@@
+principal_id=@@PRINCIPAL_ID@@
+workspace_id=@@WORKSPACE_ID@@
+managed_primary=@@MANAGED_PRIMARY@@
+state_root=@@STATE_ROOT@@
+state_root_catalog=@@STATE_ROOT_CATALOG@@
+state_root_catalog_status=@@STATE_ROOT_CATALOG_STATUS@@
+state_root_catalog_sha256=@@STATE_ROOT_CATALOG_SHA256@@
+
+digest_file() {
+  /usr/bin/shasum -a 256 "$1" | /usr/bin/cut -d ' ' -f 1
+}
+
+if [ "sha256:$(digest_file "$python_executable")" != "$python_sha256" ]; then
+  echo "blocked: pinned Python executable digest mismatch" >&2
+  exit 78
+fi
+if [ "sha256:$(digest_file "$verifier")" != "$verifier_sha256" ]; then
+  echo "blocked: deployment verifier digest mismatch" >&2
+  exit 78
+fi
+if [ "sha256:$(digest_file "$deployment_module")" != "$deployment_module_sha256" ]; then
+  echo "blocked: deployment verifier module digest mismatch" >&2
+  exit 78
+fi
+
+/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
+  "$python_executable" -I -B "$verifier" --manifest "$manifest" --quiet
+
+checkout_root=$(pwd -P)
+# The values below came from the root-owned deployment manifest. The deployed
+# module uses the fixed state root directly; it never re-resolves authority
+# from the mutable user catalog. The verifier above compares the catalog's
+# sealed presence/identity/digest and fails closed on drift.
+exec /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
+  "$python_executable" -I -B "$entrypoint" \
+  --frontdoor "$frontdoor" \
+  --principal-id "$principal_id" \
+  --workspace-id "$workspace_id" \
+  --managed-primary "$managed_primary" \
+  --checkout-root "$checkout_root" \
+  --state-root "$state_root"
