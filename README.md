@@ -23,11 +23,35 @@ human-owned operations and are separate from merging a release-preparation PR.
 
 The v0.1.0 certainty and authority boundary is deliberately narrow:
 
-- A frontend/main agent can submit a typed request, read a redacted projection,
-  and acknowledge output. It cannot supply authoritative classification or
-  approval, create runs, choose raw commands or paths, or publish changes.
-- A host-owned executor may derive a capability from an approved work order and
-  launch a pinned, bounded Codex CLI worker in the planned task worktree.
+- The Saihai bridge accepts only typed-request submission, redacted-projection
+  reads, and output acknowledgement. It rejects frontend-supplied
+  classification, approval, run creation, raw commands or paths, and
+  publication authority. This API restriction alone does not remove ambient
+  authority from an independently launched agent.
+- The redacted projection exposes an idempotency digest for deterministic
+  correlation, never the raw key. Child-thread and worker summaries are shown
+  only when request, task, owner-principal, and checkout bindings all match;
+  missing or legacy-unbound summaries remain hidden.
+- The only shipped enforcement target is the release-pinned stock Codex CLI
+  started through the root-owned zero-argument launcher. With a current
+  `action_enforced` generation, its frontend-positive path is exactly one typed
+  submit that stops at `waiting_human`; it creates no capability, worker, run,
+  provider dispatch, or other downstream execution. Codex App, IDE, and direct
+  Codex launches are outside this claim, and no `ingress_enforced` claim is made.
+- An authority decision is bound to the current live launcher process and the
+  current deployment epoch. Activation, rollback, and uninstall revoke the
+  prior epoch before changing deployment targets, so restored bytes still
+  require fresh commissioning and sealing.
+- Frontend `credential_access = denied` is limited to the two known Codex auth
+  paths, the dedicated `CODEX_HOME`, and the absence of credential-capable tool
+  classes in the fixed inventory. It does not claim that every user-readable
+  file which might contain a secret is inaccessible.
+- A host-owned executor can derive a capability from an approved work order and
+  launch a pinned, bounded Codex CLI worker only while current
+  `action_enforced` and `managed_worker` generations both verify. The worker
+  requires a separately governed policy domain. v0.1.0 ships no automatic
+  cross-domain transport from the frontend gateway to that worker domain. No
+  active `managed_worker` generation is currently claimable on the same rootfs.
 - The shipped scoped-worker executor rejects all network and provider grants.
   The opt-in live provider adapters are a separate host-owned readonly path.
 - Commit, push, and pull-request publication remain behind separate review,
@@ -48,6 +72,8 @@ v0.1.0 runtime boundary.
 - The checkout is the host-managed primary checkout at `~/dev/Saihai` or a
   linked worktree whose primary is that checkout; `directory-path.env` and
   `--state-root` do not make an arbitrary clone valid
+- The runtime user's home is a canonical, non-symlink directory owned by that
+  user and is not group- or world-writable
 - Provider CLIs and credentials only when an operator intentionally enables a
   live provider; the offline path does not require them
 
@@ -64,9 +90,13 @@ python3 scripts/setup_directory_paths.py --check
 ```
 
 The setup command is non-destructive and writes an owner-only file. Process
-environment values take precedence over catalog values, including values that
-are explicitly empty. See [Local environment configuration](docs/configuration.md)
-for resolution and recovery rules, and
+environment values generally take precedence over catalog values, including
+values that are explicitly empty. The orchestrator state-root key
+`SAIHAI_ORCH_STATE_ROOT` is the deliberate exception: process environment
+values cannot override it, and an explicit CLI `--state-root` must exactly
+match the catalog/default canonical root. See
+[Local environment configuration](docs/configuration.md) for resolution and
+recovery rules, and
 [Directory path variable inventory](docs/environment-variable-inventory.md)
 for the complete path audit.
 
@@ -93,9 +123,9 @@ for the complete path audit.
 | Recovery | The compatibility harness provides typed `resume`, `abort`, `task-view`, and `lock-status` operations over durable state. |
 | Provider runner | `run-provider` dispatches the deterministic fake provider or a pinned `claude_headless_p0` / `codex_cli_openai_p0` live adapter and writes runner-owned typed reports, normalized evidence, and confined transcripts. |
 | Report and completion gates | Typed reports and normalized provider evidence are canonical. `verify-completion` separately checks terminal artifacts and produces the thin Vault evidence block. |
-| Main-agent bridge | A main agent may submit a request, read a redacted projection, and acknowledge output. It cannot supply authoritative classification, approval, run creation, adapter preparation, or report paths. |
-| Child-thread action gateway | `child-thread-create` records a validated issue-scoped child-worktree plan and result. Main-agent projections contain only a redacted summary. |
-| Scoped worker executor | A host derives a capability from an approved work order and may run a pinned Codex CLI worker in the task worktree. Capability issuance and execution are restricted to the credential-bound `action_gateway` channel. |
+| Main-agent bridge | The bridge accepts request submission, redacted-projection reads, and output acknowledgement, while rejecting authoritative classification, approval, run creation, adapter preparation, and report paths. The projection exposes an idempotency digest, never the raw key. This API contract alone does not remove ambient authority from an independently launched agent. |
+| Child-thread action gateway | `child-thread-create` records a validated issue-scoped child-worktree plan and result. Main-agent projections contain only a redacted summary whose request, task, owner-principal, and checkout bindings all match the current request. |
+| Scoped worker executor | The executor contract and commissioning scaffolding are implemented, but `managed_worker` is suppressed because current same-rootfs external-mutation/git/credential facts are non-promotable. Derive and execute require both claims and recheck the per-capability repository/worktree binding. Only an isolated worker domain with stronger evidence may activate the claim, and no automatic transport to that domain is shipped. |
 | Status viewer | The local dashboard reads ITB sessions, queues, reports, role metadata, organization settings, workflow runs, and lock state without mutating runtime state. |
 
 ## Explicit non-goals
@@ -287,6 +317,8 @@ The frontdoor harness currently implements:
 | `bridge-submit-request`, `bridge-read-projection`, `bridge-ack-output` | Operate the constrained main-agent bridge. |
 | `child-thread-create` | Record a validated child-thread plan and result through the action gateway. |
 | `channel-token` | Create an owner-only local HTTP channel-token file. |
+| `bridge-retention-purge` | Redact eligible terminal prompts and purge only expired bridge indexes, acknowledgements, rate-limit records, and rotated audit files. |
+| `state-permission-repair` | Audit private state modes; add `--apply` only from the local manual-operator path to repair legacy modes and write durable evidence. |
 
 The default orchestrator state root is
 `~/.codex/state/itb/frontdoor-orchestrator`. To place it elsewhere, set
@@ -300,10 +332,76 @@ Linked worktrees consult only the host-managed primary checkout at
 fallback path. `--state-root` confirms the configured canonical root and cannot
 select an arbitrary location.
 
+### Agent-independent A′ frontend
+
+The portable A-prime (`A′`) model does not require Saihai to own every agent
+product's normal UI, authentication, or session lifecycle.  Each adapter must
+still declare the concrete boundary it can enforce.  For requests submitted
+through the bridge, Saihai owns the typed request and every later approval,
+capability, side-effect, and evidence gate.  This does not claim that every
+prompt entrypoint is ingress-enforced.
+
+The machine-readable assurance contract keeps four independent states distinct:
+
+| State | Claim |
+|---|---|
+| `advisory` | Instructions or observations only; no mechanical guarantee. |
+| `ingress_enforced` | Every declared prompt entry reaches Saihai or stops. |
+| `action_enforced` | Declared direct side-effect paths are denied and the target's typed Saihai gateway is the only positive path. This does not imply worker execution. |
+| `managed_worker` | Saihai owns the bounded worker runtime, binary/config, environment, timeout, and evidence; each capability separately binds the actual repository/worktree. |
+
+Codex is the first concrete frontend target. The claim is limited to the
+release-pinned stock Codex CLI 0.144.1 process started by the root-owned Saihai
+launcher; Codex App and IDE sessions are unsupported for this claim because
+their app-server client can inject dynamic tools that the current requirements
+cannot deny. The normal human entrypoint is the zero-argument command
+`/usr/bin/sudo /usr/local/bin/saihai-codex-main-agent`; a standard supervisor
+session and a short-lived fixed commissioning session have different records
+and must not be treated as interchangeable. The target is `action_enforced`;
+Saihai does not claim that every Codex prompt entrypoint is `ingress_enforced`.
+
+The bridge MCP server exposes exactly three server-backed tools:
+`submit_request`, `read_projection`, and `ack_output`. Its commissioned positive
+observation is exactly one typed submit whose stored request is
+`waiting_human`, with no capability, worker execution, run, provider evidence,
+report, or marker change. Reviewed read-only/internal Codex tools may still be
+visible, and any visible `apply_patch` must fail the real write canary. The
+target remains suppressed until the root-owned deployment and CLI binary,
+machine-wide requirements, independent host observations, and an immutable
+generation are sealed and selected by the active pointer. A mutable user
+profile supplies development and routing defaults only. Claude remains
+advisory; Cursor and Grok record future target contracts but remain suppressed
+candidate/unavailable integrations.
+
+```sh
+python3 organization/runtime/workflows/scripts/agent_integration_assurance.py report
+```
+
+See the [main-agent action-enforcement runbook](docs/runbooks/main-agent-enforcement.md)
+for the Codex profile, required administrator deployment, canaries, and the
+worker policy-domain limitation.  The first workspace binding is
+`Saber5656/Saihai`; other repositories fail closed until a host-owned binding
+is added and attested.
+
 ### Scoped worker backend
 
 The live scoped-worker backend fails closed until a host operator manually
 configures the following assets. Sahai never generates keys or credentials.
+
+The executor implementation is shipped, but the live `managed_worker` claim is
+suppressed. Codex 0.144.1 cannot prove absolute denial of a same-rootfs local
+`git push`; current worker commissioning may record evidence, but
+`commission-seal` fails closed with `worker_denial_facts_not_promotable`. An
+active worker claim requires evidence from a separately isolated policy domain.
+The current `external_mutation`, `git_commit`, `git_push`, and
+`credential_access` facts have `result=fail` with inconclusive host
+observations. In particular,
+`workspace_profile_and_network_disabled_not_same_rootfs_isolation` and
+`dedicated_auth_deny_configured_not_mechanically_proven` are explicit
+non-claims, not mechanical denial evidence.
+The shipped local action gateway does not provide automatic transport to such a
+domain, so the current release is not an automatically connected end-to-end
+worker system.
 
 | Environment variable | Purpose |
 |---|---|
@@ -314,12 +412,14 @@ configures the following assets. Sahai never generates keys or credentials.
 | `SAIHAI_SCOPED_CODEX_HOME` | Dedicated worker runtime/auth root; the main-agent profile is not inherited. |
 | `SAIHAI_ENABLE_SCOPED_WORKER_LIVE=1` | Explicit live-execution gate. Without it, only the deterministic fake harness is available. |
 
-The initial v1 mechanically accepts only the whole task worktree as scope.
-Subpath grants, commit, push, PR publication, worker-tool network, and arbitrary
-providers fail closed. The fixed Codex model control plane is host transport,
-not a network or provider grant to worker tools. Capability issuance and
-execution are available only through the credential-bound `action_gateway`
-HTTP channel, not through a CLI subcommand.
+The initial v1 capability authorizes only the whole task worktree as scope.
+Subpath grants, commit, push, PR publication, credential access, worker-tool
+network, and arbitrary providers are outside that authorized capability.
+Same-rootfs hardening is defense in depth and is not promotable assurance; do
+not infer active native enforcement from the schema or probe records. The fixed
+Codex model control plane is host transport, not a network or provider grant to
+worker tools. Capability issuance and execution are available only through the
+credential-bound `action_gateway` HTTP channel, not through a CLI subcommand.
 
 ## Offline validation
 
@@ -464,6 +564,16 @@ Viewer role states are derived as follows:
 | Task view | `workflow-frontdoor task-view` / `GET /orchestrator/tasks/{task_id}/runs` | Derived thin links/status and queue-shaped evidence. |
 | Role queue files | `<session_dir>/queue/inbox`, `<session_dir>/queue/tasks`, `<session_dir>/queue/reports` | Canonical ITB role-queue evidence; the orchestrator does not write it. |
 | Audit log | `<state_root>/audit/*.jsonl` | Principal-scoped transition, replay, rejection, and acknowledgement evidence. |
+| Main-agent deployment | `/Library/Application Support/Saihai/Manifests/codex-main-agent.deployment.json`, `/Library/Application Support/Saihai/Config/codex-main-agent.runtime.json` | Root-owned release, wrapper, requirements, profile, instruction, workspace, and policy-domain bindings. |
+| Private commissioning record | `/Library/Application Support/Saihai/Assurance/commissioning/<profile_id>/<commissioning_id>.json` | Root-only, single-use commissioning lifecycle record. |
+| Deployment epoch | `/Library/Application Support/Saihai/Assurance/epochs/<profile_id>.json` | Root-owned transition/revocation state; every deployment transition invalidates older generation bindings. |
+| Immutable assurance generation | `/Library/Application Support/Saihai/Assurance/generations/<profile_id>/<generation_id>/` | Generation manifest, attestation, observer records, observations, evidence, fixed markers, and canaries. Model prose is not authority. |
+| Active generation pointer | `/Library/Application Support/Saihai/Assurance/active/<profile_id>.json` | Atomically selected generation revalidated by each action gate. |
+| Launch-session records | `/Library/Application Support/Saihai/Assurance/launch-sessions/<session_id>.json`, `/Library/Application Support/Saihai/Assurance/commissioning-launches/<session_id>.json` | Root-owned standard and commissioning launch bindings; the two session types are not interchangeable. |
+
+Public assurance directories/files, including `epochs`, use exact `0755`/`0644`; private
+`commissioning/**` uses exact `0700`/`0600`, and lock files use `0600`. Owner or
+mode drift suppresses the affected claim.
 
 ## Workflow contracts
 
