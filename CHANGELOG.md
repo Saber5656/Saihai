@@ -37,6 +37,7 @@ release has been published.
 - [#88](https://github.com/Saber5656/Saihai/pull/88) added confined, opt-in live Claude and Codex provider adapters.
 - [#89](https://github.com/Saber5656/Saihai/pull/89) added the orchestrator failure-mode regression matrix.
 - [#90](https://github.com/Saber5656/Saihai/pull/90) added focused acceptance tests for the standard, research, policy, and security templates.
+- [#95](https://github.com/Saber5656/Saihai/pull/95) added the pinned Codex CLI deployment, exact process assurance, and deterministic read-only main-agent frontdoor.
 
 ### Safety
 
