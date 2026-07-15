@@ -2039,7 +2039,7 @@ def resolve_checkout_identity(
         branch = "detached"
 
     material = {
-        "identity_version": "1",
+        "identity_version": "2",
         "workspace_id": workspace_id,
         "checkout_kind": (
             "managed_primary" if checkout == primary else "registered_linked_worktree"
@@ -2051,7 +2051,6 @@ def resolve_checkout_identity(
         "tree_sha": tree_sha,
         "git_common_dir_digest": "sha256:"
         + hashlib.sha256(str(primary_common).encode("utf-8")).hexdigest(),
-        "worktree_catalog_digest": "sha256:" + stable_digest(catalog),
         "worktree_state_digest": _checkout_worktree_state_digest(checkout),
     }
     return {**material, "identity_digest": "sha256:" + stable_digest(material)}
@@ -2068,14 +2067,13 @@ def validate_checkout_identity(value: Any) -> dict[str, str]:
         "head_sha",
         "tree_sha",
         "git_common_dir_digest",
-        "worktree_catalog_digest",
         "worktree_state_digest",
         "identity_digest",
     }
     if not isinstance(value, dict) or set(value) != required:
         raise FrontdoorError("checkout_identity has an invalid field set")
     normalized = {key: str(value[key]) for key in required}
-    if normalized["identity_version"] != "1":
+    if normalized["identity_version"] != "2":
         raise FrontdoorError("checkout_identity version is unsupported")
     if normalized["checkout_kind"] not in {
         "managed_primary",
@@ -2084,7 +2082,6 @@ def validate_checkout_identity(value: Any) -> dict[str, str]:
         raise FrontdoorError("checkout_identity kind is unsupported")
     for field in (
         "git_common_dir_digest",
-        "worktree_catalog_digest",
         "worktree_state_digest",
         "identity_digest",
     ):
@@ -3382,7 +3379,6 @@ def redacted_checkout_identity(value: Any) -> dict[str, Any] | None:
         "head_sha": value.get("head_sha"),
         "tree_sha": value.get("tree_sha"),
         "git_common_dir_digest": value.get("git_common_dir_digest"),
-        "worktree_catalog_digest": value.get("worktree_catalog_digest"),
         "worktree_state_digest": value.get("worktree_state_digest"),
         "identity_digest": value.get("identity_digest"),
         "paths_redacted": True,

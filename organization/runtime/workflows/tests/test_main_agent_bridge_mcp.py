@@ -656,13 +656,35 @@ def test_registered_primary_and_linked_worktree_identity_acceptance_and_clone_re
         )
         assert_equal(linked_identity["branch"], "feature", "linked branch binding")
         assert linked_identity["head_sha"] == primary_identity["head_sha"]
+        assert_equal(linked_identity["identity_version"], "2", "stable identity version")
+        assert "worktree_catalog_digest" not in linked_identity
         for field in (
             "identity_digest",
             "git_common_dir_digest",
-            "worktree_catalog_digest",
             "worktree_state_digest",
         ):
             assert linked_identity[field].startswith("sha256:")
+
+        sibling = base / "sibling"
+        git(primary, "worktree", "add", "-b", "sibling", str(sibling))
+        after_sibling = mcp.frontdoor.resolve_checkout_identity(
+            workspace_id=mcp.WORKSPACE_ID,
+            managed_primary=primary,
+            checkout_root=linked,
+        )
+        assert_equal(
+            after_sibling["identity_digest"],
+            linked_identity["identity_digest"],
+            "unrelated sibling worktree does not invalidate checkout identity",
+        )
+        try:
+            mcp.frontdoor.validate_checkout_identity(
+                {**linked_identity, "identity_version": "1"}
+            )
+        except mcp.frontdoor.FrontdoorError as exc:
+            assert "version is unsupported" in str(exc)
+        else:
+            raise AssertionError("v1 checkout identity must require re-minting")
 
         # The immutable runtime bundle is executable code only. Context refs
         # must bind to the active registered checkout selected by the wrapper.

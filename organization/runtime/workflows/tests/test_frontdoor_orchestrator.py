@@ -3541,6 +3541,45 @@ def test_host_launch_session_live_identity_negative_matrix() -> None:
             )
             assert_equal(accepted["process_start_token"], child_token, "live launch accepted")
 
+            sibling = root / "sibling"
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "worktree",
+                    "add",
+                    "-b",
+                    "launch-sibling",
+                    str(sibling),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            stable_checkout = frontdoor.resolve_checkout_identity(
+                workspace_id="Saber5656/Saihai",
+                managed_primary=repo,
+                checkout_root=repo,
+            )
+            assert_equal(
+                stable_checkout["identity_digest"],
+                checkout["identity_digest"],
+                "sibling worktree leaves launch identity stable",
+            )
+            revalidated = verifier.verify_parent_session(
+                subject_pid=child.pid,
+                profile_id="codex-main-agent-a-prime",
+                principal_id="codex-main-agent-a-prime",
+                workspace_id="Saber5656/Saihai",
+                checkout_identity=stable_checkout,
+            )
+            assert_equal(
+                revalidated["record_digest"],
+                accepted["record_digest"],
+                "existing launch record remains valid after sibling worktree change",
+            )
+
             clear()
             write(record(process_start_token="proc-" + "9" * 64))
             assert_launch_reason(

@@ -2729,7 +2729,6 @@ CHECKOUT_IDENTITY_FIELDS = {
     "head_sha",
     "tree_sha",
     "git_common_dir_digest",
-    "worktree_catalog_digest",
     "worktree_state_digest",
     "identity_digest",
 }
@@ -2755,7 +2754,7 @@ def _validate_checkout_identity_shape(value: Any) -> dict[str, str]:
     if not isinstance(value, dict) or set(value) != CHECKOUT_IDENTITY_FIELDS:
         raise AssuranceGateError("checkout_identity_invalid")
     normalized = {key: str(value[key]) for key in CHECKOUT_IDENTITY_FIELDS}
-    if normalized["identity_version"] != "1":
+    if normalized["identity_version"] != "2":
         raise AssuranceGateError("checkout_identity_invalid")
     if normalized["checkout_kind"] not in {"managed_primary", "registered_linked_worktree"}:
         raise AssuranceGateError("checkout_identity_invalid")
@@ -2765,7 +2764,6 @@ def _validate_checkout_identity_shape(value: Any) -> dict[str, str]:
         raise AssuranceGateError("checkout_identity_invalid")
     for field in (
         "git_common_dir_digest",
-        "worktree_catalog_digest",
         "worktree_state_digest",
         "identity_digest",
     ):
