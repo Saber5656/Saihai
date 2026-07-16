@@ -3522,7 +3522,7 @@ def test_host_launch_session_live_identity_negative_matrix() -> None:
         profile.write_text("fixed profile\n", encoding="utf-8")
         profile.chmod(0o600)
         child = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
+            ["/bin/sleep", "60"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
