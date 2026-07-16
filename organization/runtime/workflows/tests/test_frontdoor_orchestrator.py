@@ -1006,6 +1006,13 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(transcript_path.read_bytes(), transcript_before, "duplicate prepare transcript")
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in {
+            evidence_path.parent.parent,
+            evidence_path.parent,
+            report_path.parent.parent,
+            report_path.parent,
+        }:
+            directory.chmod(0o700)
         write_normalized_provider_evidence(
             adapter_request,
             request_id="req-frontdoor",
@@ -1038,6 +1045,7 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             },
         }
         report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        report_path.chmod(0o600)
 
         validated = load_payload(
             run_frontdoor(
@@ -1109,10 +1117,12 @@ def test_manual_prepare_evidence_contract_validates_report() -> None:
             request_id=request_id,
             run_id=run_id,
         )
-        Path(adapter_request["report_path"]).write_text(
+        report_path = Path(adapter_request["report_path"])
+        report_path.write_text(
             json.dumps(report, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+        report_path.chmod(0o600)
         validated = load_payload(
             run_frontdoor(state_root, "validate-report", "--run-id", run_id)
         )
@@ -1444,6 +1454,15 @@ def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in {
+            evidence_path.parent.parent,
+            evidence_path.parent,
+            transcript_path.parent.parent,
+            transcript_path.parent,
+            report_path.parent.parent,
+            report_path.parent,
+        }:
+            directory.chmod(0o700)
         write_normalized_provider_evidence(
             adapter_request,
             request_id="req-linked",
@@ -1457,6 +1476,7 @@ def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
             + "\n",
             encoding="utf-8",
         )
+        report_path.chmod(0o600)
         validated = load_payload(run_frontdoor(state_root, "validate-report", "--run-id", "run-linked", env=env))
         assert_equal(validated["workflow_run"]["run_state"], "complete", "linked run complete")
         index = json.loads(index_path.read_text(encoding="utf-8"))
@@ -2914,7 +2934,9 @@ def test_validate_report_rejects_malformed_findings() -> None:
                 }
             ],
         )
-        Path(adapter_request["report_path"]).write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        report_path = Path(adapter_request["report_path"])
+        report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        report_path.chmod(0o600)
         bad_findings = run_frontdoor(state_root, "validate-report", "--run-id", "run-bad-findings", check=False)
         payload = load_payload(bad_findings)
         assert_equal(bad_findings.returncode, 2, "malformed findings exit")

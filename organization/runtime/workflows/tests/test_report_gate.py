@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from test_frontdoor_orchestrator import (
     run_frontdoor,
 )
 
+import report_gate
 import run_lifecycle
 import run_store
 
@@ -35,6 +37,7 @@ def write_report(adapter_request: dict, *, request_id: str, run_id: str, **overr
             report[key] = value
     path = Path(adapter_request["report_path"])
     path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.chmod(0o600)
     return report
 
 
@@ -197,7 +200,7 @@ def test_adapter_request_metadata_must_match_registry() -> None:
         request_id = "req-adapter-request-metadata"
         adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
         request_path = (
-            state_root
+            Path(adapter["work_order_path"]).parents[2]
             / "adapter-requests"
             / run_id
             / "review-claude_headless_p0.json"
@@ -228,12 +231,14 @@ def test_adapter_request_authority_fails_closed_when_missing_or_ambiguous() -> N
             run_id = f"run-authority-{name}"
             request_id = f"req-authority-{name}"
             adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
-            request_dir = state_root / "adapter-requests" / run_id
+            request_dir = Path(adapter["work_order_path"]).parents[2] / "adapter-requests" / run_id
             request_path = request_dir / "review-claude_headless_p0.json"
             if name == "missing":
                 request_path.unlink()
             else:
-                (request_dir / "review-decoy.json").write_text("{}\n", encoding="utf-8")
+                decoy_path = request_dir / "review-decoy.json"
+                decoy_path.write_text("{}\n", encoding="utf-8")
+                decoy_path.chmod(0o600)
             write_report(adapter, request_id=request_id, run_id=run_id)
 
             blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
@@ -255,7 +260,7 @@ def test_run_provider_transition_authority_does_not_fallback_to_manual_requests(
             request_id = f"req-transition-authority-{name}"
             adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
             request_path = (
-                state_root
+                Path(adapter["work_order_path"]).parents[2]
                 / "adapter-requests"
                 / run_id
                 / "review-claude_headless_p0.json"
@@ -264,6 +269,7 @@ def test_run_provider_transition_authority_does_not_fallback_to_manual_requests(
             if name == "ambiguous":
                 decoy_path = request_path.with_name("review-decoy.json")
                 decoy_path.write_text("{}\n", encoding="utf-8")
+                decoy_path.chmod(0o600)
                 artifact_refs = [str(request_path), str(decoy_path)]
 
             run = run_store.load_run(state_root, run_id)
@@ -395,12 +401,89 @@ def test_evidence_path_escape_is_scope_violation() -> None:
         assert "evidence_path_escape" in payload["errors"]
 
 
+def test_adapter_request_symlink_is_rejected_without_reading_target() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-adapter-request-symlink"
+        request_id = "req-adapter-request-symlink"
+        adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
+        request_path = (
+            Path(adapter["work_order_path"]).parents[2]
+            / "adapter-requests"
+            / run_id
+            / "review-claude_headless_p0.json"
+        )
+        victim = state_root / "outside-adapter-request.json"
+        victim.write_bytes(request_path.read_bytes())
+        victim.chmod(0o600)
+        before = victim.read_bytes()
+        request_path.unlink()
+        request_path.symlink_to(victim)
+        write_report(adapter, request_id=request_id, run_id=run_id)
+
+        blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "adapter request symlink exit")
+        assert_equal(payload["outcome"], "report_invalid", "adapter request symlink outcome")
+        assert any("unsafe request artifacts" in item for item in payload["errors"]), payload["errors"]
+        assert_equal(victim.read_bytes(), before, "adapter request symlink target unchanged")
+
+
+def test_provider_evidence_hardlink_is_rejected_without_hashing_target() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-evidence-hardlink"
+        request_id = "req-provider-evidence-hardlink"
+        adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
+        evidence_path = Path(adapter["evidence_path"])
+        victim = state_root / "outside-provider-evidence.json"
+        victim.write_bytes(evidence_path.read_bytes())
+        victim.chmod(0o600)
+        before = victim.read_bytes()
+        evidence_path.unlink()
+        os.link(victim, evidence_path)
+        write_report(adapter, request_id=request_id, run_id=run_id)
+
+        blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "provider evidence hardlink exit")
+        assert_equal(payload["outcome"], "report_invalid", "provider evidence hardlink outcome")
+        assert any("not a safe private artifact" in item for item in payload["errors"]), payload["errors"]
+        transition = json.loads(Path(payload["transition_artifact_path"]).read_text(encoding="utf-8"))
+        assert_equal(transition["evidence_sha256"], None, "unsafe evidence is not hashed")
+        assert_equal(victim.read_bytes(), before, "provider evidence hardlink target unchanged")
+
+
+def test_report_symlink_is_rejected_before_target_read() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-report-symlink"
+        request_id = "req-report-symlink"
+        adapter = prepare_review_handoff(state_root, request_id=request_id, run_id=run_id)
+        report = external_review_report(adapter, request_id=request_id, run_id=run_id)
+        victim = state_root / "outside-report.json"
+        victim.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        victim.chmod(0o600)
+        before = victim.read_bytes()
+        report_path = Path(adapter["report_path"])
+        report_path.symlink_to(victim)
+
+        try:
+            report_gate.gate_report(state_root, run_id)
+        except report_gate.ReportGateError as exc:
+            assert "canonical report path must stay under reports state directory" in str(exc)
+        else:
+            raise AssertionError("report symlink should be rejected before reading its target")
+        assert_equal(victim.read_bytes(), before, "report symlink target unchanged")
+
+
 def test_legacy_claude_transcript_path_is_accepted_for_inflight_requests() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         adapter = prepare_review_handoff(state_root, request_id="req-legacy-transcript", run_id="run-legacy-transcript")
         legacy_transcript = Path(adapter["transcript_path"]).with_name("review-claude-transcript.json")
         legacy_transcript.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+        legacy_transcript.chmod(0o600)
         write_report(
             adapter,
             request_id="req-legacy-transcript",
@@ -423,7 +506,9 @@ def test_identity_mismatch_is_scope_violation() -> None:
         adapter = prepare_review_handoff(state_root, request_id="req-identity", run_id="run-identity")
         report = external_review_report(adapter, request_id="req-identity", run_id="run-identity")
         report["run_id"] = "run-other"
-        Path(adapter["report_path"]).write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        report_path = Path(adapter["report_path"])
+        report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        report_path.chmod(0o600)
 
         blocked = run_frontdoor(state_root, "validate-report", "--run-id", "run-identity", check=False)
         payload = load_payload(blocked)
@@ -438,7 +523,9 @@ def test_missing_identity_is_invalid_report() -> None:
         adapter = prepare_review_handoff(state_root, request_id="req-missing-identity", run_id="run-missing-identity")
         report = external_review_report(adapter, request_id="req-missing-identity", run_id="run-missing-identity")
         del report["run_id"]
-        Path(adapter["report_path"]).write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        report_path = Path(adapter["report_path"])
+        report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        report_path.chmod(0o600)
 
         blocked = run_frontdoor(state_root, "validate-report", "--run-id", "run-missing-identity", check=False)
         payload = load_payload(blocked)
@@ -486,6 +573,7 @@ def test_malformed_report_json_fails_closed() -> None:
         adapter = prepare_review_handoff(state_root, request_id="req-malformed-json", run_id="run-malformed-json")
         report_path = Path(adapter["report_path"])
         report_path.write_text("{not-json\n", encoding="utf-8")
+        report_path.chmod(0o600)
 
         blocked = run_frontdoor(state_root, "validate-report", "--run-id", "run-malformed-json", check=False)
         payload = load_payload(blocked)
@@ -507,7 +595,9 @@ def test_unreadable_report_shapes_fail_closed() -> None:
             state_root = Path(raw_tmp)
             run_id = f"run-report-{suffix}"
             adapter = prepare_review_handoff(state_root, request_id=f"req-report-{suffix}", run_id=run_id)
-            Path(adapter["report_path"]).write_bytes(content)
+            report_path = Path(adapter["report_path"])
+            report_path.write_bytes(content)
+            report_path.chmod(0o600)
 
             blocked = run_frontdoor(state_root, "validate-report", "--run-id", run_id, check=False)
             payload = load_payload(blocked)
@@ -634,6 +724,9 @@ def main() -> None:
         test_nested_transcript_leak_is_scope_violation,
         test_undecodable_normalized_evidence_is_invalid_report,
         test_evidence_path_escape_is_scope_violation,
+        test_adapter_request_symlink_is_rejected_without_reading_target,
+        test_provider_evidence_hardlink_is_rejected_without_hashing_target,
+        test_report_symlink_is_rejected_before_target_read,
         test_legacy_claude_transcript_path_is_accepted_for_inflight_requests,
         test_identity_mismatch_is_scope_violation,
         test_missing_identity_is_invalid_report,
