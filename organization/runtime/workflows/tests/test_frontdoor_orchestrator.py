@@ -2587,6 +2587,62 @@ def test_context_ref_boundary_blocks_exfiltration_paths() -> None:
             raise AssertionError("context ref count cap should be enforced")
 
 
+def test_deterministic_ref_denylist_and_repo_name_validation() -> None:
+    frontdoor = load_server_module().frontdoor
+    denied_names = (
+        ".env.production",
+        "id_rsa.backup",
+        "id_ed25519-old",
+        "client.pem",
+        "client.key",
+        "bundle.p12",
+        "bundle.pfx",
+        "private-key-copy.txt",
+        "deploy_key_notes.txt",
+        "auth-token.txt",
+        "credential-cache.json",
+        "secret-notes.md",
+    )
+    for denied_name in denied_names:
+        assert_equal(
+            frontdoor._denylisted_ref_part(Path("docs") / denied_name),
+            denied_name,
+            f"denylisted path component {denied_name}",
+        )
+    for safe_name in ("environment.md", "monkey.txt", "authentication.md", "public.pem.txt"):
+        assert_equal(
+            frontdoor._denylisted_ref_part(Path("docs") / safe_name),
+            None,
+            f"safe near-miss path component {safe_name}",
+        )
+
+    assert_equal(
+        frontdoor.validate_repo_full_name("Saber5656/Saihai"),
+        "Saber5656/Saihai",
+        "valid repository full name",
+    )
+    assert_equal(
+        frontdoor.validate_repo_full_name("o" * 100 + "/" + "r" * 100),
+        "o" * 100 + "/" + "r" * 100,
+        "bounded repository full name",
+    )
+    invalid_names = (
+        "missing-slash",
+        "owner/repo/extra",
+        "/repo",
+        "owner/",
+        "owner/repo name",
+        "-" * 1_000_000 + "/repo",
+    )
+    for invalid_name in invalid_names:
+        try:
+            frontdoor.validate_repo_full_name(invalid_name)
+        except frontdoor.FrontdoorError as exc:
+            assert "repo_full_name must be owner/repo" in str(exc)
+        else:
+            raise AssertionError("invalid repository full name should be rejected")
+
+
 def test_work_order_revalidates_refs_before_provider_handoff() -> None:
     frontdoor_module = load_server_module().frontdoor
     with tempfile.TemporaryDirectory() as raw_tmp:
@@ -3068,6 +3124,12 @@ def test_child_thread_checkout_requires_registered_git_worktree() -> None:
     common_dir = frontdoor.git_common_dir(frontdoor.REPO_ROOT)
     assert common_dir is not None, "trusted Saihai common dir must resolve"
     assert frontdoor.is_approved_checkout(ROOT), "current registered worktree must be approved"
+    validated = frontdoor.validate_child_thread_plan(child_thread_plan(Path.cwd()))
+    assert_equal(
+        validated["repo_root"],
+        str(ROOT.resolve()),
+        "registered checkout is returned from the host allowlist",
+    )
     with tempfile.TemporaryDirectory() as raw_tmp:
         fake_checkout = Path(raw_tmp) / "fake-checkout"
         fake_checkout.mkdir()
@@ -3078,6 +3140,18 @@ def test_child_thread_checkout_requires_registered_git_worktree() -> None:
             "forged checkout demonstrates common-dir collision",
         )
         assert not frontdoor.is_approved_checkout(fake_checkout), "unregistered checkout must be rejected"
+        try:
+            frontdoor.validate_child_thread_plan(
+                child_thread_plan(Path(raw_tmp), repo_root=str(fake_checkout))
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "repo_root must identify the approved Saihai checkout family",
+                "unregistered checkout plan rejection",
+            )
+        else:
+            raise AssertionError("unregistered checkout plan must fail closed")
 
 
 def test_projection_binding_hides_mismatch_legacy_and_cross_owner_records() -> None:
@@ -4393,6 +4467,7 @@ def main() -> None:
         test_bridge_rejects_smuggled_authority_fields_over_http,
         test_http_bridge_uses_authenticated_principal_and_verified_ack,
         test_context_ref_boundary_blocks_exfiltration_paths,
+        test_deterministic_ref_denylist_and_repo_name_validation,
         test_work_order_revalidates_refs_before_provider_handoff,
         test_validate_report_rejects_noncanonical_report_and_stale_evidence,
         test_validate_report_missing_report_waits_for_human,

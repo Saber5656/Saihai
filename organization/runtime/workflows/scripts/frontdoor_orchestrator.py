@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import fnmatch
 import hashlib
 import hmac
 import json
@@ -28,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import host_state_root
+import safe_paths
 import run_store
 import run_lock
 import run_lifecycle
@@ -179,27 +179,25 @@ REF_DENYLIST_NAMES = {
     "id_ed25519",
     "credentials",
 }
-REF_DENYLIST_PATTERNS = (
-    ".env*",
-    "id_rsa*",
-    "id_ed25519*",
-    "*.pem",
-    "*.key",
-    "*.p12",
-    "*.pfx",
-    "*private_key*",
-    "*private-key*",
-    "*deploy_key*",
-    "*deploy-key*",
-    "*secret_key*",
-    "*secret-key*",
-    "*auth_key*",
-    "*auth-key*",
-    "*credential*",
-    "*credentials*",
-    "*secret*",
-    "*token*",
+REF_DENYLIST_PREFIXES = (".env", "id_rsa", "id_ed25519")
+REF_DENYLIST_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+REF_DENYLIST_SUBSTRINGS = (
+    "private_key",
+    "private-key",
+    "deploy_key",
+    "deploy-key",
+    "secret_key",
+    "secret-key",
+    "auth_key",
+    "auth-key",
+    "credential",
+    "secret",
+    "token",
 )
+REPO_FULL_NAME_COMPONENT_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-"
+)
+MAX_REPO_FULL_NAME_COMPONENT_CHARS = 100
 
 
 def now_iso() -> str:
@@ -682,19 +680,30 @@ class HostLaunchSessionVerifier:
 
 
 def safe_id(value: str) -> str:
-    allowed = [char if char.isalnum() or char in {"-", "_", "."} else "-" for char in value]
+    allowed = [
+        char
+        if char.isascii() and (char.isalnum() or char in {"-", "_", "."})
+        else "-"
+        for char in value
+    ]
     compact = "".join(allowed).strip(".-")
-    return compact[:96] or "anonymous"
+    return validate_artifact_id(compact[:96] or "anonymous", "safe_id")
 
 
 def validate_artifact_id(value: str, label: str) -> str:
-    if not isinstance(value, str) or not SAFE_ID_RE.fullmatch(value):
+    try:
+        safe_value = safe_paths.safe_component(value, label=label)
+    except safe_paths.SafePathError as exc:
+        raise FrontdoorError(
+            f"{label} must match {SAFE_ID_RE.pattern} and cannot contain path separators"
+        ) from exc
+    if not SAFE_ID_RE.fullmatch(safe_value):
         raise FrontdoorError(
             f"{label} must match {SAFE_ID_RE.pattern} and cannot contain path separators"
         )
-    if "/" in value or "\\" in value or value in {".", ".."} or ".." in value.split("."):
+    if ".." in safe_value.split("."):
         raise FrontdoorError(f"{label} cannot contain path traversal segments")
-    return value
+    return safe_value
 
 
 def make_principal(
@@ -1175,7 +1184,11 @@ def state_artifact_path(state_root: Path, category: str, *components: str) -> Pa
     if raw_base.is_symlink():
         raise FrontdoorError("state artifact category must not be a symlink")
     base = raw_base.resolve(strict=False)
-    candidate = base.joinpath(*components).resolve(strict=False)
+    safe_components = [
+        safe_paths.safe_component(component, label=f"{category}_component_{index}")
+        for index, component in enumerate(components)
+    ]
+    candidate = base.joinpath(*safe_components).resolve(strict=False)
     try:
         base.relative_to(root)
         candidate.relative_to(root)
@@ -1186,15 +1199,15 @@ def state_artifact_path(state_root: Path, category: str, *components: str) -> Pa
 
 
 def resolve_contained_path(raw_path: str, *, parent: Path, label: str) -> Path:
-    base = parent.resolve(strict=True)
-    candidate = Path(raw_path).expanduser()
-    candidate = candidate if candidate.is_absolute() else base / candidate
-    resolved = candidate.resolve(strict=False)
     try:
-        resolved.relative_to(base)
-    except ValueError as exc:
+        return safe_paths.confined_trusted_root_path(
+            parent,
+            raw_path,
+            label=label,
+            strict=False,
+        )
+    except safe_paths.SafePathError as exc:
         raise FrontdoorError(f"{label} must stay within repo_root") from exc
-    return resolved
 
 
 def channel_token_path(state_root: Path, channel: str) -> Path:
@@ -1286,9 +1299,30 @@ def _denylisted_ref_part(relative_path: Path) -> str | None:
         lowered = part.lower()
         if lowered in REF_DENYLIST_NAMES:
             return part
-        if any(fnmatch.fnmatch(lowered, pattern) for pattern in REF_DENYLIST_PATTERNS):
+        if (
+            lowered.startswith(REF_DENYLIST_PREFIXES)
+            or lowered.endswith(REF_DENYLIST_SUFFIXES)
+            or any(marker in lowered for marker in REF_DENYLIST_SUBSTRINGS)
+        ):
             return part
     return None
+
+
+def validate_repo_full_name(value: Any) -> str:
+    repo_full_name = str(value or "")
+    if repo_full_name.count("/") != 1:
+        raise FrontdoorError("repo_full_name must be owner/repo")
+    owner, repo = repo_full_name.split("/", 1)
+    if (
+        not owner
+        or not repo
+        or len(owner) > MAX_REPO_FULL_NAME_COMPONENT_CHARS
+        or len(repo) > MAX_REPO_FULL_NAME_COMPONENT_CHARS
+        or any(char not in REPO_FULL_NAME_COMPONENT_CHARS for char in owner)
+        or any(char not in REPO_FULL_NAME_COMPONENT_CHARS for char in repo)
+    ):
+        raise FrontdoorError("repo_full_name must be owner/repo")
+    return repo_full_name
 
 
 def _resolve_repo_path(raw: str, *, ref_root: Path, label: str) -> tuple[Path, Path]:
@@ -1297,16 +1331,18 @@ def _resolve_repo_path(raw: str, *, ref_root: Path, label: str) -> tuple[Path, P
     if "\x00" in raw:
         raise FrontdoorError(f"{label} cannot contain NUL bytes")
     root = ref_root.expanduser().resolve()
-    candidate = Path(raw).expanduser()
-    path = candidate if candidate.is_absolute() else root / candidate
     try:
-        resolved = path.resolve(strict=True)
+        resolved = safe_paths.confined_trusted_root_path(
+            root,
+            raw,
+            label=label,
+            strict=True,
+        )
     except FileNotFoundError as exc:
         raise FrontdoorError(f"{label} does not exist: {raw}") from exc
-    try:
-        relative = resolved.relative_to(root)
-    except ValueError as exc:
+    except safe_paths.SafePathError as exc:
         raise FrontdoorError(f"{label} outside approved ref root: {raw}") from exc
+    relative = resolved.relative_to(root)
     denied_part = _denylisted_ref_part(relative)
     if denied_part:
         raise FrontdoorError(f"{label} denylisted path component: {denied_part}")
@@ -2123,10 +2159,17 @@ def validate_child_thread_plan(plan: dict[str, Any]) -> dict[str, Any]:
     extra = sorted(set(plan) - allowed)
     if extra:
         raise FrontdoorError("child_thread_plan unexpected fields:" + ",".join(extra))
-    repo_full_name = str(plan["repo_full_name"])
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo_full_name):
-        raise FrontdoorError("repo_full_name must be owner/repo")
-    repo_root = Path(str(plan["repo_root"])).expanduser().resolve(strict=False)
+    repo_full_name = validate_repo_full_name(plan["repo_full_name"])
+    try:
+        repo_root = safe_paths.exact_allowlisted_path(
+            plan["repo_root"],
+            allowed_paths=git_worktree_roots(REPO_ROOT),
+            label="repo_root",
+        )
+    except safe_paths.SafePathError as exc:
+        raise FrontdoorError(
+            "repo_root must identify the approved Saihai checkout family"
+        ) from exc
     if not is_approved_checkout(repo_root):
         raise FrontdoorError("repo_root must identify the approved Saihai checkout family")
     instruction_ref = validate_child_thread_path(
@@ -2567,11 +2610,18 @@ def bridge_transaction_path(
     request_id: str,
     idempotency_digest: str,
 ) -> Path:
-    validate_artifact_id(request_id, "request_id")
-    normalize_sha256_digest(idempotency_digest, "idempotency_key_digest")
+    safe_request_id = validate_artifact_id(request_id, "request_id")
+    normalized_digest = normalize_sha256_digest(
+        idempotency_digest,
+        "idempotency_key_digest",
+    )
+    digest_component = safe_paths.safe_component(
+        normalized_digest.removeprefix("sha256:")[:24],
+        label="idempotency_key_digest_component",
+    )
     return (
         state_paths(state_root)["bridge_transactions"]
-        / f"{request_id}-{idempotency_digest.removeprefix('sha256:')[:24]}.json"
+        / f"{safe_request_id}-{digest_component}.json"
     )
 
 
