@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import safe_paths
+
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$")
 RESERVED_ARTIFACT_SUFFIX_RE = re.compile(r"(?:\.error|\.corrupt-\d+)$")
 
@@ -53,20 +55,31 @@ def now_iso() -> str:
 
 
 def validate_artifact_id(value: str, label: str) -> str:
-    if not isinstance(value, str) or not SAFE_ID_RE.fullmatch(value):
+    try:
+        safe_value = safe_paths.safe_component(value, label=label)
+    except safe_paths.SafePathError as exc:
+        raise RunStoreError(
+            "schema_invalid",
+            [f"{label} must match {SAFE_ID_RE.pattern} and cannot contain path separators"],
+        ) from exc
+    if not SAFE_ID_RE.fullmatch(safe_value):
         raise RunStoreError(
             "schema_invalid",
             [f"{label} must match {SAFE_ID_RE.pattern} and cannot contain path separators"],
         )
-    if "/" in value or "\\" in value or value in {".", ".."} or ".." in value.split("."):
+    if ".." in safe_value.split("."):
         raise RunStoreError("schema_invalid", [f"{label} cannot contain path traversal segments"])
-    if RESERVED_ARTIFACT_SUFFIX_RE.search(value):
+    if RESERVED_ARTIFACT_SUFFIX_RE.search(safe_value):
         raise RunStoreError("schema_invalid", [f"{label} cannot use reserved run-store artifact suffixes"])
-    return value
+    return safe_value
 
 
-def _ensure_private_directory(path: Path) -> None:
-    """Create a no-symlink directory chain with private new components."""
+def _validated_private_directory(
+    path: Path,
+    *,
+    create_missing: bool,
+) -> Path | None:
+    """Validate a private directory chain, optionally creating missing components."""
 
     absolute = path.expanduser()
     if not absolute.is_absolute():
@@ -95,6 +108,8 @@ def _ensure_private_directory(path: Path) -> None:
             try:
                 metadata = component.lstat()
             except FileNotFoundError:
+                if not create_missing:
+                    return None
                 try:
                     component.mkdir(mode=0o700)
                     created = True
@@ -135,6 +150,15 @@ def _ensure_private_directory(path: Path) -> None:
         or stat.S_IMODE(metadata.st_mode) != 0o700
     ):
         raise RunStoreError("io_error", ["artifact parent must be owned mode 0700"])
+    return absolute
+
+
+def _ensure_private_directory(path: Path) -> None:
+    """Create a no-symlink directory chain with private new components."""
+
+    validated = _validated_private_directory(path, create_missing=True)
+    if validated is None:  # pragma: no cover - create_missing=True is exhaustive.
+        raise RunStoreError("io_error", ["private directory could not be created"])
 
 
 def ensure_private_directory(path: Path) -> None:
@@ -145,19 +169,46 @@ def ensure_private_directory(path: Path) -> None:
         os.umask(old_umask)
 
 
-def _open_parent(path: Path) -> tuple[int, str]:
-    if not path.name or path.name in {".", ".."} or os.path.basename(path.name) != path.name:
+def _artifact_name(path: Path) -> str:
+    name = path.name
+    if (
+        not name
+        or name in {".", ".."}
+        or "\x00" in name
+        or os.path.basename(name) != name
+    ):
         raise RunStoreError("io_error", ["artifact filename is unsafe"])
-    _ensure_private_directory(path.parent)
+    return name
+
+
+def _nofollow_flag() -> int:
+    flag = getattr(os, "O_NOFOLLOW", None)
+    if flag is None:
+        raise RunStoreError("io_error", ["O_NOFOLLOW is required for private artifacts"])
+    return flag
+
+
+def _open_private_directory(path: Path, *, create_missing: bool) -> int | None:
+    validated = _validated_private_directory(path, create_missing=create_missing)
+    if validated is None:
+        return None
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    flags |= _nofollow_flag()
+    descriptor = -1
     try:
-        descriptor = os.open(path.parent, flags)
+        descriptor = os.open(validated, flags)
         metadata = os.fstat(descriptor)
+    except FileNotFoundError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not create_missing:
+            return None
+        raise RunStoreError("io_error", [str(exc)]) from exc
     except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
         raise RunStoreError("io_error", [str(exc)]) from exc
     if (
         not stat.S_ISDIR(metadata.st_mode)
@@ -166,7 +217,19 @@ def _open_parent(path: Path) -> tuple[int, str]:
     ):
         os.close(descriptor)
         raise RunStoreError("io_error", ["artifact parent descriptor is unsafe"])
-    return descriptor, path.name
+    return descriptor
+
+
+def _open_parent(
+    path: Path,
+    *,
+    create_parent: bool = True,
+) -> tuple[int, str] | None:
+    name = _artifact_name(path)
+    descriptor = _open_private_directory(path.parent, create_missing=create_parent)
+    if descriptor is None:
+        return None
+    return descriptor, name
 
 
 def _validate_open_artifact(descriptor: int, parent_descriptor: int) -> None:
@@ -176,21 +239,291 @@ def _validate_open_artifact(descriptor: int, parent_descriptor: int) -> None:
         not stat.S_ISREG(artifact.st_mode)
         or artifact.st_uid != parent.st_uid
         or stat.S_IMODE(artifact.st_mode) != 0o600
+        or artifact.st_nlink != 1
     ):
-        raise RunStoreError("io_error", ["artifact ownership or mode is unsafe"])
+        raise RunStoreError("io_error", ["artifact type, ownership, mode, or link count is unsafe"])
+
+
+def _open_private_artifact(
+    path: Path,
+    *,
+    missing_ok: bool,
+) -> tuple[int, int, str] | None:
+    parent = _open_parent(path, create_parent=False)
+    if parent is None:
+        if missing_ok:
+            return None
+        raise RunStoreError("io_error", ["private artifact is missing"])
+    parent_fd, name = parent
+    descriptor = -1
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+    flags |= _nofollow_flag()
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+        _validate_open_artifact(descriptor, parent_fd)
+    except FileNotFoundError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+        if missing_ok:
+            return None
+        raise RunStoreError("io_error", ["private artifact is missing"]) from exc
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+        raise RunStoreError("io_error", [str(exc)]) from exc
+    except RunStoreError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+        raise
+    return parent_fd, descriptor, name
+
+
+def private_artifact_stat(path: Path) -> os.stat_result | None:
+    """Return validated private-artifact metadata, or ``None`` only for ENOENT."""
+
+    opened = _open_private_artifact(path, missing_ok=True)
+    if opened is None:
+        return None
+    parent_fd, descriptor, _ = opened
+    try:
+        return os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+        os.close(parent_fd)
+
+
+def private_artifact_exists(path: Path) -> bool:
+    """Return false only when the artifact or its private parent does not exist."""
+
+    return private_artifact_stat(path) is not None
+
+
+def _validate_listing_filter(value: str, label: str) -> str:
+    if not isinstance(value, str) or "\x00" in value or "/" in value or "\\" in value:
+        raise RunStoreError("io_error", [f"{label} must be a fixed filename fragment"])
+    return value
+
+
+def list_private_artifacts(
+    directory: Path,
+    *,
+    prefix: str = "",
+    suffix: str = "",
+) -> list[Path]:
+    """List validated direct-child artifacts using literal prefix/suffix filters.
+
+    A missing directory returns an empty list without creating it. Every matching
+    entry must be an owned mode-0600 regular file; unsafe matches fail closed.
+    """
+
+    literal_prefix = _validate_listing_filter(prefix, "prefix")
+    literal_suffix = _validate_listing_filter(suffix, "suffix")
+    directory_fd = _open_private_directory(directory, create_missing=False)
+    if directory_fd is None:
+        return []
+    try:
+        try:
+            names = sorted(os.listdir(directory_fd))
+        except OSError as exc:
+            raise RunStoreError("io_error", [str(exc)]) from exc
+        matches: list[Path] = []
+        for name in names:
+            if not name.startswith(literal_prefix) or not name.endswith(literal_suffix):
+                continue
+            _artifact_name(Path(name))
+            descriptor = -1
+            flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+            flags |= _nofollow_flag()
+            try:
+                descriptor = os.open(name, flags, dir_fd=directory_fd)
+                _validate_open_artifact(descriptor, directory_fd)
+            except OSError as exc:
+                raise RunStoreError("io_error", [str(exc)]) from exc
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            matches.append(directory / name)
+        return matches
+    finally:
+        os.close(directory_fd)
+
+
+def _same_open_artifact(before: os.stat_result, current: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(current.st_mode)
+        and before.st_dev == current.st_dev
+        and before.st_ino == current.st_ino
+        and before.st_uid == current.st_uid
+        and before.st_nlink == current.st_nlink == 1
+        and stat.S_IMODE(before.st_mode) == stat.S_IMODE(current.st_mode) == 0o600
+    )
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise OSError("private artifact write made no progress")
+        remaining = remaining[written:]
+
+
+def create_private_file(path: Path, payload: bytes) -> bool:
+    """Create one private artifact, or validate an existing artifact and return false."""
+
+    if not isinstance(payload, bytes):
+        raise RunStoreError("schema_invalid", ["private artifact payload must be bytes"])
+    parent_fd = -1
+    descriptor = -1
+    created = False
+    durable = False
+    old_umask = os.umask(0o077)
+    try:
+        parent = _open_parent(path)
+        assert parent is not None
+        parent_fd, name = parent
+        create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _nofollow_flag()
+        try:
+            descriptor = os.open(name, create_flags, 0o600, dir_fd=parent_fd)
+        except FileExistsError:
+            existing_flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | _nofollow_flag()
+            try:
+                descriptor = os.open(name, existing_flags, dir_fd=parent_fd)
+                _validate_open_artifact(descriptor, parent_fd)
+            except OSError as exc:
+                raise RunStoreError("io_error", [str(exc)]) from exc
+            return False
+
+        created = True
+        _write_all(descriptor, payload)
+        os.fsync(descriptor)
+        _validate_open_artifact(descriptor, parent_fd)
+        os.fsync(parent_fd)
+        durable = True
+        return True
+    except OSError as exc:
+        raise RunStoreError("io_error", [str(exc)]) from exc
+    finally:
+        if created and not durable and parent_fd >= 0 and descriptor >= 0:
+            try:
+                before = os.fstat(descriptor)
+                current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                if before.st_dev == current.st_dev and before.st_ino == current.st_ino:
+                    os.unlink(name, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+            except OSError:
+                pass
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_fd >= 0:
+            os.close(parent_fd)
+        os.umask(old_umask)
+
+
+def unlink_private_file(path: Path, *, missing_ok: bool = False) -> bool:
+    """Unlink one validated private artifact relative to a stable parent fd."""
+
+    opened = _open_private_artifact(path, missing_ok=True)
+    if opened is None:
+        if missing_ok:
+            return False
+        raise RunStoreError("io_error", ["private artifact is missing"])
+    parent_fd, descriptor, name = opened
+    try:
+        before = os.fstat(descriptor)
+        if before.st_nlink != 1:
+            raise RunStoreError("io_error", ["unlink artifact link count is unsafe"])
+        try:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise RunStoreError("io_error", [str(exc)]) from exc
+        if not _same_open_artifact(before, current):
+            raise RunStoreError("io_error", ["unlink artifact changed before removal"])
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except OSError as exc:
+            raise RunStoreError("io_error", [str(exc)]) from exc
+        return True
+    finally:
+        os.close(descriptor)
+        os.close(parent_fd)
+
+
+def rotate_private_file(
+    source: Path,
+    target: Path,
+    *,
+    target_must_not_exist: bool = True,
+) -> None:
+    """Rename a private artifact within one stable directory and fsync it."""
+
+    source_absolute = source.expanduser().absolute()
+    target_absolute = target.expanduser().absolute()
+    if source_absolute.parent != target_absolute.parent:
+        raise RunStoreError("io_error", ["private artifact rotation must stay in one directory"])
+    source_name = _artifact_name(source_absolute)
+    target_name = _artifact_name(target_absolute)
+    if source_name == target_name:
+        raise RunStoreError("io_error", ["private artifact rotation names must differ"])
+
+    opened = _open_private_artifact(source_absolute, missing_ok=False)
+    assert opened is not None
+    parent_fd, source_fd, opened_source_name = opened
+    target_fd = -1
+    try:
+        source_metadata = os.fstat(source_fd)
+        if source_metadata.st_nlink != 1:
+            raise RunStoreError("io_error", ["rotation source link count is unsafe"])
+
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+        flags |= _nofollow_flag()
+        try:
+            target_fd = os.open(target_name, flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            target_fd = -1
+        except OSError as exc:
+            raise RunStoreError("io_error", [str(exc)]) from exc
+        else:
+            _validate_open_artifact(target_fd, parent_fd)
+            if target_must_not_exist:
+                raise RunStoreError("io_error", ["rotation target already exists"])
+            if os.fstat(target_fd).st_nlink != 1:
+                raise RunStoreError("io_error", ["rotation target link count is unsafe"])
+
+        try:
+            current = os.stat(opened_source_name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise RunStoreError("io_error", [str(exc)]) from exc
+        if not _same_open_artifact(source_metadata, current):
+            raise RunStoreError("io_error", ["rotation source changed before rename"])
+        try:
+            os.replace(
+                opened_source_name,
+                target_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            os.fsync(parent_fd)
+        except OSError as exc:
+            raise RunStoreError("io_error", [str(exc)]) from exc
+    finally:
+        if target_fd >= 0:
+            os.close(target_fd)
+        os.close(source_fd)
+        os.close(parent_fd)
 
 
 def read_bytes(path: Path, *, max_bytes: int = 64 * 1024 * 1024) -> bytes:
     """Read a private regular artifact through no-follow descriptors."""
 
-    parent_fd, name = _open_parent(path)
-    descriptor = -1
+    opened = _open_private_artifact(path, missing_ok=False)
+    assert opened is not None
+    parent_fd, descriptor, _ = opened
     try:
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        descriptor = os.open(name, flags, dir_fd=parent_fd)
-        _validate_open_artifact(descriptor, parent_fd)
         metadata = os.fstat(descriptor)
         if metadata.st_size > max_bytes:
             raise RunStoreError("io_error", ["artifact exceeds read boundary"])
@@ -208,8 +541,7 @@ def read_bytes(path: Path, *, max_bytes: int = 64 * 1024 * 1024) -> bytes:
     except OSError as exc:
         raise RunStoreError("io_error", [str(exc)]) from exc
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        os.close(descriptor)
         os.close(parent_fd)
 
 
@@ -229,8 +561,7 @@ def atomic_write_json(path: Path, payload: Any) -> None:
         encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         parent_fd, name = _open_parent(path)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        flags |= _nofollow_flag()
         descriptor = os.open(tmp_name, flags, 0o600, dir_fd=parent_fd)
         with os.fdopen(descriptor, "wb", closefd=False) as handle:
             handle.write(encoded)
@@ -269,13 +600,12 @@ def append_json_line(path: Path, payload: Any, *, max_file_bytes: int = 16 * 102
     try:
         parent_fd, name = _open_parent(path)
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        flags |= _nofollow_flag()
         descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
         _validate_open_artifact(descriptor, parent_fd)
         if os.fstat(descriptor).st_size + len(encoded) > max_file_bytes:
             raise RunStoreError("io_error", ["append artifact exceeds size boundary"])
-        os.write(descriptor, encoded)
+        _write_all(descriptor, encoded)
         os.fsync(descriptor)
         os.fsync(parent_fd)
     except OSError as exc:
@@ -295,12 +625,10 @@ def read_and_unlink_private_file(
 ) -> bytes:
     """Read and unlink one exact private file through a stable parent fd."""
 
-    parent_fd, name = _open_parent(path)
-    descriptor = -1
+    opened = _open_private_artifact(path, missing_ok=False)
+    assert opened is not None
+    parent_fd, descriptor, name = opened
     try:
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(name, flags, dir_fd=parent_fd)
-        _validate_open_artifact(descriptor, parent_fd)
         before = os.fstat(descriptor)
         if before.st_nlink != 1 or before.st_size > max_bytes:
             raise RunStoreError("io_error", ["unlink artifact identity is unsafe"])
@@ -327,8 +655,7 @@ def read_and_unlink_private_file(
     except OSError as exc:
         raise RunStoreError("io_error", [str(exc)]) from exc
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
+        os.close(descriptor)
         os.close(parent_fd)
 
 
@@ -593,21 +920,17 @@ def quarantine_corrupt_run(state_root: Path, run_id: str) -> Path:
     index = 1
     while True:
         target = state_root / "runs" / f"{validate_artifact_id(run_id, 'run_id')}.corrupt-{index}.json"
-        if not target.exists():
+        if not private_artifact_exists(target):
             break
         index += 1
-    try:
-        ensure_private_directory(target.parent)
-        os.replace(source, target)
-    except OSError as exc:
-        raise RunStoreError("io_error", [str(exc)]) from exc
+    rotate_private_file(source, target)
     return target
 
 
 def load_run(state_root: Path, run_id: str) -> dict[str, Any]:
     validate_artifact_id(run_id, "run_id")
     path = run_path(state_root, run_id)
-    if not path.exists():
+    if not private_artifact_exists(path):
         raise RunStoreError("run_not_found")
     try:
         run = read_json(path)
@@ -660,7 +983,7 @@ def store_run(
 
     path = run_path(state_root, run_id)
     if expected_current_state is not None:
-        if not path.exists():
+        if not private_artifact_exists(path):
             conflict_errors = [f"expected existing run_state {expected_current_state!r}, found missing run"]
             write_error_artifact(
                 state_root,

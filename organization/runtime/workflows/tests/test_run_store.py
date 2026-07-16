@@ -5,11 +5,17 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import stat
+import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = ROOT / "organization/runtime/workflows/scripts/run_store.py"
+SCRIPT_DIR = SCRIPT.parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 
 def load_run_store_module():
@@ -363,6 +369,310 @@ def test_provider_execution_state_is_durable_and_bounded() -> None:
             raise AssertionError("provider execution timeout ceiling must be enforced")
 
 
+def test_private_artifact_stat_and_exists_are_nofollow_and_noncreating() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        missing = state_root / "missing-parent" / "record.json"
+        assert_equal(run_store.private_artifact_stat(missing), None, "missing private stat")
+        assert_equal(run_store.private_artifact_exists(missing), False, "missing private exists")
+        assert not missing.parent.exists(), "read-only metadata checks must not create a parent"
+
+        artifact = state_root / "records" / "record.json"
+        write_private_fixture(artifact, "private\n")
+        metadata = run_store.private_artifact_stat(artifact)
+        assert metadata is not None
+        assert_equal(metadata.st_size, len(b"private\n"), "private artifact size")
+        assert_equal(run_store.private_artifact_exists(artifact), True, "private artifact exists")
+
+        artifact.chmod(0o644)
+        try:
+            run_store.private_artifact_stat(artifact)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "unsafe mode error class")
+        else:
+            raise AssertionError("wrong-mode private artifact must fail closed")
+
+        artifact.unlink()
+        victim = state_root / "victim.json"
+        victim.write_text("victim\n", encoding="utf-8")
+        artifact.symlink_to(victim)
+        for operation in (
+            run_store.private_artifact_stat,
+            run_store.private_artifact_exists,
+        ):
+            try:
+                operation(artifact)
+            except run_store.RunStoreError as exc:
+                assert_equal(exc.reason_class, "io_error", "symlink metadata error class")
+            else:
+                raise AssertionError("private artifact symlink must fail closed")
+        assert_equal(victim.read_text(encoding="utf-8"), "victim\n", "symlink victim")
+
+        artifact.unlink()
+        victim.chmod(0o600)
+        os.link(victim, artifact)
+        try:
+            run_store.private_artifact_stat(artifact)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "hardlink metadata error class")
+        else:
+            raise AssertionError("private artifact hardlink must fail closed")
+        assert_equal(victim.read_text(encoding="utf-8"), "victim\n", "hardlink victim")
+
+
+def test_list_private_artifacts_validates_matching_entries() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        missing = state_root / "missing-list"
+        assert_equal(run_store.list_private_artifacts(missing, suffix=".json"), [], "missing list")
+        assert not missing.exists(), "listing must not create a missing directory"
+
+        directory = state_root / "records"
+        first = directory / "item-02.json"
+        second = directory / "item-01.json"
+        ignored = directory / "notes.txt"
+        write_private_fixture(first, "{}\n")
+        write_private_fixture(second, "{}\n")
+        write_private_fixture(ignored, "ignored\n")
+        assert_equal(
+            run_store.list_private_artifacts(directory, prefix="item-", suffix=".json"),
+            [second, first],
+            "literal filtered list",
+        )
+
+        ignored.unlink()
+        ignored.symlink_to(first)
+        assert_equal(
+            run_store.list_private_artifacts(directory, prefix="item-", suffix=".json"),
+            [second, first],
+            "nonmatching symlink ignored",
+        )
+
+        matching_link = directory / "item-03.json"
+        matching_link.symlink_to(first)
+        try:
+            run_store.list_private_artifacts(directory, prefix="item-", suffix=".json")
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "matching symlink list class")
+        else:
+            raise AssertionError("matching list symlink must fail closed")
+        matching_link.unlink()
+
+        first.chmod(0o644)
+        try:
+            run_store.list_private_artifacts(directory, prefix="item-", suffix=".json")
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "wrong-mode list class")
+        else:
+            raise AssertionError("matching wrong-mode artifact must fail closed")
+        first.chmod(0o600)
+
+        matching_directory = directory / "item-directory.json"
+        matching_directory.mkdir(mode=0o700)
+        try:
+            run_store.list_private_artifacts(directory, prefix="item-", suffix=".json")
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "nonregular list class")
+        else:
+            raise AssertionError("matching nonregular artifact must fail closed")
+        matching_directory.rmdir()
+
+        for unsafe_filter in ("../", "nested/"):
+            try:
+                run_store.list_private_artifacts(directory, prefix=unsafe_filter)
+            except run_store.RunStoreError as exc:
+                assert_equal(exc.reason_class, "io_error", "unsafe listing filter class")
+            else:
+                raise AssertionError("path-like listing filters must be rejected")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        actual = state_root / "actual"
+        run_store.ensure_private_directory(actual)
+        alias = state_root / "alias"
+        alias.symlink_to(actual, target_is_directory=True)
+        try:
+            run_store.list_private_artifacts(alias, suffix=".json")
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "symlink directory list class")
+        else:
+            raise AssertionError("symlinked listing directory must fail closed")
+
+
+def test_unlink_private_file_is_descriptor_relative_and_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        missing = state_root / "missing-parent" / "missing.json"
+        assert_equal(
+            run_store.unlink_private_file(missing, missing_ok=True),
+            False,
+            "missing-ok unlink",
+        )
+        assert not missing.parent.exists(), "missing unlink must not create a parent"
+        try:
+            run_store.unlink_private_file(missing)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "missing unlink class")
+        else:
+            raise AssertionError("required missing unlink must fail")
+
+        artifact = state_root / "records" / "delete.json"
+        write_private_fixture(artifact, "delete me\n")
+        assert_equal(run_store.unlink_private_file(artifact), True, "private unlink")
+        assert not artifact.exists()
+
+        victim = state_root / "victim.json"
+        victim.write_text("keep me\n", encoding="utf-8")
+        artifact.symlink_to(victim)
+        try:
+            run_store.unlink_private_file(artifact)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "symlink unlink class")
+        else:
+            raise AssertionError("symlink unlink must fail closed")
+        assert artifact.is_symlink(), "failed unlink must preserve the symlink for inspection"
+        assert_equal(victim.read_text(encoding="utf-8"), "keep me\n", "unlink victim")
+
+
+def test_create_private_file_is_exclusive_nofollow_and_validates_existing() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        artifact = state_root / "secrets" / "principal.key"
+        assert_equal(
+            run_store.create_private_file(artifact, b"first-secret\n"),
+            True,
+            "created private file",
+        )
+        metadata = artifact.stat(follow_symlinks=False)
+        assert_equal(stat.S_IMODE(metadata.st_mode), 0o600, "created private mode")
+        assert_equal(metadata.st_nlink, 1, "created private link count")
+        assert_equal(artifact.read_bytes(), b"first-secret\n", "created private payload")
+        assert_equal(
+            run_store.create_private_file(artifact, b"must-not-overwrite\n"),
+            False,
+            "validated existing private file",
+        )
+        assert_equal(artifact.read_bytes(), b"first-secret\n", "existing private payload")
+
+        artifact.chmod(0o644)
+        try:
+            run_store.create_private_file(artifact, b"must-not-write\n")
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "wrong-mode create class")
+        else:
+            raise AssertionError("wrong-mode existing private file must fail closed")
+        artifact.unlink()
+
+        victim = state_root / "victim.key"
+        victim.write_bytes(b"victim\n")
+        victim.chmod(0o600)
+        artifact.symlink_to(victim)
+        try:
+            run_store.create_private_file(artifact, b"must-not-write\n")
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "symlink create class")
+        else:
+            raise AssertionError("symlink existing private file must fail closed")
+        assert_equal(victim.read_bytes(), b"victim\n", "create symlink victim")
+
+        artifact.unlink()
+        os.link(victim, artifact)
+        try:
+            run_store.create_private_file(artifact, b"must-not-write\n")
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "hardlink create class")
+        else:
+            raise AssertionError("hardlink existing private file must fail closed")
+        assert_equal(victim.read_bytes(), b"victim\n", "create hardlink victim")
+
+
+def test_rotate_private_file_is_same_directory_nofollow_and_durable() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        source = state_root / "audit" / "events.jsonl"
+        target = state_root / "audit" / "events.1.jsonl"
+        write_private_fixture(source, "event\n")
+        run_store.rotate_private_file(source, target)
+        assert not source.exists()
+        assert_equal(target.read_text(encoding="utf-8"), "event\n", "rotated content")
+
+        write_private_fixture(source, "new event\n")
+        try:
+            run_store.rotate_private_file(source, target)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "rotation conflict class")
+        else:
+            raise AssertionError("existing rotation target must fail closed")
+        assert_equal(source.read_text(encoding="utf-8"), "new event\n", "conflict source")
+        assert_equal(target.read_text(encoding="utf-8"), "event\n", "conflict target")
+
+        run_store.rotate_private_file(source, target, target_must_not_exist=False)
+        assert not source.exists()
+        assert_equal(target.read_text(encoding="utf-8"), "new event\n", "replaced rotation")
+
+        write_private_fixture(source, "third event\n")
+        target.unlink()
+        victim = state_root / "victim.jsonl"
+        victim.write_text("victim\n", encoding="utf-8")
+        target.symlink_to(victim)
+        try:
+            run_store.rotate_private_file(source, target, target_must_not_exist=False)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "symlink rotation target class")
+        else:
+            raise AssertionError("symlink rotation target must fail closed")
+        assert_equal(victim.read_text(encoding="utf-8"), "victim\n", "rotation target victim")
+
+        other = state_root / "other" / "events.2.jsonl"
+        try:
+            run_store.rotate_private_file(source, other)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "cross-directory rotation class")
+        else:
+            raise AssertionError("cross-directory rotation must be rejected")
+        assert not other.parent.exists(), "rejected rotation must not create another directory"
+
+        source.unlink()
+        source.symlink_to(victim)
+        safe_target = source.with_name("events.3.jsonl")
+        try:
+            run_store.rotate_private_file(source, safe_target)
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "symlink rotation source class")
+        else:
+            raise AssertionError("symlink rotation source must fail closed")
+        assert_equal(victim.read_text(encoding="utf-8"), "victim\n", "rotation source victim")
+
+
+def test_existing_private_helpers_reject_hardlinked_artifacts() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        victim = state_root / "outside.json"
+        victim.write_text('{"outside": true}\n', encoding="utf-8")
+        victim.chmod(0o600)
+        artifact = state_root / "records" / "record.json"
+        run_store.ensure_private_directory(artifact.parent)
+        os.link(victim, artifact)
+
+        for operation in (
+            lambda: run_store.read_json(artifact),
+            lambda: run_store.append_json_line(artifact, {"appended": True}),
+            lambda: run_store.read_and_unlink_private_file(artifact),
+        ):
+            try:
+                operation()
+            except run_store.RunStoreError as exc:
+                assert_equal(exc.reason_class, "io_error", "hardlink helper error class")
+            else:
+                raise AssertionError("existing private helper must reject hardlink artifacts")
+        assert_equal(
+            victim.read_text(encoding="utf-8"),
+            '{"outside": true}\n',
+            "hardlink helper victim",
+        )
+        assert artifact.exists(), "failed hardlink operations must preserve the artifact"
+
+
 def main() -> None:
     tests = [
         test_store_and_reload_roundtrip,
@@ -380,6 +690,12 @@ def main() -> None:
         test_activation_fields_used_by_drain_are_required,
         test_extra_keys_are_allowed,
         test_provider_execution_state_is_durable_and_bounded,
+        test_private_artifact_stat_and_exists_are_nofollow_and_noncreating,
+        test_list_private_artifacts_validates_matching_entries,
+        test_unlink_private_file_is_descriptor_relative_and_fail_closed,
+        test_create_private_file_is_exclusive_nofollow_and_validates_existing,
+        test_rotate_private_file_is_same_directory_nofollow_and_durable,
+        test_existing_private_helpers_reject_hardlinked_artifacts,
     ]
     for test in tests:
         test()
