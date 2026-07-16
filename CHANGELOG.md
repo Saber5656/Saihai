@@ -37,6 +37,7 @@ release has been published.
 - [#88](https://github.com/Saber5656/Saihai/pull/88) added confined, opt-in live Claude and Codex provider adapters.
 - [#89](https://github.com/Saber5656/Saihai/pull/89) added the orchestrator failure-mode regression matrix.
 - [#90](https://github.com/Saber5656/Saihai/pull/90) added focused acceptance tests for the standard, research, policy, and security templates.
+- [#95](https://github.com/Saber5656/Saihai/pull/95) added the pinned Codex CLI deployment, exact process assurance, and deterministic read-only main-agent frontdoor.
 
 ### Safety
 
@@ -69,11 +70,19 @@ release has been published.
 - [#91](https://github.com/Saber5656/Saihai/pull/91) synchronized the root README with shipped behavior and added Japanese documentation parity.
 - [#92](https://github.com/Saber5656/Saihai/pull/92) synchronized the workflow README and operator runbook with the implemented runtime.
 - [#93](https://github.com/Saber5656/Saihai/pull/93) completed the operator runbook's orchestrator issue map.
+- [#94](https://github.com/Saber5656/Saihai/pull/94) added the v0.1.0 changelog and synchronized English and Japanese release guidance.
 
 ### v0.1.0 authority boundary
 
-- A frontend/main agent can submit a typed request, read a redacted projection, and acknowledge output; it cannot classify, approve, create runs, choose raw commands or paths, or publish changes.
-- A host-owned executor can derive a capability from an approved work order and launch a pinned, bounded Codex CLI worker in the planned task worktree.
+- The Saihai bridge API lets a frontend/main agent submit a typed request, read a redacted projection, and acknowledge output; that API cannot classify, approve, create runs, choose raw commands or paths, or publish changes. This bridge boundary does not remove ambient authority from an independently launched agent.
+- The projection exposes an idempotency digest but never its raw key. Child-thread and worker summaries are visible only under an exact request, task, owner-principal, and checkout binding.
+- The only shipped enforcement target is the release-pinned stock Codex CLI started by the root-owned zero-argument launcher. Codex App, IDE, direct Codex launches, and universal prompt ingress are not claimed.
+- Every authority check is rebound to the live launcher process and current deployment epoch. Activation, rollback, and uninstall revoke the previous epoch before target mutation; restored deployments require fresh commissioning and sealing.
+- Frontend `credential_access = denied` covers only the known Codex auth paths, dedicated `CODEX_HOME`, and the mechanically verified absence of credential-capable tool classes from the fixed inventory. It is not a claim that all user-readable secret-bearing files are inaccessible.
+- A commissioned frontend positive path creates exactly one typed request in `waiting_human` and no capability, worker execution, run, provider dispatch, report, or other downstream side effect.
+- A host-owned executor can derive a capability from an approved work order and launch a pinned, bounded Codex CLI worker in the planned task worktree only when independent frontend and worker assurance generations verify.
+- The frontend and worker require separately governed policy domains. v0.1.0 does not ship automatic cross-domain transport between the frontend gateway and the worker domain.
+- Same-rootfs Codex 0.144.1 worker evidence is not promotable because generic external mutation, absolute local `git push`, and credential denial cannot be proved there; `external_mutation`, `git_commit`, `git_push`, and `credential_access` remain failed/inconclusive, and worker `commission-seal` stays fail-closed until isolated-domain evidence exists.
 - The shipped scoped-worker executor rejects every network and provider grant. Live provider adapters are a separate host-owned, opt-in, readonly path.
 - Commit, push, and pull-request publication remain behind separate review, approval, and publication gates.
 - The supported checkout is the host-managed primary checkout at `~/dev/Saihai` or one of its linked worktrees. An arbitrary fresh clone does not satisfy the checkout identity contract.

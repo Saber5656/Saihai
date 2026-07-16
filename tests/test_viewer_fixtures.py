@@ -289,9 +289,13 @@ def test_transcript_marker_never_reaches_api() -> None:
 
 
 def test_all_fixtures_are_fresh() -> None:
-    for name in GENERATOR.SCENARIOS:
-        passed, diff = GENERATOR.check_fixture(name)
-        assert passed, f"{name}\n{diff}"
+    previous_umask = os.umask(0o077)
+    try:
+        for name in GENERATOR.SCENARIOS:
+            passed, diff = GENERATOR.check_fixture(name)
+            assert passed, f"{name}\n{diff}"
+    finally:
+        os.umask(previous_umask)
 
 
 def test_normalized_content_digests_match_artifacts() -> None:

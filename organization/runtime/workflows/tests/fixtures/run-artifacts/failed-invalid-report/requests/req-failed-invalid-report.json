@@ -241,7 +241,7 @@
     }
   ],
   "run_id": "run-failed-invalid-report",
-  "status": "approved",
+  "status": "failed",
   "task_id": "TSK-failed-invalid-report",
   "updated_at": "2026-01-01T00:00:00+0000",
   "user_prompt": "Run bounded offline external review."

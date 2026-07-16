@@ -1,0 +1,12 @@
+extensions:
+  - addsTo:
+      pack: codeql/python-all
+      extensible: barrierModel
+    data:
+      - ["host_state_root", "Member[configured_state_root].ReturnValue", "path-injection"]
+      - ["host_state_root", "Member[resolve_configured_state_root].ReturnValue", "path-injection"]
+      - ["safe_paths", "Member[safe_component].ReturnValue", "path-injection"]
+      - ["safe_paths", "Member[safe_relative_component].ReturnValue", "path-injection"]
+      - ["safe_paths", "Member[confined_state_path].ReturnValue", "path-injection"]
+      - ["safe_paths", "Member[confined_trusted_root_path].ReturnValue", "path-injection"]
+      - ["safe_paths", "Member[exact_allowlisted_path].ReturnValue", "path-injection"]

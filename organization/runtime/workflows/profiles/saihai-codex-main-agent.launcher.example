@@ -1,0 +1,90 @@
+#!/bin/sh
+# Root-owned launcher template for the single stock Codex CLI surface covered
+# by the Saihai A-prime action claim. A human invokes the installed launcher
+# through sudo. It accepts no arguments: prompts are entered only in the child
+# interactive TUI after the root supervisor has written a launch-session
+# record and dropped the child to the manifest-bound runtime user.
+#
+# Login/authentication is a separate manual human operation in the dedicated
+# CODEX_HOME and is never performed here. The session id is not a secret; the
+# administrator-owned record plus live PID/process-start identity is the
+# authority. A direct Codex or wrapper launch has no such record and is denied.
+
+set -eu
+
+if [ "$#" -ne 0 ]; then
+  echo "refused: Saihai Codex main-agent launcher accepts no flags, prompt arguments, or subcommands" >&2
+  exit 64
+fi
+
+native_codex=@@NATIVE_CODEX@@
+native_codex_sha256=@@NATIVE_CODEX_SHA256@@
+native_codex_version=@@NATIVE_CODEX_VERSION@@
+python_executable=@@PYTHON_EXECUTABLE@@
+verifier=@@VERIFIER@@
+verifier_sha256=@@VERIFIER_SHA256@@
+deployment_module=@@DEPLOYMENT_MODULE@@
+deployment_module_sha256=@@DEPLOYMENT_MODULE_SHA256@@
+supervisor=@@SUPERVISOR@@
+supervisor_sha256=@@SUPERVISOR_SHA256@@
+manifest=@@MANIFEST@@
+runtime_user_uid=@@RUNTIME_USER_UID@@
+runtime_user_name=@@RUNTIME_USER_NAME@@
+runtime_user_home=@@RUNTIME_USER_HOME@@
+codex_home=@@CODEX_HOME@@
+profile_path=@@PROFILE_PATH@@
+profile_sha256=@@PROFILE_SHA256@@
+
+digest_file() {
+  /usr/bin/shasum -a 256 "$1" | /usr/bin/cut -d ' ' -f 1
+}
+
+if [ "$(/usr/bin/id -u)" != "0" ]; then
+  echo "blocked: launcher requires a human sudo invocation" >&2
+  exit 77
+fi
+sudo_uid=${SUDO_UID:-}
+sudo_user=${SUDO_USER:-}
+if [ "$sudo_uid" != "$runtime_user_uid" ] || [ "$sudo_user" != "$runtime_user_name" ]; then
+  echo "blocked: launcher sudo runtime identity mismatch" >&2
+  exit 77
+fi
+if [ -e "$codex_home/config.toml" ] || [ -L "$codex_home/config.toml" ]; then
+  echo "blocked: dedicated CODEX_HOME base config must remain absent" >&2
+  exit 78
+fi
+if [ "sha256:$(digest_file "$native_codex")" != "$native_codex_sha256" ]; then
+  echo "blocked: pinned stock Codex executable digest mismatch" >&2
+  exit 78
+fi
+if [ "$(/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C "$native_codex" --version)" != "$native_codex_version" ]; then
+  echo "blocked: pinned stock Codex version mismatch" >&2
+  exit 78
+fi
+if [ "sha256:$(digest_file "$profile_path")" != "$profile_sha256" ]; then
+  echo "blocked: manifest-bound Codex profile digest mismatch" >&2
+  exit 78
+fi
+if [ "sha256:$(digest_file "$verifier")" != "$verifier_sha256" ]; then
+  echo "blocked: deployment verifier digest mismatch" >&2
+  exit 78
+fi
+if [ "sha256:$(digest_file "$deployment_module")" != "$deployment_module_sha256" ]; then
+  echo "blocked: deployment verifier module digest mismatch" >&2
+  exit 78
+fi
+if [ "sha256:$(digest_file "$supervisor")" != "$supervisor_sha256" ]; then
+  echo "blocked: launch supervisor digest mismatch" >&2
+  exit 78
+fi
+
+/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C \
+  "$python_executable" -I -B "$verifier" --manifest "$manifest" --quiet
+
+exec /usr/bin/env -i \
+  SUDO_UID="$sudo_uid" \
+  SUDO_USER="$sudo_user" \
+  PATH=/usr/bin:/bin \
+  LC_ALL=C \
+  TERM="${TERM:-xterm-256color}" \
+  "$python_executable" -I -B "$supervisor"

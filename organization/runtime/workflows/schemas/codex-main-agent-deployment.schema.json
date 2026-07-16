@@ -1,0 +1,426 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saihai.local/schemas/workflows/codex-main-agent-deployment.schema.json",
+  "title": "Codex Main-Agent Deployment Manifest",
+  "description": "Root-owned trust manifest for the Codex A-prime frontend bridge deployment. Runtime assurance is a separate, host-owned record.",
+  "type": "object",
+  "required": [
+    "deployment_version",
+    "deployment_id",
+    "release_commit",
+    "platform",
+    "expected_admin_uid",
+    "topology",
+    "bindings",
+    "artifacts",
+    "tool_contract"
+  ],
+  "properties": {
+    "deployment_version": {
+      "const": "1"
+    },
+    "deployment_id": {
+      "const": "codex-main-agent-a-prime"
+    },
+    "release_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "platform": {
+      "const": "macos"
+    },
+    "expected_admin_uid": {
+      "const": 0
+    },
+    "topology": {
+      "type": "object",
+      "required": [
+        "frontend_policy_domain",
+        "write_capable_worker_policy_domain",
+        "shared_rootfs",
+        "worker_isolation"
+      ],
+      "properties": {
+        "frontend_policy_domain": {
+          "$ref": "#/$defs/safeId"
+        },
+        "write_capable_worker_policy_domain": {
+          "$ref": "#/$defs/safeId"
+        },
+        "shared_rootfs": {
+          "const": false
+        },
+        "worker_isolation": {
+          "const": "separate_host_vm_or_container"
+        }
+      },
+      "additionalProperties": false
+    },
+    "bindings": {
+      "type": "object",
+      "required": [
+        "frontdoor",
+        "principal_id",
+        "workspace_id",
+        "managed_primary",
+        "checkout_binding",
+        "workspace_catalog",
+        "assurance_root",
+        "state_root_catalog",
+        "deployment_manifest_path",
+        "runtime_config_path",
+        "instructions_path",
+        "developer_instructions_sha256",
+        "runtime_user_uid",
+        "runtime_user_name",
+        "runtime_user_home",
+        "codex_home",
+        "state_root",
+        "state_root_source",
+        "state_root_catalog_observation"
+      ],
+      "properties": {
+        "frontdoor": {
+          "const": "codex"
+        },
+        "principal_id": {
+          "const": "codex-main-agent-a-prime"
+        },
+        "workspace_id": {
+          "const": "Saber5656/Saihai"
+        },
+        "managed_primary": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "checkout_binding": {
+          "const": "launch_cwd_registered_worktree"
+        },
+        "workspace_catalog": {
+          "const": "git_worktree_list"
+        },
+        "assurance_root": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "state_root_catalog": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "deployment_manifest_path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "runtime_config_path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "instructions_path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "developer_instructions_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtime_user_uid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "runtime_user_name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.-]{0,63}$"
+        },
+        "runtime_user_home": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "codex_home": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "state_root": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "state_root_source": {
+          "enum": [
+            "catalog",
+            "default"
+          ]
+        },
+        "state_root_catalog_observation": {
+          "$ref": "#/$defs/catalogObservation"
+        }
+      },
+      "additionalProperties": false
+    },
+    "artifacts": {
+      "type": "object",
+      "required": [
+        "runtime_bundle",
+        "bridge_wrapper",
+        "python_executable",
+        "runtime_config",
+        "requirements",
+        "instructions",
+        "codex_launcher",
+        "codex_profile",
+        "native_codex",
+        "supervisor",
+        "observer"
+      ],
+      "properties": {
+        "runtime_bundle": {
+          "$ref": "#/$defs/treeArtifact"
+        },
+        "bridge_wrapper": {
+          "$ref": "#/$defs/fileArtifact"
+        },
+        "python_executable": {
+          "$ref": "#/$defs/fileArtifact"
+        },
+        "runtime_config": {
+          "$ref": "#/$defs/fileArtifact"
+        },
+        "requirements": {
+          "$ref": "#/$defs/fileArtifact"
+        },
+        "instructions": {
+          "$ref": "#/$defs/fileArtifact"
+        },
+        "codex_launcher": {
+          "$ref": "#/$defs/fileArtifact"
+        },
+        "codex_profile": {
+          "$ref": "#/$defs/fileArtifact"
+        },
+        "native_codex": {
+          "$ref": "#/$defs/nativeCodexArtifact"
+        },
+        "supervisor": {
+          "$ref": "#/$defs/fileArtifact"
+        },
+        "observer": {
+          "$ref": "#/$defs/fileArtifact"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tool_contract": {
+      "type": "object",
+      "required": [
+        "server_name",
+        "enabled_tools",
+        "forbidden_tools"
+      ],
+      "properties": {
+        "server_name": {
+          "const": "saihai_bridge"
+        },
+        "enabled_tools": {
+          "const": [
+            "submit_request",
+            "read_projection",
+            "ack_output"
+          ]
+        },
+        "forbidden_tools": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safeId"
+          },
+          "allOf": [
+            {
+              "contains": {
+                "const": "approve"
+              }
+            },
+            {
+              "contains": {
+                "const": "execute"
+              }
+            },
+            {
+              "contains": {
+                "const": "shell"
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "pattern": "^/[^\\u0000]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "mode": {
+      "type": "string",
+      "pattern": "^0[0-7]{3}$"
+    },
+    "fileArtifact": {
+      "type": "object",
+      "required": [
+        "kind",
+        "path",
+        "sha256",
+        "mode"
+      ],
+      "properties": {
+        "kind": {
+          "const": "file"
+        },
+        "path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mode": {
+          "$ref": "#/$defs/mode"
+        }
+      },
+      "additionalProperties": false
+    },
+    "nativeCodexArtifact": {
+      "type": "object",
+      "required": [
+        "kind",
+        "path",
+        "sha256",
+        "mode",
+        "version",
+        "package",
+        "package_version",
+        "package_integrity",
+        "platform",
+        "architecture"
+      ],
+      "properties": {
+        "kind": {
+          "const": "file"
+        },
+        "path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "sha256": {
+          "const": "sha256:29915529b97697def1a957b0505e770aa6a45744435d62fc263e98d7619e167a"
+        },
+        "mode": {
+          "$ref": "#/$defs/mode"
+        },
+        "version": {
+          "const": "codex-cli 0.144.1"
+        },
+        "package": {
+          "const": "@openai/codex"
+        },
+        "package_version": {
+          "const": "0.144.1-darwin-arm64"
+        },
+        "package_integrity": {
+          "const": "sha512-dABeDK+ATqMG54MGBd3VjpKfh5EOoqx9PKVQB2QYDaEXx3F6CdUCXue5QIMfr4OxziUj8pUcLAQyd+KFqiTUFw=="
+        },
+        "platform": {
+          "const": "darwin"
+        },
+        "architecture": {
+          "const": "arm64"
+        }
+      },
+      "additionalProperties": false
+    },
+    "catalogObservation": {
+      "type": "object",
+      "required": [
+        "status",
+        "device",
+        "inode",
+        "uid",
+        "mode",
+        "size",
+        "sha256"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "present",
+            "absent"
+          ]
+        },
+        "device": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inode": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mode": {
+          "$ref": "#/$defs/mode"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "additionalProperties": false
+    },
+    "treeArtifact": {
+      "type": "object",
+      "required": [
+        "kind",
+        "path",
+        "sha256",
+        "mode",
+        "digest_algorithm",
+        "entrypoint",
+        "verifier",
+        "deployment_module"
+      ],
+      "properties": {
+        "kind": {
+          "const": "tree"
+        },
+        "path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mode": {
+          "const": "0755"
+        },
+        "digest_algorithm": {
+          "const": "saihai-tree-sha256-v1"
+        },
+        "entrypoint": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "verifier": {
+          "$ref": "#/$defs/safeRelativePath"
+        },
+        "deployment_module": {
+          "$ref": "#/$defs/safeRelativePath"
+        }
+      },
+      "additionalProperties": false
+    },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$"
+    }
+  },
+  "additionalProperties": false
+}

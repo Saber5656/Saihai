@@ -88,10 +88,85 @@ def test_confined_path_rejects_symlink_chain() -> None:
         )
 
 
+def test_trusted_root_path_resolves_inside_and_rejects_escape() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        trusted = root / "trusted"
+        trusted.mkdir()
+        outside = root / "outside"
+        outside.mkdir()
+        (trusted / "nested").mkdir()
+        (trusted / "nested" / "present.txt").write_text("ok", encoding="utf-8")
+
+        assert safe_paths.confined_trusted_root_path(
+            trusted,
+            "nested/present.txt",
+            label="candidate",
+            strict=True,
+        ) == (trusted / "nested" / "present.txt").resolve()
+        assert safe_paths.confined_trusted_root_path(
+            trusted,
+            "nested/missing.txt",
+            label="candidate",
+        ) == (trusted / "nested" / "missing.txt").resolve()
+        expect_rejected(
+            lambda: safe_paths.confined_trusted_root_path(
+                trusted,
+                "../outside/result.txt",
+                label="candidate",
+            ),
+            "unsafe_candidate_component_0",
+        )
+        (trusted / "escape").symlink_to(outside, target_is_directory=True)
+        expect_rejected(
+            lambda: safe_paths.confined_trusted_root_path(
+                trusted,
+                "escape/result.txt",
+                label="candidate",
+            ),
+            "candidate_outside_trusted_root",
+        )
+
+
+def test_exact_allowlisted_path_returns_host_member_only() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        allowed = root / "registered-worktree"
+        allowed.mkdir()
+        other = root / "unregistered-worktree"
+        other.mkdir()
+        alias = root / "registered-alias"
+        alias.symlink_to(allowed, target_is_directory=True)
+
+        assert safe_paths.exact_allowlisted_path(
+            allowed,
+            allowed_paths={allowed},
+            label="checkout",
+        ) == allowed.resolve()
+        expect_rejected(
+            lambda: safe_paths.exact_allowlisted_path(
+                alias,
+                allowed_paths={allowed},
+                label="checkout",
+            ),
+            "checkout_not_allowlisted",
+        )
+        expect_rejected(
+            lambda: safe_paths.exact_allowlisted_path(
+                other,
+                allowed_paths={allowed},
+                label="checkout",
+            ),
+            "checkout_not_allowlisted",
+        )
+
+
 if __name__ == "__main__":
     tests = (
         test_constructor_rejects_traversal_absolute_and_scope_escape,
         test_confined_path_rejects_symlink_chain,
+        test_trusted_root_path_resolves_inside_and_rejects_escape,
+        test_exact_allowlisted_path_returns_host_member_only,
     )
     for test in tests:
         test()

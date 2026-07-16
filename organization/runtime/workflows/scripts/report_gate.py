@@ -13,6 +13,7 @@ import provider_evidence_contract
 import run_lifecycle
 import run_lock
 import run_store
+import safe_paths
 import task_state_bridge
 import workflow_selector
 
@@ -36,30 +37,53 @@ def now_iso() -> str:
 
 
 def state_paths(state_root: Path) -> dict[str, Path]:
+    root = state_root.expanduser().resolve(strict=False)
     return {
-        "runs": state_root / "runs",
-        "work_orders": state_root / "work-orders",
-        "adapter_requests": state_root / "adapter-requests",
-        "provider_evidence": state_root / "provider-evidence",
-        "reports": state_root / "reports",
-        "transitions": state_root / "transitions",
-        "audit": state_root / "audit",
+        "runs": root / "runs",
+        "work_orders": root / "work-orders",
+        "adapter_requests": root / "adapter-requests",
+        "provider_evidence": root / "provider-evidence",
+        "reports": root / "reports",
+        "transitions": root / "transitions",
+        "audit": root / "audit",
     }
 
 
-def path_is_within(path: Path, parent: Path) -> bool:
+def confined_state_artifact(
+    state_root: Path,
+    raw_path: str | Path,
+    *,
+    namespace: str,
+    label: str,
+) -> Path:
     try:
-        path.resolve().relative_to(parent.resolve())
-    except ValueError:
+        return safe_paths.confined_state_path(
+            state_root,
+            raw_path,
+            namespaces={namespace},
+        )
+    except safe_paths.SafePathError as exc:
+        raise ReportGateError(f"{label} must stay under {namespace} state directory") from exc
+
+
+def path_is_within(path: Path, parent: Path) -> bool:
+    """Compatibility predicate for a path below one state namespace."""
+
+    try:
+        safe_paths.confined_state_path(
+            parent.parent,
+            path,
+            namespaces={parent.name},
+        )
+    except safe_paths.SafePathError:
         return False
     return True
 
 
 def read_json(path: Path) -> dict[str, Any]:
     try:
-        with path.open(encoding="utf-8") as handle:
-            data = json.load(handle)
-    except OSError as exc:
+        data = run_store.read_json(path)
+    except run_store.RunStoreError as exc:
         raise ReportGateError(f"missing file: {path}") from exc
     if not isinstance(data, dict):
         raise ReportGateError(f"expected object json: {path}")
@@ -112,13 +136,16 @@ def authoritative_adapter_request(
     run: dict[str, Any],
     work_order: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, list[str]]:
-    run_id = str(run.get("run_id") or "")
-    step_id = str(work_order.get("step_id") or "")
+    try:
+        run_id = run_store.validate_artifact_id(str(run.get("run_id") or ""), "run_id")
+        step_id = run_store.validate_artifact_id(str(work_order.get("step_id") or ""), "step_id")
+    except run_store.RunStoreError:
+        return None, ["adapter_request_authority run or step identity is not artifact-safe"]
     request_dir = (
         state_paths(state_root)["adapter_requests"]
-        / run_store.validate_artifact_id(run_id, "run_id")
+        / run_id
     )
-    request_prefix = f"{run_store.validate_artifact_id(step_id, 'step_id')}-"
+    request_prefix = f"{step_id}-"
 
     transition_candidates: list[Path] = []
     has_run_provider_transition = False
@@ -133,28 +160,38 @@ def authoritative_adapter_request(
                 for raw_ref in refs:
                     if not isinstance(raw_ref, str) or not raw_ref:
                         continue
-                    candidate = Path(raw_ref).expanduser()
+                    try:
+                        candidate = confined_state_artifact(
+                            state_root,
+                            raw_ref,
+                            namespace="adapter-requests",
+                            label="adapter request",
+                        )
+                    except ReportGateError:
+                        continue
                     if (
-                        path_is_within(candidate, request_dir)
-                        and candidate.parent.resolve() == request_dir.resolve()
+                        candidate.parent == request_dir
                         and candidate.name.startswith(request_prefix)
                         and candidate.suffix == ".json"
                     ):
                         transition_candidates.append(candidate)
             break
 
-    candidates = list(dict.fromkeys(path.resolve() for path in transition_candidates))
+    candidates = list(dict.fromkeys(transition_candidates))
     if has_run_provider_transition and len(candidates) != 1:
         return None, [
             "adapter_request_authority run_provider transition requires exactly one "
             f"current request: found {len(candidates)}"
         ]
-    if not has_run_provider_transition and request_dir.exists():
-        candidates = [
-            path.resolve()
-            for path in sorted(request_dir.glob(f"{request_prefix}*.json"))
-            if path_is_within(path, request_dir) and path.parent.resolve() == request_dir.resolve()
-        ]
+    if not has_run_provider_transition:
+        try:
+            candidates = run_store.list_private_artifacts(
+                request_dir,
+                prefix=request_prefix,
+                suffix=".json",
+            )
+        except run_store.RunStoreError as exc:
+            return None, [f"adapter_request_authority unsafe request artifacts: {exc.reason_class}"]
     if len(candidates) != 1:
         return None, [
             "adapter_request_authority requires exactly one current request: "
@@ -181,17 +218,28 @@ def authoritative_adapter_request(
             errors.append(f"adapter_request_authority.{field} mismatch: expected {expected!r}")
 
     expected_paths = {
-        "work_order_path": work_order_path(state_root, run_id, step_id),
-        "report_path": report_path(state_root, run_id, step_id),
-        "evidence_path": provider_evidence_path(state_root, run_id, step_id),
-        "transcript_path": provider_transcript_path(state_root, run_id, step_id),
+        "work_order_path": ("work-orders", work_order_path(state_root, run_id, step_id)),
+        "report_path": ("reports", report_path(state_root, run_id, step_id)),
+        "evidence_path": ("provider-evidence", provider_evidence_path(state_root, run_id, step_id)),
+        "transcript_path": ("provider-evidence", provider_transcript_path(state_root, run_id, step_id)),
     }
-    for field, expected in expected_paths.items():
+    for field, (namespace, expected) in expected_paths.items():
         raw_path = request.get(field)
         if not isinstance(raw_path, str) or not raw_path:
             errors.append(f"adapter_request_authority.{field} must be non-empty string")
-        elif Path(raw_path).expanduser().resolve() != expected.resolve():
+            continue
+        try:
+            candidate = confined_state_artifact(
+                state_root,
+                raw_path,
+                namespace=namespace,
+                label=f"adapter_request_authority.{field}",
+            )
+        except ReportGateError:
             errors.append(f"adapter_request_authority.{field} mismatch")
+        else:
+            if candidate != expected:
+                errors.append(f"adapter_request_authority.{field} mismatch")
 
     adapter = request.get("adapter")
     if not isinstance(adapter, dict):
@@ -224,7 +272,7 @@ def authoritative_adapter_request(
             errors.append("adapter_request_authority.provider_adapter_id is not artifact-safe")
         else:
             expected_request_path = request_dir / f"{request_prefix}{validated_adapter_id}.json"
-            if request_path != expected_request_path.resolve():
+            if request_path != expected_request_path:
                 errors.append("adapter_request_authority path does not match provider_adapter_id")
     else:
         errors.append("adapter_request_authority.provider_adapter_id must be non-empty string")
@@ -252,11 +300,7 @@ def stable_digest(payload: Any) -> str:
 
 
 def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return "sha256:" + hashlib.sha256(run_store.read_bytes(path)).hexdigest()
 
 
 def append_audit_event(
@@ -287,9 +331,7 @@ def append_audit_event(
         "details": details or {},
     }
     path = state_paths(state_root)["audit"] / "events.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+    run_store.append_json_line(path, event)
     return event
 
 
@@ -361,8 +403,14 @@ def _scope_violation_errors(report: Any, *, run: dict[str, Any], state_root: Pat
         for field in ("evidence_path", "transcript_path"):
             raw = evidence.get(field)
             if isinstance(raw, str) and raw:
-                path = Path(raw).expanduser()
-                if not path_is_within(path, state_paths(state_root)["provider_evidence"]):
+                try:
+                    confined_state_artifact(
+                        state_root,
+                        raw,
+                        namespace="provider-evidence",
+                        label=f"provider_evidence.{field}",
+                    )
+                except ReportGateError:
                     errors.append("evidence_path_escape")
                     break
     authority = report.get("authority")
@@ -482,8 +530,11 @@ def validate_provider_evidence(
     for field in ("provider", "effective_model", "provider_session_id", "transcript_path", "evidence_path"):
         if not isinstance(value.get(field), str) or not value.get(field):
             errors.append(f"provider_evidence.{field} must be non-empty string")
-    run_id = str(run.get("run_id") or "")
-    step_id = str(work_order.get("step_id") or "")
+    try:
+        run_id = run_store.validate_artifact_id(str(run.get("run_id") or ""), "run_id")
+        step_id = run_store.validate_artifact_id(str(work_order.get("step_id") or ""), "step_id")
+    except run_store.RunStoreError:
+        return errors + ["provider_evidence run or step identity is not artifact-safe"]
     expected_paths = {
         "transcript_path": [
             provider_transcript_path(state_root, run_id, step_id),
@@ -492,13 +543,29 @@ def validate_provider_evidence(
         "evidence_path": [provider_evidence_path(state_root, run_id, step_id)],
     }
     for field in ("transcript_path", "evidence_path"):
-        path = Path(str(value.get(field, ""))).expanduser()
-        if value.get(field) and not path.exists():
-            errors.append(f"provider_evidence.{field} does not exist: {path}")
-        if value.get(field) and not path_is_within(path, state_paths(state_root)["provider_evidence"]):
+        raw_path = value.get(field)
+        if not isinstance(raw_path, str) or not raw_path:
+            continue
+        try:
+            path = confined_state_artifact(
+                state_root,
+                raw_path,
+                namespace="provider-evidence",
+                label=f"provider_evidence.{field}",
+            )
+        except ReportGateError:
             errors.append(f"provider_evidence.{field} must stay under provider evidence state directory")
-        if value.get(field) and path.resolve() not in {expected.resolve() for expected in expected_paths[field]}:
+            continue
+        if path not in expected_paths[field]:
             errors.append(f"provider_evidence.{field} must match current run evidence path")
+            continue
+        try:
+            exists = run_store.private_artifact_exists(path)
+        except run_store.RunStoreError:
+            errors.append(f"provider_evidence.{field} is not a safe private artifact")
+        else:
+            if not exists:
+                errors.append(f"provider_evidence.{field} does not exist: {path}")
     return errors
 
 
@@ -546,11 +613,20 @@ def validate_normalized_provider_evidence(
         expected_identity["run_id"],
         expected_identity["step_id"],
     )
-    if evidence_path.resolve() != expected_evidence_path.resolve():
+    if evidence_path != expected_evidence_path:
         errors.append("normalized_evidence path must match current run evidence path")
     artifact_evidence_path = value.get("evidence_path")
     if isinstance(artifact_evidence_path, str) and artifact_evidence_path:
-        if Path(artifact_evidence_path).expanduser().resolve() != evidence_path.resolve():
+        try:
+            normalized_artifact_evidence_path = confined_state_artifact(
+                state_root,
+                artifact_evidence_path,
+                namespace="provider-evidence",
+                label="normalized_evidence.evidence_path",
+            )
+        except ReportGateError:
+            normalized_artifact_evidence_path = None
+        if normalized_artifact_evidence_path != evidence_path:
             errors.append("normalized_evidence.evidence_path must reference its own artifact")
 
     expected_transcript_paths = {
@@ -558,27 +634,50 @@ def validate_normalized_provider_evidence(
             state_root,
             expected_identity["run_id"],
             expected_identity["step_id"],
-        ).resolve(),
+        ),
         legacy_provider_transcript_path(
             state_root,
             expected_identity["run_id"],
             expected_identity["step_id"],
-        ).resolve(),
+        ),
     }
     artifact_transcript_path = value.get("transcript_path")
     report_transcript_path = report_provider_evidence.get("transcript_path")
     if isinstance(artifact_transcript_path, str) and artifact_transcript_path:
-        transcript_path = Path(artifact_transcript_path).expanduser()
-        if transcript_path.resolve() not in expected_transcript_paths:
+        try:
+            transcript_path = confined_state_artifact(
+                state_root,
+                artifact_transcript_path,
+                namespace="provider-evidence",
+                label="normalized_evidence.transcript_path",
+            )
+        except ReportGateError:
+            transcript_path = None
+        if transcript_path not in expected_transcript_paths:
             errors.append("normalized_evidence.transcript_path must match current run transcript path")
-        if not transcript_path.exists():
-            errors.append(f"normalized_evidence.transcript_path does not exist: {transcript_path}")
+        elif transcript_path is not None:
+            try:
+                exists = run_store.private_artifact_exists(transcript_path)
+            except run_store.RunStoreError:
+                errors.append("normalized_evidence.transcript_path is not a safe private artifact")
+            else:
+                if not exists:
+                    errors.append(f"normalized_evidence.transcript_path does not exist: {transcript_path}")
         if (
             isinstance(report_transcript_path, str)
             and report_transcript_path
-            and transcript_path.resolve() != Path(report_transcript_path).expanduser().resolve()
         ):
-            errors.append("normalized_evidence.transcript_path must match report provider_evidence")
+            try:
+                normalized_report_transcript_path = confined_state_artifact(
+                    state_root,
+                    report_transcript_path,
+                    namespace="provider-evidence",
+                    label="report provider_evidence.transcript_path",
+                )
+            except ReportGateError:
+                normalized_report_transcript_path = None
+            if transcript_path != normalized_report_transcript_path:
+                errors.append("normalized_evidence.transcript_path must match report provider_evidence")
 
     if value.get("outcome") != "ok":
         errors.append("normalized_evidence.outcome must be 'ok' for a valid report")
@@ -598,12 +697,23 @@ def validate_normalized_provider_evidence_file(
     raw_path = report_provider_evidence.get("evidence_path")
     if not isinstance(raw_path, str) or not raw_path:
         return []
-    path = Path(raw_path).expanduser()
-    if not path.exists() or not path_is_within(path, state_paths(state_root)["provider_evidence"]):
+    try:
+        path = confined_state_artifact(
+            state_root,
+            raw_path,
+            namespace="provider-evidence",
+            label="normalized_evidence.evidence_path",
+        )
+    except ReportGateError:
         return []
     try:
+        if not run_store.private_artifact_exists(path):
+            return []
+    except run_store.RunStoreError:
+        return ["normalized_evidence artifact is not a safe private artifact"]
+    try:
         value = read_json(path)
-    except (ReportGateError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except ReportGateError as exc:
         return [f"normalized_evidence unreadable: {exc}"]
     return validate_normalized_provider_evidence(
         value,
@@ -670,9 +780,9 @@ def validate_authority(value: Any) -> list[str]:
 
 
 def next_numbered_artifact(path: Path, suffix: str) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    existing = sorted(path.glob(f"*-{suffix}.json"))
-    return path / f"{len(existing) + 1:04d}-{suffix}.json"
+    safe_suffix = run_store.validate_artifact_id(suffix, "artifact_suffix")
+    existing = run_store.list_private_artifacts(path, suffix=f"-{safe_suffix}.json")
+    return path / f"{len(existing) + 1:04d}-{safe_suffix}.json"
 
 
 def write_transition_artifact(
@@ -681,7 +791,11 @@ def write_transition_artifact(
     run_id: str,
     payload: dict[str, Any],
 ) -> Path:
-    path = next_numbered_artifact(state_paths(state_root)["transitions"] / run_id, "report-gate")
+    safe_run_id = run_store.validate_artifact_id(run_id, "run_id")
+    path = next_numbered_artifact(
+        state_paths(state_root)["transitions"] / safe_run_id,
+        "report-gate",
+    )
     run_store.atomic_write_json(path, payload)
     return path
 
@@ -693,9 +807,15 @@ def write_rejection_artifact(
     step_id: str,
     payload: dict[str, Any],
 ) -> Path:
-    directory = state_paths(state_root)["reports"] / run_id
-    existing = sorted(directory.glob(f"{step_id}-rejection-*.json"))
-    path = directory / f"{step_id}-rejection-{len(existing) + 1}.json"
+    safe_run_id = run_store.validate_artifact_id(run_id, "run_id")
+    safe_step_id = run_store.validate_artifact_id(step_id, "step_id")
+    directory = state_paths(state_root)["reports"] / safe_run_id
+    existing = run_store.list_private_artifacts(
+        directory,
+        prefix=f"{safe_step_id}-rejection-",
+        suffix=".json",
+    )
+    path = directory / f"{safe_step_id}-rejection-{len(existing) + 1}.json"
     run_store.atomic_write_json(path, payload)
     return path
 
@@ -707,7 +827,7 @@ def gate_report(
     report_path_arg: str = "",
     principal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    run_store.validate_artifact_id(run_id, "run_id")
+    run_id = run_store.validate_artifact_id(run_id, "run_id")
     actor = principal or {
         "principal_type": "harness_runner",
         "principal_id": "local-harness",
@@ -762,14 +882,29 @@ def gate_report(
                     "transition_artifact_path": None,
                     "rejection_artifact_path": None,
                 }
-            step_id = str(run["current_step"])
+            step_id = run_store.validate_artifact_id(str(run["current_step"]), "step_id")
             work_order_file = work_order_path(state_root, run_id, step_id)
             work_order = read_json(work_order_file)
-            canonical_report_path = Path(str(work_order["report_path"])).expanduser()
-            path = Path(report_path_arg).expanduser() if report_path_arg else canonical_report_path
-            if not path_is_within(path, state_paths(state_root)["reports"]):
-                raise ReportGateError("report path must stay under orchestrator state reports directory")
-            if path.resolve() != canonical_report_path.resolve():
+            expected_report_path = report_path(state_root, run_id, step_id)
+            canonical_report_path = confined_state_artifact(
+                state_root,
+                str(work_order["report_path"]),
+                namespace="reports",
+                label="canonical report path",
+            )
+            if canonical_report_path != expected_report_path:
+                raise ReportGateError("work order report path must match canonical report artifact")
+            path = (
+                confined_state_artifact(
+                    state_root,
+                    report_path_arg,
+                    namespace="reports",
+                    label="report path",
+                )
+                if report_path_arg
+                else canonical_report_path
+            )
+            if path != canonical_report_path:
                 raise ReportGateError("report path must match canonical work order report path")
 
             if run_state == "waiting_provider" and run_lifecycle.provider_claim_is_live(run, work_order):
@@ -799,10 +934,8 @@ def gate_report(
             report_read_error: str | None = None
             report_digest: str | None = None
             try:
-                if not path.is_file():
-                    raise OSError("report path is not a regular file")
-                raw_report = path.read_bytes()
-            except OSError:
+                raw_report = run_store.read_bytes(path)
+            except run_store.RunStoreError:
                 report = {}
                 report_read_outcome = "report_not_written"
                 report_read_error = "report file is unavailable"
@@ -969,6 +1102,24 @@ def gate_report(
                 if isinstance(report.get("provider_evidence"), dict)
                 else None
             )
+            evidence_sha256 = None
+            if isinstance(evidence_path, str) and evidence_path:
+                try:
+                    digest_path = confined_state_artifact(
+                        state_root,
+                        evidence_path,
+                        namespace="provider-evidence",
+                        label="provider_evidence.evidence_path",
+                    )
+                    expected_digest_path = provider_evidence_path(
+                        state_root,
+                        run_id,
+                        step_id,
+                    )
+                    if digest_path == expected_digest_path:
+                        evidence_sha256 = file_sha256(digest_path)
+                except (ReportGateError, run_store.RunStoreError):
+                    evidence_sha256 = None
             transition_payload = {
                 "transition_artifact_version": "1",
                 "run_id": run_id,
@@ -984,7 +1135,7 @@ def gate_report(
                 "report_path": str(path),
                 "report_sha256": report_digest,
                 "evidence_path": evidence_path,
-                "evidence_sha256": file_sha256(Path(evidence_path)) if evidence_path and Path(evidence_path).exists() else None,
+                "evidence_sha256": evidence_sha256,
                 "occurred_at": now_iso(),
                 "principal": run_lifecycle.redacted_principal(actor),
             }

@@ -120,8 +120,9 @@ def write_review_artifacts(
     transcript_path = Path(request["transcript_path"])
     report_path = Path(request["report_path"])
     for path in (evidence_path, transcript_path, report_path):
-        path.parent.mkdir(parents=True, exist_ok=True)
+        harness.frontdoor.run_store.ensure_private_directory(path.parent)
     transcript_path.write_text(json.dumps({"signal_only": True}) + "\n", encoding="utf-8")
+    transcript_path.chmod(0o600)
     fixed_fields = request["evidence_contract"]["fixed_fields"]
     evidence = {
         **fixed_fields,
@@ -134,6 +135,7 @@ def write_review_artifacts(
         "stdout_sha256": "sha256:" + hashlib.sha256(transcript_path.read_bytes()).hexdigest(),
     }
     evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
+    evidence_path.chmod(0o600)
     report = {
         "report_version": "1",
         "report_id": f"report-{run_id}",
@@ -160,6 +162,7 @@ def write_review_artifacts(
     }
     report.update(report_updates or {})
     report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+    report_path.chmod(0o600)
     return report_path, evidence_path, transcript_path
 
 
@@ -348,7 +351,7 @@ def scenario_directory_report_path(harness: OrchestratorHarness) -> dict[str, An
     run_id = prepare_run(harness, "directory-report-path")
     prepared = harness.frontdoor.prepare_claude_adapter(state_root=harness.state_root, run_id=run_id)
     report_path = Path(prepared["adapter_request"]["report_path"])
-    report_path.parent.mkdir(parents=True, exist_ok=True)
+    harness.frontdoor.run_store.ensure_private_directory(report_path.parent)
     report_path.mkdir()
     payload = harness.frontdoor.validate_report(state_root=harness.state_root, run_id=run_id)
     require_equal(payload.get("decision"), "blocked", "directory report decision")
@@ -555,7 +558,7 @@ def scenario_stale_lock_recovered(harness: OrchestratorHarness) -> dict[str, Any
     harness.approve(request_id)
     harness.create_run(request_id, run_id)
     lock_path = harness.frontdoor.run_lock.global_lock_path(harness.state_root)
-    lock_path.mkdir(parents=True)
+    lock_path.mkdir(parents=True, mode=0o700)
     owner = {
         "lock_version": "1",
         "lock_type": "workflow-run-global",
@@ -785,7 +788,7 @@ ORIGINAL_POPEN = subprocess.Popen
 
 def guarded_popen(*args: Any, **kwargs: Any) -> Any:
     command = args[0] if args else kwargs.get("args")
-    expected_ps = ["ps", "-o", "lstart=", "-p", str(os.getpid())]
+    expected_ps = ["/bin/ps", "-o", "lstart=", "-p", str(os.getpid())]
     if command == expected_ps:
         return ORIGINAL_POPEN(*args, **kwargs)
     raise AssertionError(f"external process attempted: args={args!r}, kwargs={kwargs!r}")

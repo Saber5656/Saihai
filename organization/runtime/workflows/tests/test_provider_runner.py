@@ -108,7 +108,7 @@ def test_fake_provider_success_completes_with_normalized_evidence() -> None:
             Path(payload["transcript_path"]).resolve(),
             "evidence transcript path",
         )
-        assert isinstance(evidence["duration_ms"], int | float)
+        assert isinstance(evidence["duration_ms"], (int, float))
         assert not isinstance(evidence["duration_ms"], bool)
         assert isinstance(evidence["usage"], dict)
         assert_equal(evidence["outcome"], "ok", "evidence outcome")

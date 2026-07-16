@@ -42,6 +42,21 @@ REQUIRED_WORK_ORDER_FIELDS = [
 ASSIGNMENT_ROLES = {"implementer", "reviewer", "qa", "approver", "observer", "publisher"}
 PERMISSION_MODES = {"readonly", "edit", "full"}
 FORBIDDEN_RAW_TRANSCRIPT_KEYS = {"prompt", "raw_prompt", "raw_transcript", "raw_transcript_text", "transcript"}
+LAUNCH_SESSION_FIELDS = {
+    "launch_session_version", "session_id", "deployment_id", "profile_id",
+    "principal_id", "workspace_id", "subject_pid", "process_start_token",
+    "native_realpath", "native_digest", "profile_realpath", "profile_digest",
+    "launch_argv_digest", "checkout_realpath", "checkout_identity_digest",
+    "issued_at", "valid_until", "status", "session_kind",
+    "commissioning_launch_reference", "commissioning_launch_digest", "supervisor_pid",
+    "supervisor_start_token", "record_reference", "record_digest",
+}
+PROJECTION_BINDING_FIELDS = {
+    "request_id",
+    "task_id",
+    "owner_principal_digest",
+    "checkout_identity_digest",
+}
 _WORK_ORDER_SCHEMA_CACHE: dict[str, Any] | None = None
 
 
@@ -68,6 +83,100 @@ def sha256_digest(payload: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(payload)).hexdigest()
 
 
+def _normalized_owner_principal(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise WorkOrderError("projection_binding_owner_invalid")
+    owner = {
+        "principal_type": str(value.get("principal_type") or ""),
+        "principal_id": str(value.get("principal_id") or ""),
+        "authn_method": str(value.get("authn_method") or ""),
+    }
+    if not all(owner.values()):
+        raise WorkOrderError("projection_binding_owner_invalid")
+    return owner
+
+
+def build_projection_binding(
+    *,
+    request_id: Any,
+    task_id: Any,
+    owner_principal: Any,
+    checkout_identity_digest: Any,
+) -> dict[str, str]:
+    """Build the exact non-authority binding used to filter bridge summaries."""
+
+    try:
+        normalized_request_id = run_store.validate_artifact_id(
+            str(request_id or ""), "request_id"
+        )
+        normalized_task_id = run_store.validate_artifact_id(
+            str(task_id or ""), "task_id"
+        )
+    except run_store.RunStoreError as exc:
+        raise WorkOrderError("projection_binding_identifier_invalid") from exc
+    owner = _normalized_owner_principal(owner_principal)
+    checkout_digest = str(checkout_identity_digest or "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", checkout_digest):
+        raise WorkOrderError("projection_binding_checkout_invalid")
+    return {
+        "request_id": normalized_request_id,
+        "task_id": normalized_task_id,
+        "owner_principal_digest": sha256_digest(owner),
+        "checkout_identity_digest": checkout_digest,
+    }
+
+
+def projection_binding_from_request_record(
+    request_record: dict[str, Any],
+) -> dict[str, str]:
+    if not isinstance(request_record, dict):
+        raise WorkOrderError("projection_binding_request_invalid")
+    return build_projection_binding(
+        request_id=request_record.get("request_id"),
+        task_id=request_record.get("task_id"),
+        owner_principal=request_record.get("owner_principal"),
+        checkout_identity_digest=request_record.get("checkout_identity_digest"),
+    )
+
+
+def validate_projection_binding(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != PROJECTION_BINDING_FIELDS:
+        raise WorkOrderError("projection_binding_invalid")
+    try:
+        request_id = run_store.validate_artifact_id(
+            str(value.get("request_id") or ""), "request_id"
+        )
+        task_id = run_store.validate_artifact_id(
+            str(value.get("task_id") or ""), "task_id"
+        )
+    except run_store.RunStoreError as exc:
+        raise WorkOrderError("projection_binding_invalid") from exc
+    owner_digest = str(value.get("owner_principal_digest") or "")
+    checkout_digest = str(value.get("checkout_identity_digest") or "")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", owner_digest) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", checkout_digest
+    ):
+        raise WorkOrderError("projection_binding_invalid")
+    return {
+        "request_id": request_id,
+        "task_id": task_id,
+        "owner_principal_digest": owner_digest,
+        "checkout_identity_digest": checkout_digest,
+    }
+
+
+def normalize_launch_session_identity(value: Any) -> dict[str, Any]:
+    try:
+        import codex_main_agent_supervisor as supervisor
+
+        normalized = supervisor.validate_session_record_shape(value)
+    except Exception as exc:
+        raise WorkOrderError("frontend_launch_session_invalid") from exc
+    if set(normalized) != LAUNCH_SESSION_FIELDS:
+        raise WorkOrderError("frontend_launch_session_invalid")
+    return json.loads(json.dumps(dict(normalized)))
+
+
 def work_order_schema() -> dict[str, Any]:
     global _WORK_ORDER_SCHEMA_CACHE
     if _WORK_ORDER_SCHEMA_CACHE is None:
@@ -89,7 +198,7 @@ def _type_matches(value: Any, expected: Any) -> bool:
     if expected == "integer":
         return isinstance(value, int) and not isinstance(value, bool)
     if expected == "number":
-        return isinstance(value, int | float) and not isinstance(value, bool)
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
     if expected == "null":
         return value is None
     return True
@@ -99,8 +208,30 @@ def _json_path(parent: str, key: str) -> str:
     return f"{parent}.{key}" if parent != "$" else f"$.{key}"
 
 
-def _validate_schema_fragment(value: Any, schema: dict[str, Any], path: str) -> list[str]:
+def _validate_schema_fragment(
+    value: Any,
+    schema: dict[str, Any],
+    path: str,
+    *,
+    root_schema: dict[str, Any] | None = None,
+) -> list[str]:
+    root = schema if root_schema is None else root_schema
     errors: list[str] = []
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        if not reference.startswith("#/"):
+            return [f"schema:{path}:unsupported_ref"]
+        resolved: Any = root
+        try:
+            for component in reference[2:].split("/"):
+                resolved = resolved[component.replace("~1", "/").replace("~0", "~")]
+        except (KeyError, TypeError):
+            return [f"schema:{path}:unresolved_ref"]
+        if not isinstance(resolved, dict):
+            return [f"schema:{path}:unresolved_ref"]
+        errors.extend(
+            _validate_schema_fragment(value, resolved, path, root_schema=root)
+        )
     expected_type = schema.get("type")
     if expected_type is not None and not _type_matches(value, expected_type):
         errors.append(f"schema:{path}:type")
@@ -112,7 +243,7 @@ def _validate_schema_fragment(value: Any, schema: dict[str, Any], path: str) -> 
         errors.append(f"schema:{path}:enum")
     if "pattern" in schema and isinstance(value, str) and not re.search(str(schema["pattern"]), value):
         errors.append(f"schema:{path}:pattern")
-    if "minimum" in schema and isinstance(value, int | float) and not isinstance(value, bool):
+    if "minimum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool):
         if value < schema["minimum"]:
             errors.append(f"schema:{path}:minimum")
 
@@ -126,7 +257,14 @@ def _validate_schema_fragment(value: Any, schema: dict[str, Any], path: str) -> 
         properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         for key, child_schema in properties.items():
             if key in value and isinstance(child_schema, dict):
-                errors.extend(_validate_schema_fragment(value[key], child_schema, _json_path(path, str(key))))
+                errors.extend(
+                    _validate_schema_fragment(
+                        value[key],
+                        child_schema,
+                        _json_path(path, str(key)),
+                        root_schema=root,
+                    )
+                )
         if schema.get("additionalProperties") is False:
             for key in sorted(set(value) - set(properties)):
                 errors.append(f"schema:{_json_path(path, str(key))}:additional_property")
@@ -138,11 +276,18 @@ def _validate_schema_fragment(value: Any, schema: dict[str, Any], path: str) -> 
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
-                errors.extend(_validate_schema_fragment(item, item_schema, f"{path}[{index}]"))
+                errors.extend(
+                    _validate_schema_fragment(
+                        item,
+                        item_schema,
+                        f"{path}[{index}]",
+                        root_schema=root,
+                    )
+                )
 
     if "anyOf" in schema and isinstance(schema["anyOf"], list):
         branch_errors = [
-            _validate_schema_fragment(value, branch, path)
+            _validate_schema_fragment(value, branch, path, root_schema=root)
             for branch in schema["anyOf"]
             if isinstance(branch, dict)
         ]
@@ -155,15 +300,22 @@ def _validate_schema_fragment(value: Any, schema: dict[str, Any], path: str) -> 
         condition = branch.get("if")
         applies = True
         if isinstance(condition, dict):
-            applies = not _validate_schema_fragment(value, condition, path)
+            applies = not _validate_schema_fragment(
+                value, condition, path, root_schema=root
+            )
         if applies and isinstance(branch.get("then"), dict):
-            errors.extend(_validate_schema_fragment(value, branch["then"], path))
+            errors.extend(
+                _validate_schema_fragment(
+                    value, branch["then"], path, root_schema=root
+                )
+            )
 
     return errors
 
 
 def validate_against_work_order_schema(work_order: dict[str, Any]) -> list[str]:
-    return _validate_schema_fragment(work_order, work_order_schema(), "$")
+    schema = work_order_schema()
+    return _validate_schema_fragment(work_order, schema, "$", root_schema=schema)
 
 
 def _forbidden_raw_transcript_paths(value: Any, path: str = "$") -> list[str]:
@@ -299,7 +451,53 @@ def build_work_order(
             },
         },
     }
+    owner_principal = request_record.get("owner_principal")
+    checkout_identity_digest = request_record.get("checkout_identity_digest")
+    if owner_principal is not None or checkout_identity_digest is not None:
+        if not isinstance(owner_principal, dict) or not isinstance(checkout_identity_digest, str):
+            raise WorkOrderError("frontend_request_binding_incomplete")
+        work_order["frontend_request_binding"] = {
+            "owner_principal": {
+                "principal_type": str(owner_principal.get("principal_type") or ""),
+                "principal_id": str(owner_principal.get("principal_id") or ""),
+                "authn_method": str(owner_principal.get("authn_method") or ""),
+            },
+            "checkout_identity_digest": checkout_identity_digest,
+        }
+        request_binding_source = {
+            **request_record,
+            "request_id": request_record.get("request_id", run.get("request_id")),
+            "task_id": request_record.get("task_id", run.get("task_id")),
+        }
+        work_order["projection_binding"] = projection_binding_from_request_record(
+            request_binding_source
+        )
+    launch_session_identity = request_record.get("launch_session_identity")
+    launch_session_digest = request_record.get("launch_session_digest")
+    if launch_session_identity is not None or launch_session_digest:
+        if not isinstance(launch_session_digest, str):
+            raise WorkOrderError("frontend_launch_session_incomplete")
+        normalized_session = normalize_launch_session_identity(launch_session_identity)
+        if launch_session_digest != normalized_session["record_digest"]:
+            raise WorkOrderError("frontend_launch_session_digest_mismatch")
+        if (
+            not isinstance(owner_principal, dict)
+            or normalized_session["principal_id"] != owner_principal.get("principal_id")
+            or normalized_session["checkout_identity_digest"] != checkout_identity_digest
+        ):
+            raise WorkOrderError("frontend_launch_session_authority_mismatch")
+        work_order["frontend_launch_session_binding"] = {
+            "launch_session_identity": normalized_session,
+            "launch_session_digest": launch_session_digest,
+        }
     if worker_execution_plan is not None:
+        plan_projection_binding = (
+            worker_execution_plan.get("projection_binding")
+            if isinstance(worker_execution_plan, dict)
+            else None
+        )
+        if plan_projection_binding != work_order.get("projection_binding"):
+            raise WorkOrderError("worker_projection_binding_mismatch")
         work_order["worker_execution_plan"] = worker_execution_plan
     return work_order
 
@@ -377,6 +575,72 @@ def validate_work_order(
                 errors.append("work_order_authority.runner_claim.claim_state must be unclaimed")
             if "lease_expires_at" not in runner_claim:
                 errors.append("work_order_authority.runner_claim.lease_expires_at must be present")
+
+    launch_binding = work_order.get("frontend_launch_session_binding")
+    if launch_binding is not None:
+        if not isinstance(launch_binding, dict) or set(launch_binding) != {
+            "launch_session_identity",
+            "launch_session_digest",
+        }:
+            errors.append("frontend_launch_session_binding must be exact object")
+        else:
+            try:
+                normalized_session = normalize_launch_session_identity(
+                    launch_binding.get("launch_session_identity")
+                )
+            except WorkOrderError as exc:
+                errors.append(str(exc))
+            else:
+                if launch_binding.get("launch_session_digest") != normalized_session["record_digest"]:
+                    errors.append("frontend_launch_session_digest_mismatch")
+                frontend_binding = work_order.get("frontend_request_binding")
+                if not isinstance(frontend_binding, dict):
+                    errors.append("frontend_launch_session_requires_request_binding")
+                else:
+                    owner = frontend_binding.get("owner_principal")
+                    if (
+                        not isinstance(owner, dict)
+                        or normalized_session["principal_id"] != owner.get("principal_id")
+                        or normalized_session["checkout_identity_digest"]
+                        != frontend_binding.get("checkout_identity_digest")
+                    ):
+                        errors.append("frontend_launch_session_authority_mismatch")
+
+    frontend_binding = work_order.get("frontend_request_binding")
+    projection_binding = work_order.get("projection_binding")
+    if frontend_binding is not None:
+        try:
+            expected_projection_binding = build_projection_binding(
+                request_id=work_order.get("request_id"),
+                task_id=work_order.get("task_id"),
+                owner_principal=(
+                    frontend_binding.get("owner_principal")
+                    if isinstance(frontend_binding, dict)
+                    else None
+                ),
+                checkout_identity_digest=(
+                    frontend_binding.get("checkout_identity_digest")
+                    if isinstance(frontend_binding, dict)
+                    else None
+                ),
+            )
+            normalized_projection_binding = validate_projection_binding(
+                projection_binding
+            )
+        except WorkOrderError as exc:
+            errors.append(str(exc))
+        else:
+            if normalized_projection_binding != expected_projection_binding:
+                errors.append("projection_binding_mismatch")
+    elif projection_binding is not None:
+        errors.append("projection_binding_requires_frontend_request_binding")
+
+    worker_plan = work_order.get("worker_execution_plan")
+    if worker_plan is not None and (
+        not isinstance(worker_plan, dict)
+        or worker_plan.get("projection_binding") != projection_binding
+    ):
+        errors.append("worker_projection_binding_mismatch")
 
     workflow_id = work_order.get("workflow_id")
     step_id = work_order.get("step_id")

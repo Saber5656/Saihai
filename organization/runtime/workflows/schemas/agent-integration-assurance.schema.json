@@ -1,0 +1,327 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saihai.local/schemas/workflows/agent-integration-assurance.schema.json",
+  "title": "Agent Integration Assurance Target Registry",
+  "description": "Static, platform-neutral target requirements. Runtime observations and attestations are stored only in the host-owned assurance state root.",
+  "type": "object",
+  "required": ["contract_version", "failure_policy", "profiles"],
+  "properties": {
+    "contract_version": {"const": "2"},
+    "failure_policy": {
+      "type": "object",
+      "required": [
+        "missing_evidence",
+        "invalid_evidence",
+        "stale_evidence",
+        "configuration_drift",
+        "claim_downgrade"
+      ],
+      "properties": {
+        "missing_evidence": {"const": "suppress"},
+        "invalid_evidence": {"const": "suppress"},
+        "stale_evidence": {"const": "suppress"},
+        "configuration_drift": {"const": "suppress"},
+        "claim_downgrade": {"const": "forbidden"}
+      },
+      "additionalProperties": false
+    },
+    "profiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "profile_version",
+          "profile_id",
+          "agent_family",
+          "surface_role",
+          "integration_state",
+          "transports",
+          "target_claims",
+          "operation_requirements",
+          "configuration_requirements",
+          "evidence_policy",
+          "tool_validator",
+          "launch_validator",
+          "execution_binding_validator",
+          "rationale"
+        ],
+        "properties": {
+          "profile_version": {"const": "2"},
+          "profile_id": {"$ref": "#/$defs/safeId"},
+          "agent_family": {"$ref": "#/$defs/safeFamily"},
+          "surface_role": {
+            "enum": ["main_agent", "bounded_worker"]
+          },
+          "integration_state": {
+            "enum": ["configured", "available_advisory", "candidate", "unavailable"]
+          },
+          "transports": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "enum": ["mcp", "native_policy", "hook", "cli", "api", "unknown"]
+            }
+          },
+          "target_claims": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/enforcedClaim"}
+          },
+          "operation_requirements": {"$ref": "#/$defs/operationMap"},
+          "configuration_requirements": {
+            "type": "object",
+            "required": ["deployment_manifest_path", "required_artifact_roles"],
+            "properties": {
+              "deployment_manifest_path": {
+                "anyOf": [
+                  {"type": "string", "pattern": "^/[^\\u0000]*$", "maxLength": 1024},
+                  {"type": "null"}
+                ]
+              },
+              "required_artifact_roles": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "enum": [
+                    "deployment_manifest",
+                    "runtime_config",
+                    "requirements",
+                    "bridge_wrapper",
+                    "instructions",
+                    "profile_snapshot",
+                    "observer",
+                    "supervisor"
+                  ]
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "evidence_policy": {
+            "type": "object",
+            "required": ["max_age_seconds", "future_skew_seconds", "required_bindings"],
+            "properties": {
+              "max_age_seconds": {"type": "integer", "minimum": 60, "maximum": 86400},
+              "future_skew_seconds": {"type": "integer", "minimum": 0, "maximum": 300},
+              "required_bindings": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "uniqueItems": true,
+                "items": {
+                  "enum": [
+                    "configuration_digest",
+                    "runtime_binary_digest",
+                    "tool_inventory_digest",
+                    "checkout_digest"
+                  ]
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "tool_validator": {
+            "anyOf": [
+              {"type": "null"},
+              {"$ref": "#/$defs/toolValidator"}
+            ]
+          },
+          "launch_validator": {
+            "anyOf": [
+              {"type": "null"},
+              {"$ref": "#/$defs/launchValidator"}
+            ]
+          },
+          "execution_binding_validator": {
+            "anyOf": [
+              {"type": "null"},
+              {"$ref": "#/$defs/launchValidator"}
+            ]
+          },
+          "rationale": {"type": "string", "minLength": 1, "maxLength": 2048}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"
+    },
+    "safeFamily": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+    },
+    "enforcedClaim": {
+      "type": "string",
+      "enum": ["ingress_enforced", "action_enforced", "managed_worker"]
+    },
+    "operationCoverage": {
+      "type": "string",
+      "enum": [
+        "ambient",
+        "saihai_gateway_only",
+        "capability_scoped",
+        "denied",
+        "unverified",
+        "not_applicable"
+      ]
+    },
+    "operationMap": {
+      "type": "object",
+      "required": [
+        "typed_request_submit",
+        "redacted_projection_read",
+        "output_acknowledge",
+        "filesystem_write",
+        "shell_exec",
+        "process_spawn",
+        "network_egress",
+        "external_mutation",
+        "provider_dispatch",
+        "git_commit",
+        "git_push",
+        "pr_create",
+        "release_publish",
+        "credential_access",
+        "agent_spawn",
+        "surface_launch"
+      ],
+      "properties": {
+        "typed_request_submit": {"$ref": "#/$defs/operationCoverage"},
+        "redacted_projection_read": {"$ref": "#/$defs/operationCoverage"},
+        "output_acknowledge": {"$ref": "#/$defs/operationCoverage"},
+        "filesystem_write": {"$ref": "#/$defs/operationCoverage"},
+        "shell_exec": {"$ref": "#/$defs/operationCoverage"},
+        "process_spawn": {"$ref": "#/$defs/operationCoverage"},
+        "network_egress": {"$ref": "#/$defs/operationCoverage"},
+        "external_mutation": {"$ref": "#/$defs/operationCoverage"},
+        "provider_dispatch": {"$ref": "#/$defs/operationCoverage"},
+        "git_commit": {"$ref": "#/$defs/operationCoverage"},
+        "git_push": {"$ref": "#/$defs/operationCoverage"},
+        "pr_create": {"$ref": "#/$defs/operationCoverage"},
+        "release_publish": {"$ref": "#/$defs/operationCoverage"},
+        "credential_access": {"$ref": "#/$defs/operationCoverage"},
+        "agent_spawn": {"$ref": "#/$defs/operationCoverage"},
+        "surface_launch": {"$ref": "#/$defs/operationCoverage"}
+      },
+      "additionalProperties": false
+    },
+    "toolNameArray": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    },
+    "toolCategoryRule": {
+      "type": "object",
+      "required": ["mode", "values", "alternatives"],
+      "properties": {
+        "mode": {"enum": ["exact", "subset", "one_of"]},
+        "values": {"$ref": "#/$defs/toolNameArray"},
+        "alternatives": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/toolNameArray"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "toolValidator": {
+      "type": "object",
+      "required": [
+        "validator_id",
+        "validator_version",
+        "validator_kind",
+        "validator_digest",
+        "classification_requirements",
+        "manifest_enabled_tools",
+        "operation_tool_names"
+      ],
+      "properties": {
+        "validator_id": {"$ref": "#/$defs/safeId"},
+        "validator_version": {"$ref": "#/$defs/safeId"},
+        "validator_kind": {"const": "declarative_tool_classification"},
+        "validator_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "SHA-256 of the canonical declarative tool-validator payload excluding validator_digest."
+        },
+        "classification_requirements": {
+          "type": "object",
+          "required": [
+            "server_backed_mcp_tools",
+            "reviewed_internal_tools",
+            "active_external_mutation_tools",
+            "mechanically_denied_tools",
+            "dynamic_tools",
+            "extension_tools",
+            "multi_agent_tools"
+          ],
+          "properties": {
+            "server_backed_mcp_tools": {"$ref": "#/$defs/toolCategoryRule"},
+            "reviewed_internal_tools": {"$ref": "#/$defs/toolCategoryRule"},
+            "active_external_mutation_tools": {"$ref": "#/$defs/toolCategoryRule"},
+            "mechanically_denied_tools": {"$ref": "#/$defs/toolCategoryRule"},
+            "dynamic_tools": {"$ref": "#/$defs/toolCategoryRule"},
+            "extension_tools": {"$ref": "#/$defs/toolCategoryRule"},
+            "multi_agent_tools": {"$ref": "#/$defs/toolCategoryRule"}
+          },
+          "additionalProperties": false
+        },
+        "manifest_enabled_tools": {
+          "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/toolNameArray"}
+          ]
+        },
+        "operation_tool_names": {
+          "type": "object",
+          "required": [
+            "filesystem_write", "shell_exec", "process_spawn", "network_egress",
+            "external_mutation", "provider_dispatch", "git_commit", "git_push",
+            "pr_create", "release_publish", "credential_access", "agent_spawn"
+          ],
+          "properties": {
+            "filesystem_write": {"$ref": "#/$defs/toolNameArray"},
+            "shell_exec": {"$ref": "#/$defs/toolNameArray"},
+            "process_spawn": {"$ref": "#/$defs/toolNameArray"},
+            "network_egress": {"$ref": "#/$defs/toolNameArray"},
+            "external_mutation": {"$ref": "#/$defs/toolNameArray"},
+            "provider_dispatch": {"$ref": "#/$defs/toolNameArray"},
+            "git_commit": {"$ref": "#/$defs/toolNameArray"},
+            "git_push": {"$ref": "#/$defs/toolNameArray"},
+            "pr_create": {"$ref": "#/$defs/toolNameArray"},
+            "release_publish": {"$ref": "#/$defs/toolNameArray"},
+            "credential_access": {"$ref": "#/$defs/toolNameArray"},
+            "agent_spawn": {"$ref": "#/$defs/toolNameArray"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "launchValidator": {
+      "type": "object",
+      "required": [
+        "validator_id", "validator_version", "module", "function",
+        "fields_constant", "validator_digest"
+      ],
+      "properties": {
+        "validator_id": {"$ref": "#/$defs/safeId"},
+        "validator_version": {"$ref": "#/$defs/safeId"},
+        "module": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,95}$"},
+        "function": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,95}$"},
+        "fields_constant": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,95}$"},
+        "validator_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "SHA-256 of the exact no-follow module.__file__ bytes for this executable validator adapter."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

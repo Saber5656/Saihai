@@ -42,15 +42,19 @@ def test_advanced_codeql_contract() -> None:
 
 def test_local_model_pack_remains_discoverable() -> None:
     pack = (MODEL_PACK / "codeql-pack.yml").read_text(encoding="utf-8")
-    model = (MODEL_PACK / "models" / "frontdoor.yaml").read_text(encoding="utf-8")
+    model = (MODEL_PACK / "models" / "frontdoor.yml").read_text(encoding="utf-8")
 
     assert "extensionTargets:" in pack
     assert "codeql/python-all" in pack
     assert "dataExtensions:" in pack
-    assert "models/**/*.yaml" in pack
+    assert "models/**/*.yml" in pack
     assert "extensible: barrierModel" in model
     assert '"host_state_root"' in model
     assert "Member[configured_state_root].ReturnValue" in model
+    assert (
+        '["host_state_root", "Member[resolve_configured_state_root].ReturnValue", "path-injection"]'
+        in model
+    )
     assert '"safe_paths"' in model
     assert "Member[confined_state_path].ReturnValue" in model
     assert "path-injection" in model

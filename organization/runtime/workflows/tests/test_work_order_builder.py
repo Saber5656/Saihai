@@ -65,6 +65,14 @@ def run_record(**overrides) -> dict:
 
 def request_record(**overrides) -> dict:
     candidate = {
+        "task_id": "TSK-work-order",
+        "request_id": "req-work-order",
+        "owner_principal": {
+            "principal_type": "main_agent_bridge",
+            "principal_id": "codex-main-agent-a-prime",
+            "authn_method": "installed_frontend_profile",
+        },
+        "checkout_identity_digest": "sha256:" + "4" * 64,
         "classification": {"context_scope": "refs_only"},
         "approved_activation": {
             "policy": {},
@@ -139,6 +147,111 @@ def test_build_valid_p0_order() -> None:
         assert "Step 'review'" in order["instruction"], "instruction includes step id"
         assert "external_review_report" in order["instruction"], "instruction includes output contract"
         assert_equal(order["work_order_authority"]["runner_claim"]["claim_state"], "unclaimed", "claim")
+        assert_equal(
+            order["frontend_request_binding"],
+            {
+                "owner_principal": {
+                    "principal_type": "main_agent_bridge",
+                    "principal_id": "codex-main-agent-a-prime",
+                    "authn_method": "installed_frontend_profile",
+                },
+                "checkout_identity_digest": "sha256:" + "4" * 64,
+            },
+            "frontend request binding",
+        )
+        assert_equal(
+            order["projection_binding"],
+            work_order_builder.build_projection_binding(
+                request_id="req-work-order",
+                task_id="TSK-work-order",
+                owner_principal=order["frontend_request_binding"]["owner_principal"],
+                checkout_identity_digest="sha256:" + "4" * 64,
+            ),
+            "projection binding",
+        )
+
+
+def test_projection_binding_is_exact_and_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        for field, replacement in (
+            ("request_id", "req-other"),
+            ("task_id", "TSK-other"),
+            ("owner_principal_digest", "sha256:" + "a" * 64),
+            ("checkout_identity_digest", "sha256:" + "b" * 64),
+        ):
+            order = build(state_root)
+            order["projection_binding"][field] = replacement
+            errors = work_order_builder.validate_work_order(
+                order,
+                template=template(),
+                step=step(),
+                state_root=state_root,
+            )
+            assert "projection_binding_mismatch" in errors, (field, errors)
+
+        missing = build(state_root)
+        missing.pop("projection_binding")
+        errors = work_order_builder.validate_work_order(
+            missing,
+            template=template(),
+            step=step(),
+            state_root=state_root,
+        )
+        assert "projection_binding_invalid" in errors
+
+
+def test_frontend_request_binding_is_all_or_nothing() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request = request_record()
+        request.pop("checkout_identity_digest")
+        try:
+            build(state_root, request=request)
+        except work_order_builder.WorkOrderError as exc:
+            assert_equal(str(exc), "frontend_request_binding_incomplete", "partial binding reason")
+        else:
+            raise AssertionError("partial frontend request binding accepted")
+
+
+def test_cursor_and_grok_requesters_preserve_adapter_neutral_work_order_contract() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        for frontend in ("cursor", "grok"):
+            principal_id = f"{frontend}-main-agent-a-prime"
+            order = build(
+                state_root,
+                run=run_record(
+                    requester={
+                        "frontdoor": frontend,
+                        "chat_session_id": f"{frontend}-session",
+                    }
+                ),
+                request=request_record(
+                    owner_principal={
+                        "principal_type": "main_agent_bridge",
+                        "principal_id": principal_id,
+                        "authn_method": "installed_frontend_profile",
+                    }
+                ),
+            )
+            assert_equal(
+                work_order_builder.validate_work_order(
+                    order,
+                    template=template(),
+                    step=step(),
+                    state_root=state_root,
+                ),
+                [],
+                f"{frontend} work order errors",
+            )
+            assert_equal(order["requester"]["frontdoor"], frontend, f"{frontend} requester")
+            assert_equal(
+                order["frontend_request_binding"]["owner_principal"]["principal_id"],
+                principal_id,
+                f"{frontend} principal binding",
+            )
+            assert_equal(order["from_role"], "frontdoor", f"{frontend} normalized role")
 
 
 def test_required_field_list_matches_schema() -> None:
@@ -292,6 +405,9 @@ def test_snapshot_path_rejects_symlinked_work_order_root() -> None:
 def main() -> None:
     tests = [
         test_build_valid_p0_order,
+        test_frontend_request_binding_is_all_or_nothing,
+        test_projection_binding_is_exact_and_fail_closed,
+        test_cursor_and_grok_requesters_preserve_adapter_neutral_work_order_contract,
         test_required_field_list_matches_schema,
         test_validate_rejects_missing_refs,
         test_validate_rejects_report_path_escape,

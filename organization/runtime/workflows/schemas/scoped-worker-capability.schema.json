@@ -8,14 +8,21 @@
     "capability_version",
     "capability_id",
     "task_id",
+    "request_id",
     "run_id",
     "step_id",
     "work_order_digest",
     "issuance_binding_digest",
+    "assurance_binding",
+    "assurance_binding_digest",
+    "frontend_launch_session_binding",
+    "worker_runtime_binding",
+    "worker_runtime_binding_digest",
     "executor_principal",
     "gateway_principal_digest",
     "worker_backend",
     "worker_execution_plan_digest",
+    "projection_binding",
     "repository",
     "worktree",
     "allowed_operations",
@@ -35,14 +42,38 @@
     "capability_version": { "const": "1" },
     "capability_id": { "type": "string", "pattern": "^cap-[0-9a-f]{24}$" },
     "task_id": { "type": "string" },
+    "request_id": { "type": "string" },
     "run_id": { "type": "string" },
     "step_id": { "type": "string" },
     "work_order_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "issuance_binding_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "assurance_binding": {
+      "type": "object",
+      "required": ["binding_version", "frontend_action", "worker_managed"],
+      "properties": {
+        "binding_version": { "const": "1" },
+        "frontend_action": { "$ref": "#/$defs/verifiedClaim" },
+        "worker_managed": { "$ref": "#/$defs/verifiedClaim" }
+      },
+      "additionalProperties": false
+    },
+    "assurance_binding_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "frontend_launch_session_binding": {
+      "type": "object",
+      "required": ["launch_session_identity", "launch_session_digest"],
+      "properties": {
+        "launch_session_identity": { "$ref": "#/$defs/launchSessionIdentity" },
+        "launch_session_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "worker_runtime_binding": { "$ref": "#/$defs/workerRuntimeBinding" },
+    "worker_runtime_binding_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "executor_principal": { "type": "object" },
     "gateway_principal_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "worker_backend": { "type": "object" },
+    "worker_backend": { "$ref": "#/$defs/workerBackend" },
     "worker_execution_plan_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "projection_binding": { "$ref": "#/$defs/projectionBinding" },
     "repository": { "type": "object" },
     "worktree": { "type": "object" },
     "allowed_operations": { "type": "array", "items": { "type": "string" } },
@@ -58,5 +89,176 @@
     "signature": { "type": "object" },
     "execution_state": { "type": "object" }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "projectionBinding": {
+      "type": "object",
+      "required": [
+        "request_id", "task_id", "owner_principal_digest", "checkout_identity_digest"
+      ],
+      "properties": {
+        "request_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$" },
+        "task_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$" },
+        "owner_principal_digest": { "$ref": "#/$defs/sha256" },
+        "checkout_identity_digest": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "workerRuntimeBinding": {
+      "type": "object",
+      "required": [
+        "binding_version", "runtime_realpath", "runtime_digest", "profile_mode",
+        "profile_realpath", "profile_digest", "codex_home_realpath", "environment",
+        "environment_digest", "argv_template", "argv_digest", "runner_profile_digest"
+      ],
+      "properties": {
+        "binding_version": { "const": "1" },
+        "runtime_realpath": { "type": "string", "pattern": "^/" },
+        "runtime_digest": { "$ref": "#/$defs/sha256" },
+        "profile_mode": { "const": "ignored_by_fixed_argv" },
+        "profile_realpath": { "type": "null" },
+        "profile_digest": { "$ref": "#/$defs/sha256" },
+        "codex_home_realpath": { "type": "string", "pattern": "^/" },
+        "environment": {
+          "type": "object",
+          "required": ["PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL", "TMPDIR"],
+          "properties": {
+            "PATH": { "const": "/usr/bin:/bin" },
+            "HOME": { "type": "string", "pattern": "^/" },
+            "CODEX_HOME": { "type": "string", "pattern": "^/" },
+            "LANG": { "const": "C" },
+            "LC_ALL": { "const": "C" },
+            "TMPDIR": { "const": "/tmp" }
+          },
+          "additionalProperties": false
+        },
+        "environment_digest": { "$ref": "#/$defs/sha256" },
+        "argv_template": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "argv_digest": { "$ref": "#/$defs/sha256" },
+        "runner_profile_digest": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "workerBackend": {
+      "type": "object",
+      "required": [
+        "backend_id", "adapter_version", "executable_path", "executable_digest",
+        "runner_profile_digest", "provider_id", "runtime_binding"
+      ],
+      "properties": {
+        "backend_id": { "const": "codex_cli" },
+        "adapter_version": { "const": "1" },
+        "executable_path": { "type": "string", "pattern": "^/" },
+        "executable_digest": { "$ref": "#/$defs/sha256" },
+        "runner_profile_digest": { "$ref": "#/$defs/sha256" },
+        "provider_id": { "const": "openai-codex" },
+        "runtime_binding": { "$ref": "#/$defs/workerRuntimeBinding" }
+      },
+      "additionalProperties": false
+    },
+    "launchSessionIdentity": {
+      "type": "object",
+      "required": [
+        "launch_session_version", "session_id", "deployment_id", "profile_id",
+        "principal_id", "workspace_id", "subject_pid", "process_start_token",
+        "native_realpath", "native_digest", "profile_realpath", "profile_digest",
+        "launch_argv_digest", "checkout_realpath", "checkout_identity_digest",
+        "issued_at", "valid_until", "status", "session_kind",
+        "commissioning_launch_reference", "commissioning_launch_digest",
+        "supervisor_pid", "supervisor_start_token", "record_reference", "record_digest"
+      ],
+      "properties": {
+        "launch_session_version": { "const": "2" },
+        "session_id": { "type": "string" },
+        "deployment_id": { "type": "string" },
+        "profile_id": { "type": "string" },
+        "principal_id": { "type": "string" },
+        "workspace_id": { "type": "string" },
+        "subject_pid": { "type": "integer", "minimum": 1 },
+        "process_start_token": { "type": "string", "pattern": "^proc-[0-9a-f]{64}$" },
+        "native_realpath": { "type": "string", "pattern": "^/" },
+        "native_digest": { "$ref": "#/$defs/sha256" },
+        "profile_realpath": { "type": "string", "pattern": "^/" },
+        "profile_digest": { "$ref": "#/$defs/sha256" },
+        "launch_argv_digest": { "$ref": "#/$defs/sha256" },
+        "checkout_realpath": { "type": "string", "pattern": "^/" },
+        "checkout_identity_digest": { "$ref": "#/$defs/sha256" },
+        "issued_at": { "type": "string" },
+        "valid_until": { "type": "string" },
+        "status": { "const": "active" },
+        "session_kind": { "enum": ["standard", "commissioning"] },
+        "commissioning_launch_reference": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^commissioning-launches/[A-Za-z0-9_.-]+\\.json$" }
+          ]
+        },
+        "commissioning_launch_digest": {
+          "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+        },
+        "supervisor_pid": { "type": "integer", "minimum": 1 },
+        "supervisor_start_token": { "type": "string", "pattern": "^proc-[0-9a-f]{64}$" },
+        "record_reference": { "type": "string", "pattern": "^launch-sessions/[A-Za-z0-9_.-]+\\.json$" },
+        "record_digest": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "session_kind": { "const": "standard" } } },
+          "then": {
+            "properties": {
+              "commissioning_launch_reference": { "type": "null" },
+              "commissioning_launch_digest": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "session_kind": { "const": "commissioning" } } },
+          "then": {
+            "properties": {
+              "commissioning_launch_reference": { "type": "string", "pattern": "^commissioning-launches/[A-Za-z0-9_.-]+\\.json$" },
+              "commissioning_launch_digest": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        }
+      ]
+    },
+    "verifiedClaim": {
+      "type": "object",
+      "required": [
+        "profile_id",
+        "claim",
+        "attestation_digest",
+        "profile_subject_digest",
+        "subject_binding_digest",
+        "bindings_digest",
+        "evidence_set_digest",
+        "checkout_identity_digest"
+      ],
+      "properties": {
+        "profile_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+        },
+        "claim": {
+          "enum": ["action_enforced", "managed_worker"]
+        },
+        "attestation_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "profile_subject_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "subject_binding_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "bindings_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "evidence_set_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "checkout_identity_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    }
+  }
 }

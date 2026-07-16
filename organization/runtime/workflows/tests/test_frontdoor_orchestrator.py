@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -60,15 +61,16 @@ def run_frontdoor(
     check: bool = True,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    canonical_state_root = state_root.resolve(strict=False)
     return subprocess.run(
         [
             sys.executable,
             "-c",
             FRONTDOOR_TEST_WRAPPER,
             str(SCRIPT_DIR),
-            str(state_root),
+            str(canonical_state_root),
             "--state-root",
-            str(state_root),
+            str(canonical_state_root),
             *args,
         ],
         cwd=ROOT,
@@ -176,6 +178,7 @@ def child_thread_plan(state_root: Path, **overrides) -> dict:
     instruction_ref = ROOT / "organization/runtime/workflows/README.md"
     plan = {
         "task_id": "TSK-child-thread",
+        "request_id": "req-child-summary",
         "issue_id": "67",
         "issue_url": "https://github.com/Saber5656/Saihai/issues/67",
         "repo_full_name": "Saber5656/Saihai",
@@ -195,6 +198,54 @@ def child_thread_plan(state_root: Path, **overrides) -> dict:
     }
     plan.update(overrides)
     return plan
+
+
+def write_approved_child_request(
+    state_root: Path,
+    plan: dict,
+    *,
+    owner: dict | None = None,
+) -> dict:
+    frontdoor = load_server_module().frontdoor
+    request_owner = owner or frontdoor.bridge_principal("codex", "")
+    checkout_identity = frontdoor.resolve_checkout_identity(
+        workspace_id="Saber5656/Saihai",
+        managed_primary=ROOT,
+        checkout_root=ROOT,
+    )
+    created_at = frontdoor.now_iso()
+    record = {
+        "request_version": "1",
+        "task_id": plan["task_id"],
+        "request_id": plan["request_id"],
+        "request_kind": "agent_task_request",
+        "created_at": created_at,
+        "updated_at": created_at,
+        "user_prompt": "Create the approved issue-scoped child thread.",
+        "request_digest": "sha256:" + "1" * 64,
+        "idempotency_key_digest": "sha256:" + "2" * 64,
+        "context_refs": ["organization/runtime/workflows/README.md"],
+        "allowed_paths": [],
+        "workspace_id": "Saber5656/Saihai",
+        "checkout_identity": checkout_identity,
+        "checkout_identity_digest": checkout_identity["identity_digest"],
+        "owner_principal": request_owner,
+        "principal": request_owner,
+        "status": "approved",
+        "proposal": {
+            "decision": "approved",
+            "reason": "human_approved_action_gateway_plan",
+            "next_action": "action_gateway",
+        },
+        "approved_activation": {
+            "activation_status": "approved",
+        },
+    }
+    frontdoor.write_json(
+        frontdoor.request_path(state_root, plan["request_id"]),
+        record,
+    )
+    return record
 
 
 def write_normalized_provider_evidence(
@@ -221,6 +272,7 @@ def write_normalized_provider_evidence(
         "usage": {"input_tokens": 1, "output_tokens": 1},
     }
     evidence_path.write_text(json.dumps(evidence, ensure_ascii=False) + "\n", encoding="utf-8")
+    evidence_path.chmod(0o600)
     return evidence
 
 
@@ -261,6 +313,15 @@ def prepare_review_handoff(state_root: Path, *, request_id: str, run_id: str) ->
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    for directory in {
+        evidence_path.parent.parent,
+        evidence_path.parent,
+        transcript_path.parent.parent,
+        transcript_path.parent,
+        report_path.parent.parent,
+        report_path.parent,
+    }:
+        directory.chmod(0o700)
     write_normalized_provider_evidence(
         adapter_request,
         request_id=request_id,
@@ -313,8 +374,15 @@ def test_channel_token_permissions_are_private() -> None:
         assert_equal(token_path.stat().st_mode & 0o777, 0o600, "created token mode")
 
         token_path.chmod(0o644)
+        try:
+            frontdoor_module.channel_token(state_root, "operator")
+        except frontdoor_module.FrontdoorError as exc:
+            assert "cannot be created safely" in str(exc)
+        else:
+            raise AssertionError("wrong-mode channel token should fail closed")
+        assert_equal(token_path.stat().st_mode & 0o777, 0o644, "token mode remains unchanged")
+        token_path.chmod(0o600)
         assert_equal(frontdoor_module.channel_token(state_root, "operator"), token, "existing token")
-        assert_equal(token_path.stat().st_mode & 0o777, 0o600, "tightened token mode")
         cli_payload = load_payload(run_frontdoor(state_root, "channel-token", "--channel", "operator"))
         assert "token" not in cli_payload, "channel token must not be emitted to stdout"
         assert_equal(cli_payload["token_exposed"], False, "channel token output marker")
@@ -327,9 +395,27 @@ def test_channel_token_permissions_are_private() -> None:
         try:
             frontdoor_module.channel_token(state_root, "operator")
         except frontdoor_module.FrontdoorError as exc:
-            assert "must not be a symlink" in str(exc)
+            assert "cannot be created safely" in str(exc)
         else:
             raise AssertionError("channel token symlink should be blocked")
+        token_path.unlink()
+
+        hardlink_target = state_root / "external-token"
+        hardlink_target.write_text("external\n", encoding="utf-8")
+        hardlink_target.chmod(0o600)
+        os.link(hardlink_target, token_path)
+        try:
+            frontdoor_module.channel_token(state_root, "operator")
+        except frontdoor_module.FrontdoorError as exc:
+            assert "cannot be created safely" in str(exc)
+        else:
+            raise AssertionError("channel token hardlink should be blocked")
+        assert_equal(
+            hardlink_target.read_text(encoding="utf-8"),
+            "external\n",
+            "channel token hardlink target",
+        )
+        assert_equal(hardlink_target.stat().st_mode & 0o777, 0o600, "hardlink target mode")
 
 
 def test_state_root_is_fixed_by_host_configuration() -> None:
@@ -337,15 +423,16 @@ def test_state_root_is_fixed_by_host_configuration() -> None:
     previous = frontdoor_module.DIRECTORY_CATALOG.get("SAIHAI_ORCH_STATE_ROOT")
     previous_process = os.environ.get("SAIHAI_ORCH_STATE_ROOT")
     with tempfile.TemporaryDirectory() as raw_tmp:
-        configured = Path(raw_tmp) / "configured"
-        configured.mkdir()
+        temp_root = Path(raw_tmp).resolve()
+        configured = temp_root / "configured"
+        configured.mkdir(mode=0o700)
         frontdoor_module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = str(configured)
-        os.environ["SAIHAI_ORCH_STATE_ROOT"] = str(Path(raw_tmp) / "ignored-process-override")
+        os.environ["SAIHAI_ORCH_STATE_ROOT"] = str(temp_root / "ignored-process-override")
         try:
             assert_equal(frontdoor_module.trusted_state_root(None), configured.resolve(), "configured default")
             assert_equal(frontdoor_module.trusted_state_root(configured), configured.resolve(), "matching root")
             try:
-                frontdoor_module.trusted_state_root(Path(raw_tmp) / "arbitrary")
+                frontdoor_module.trusted_state_root(temp_root / "arbitrary")
             except frontdoor_module.FrontdoorError as exc:
                 assert_equal(str(exc), "state_root_not_configured", "arbitrary root rejection")
             else:
@@ -359,23 +446,31 @@ def test_state_root_is_fixed_by_host_configuration() -> None:
             else:
                 raise AssertionError("unvalidated configured state root should be rejected")
 
-            symlink = Path(raw_tmp) / "configured-link"
+            symlink = temp_root / "configured-link"
             symlink.symlink_to(configured, target_is_directory=True)
             frontdoor_module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = str(symlink)
             try:
                 frontdoor_module.trusted_state_root(symlink)
             except frontdoor_module.FrontdoorError as exc:
-                assert "non-symlink directory" in str(exc)
+                assert_equal(
+                    str(exc),
+                    "state_root_symlink_redirection_forbidden",
+                    "configured symlink rejection",
+                )
             else:
                 raise AssertionError("symlink state root should be rejected")
 
-            dangling = Path(raw_tmp) / "dangling-configured-link"
-            dangling.symlink_to(Path(raw_tmp) / "missing-target", target_is_directory=True)
+            dangling = temp_root / "dangling-configured-link"
+            dangling.symlink_to(temp_root / "missing-target", target_is_directory=True)
             frontdoor_module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = str(dangling)
             try:
                 frontdoor_module.trusted_state_root(dangling)
             except frontdoor_module.FrontdoorError as exc:
-                assert "non-symlink directory" in str(exc)
+                assert_equal(
+                    str(exc),
+                    "state_root_symlink_redirection_forbidden",
+                    "dangling symlink rejection",
+                )
             else:
                 raise AssertionError("dangling symlink state root should be rejected")
         finally:
@@ -569,6 +664,73 @@ def test_state_artifact_category_symlink_is_rejected() -> None:
         assert_equal(list(outside.iterdir()), [], "outside directory remains untouched")
 
 
+def test_state_reads_never_fall_back_to_repository_json_loader() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        schema_directory = ROOT / "organization/runtime/workflows/schemas"
+        (state_root / "requests").symlink_to(schema_directory, target_is_directory=True)
+        frontdoor = load_server_module().frontdoor
+        path = frontdoor.request_path(state_root, "workflow-template.schema")
+        try:
+            frontdoor.read_json(path)
+        except frontdoor.FrontdoorError as exc:
+            assert "missing file" in str(exc)
+        else:
+            raise AssertionError("state JSON read followed a category symlink into the repository")
+
+
+def test_state_cleanup_and_audit_rotation_reject_category_symlinks() -> None:
+    frontdoor = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp, tempfile.TemporaryDirectory() as raw_outside:
+        state_root = Path(raw_tmp)
+        outside = Path(raw_outside)
+
+        temporary = outside / ".victim.tmp"
+        temporary.write_text("must remain\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        (state_root / "requests").symlink_to(outside, target_is_directory=True)
+        try:
+            frontdoor._remove_bridge_atomic_temps(state_root)
+        except frontdoor.FrontdoorError:
+            pass
+        else:
+            raise AssertionError("bridge cleanup followed a category symlink")
+        assert temporary.exists(), "bridge cleanup removed an artifact outside state root"
+
+        (state_root / "requests").unlink()
+        audit_file = outside / "events.jsonl"
+        audit_file.write_text('{"existing":true}\n', encoding="utf-8")
+        audit_file.chmod(0o600)
+        (state_root / "audit").symlink_to(outside, target_is_directory=True)
+        original_limit = frontdoor.BRIDGE_AUDIT_ROTATE_BYTES
+        frontdoor.BRIDGE_AUDIT_ROTATE_BYTES = 1
+        try:
+            try:
+                frontdoor.append_audit_event(
+                    state_root=state_root,
+                    event_type="symlink-boundary-test",
+                    principal=frontdoor.default_manual_principal(),
+                    subject={"request_id": "req-symlink-boundary"},
+                    outcome="blocked",
+                )
+            except frontdoor.FrontdoorError:
+                pass
+            else:
+                raise AssertionError("audit rotation followed a category symlink")
+        finally:
+            frontdoor.BRIDGE_AUDIT_ROTATE_BYTES = original_limit
+        assert_equal(
+            audit_file.read_text(encoding="utf-8"),
+            '{"existing":true}\n',
+            "outside audit artifact",
+        )
+        assert_equal(
+            list(outside.glob("events.*.jsonl")),
+            [],
+            "outside rotated audit artifacts",
+        )
+
+
 def test_principal_key_permissions_are_private() -> None:
     frontdoor_module = load_server_module().frontdoor
     with tempfile.TemporaryDirectory() as raw_tmp:
@@ -581,8 +743,14 @@ def test_principal_key_permissions_are_private() -> None:
         assert_equal(key_path.stat().st_mode & 0o777, 0o600, "principal key mode")
 
         key_path.chmod(0o644)
-        frontdoor_module.principal_key(state_root, principal)
-        assert_equal(key_path.stat().st_mode & 0o777, 0o600, "principal key mode tightened")
+        try:
+            frontdoor_module.principal_key(state_root, principal)
+        except frontdoor_module.FrontdoorError as exc:
+            assert "cannot be created safely" in str(exc)
+        else:
+            raise AssertionError("wrong-mode principal key should fail closed")
+        assert_equal(key_path.stat().st_mode & 0o777, 0o644, "principal key mode unchanged")
+        key_path.chmod(0o600)
 
         key_path.unlink()
         symlink_target = state_root / "leaked-principal-key"
@@ -591,9 +759,27 @@ def test_principal_key_permissions_are_private() -> None:
         try:
             frontdoor_module.principal_key(state_root, principal)
         except frontdoor_module.FrontdoorError as exc:
-            assert "must not be a symlink" in str(exc)
+            assert "cannot be created safely" in str(exc)
         else:
             raise AssertionError("principal key symlink should be blocked")
+        key_path.unlink()
+
+        hardlink_target = state_root / "external-principal-key"
+        hardlink_target.write_text("external\n", encoding="utf-8")
+        hardlink_target.chmod(0o600)
+        os.link(hardlink_target, key_path)
+        try:
+            frontdoor_module.principal_key(state_root, principal)
+        except frontdoor_module.FrontdoorError as exc:
+            assert "cannot be created safely" in str(exc)
+        else:
+            raise AssertionError("principal key hardlink should be blocked")
+        assert_equal(
+            hardlink_target.read_text(encoding="utf-8"),
+            "external\n",
+            "principal key hardlink target",
+        )
+        assert_equal(hardlink_target.stat().st_mode & 0o777, 0o600, "principal hardlink mode")
 
 
 def test_frontdoor_propose_approve_create_run_and_drain() -> None:
@@ -820,6 +1006,13 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(transcript_path.read_bytes(), transcript_before, "duplicate prepare transcript")
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in {
+            evidence_path.parent.parent,
+            evidence_path.parent,
+            report_path.parent.parent,
+            report_path.parent,
+        }:
+            directory.chmod(0o700)
         write_normalized_provider_evidence(
             adapter_request,
             request_id="req-frontdoor",
@@ -852,6 +1045,7 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             },
         }
         report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        report_path.chmod(0o600)
 
         validated = load_payload(
             run_frontdoor(
@@ -864,6 +1058,15 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(validated["report_status"], "complete", "report validation status")
         assert_equal(validated["workflow_run"]["run_state"], "complete", "validated run state")
         assert_equal(validated["workflow_run"]["goal_state"], "complete", "validated goal state")
+        assert_equal(
+            json.loads(
+                (state_root / "requests" / "req-frontdoor.json").read_text(
+                    encoding="utf-8"
+                )
+            )["status"],
+            "complete",
+            "validated run synchronizes request",
+        )
         transitions = validated["workflow_run"]["transitions"]
         assert_equal([item["seq"] for item in transitions], [1, 2, 3, 4], "lifecycle transition seq")
         assert_equal(
@@ -914,10 +1117,12 @@ def test_manual_prepare_evidence_contract_validates_report() -> None:
             request_id=request_id,
             run_id=run_id,
         )
-        Path(adapter_request["report_path"]).write_text(
+        report_path = Path(adapter_request["report_path"])
+        report_path.write_text(
             json.dumps(report, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+        report_path.chmod(0o600)
         validated = load_payload(
             run_frontdoor(state_root, "validate-report", "--run-id", run_id)
         )
@@ -1114,7 +1319,9 @@ def test_drain_blocks_invalid_existing_work_order() -> None:
         )
 
         order_dir = state_root / "work-orders" / "run-invalid-work-order"
-        order_dir.mkdir(parents=True)
+        (state_root / "work-orders").mkdir(mode=0o700, exist_ok=True)
+        (state_root / "work-orders").chmod(0o700)
+        order_dir.mkdir(parents=True, mode=0o700)
         invalid_order = {
             "work_order_version": "1",
             "task_id": "TSK-invalid-work-order",
@@ -1154,7 +1361,9 @@ def test_drain_blocks_invalid_existing_work_order() -> None:
                 "runner_claim": {"claim_state": "unclaimed", "lease_expires_at": None},
             },
         }
-        (order_dir / "review.json").write_text(json.dumps(invalid_order, ensure_ascii=False) + "\n", encoding="utf-8")
+        invalid_path = order_dir / "review.json"
+        invalid_path.write_text(json.dumps(invalid_order, ensure_ascii=False) + "\n", encoding="utf-8")
+        invalid_path.chmod(0o600)
 
         blocked_run = run_frontdoor(state_root, "drain", "--run-id", "run-invalid-work-order", check=False)
         assert_equal(blocked_run.returncode, 2, "blocked drain exit")
@@ -1173,15 +1382,18 @@ def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
         state_root = root / "frontdoor"
         itb_root = root / "itb"
         session_dir = itb_root / "thread-linked"
-        session_dir.mkdir(parents=True)
+        itb_root.mkdir(mode=0o700)
+        session_dir.mkdir(mode=0o700)
         (session_dir / "active-execution-context.json").write_text(
             json.dumps({"session_id": "thread-linked"}) + "\n",
             encoding="utf-8",
         )
+        (session_dir / "active-execution-context.json").chmod(0o600)
         (session_dir / "active-task.json").write_text(
             json.dumps({"task_id": "TSK-linked"}) + "\n",
             encoding="utf-8",
         )
+        (session_dir / "active-task.json").chmod(0o600)
         env = os.environ.copy()
         env["SAIHAI_ITB_STATE_ROOTS"] = str(itb_root)
 
@@ -1242,6 +1454,15 @@ def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in {
+            evidence_path.parent.parent,
+            evidence_path.parent,
+            transcript_path.parent.parent,
+            transcript_path.parent,
+            report_path.parent.parent,
+            report_path.parent,
+        }:
+            directory.chmod(0o700)
         write_normalized_provider_evidence(
             adapter_request,
             request_id="req-linked",
@@ -1255,6 +1476,7 @@ def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
             + "\n",
             encoding="utf-8",
         )
+        report_path.chmod(0o600)
         validated = load_payload(run_frontdoor(state_root, "validate-report", "--run-id", "run-linked", env=env))
         assert_equal(validated["workflow_run"]["run_state"], "complete", "linked run complete")
         index = json.loads(index_path.read_text(encoding="utf-8"))
@@ -1603,6 +1825,88 @@ def test_create_run_validates_resume_policy_and_binds_request() -> None:
         )
         assert_equal(second.returncode, 2, "second run id blocked")
         assert "already bound" in load_payload(second)["reason"]
+
+
+def test_terminal_run_synchronizes_request_and_releases_pending_quota() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-terminal-sync"
+        run_id = "run-terminal-sync"
+        create_approved_run(state_root, request_id=request_id, run_id=run_id)
+        request_file = frontdoor_module.request_path(state_root, request_id)
+
+        aborted = frontdoor_module.abort_run(
+            state_root=state_root,
+            run_id=run_id,
+            reason="terminal sync fixture",
+        )
+        assert_equal(aborted["workflow_run"]["run_state"], "aborted", "run aborted")
+        assert_equal(
+            frontdoor_module.read_json(request_file)["status"],
+            "aborted",
+            "abort synchronizes request",
+        )
+
+        stale = frontdoor_module.read_json(request_file)
+        stale["status"] = "approved"
+        frontdoor_module.write_json(request_file, stale)
+        replayed_create = frontdoor_module.create_run(
+            state_root=state_root,
+            request_id=request_id,
+            run_id=run_id,
+            resume_policy="manual",
+        )
+        assert_equal(replayed_create["created"], False, "terminal create replay")
+        assert_equal(
+            frontdoor_module.read_json(request_file)["status"],
+            "aborted",
+            "create replay repairs stale request",
+        )
+
+        stale = frontdoor_module.read_json(request_file)
+        stale["status"] = "approved"
+        frontdoor_module.write_json(request_file, stale)
+        resumed = frontdoor_module.resume_run(state_root=state_root, run_id=run_id)
+        assert_equal(resumed["reason"], "terminal_run_already_set", "terminal resume replay")
+        assert_equal(
+            frontdoor_module.read_json(request_file)["status"],
+            "aborted",
+            "resume replay repairs stale request",
+        )
+
+        owner = frontdoor_module.bridge_principal("codex", "")
+        stale = frontdoor_module.read_json(request_file)
+        stale["status"] = "approved"
+        stale["owner_principal"] = frontdoor_module.redacted_principal(owner)
+        stale["principal"] = frontdoor_module.redacted_principal(owner)
+        frontdoor_module.write_json(request_file, stale)
+        pending_count, pending_bytes = frontdoor_module.bridge_pending_usage(
+            state_root, owner
+        )
+        assert_equal(pending_count, 0, "terminal run releases pending quota")
+        assert_equal(pending_bytes, 0, "terminal run releases pending bytes")
+        assert_equal(
+            frontdoor_module.read_json(request_file)["status"],
+            "aborted",
+            "quota scan repairs stale request",
+        )
+
+        no_run_id = "req-approved-without-run"
+        frontdoor_module.write_json(
+            frontdoor_module.request_path(state_root, no_run_id),
+            {
+                "request_id": no_run_id,
+                "status": "approved",
+                "owner_principal": frontdoor_module.redacted_principal(owner),
+                "principal": frontdoor_module.redacted_principal(owner),
+            },
+        )
+        pending_count, pending_bytes = frontdoor_module.bridge_pending_usage(
+            state_root, owner
+        )
+        assert_equal(pending_count, 1, "approved request without run stays pending")
+        assert pending_bytes > 0, "approved request without run must consume pending bytes"
 
 
 def test_approval_uses_requested_ref_forms_without_leaking_original_paths() -> None:
@@ -2419,6 +2723,62 @@ def test_context_ref_boundary_blocks_exfiltration_paths() -> None:
             raise AssertionError("context ref count cap should be enforced")
 
 
+def test_deterministic_ref_denylist_and_repo_name_validation() -> None:
+    frontdoor = load_server_module().frontdoor
+    denied_names = (
+        ".env.production",
+        "id_rsa.backup",
+        "id_ed25519-old",
+        "client.pem",
+        "client.key",
+        "bundle.p12",
+        "bundle.pfx",
+        "private-key-copy.txt",
+        "deploy_key_notes.txt",
+        "auth-token.txt",
+        "credential-cache.json",
+        "secret-notes.md",
+    )
+    for denied_name in denied_names:
+        assert_equal(
+            frontdoor._denylisted_ref_part(Path("docs") / denied_name),
+            denied_name,
+            f"denylisted path component {denied_name}",
+        )
+    for safe_name in ("environment.md", "monkey.txt", "authentication.md", "public.pem.txt"):
+        assert_equal(
+            frontdoor._denylisted_ref_part(Path("docs") / safe_name),
+            None,
+            f"safe near-miss path component {safe_name}",
+        )
+
+    assert_equal(
+        frontdoor.validate_repo_full_name("Saber5656/Saihai"),
+        "Saber5656/Saihai",
+        "valid repository full name",
+    )
+    assert_equal(
+        frontdoor.validate_repo_full_name("o" * 100 + "/" + "r" * 100),
+        "o" * 100 + "/" + "r" * 100,
+        "bounded repository full name",
+    )
+    invalid_names = (
+        "missing-slash",
+        "owner/repo/extra",
+        "/repo",
+        "owner/",
+        "owner/repo name",
+        "-" * 1_000_000 + "/repo",
+    )
+    for invalid_name in invalid_names:
+        try:
+            frontdoor.validate_repo_full_name(invalid_name)
+        except frontdoor.FrontdoorError as exc:
+            assert "repo_full_name must be owner/repo" in str(exc)
+        else:
+            raise AssertionError("invalid repository full name should be rejected")
+
+
 def test_work_order_revalidates_refs_before_provider_handoff() -> None:
     frontdoor_module = load_server_module().frontdoor
     with tempfile.TemporaryDirectory() as raw_tmp:
@@ -2524,7 +2884,9 @@ def test_validate_report_rejects_noncanonical_report_and_stale_evidence() -> Non
         )
         report["provider_evidence"]["evidence_path"] = str(stale_evidence)
         report["provider_evidence"]["transcript_path"] = str(stale_transcript)
-        Path(adapter_request["report_path"]).write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        canonical_report = Path(adapter_request["report_path"])
+        canonical_report.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        canonical_report.chmod(0o600)
         stale = run_frontdoor(state_root, "validate-report", "--run-id", "run-stale-evidence", check=False)
         payload = load_payload(stale)
         assert_equal(stale.returncode, 2, "stale evidence report exit")
@@ -2572,7 +2934,9 @@ def test_validate_report_rejects_malformed_findings() -> None:
                 }
             ],
         )
-        Path(adapter_request["report_path"]).write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        report_path = Path(adapter_request["report_path"])
+        report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        report_path.chmod(0o600)
         bad_findings = run_frontdoor(state_root, "validate-report", "--run-id", "run-bad-findings", check=False)
         payload = load_payload(bad_findings)
         assert_equal(bad_findings.returncode, 2, "malformed findings exit")
@@ -2768,6 +3132,7 @@ def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> N
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         plan = child_thread_plan(state_root)
+        write_approved_child_request(state_root, plan)
         result = {
             "status": "created",
             "thread_id": "thread-child-67",
@@ -2795,6 +3160,16 @@ def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> N
         assert "worktree_path" not in created["child_thread"], "projection summary must not expose absolute worktree path"
         assert Path(created["action_path"]).exists(), "child action record should be durable"
         action_record = json.loads(Path(created["action_path"]).read_text(encoding="utf-8"))
+        assert_equal(
+            action_record["projection_binding"],
+            action_record["plan"]["projection_binding"],
+            "child record projection binding",
+        )
+        assert_equal(
+            action_record["plan"]["request_id"],
+            plan["request_id"],
+            "child plan request binding",
+        )
         assert "idempotency_key" not in action_record["plan"], "child action must not store raw idempotency key"
         assert "idempotency_key_digest" not in action_record["plan"]
         child_idempotency = frontdoor_module.child_thread_idempotency_path(state_root, plan["idempotency_key"])
@@ -2858,36 +3233,19 @@ def test_child_thread_create_gateway_records_redacted_summary_and_replays() -> N
         assert_equal(replay_result_conflict.returncode, 2, "child action replay result conflict exit")
         assert "idempotency conflict" in load_payload(replay_result_conflict)["reason"]
 
-        projection_request = {
-            "task_id": plan["task_id"],
-            "request_id": "req-child-summary",
-            "request_kind": "orchestrator_status_request",
-            "prompt": "Show child worktree status",
-            "refs": ["organization/runtime/workflows/README.md"],
-            "idempotency_key": "summary-key",
-        }
         projection = load_payload(
             run_frontdoor(
                 state_root,
-                "bridge-submit-request",
-                "--task-id",
-                projection_request["task_id"],
+                "bridge-read-projection",
                 "--request-id",
-                projection_request["request_id"],
-                "--request-kind",
-                projection_request["request_kind"],
-                "--prompt",
-                projection_request["prompt"],
-                "--ref",
-                projection_request["refs"][0],
-                "--idempotency-key",
-                projection_request["idempotency_key"],
+                plan["request_id"],
             )
         )
-        bridge_idempotency = frontdoor_module.idempotency_path(state_root, projection_request["idempotency_key"])
-        bridge_idempotency_text = bridge_idempotency.read_text(encoding="utf-8")
-        assert projection_request["idempotency_key"] not in bridge_idempotency_text
-        assert "idempotency_key_digest" not in bridge_idempotency_text
+        assert_equal(
+            projection["idempotency_key_digest"],
+            "sha256:" + "2" * 64,
+            "projection idempotency digest",
+        )
         summaries = projection["child_thread_summaries"]
         assert_equal(len(summaries), 2, "projection child thread summary count")
         summary = next(item for item in summaries if item["thread_id"] == "thread-child-67")
@@ -2904,6 +3262,12 @@ def test_child_thread_checkout_requires_registered_git_worktree() -> None:
     common_dir = frontdoor.git_common_dir(frontdoor.REPO_ROOT)
     assert common_dir is not None, "trusted Saihai common dir must resolve"
     assert frontdoor.is_approved_checkout(ROOT), "current registered worktree must be approved"
+    validated = frontdoor.validate_child_thread_plan(child_thread_plan(Path.cwd()))
+    assert_equal(
+        validated["repo_root"],
+        str(ROOT.resolve()),
+        "registered checkout is returned from the host allowlist",
+    )
     with tempfile.TemporaryDirectory() as raw_tmp:
         fake_checkout = Path(raw_tmp) / "fake-checkout"
         fake_checkout.mkdir()
@@ -2914,12 +3278,181 @@ def test_child_thread_checkout_requires_registered_git_worktree() -> None:
             "forged checkout demonstrates common-dir collision",
         )
         assert not frontdoor.is_approved_checkout(fake_checkout), "unregistered checkout must be rejected"
+        try:
+            frontdoor.validate_child_thread_plan(
+                child_thread_plan(Path(raw_tmp), repo_root=str(fake_checkout))
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "repo_root must identify the approved Saihai checkout family",
+                "unregistered checkout plan rejection",
+            )
+        else:
+            raise AssertionError("unregistered checkout plan must fail closed")
+
+
+def test_projection_binding_hides_mismatch_legacy_and_cross_owner_records() -> None:
+    frontdoor = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        plan_a = child_thread_plan(
+            state_root,
+            request_id="req-projection-a",
+            idempotency_key="projection-child-a",
+        )
+        owner_a = frontdoor.bridge_principal("codex", "")
+        record_a = write_approved_child_request(
+            state_root,
+            plan_a,
+            owner=owner_a,
+        )
+        owner_b = frontdoor.make_principal(
+            "main_agent_bridge",
+            "codex-main-agent-b",
+            authn_method="installed_frontend_profile",
+        )
+        plan_b = child_thread_plan(
+            state_root,
+            request_id="req-projection-b",
+            idempotency_key="projection-child-b",
+        )
+        record_b = write_approved_child_request(
+            state_root,
+            plan_b,
+            owner=owner_b,
+        )
+
+        def child_result(plan: dict, thread_id: str) -> dict:
+            return {
+                "status": "created",
+                "thread_id": thread_id,
+                "worktree_path": plan["worktree_path"],
+                "branch_name": plan["branch_name"],
+                "instruction_ref": plan["initial_instruction_ref"],
+                "instruction_digest": plan["instruction_digest"],
+            }
+
+        frontdoor.child_thread_create_action(
+            state_root=state_root,
+            plan=plan_a,
+            result=child_result(plan_a, "thread-projection-a"),
+        )
+        frontdoor.child_thread_create_action(
+            state_root=state_root,
+            plan=plan_b,
+            result=child_result(plan_b, "thread-projection-b"),
+        )
+
+        binding_a = frontdoor.work_order_builder.projection_binding_from_request_record(
+            record_a
+        )
+        binding_b = frontdoor.work_order_builder.projection_binding_from_request_record(
+            record_b
+        )
+
+        def execution_record(
+            execution_id: str,
+            binding: dict,
+        ) -> dict:
+            return {
+                "execution_version": "1",
+                "execution_id": execution_id,
+                "capability_id": "cap-" + "a" * 24,
+                "capability_digest": "sha256:" + "b" * 64,
+                "task_id": binding["task_id"],
+                "request_id": binding["request_id"],
+                "run_id": "run-projection",
+                "step_id": "implement",
+                "projection_binding": binding,
+                "backend_id": "codex_cli",
+                "status": "completed",
+                "started_at": "2026-07-15T00:00:00Z",
+                "finished_at": "2026-07-15T00:00:01Z",
+                "result_digest": "sha256:" + "c" * 64,
+                "evidence_digest": "sha256:" + "d" * 64,
+                "failure_reason": None,
+            }
+
+        execution_dir = frontdoor.scoped_worker_executor.state_paths(state_root)[
+            "executions"
+        ]
+        frontdoor.write_json(
+            execution_dir / "exec-projection-a.json",
+            execution_record("exec-projection-a", binding_a),
+        )
+        frontdoor.write_json(
+            execution_dir / "exec-projection-b.json",
+            execution_record("exec-projection-b", binding_b),
+        )
+        for index, (field, replacement) in enumerate(
+            (
+                ("request_id", "req-mismatch"),
+                ("task_id", "TSK-mismatch"),
+                ("owner_principal_digest", "sha256:" + "e" * 64),
+                ("checkout_identity_digest", "sha256:" + "f" * 64),
+            )
+        ):
+            mismatched = json.loads(
+                json.dumps(
+                    execution_record(f"exec-projection-mismatch-{index}", binding_a)
+                )
+            )
+            mismatched["projection_binding"][field] = replacement
+            frontdoor.write_json(
+                execution_dir / f"exec-projection-mismatch-{index}.json",
+                mismatched,
+            )
+        legacy = execution_record("exec-projection-legacy", binding_a)
+        legacy.pop("projection_binding")
+        frontdoor.write_json(
+            execution_dir / "exec-projection-legacy.json",
+            legacy,
+        )
+
+        projection_a, _ = frontdoor.build_bridge_projection(
+            state_root=state_root,
+            request_id=plan_a["request_id"],
+            principal=owner_a,
+        )
+        projection_b, _ = frontdoor.build_bridge_projection(
+            state_root=state_root,
+            request_id=plan_b["request_id"],
+            principal=owner_b,
+        )
+        assert_equal(
+            [item["thread_id"] for item in projection_a["child_thread_summaries"]],
+            ["thread-projection-a"],
+            "request A child visibility",
+        )
+        assert_equal(
+            [item["thread_id"] for item in projection_b["child_thread_summaries"]],
+            ["thread-projection-b"],
+            "request B child visibility",
+        )
+        assert_equal(
+            [
+                item["execution_id"]
+                for item in projection_a["worker_execution_summaries"]
+            ],
+            ["exec-projection-a"],
+            "request A worker visibility",
+        )
+        assert_equal(
+            [
+                item["execution_id"]
+                for item in projection_b["worker_execution_summaries"]
+            ],
+            ["exec-projection-b"],
+            "request B worker visibility",
+        )
 
 
 def test_child_thread_create_blocks_bridge_and_arbitrary_paths() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         plan = child_thread_plan(state_root)
+        write_approved_child_request(state_root, plan)
         result = {
             "status": "created",
             "thread_id": "thread-child-67",
@@ -2959,7 +3492,6 @@ def test_child_thread_create_blocks_bridge_and_arbitrary_paths() -> None:
         )
         assert_equal(unsafe.returncode, 2, "unsafe path exit")
         assert "worktree_path must stay within repo_root" in load_payload(unsafe)["reason"]
-
         frontdoor_module = load_server_module()
         api = frontdoor_module.FrontdoorServer(("127.0.0.1", 0), frontdoor_module.Handler, state_root=state_root)
         thread = threading.Thread(target=api.serve_forever, daemon=True)
@@ -2993,10 +3525,869 @@ def test_child_thread_create_blocks_bridge_and_arbitrary_paths() -> None:
             thread.join(timeout=5)
 
 
+def test_checkout_git_reads_use_pinned_binary_and_ambient_config_denials() -> None:
+    frontdoor = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        repo = Path(raw_tmp) / "repo"
+        repo.mkdir(mode=0o700)
+        canonical_repo = repo.resolve(strict=True)
+        calls: list[list[str]] = []
+        environments: list[dict[str, str]] = []
+        original_run = frontdoor.subprocess.run
+
+        class Result:
+            returncode = 0
+            stderr = ""
+
+            def __init__(self, stdout: str | bytes) -> None:
+                self.stdout = stdout
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            environments.append(dict(kwargs.get("env") or {}))
+            if kwargs.get("text"):
+                if "--git-common-dir" in argv:
+                    return Result(str(repo / ".git") + "\n")
+                return Result(f"worktree {repo}\0\0")
+            return Result(b"fixture\n")
+
+        frontdoor.subprocess.run = fake_run
+        try:
+            assert frontdoor.git_common_dir(repo) == canonical_repo / ".git"
+            assert frontdoor.git_worktree_roots(repo) == {canonical_repo}
+            assert frontdoor._git_bytes(repo, ["rev-parse", "HEAD"]) == b"fixture\n"
+        finally:
+            frontdoor.subprocess.run = original_run
+
+        expected_prefix = [str(frontdoor.host_state_root.TRUSTED_GIT_EXECUTABLE)]
+        for item in frontdoor.host_state_root.GIT_FIXED_CONFIG:
+            expected_prefix.extend(["-c", item])
+        expected_prefix.extend(["-C", str(canonical_repo)])
+        assert len(calls) == 3
+        for argv in calls:
+            assert argv[: len(expected_prefix)] == expected_prefix, argv
+        for environment in environments:
+            assert environment["GIT_CONFIG_NOSYSTEM"] == "1"
+            assert environment["GIT_CONFIG_GLOBAL"] == "/dev/null"
+            assert environment["GIT_TERMINAL_PROMPT"] == "0"
+            assert "GITHUB_TOKEN" not in environment
+
+        if os.getuid() != 0:
+            privileged_calls: list[dict] = []
+            original_euid = frontdoor.host_state_root.os.geteuid
+            original_host_run = frontdoor.host_state_root.subprocess.run
+
+            def fake_privileged_run(argv, **kwargs):
+                privileged_calls.append({"argv": list(argv), **kwargs})
+                return Result("")
+
+            frontdoor.host_state_root.os.geteuid = lambda: 0
+            frontdoor.host_state_root.subprocess.run = fake_privileged_run
+            try:
+                frontdoor.host_state_root.run_git_as_checkout_owner(
+                    repo,
+                    ["status", "--porcelain"],
+                    text=True,
+                )
+            finally:
+                frontdoor.host_state_root.os.geteuid = original_euid
+                frontdoor.host_state_root.subprocess.run = original_host_run
+            assert_equal(len(privileged_calls), 1, "root git fixture call")
+            assert privileged_calls[0]["preexec_fn"] is not None
+            assert privileged_calls[0]["argv"][0] == "/usr/bin/git"
+            assert privileged_calls[0]["env"]["HOME"] == str(Path.home())
+
+        subprocess.run(
+            ["/usr/bin/git", "-C", str(repo), "init", "--quiet"],
+            check=True,
+            capture_output=True,
+        )
+        marker = root_marker = Path(raw_tmp) / "fsmonitor-invoked"
+        hook = Path(raw_tmp) / "malicious-fsmonitor.sh"
+        hook.write_text(
+            "#!/bin/sh\n"
+            f"printf invoked > {str(marker)!r}\n"
+            "printf token\\n\n",
+            encoding="utf-8",
+        )
+        hook.chmod(0o700)
+        subprocess.run(
+            ["/usr/bin/git", "-C", str(repo), "config", "core.fsmonitor", str(hook)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["/usr/bin/git", "-C", str(repo), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+        )
+        assert root_marker.exists(), "fixture fsmonitor hook was not executable"
+        root_marker.unlink()
+        frontdoor._git_bytes(repo, ["status", "--porcelain"])
+        assert not root_marker.exists(), "safe Git executed repository fsmonitor hook"
+
+
+def test_state_permission_repair_is_dry_run_by_default_and_fail_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        legacy = state_root / "acks" / "legacy-run"
+        legacy.mkdir(parents=True, mode=0o755)
+        (state_root / "acks").chmod(0o755)
+        legacy.chmod(0o755)
+        artifact = legacy / "ack.json"
+        artifact.write_text('{"legacy":true}\n', encoding="utf-8")
+        artifact.chmod(0o644)
+
+        dry = run_frontdoor(
+            state_root,
+            "state-permission-repair",
+            check=False,
+        )
+        dry_payload = load_payload(dry)
+        assert_equal(dry.returncode, 2, "permission dry-run exit")
+        assert_equal(dry_payload["decision"], "repair_required", "permission dry-run decision")
+        assert_equal(dry_payload["permission_report"]["mode"], "dry_run", "permission dry-run mode")
+        assert dry_payload["permission_report"]["finding_count"] >= 3
+        assert_equal(artifact.stat().st_mode & 0o777, 0o644, "dry-run leaves file mode")
+        assert_equal(legacy.stat().st_mode & 0o777, 0o755, "dry-run leaves directory mode")
+        assert dry_payload["evidence"]["report_digest"].startswith("sha256:")
+        assert dry_payload["evidence"]["durable_report_path"] is None
+
+        applied = load_payload(
+            run_frontdoor(
+                state_root,
+                "state-permission-repair",
+                "--apply",
+            )
+        )
+        assert_equal(applied["decision"], "repaired", "permission repair decision")
+        assert_equal(artifact.stat().st_mode & 0o777, 0o600, "repair file mode")
+        assert_equal(legacy.stat().st_mode & 0o777, 0o700, "repair directory mode")
+        durable = Path(applied["evidence"]["durable_report_path"])
+        assert durable.is_file()
+        assert_equal(durable.stat().st_mode & 0o777, 0o600, "repair evidence mode")
+        assert applied["evidence"]["audit_event_digest"].startswith("sha256:")
+        after = load_payload(run_frontdoor(state_root, "state-permission-repair"))
+        assert_equal(after["decision"], "already_private", "permission post-audit")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        legacy = state_root / "legacy"
+        legacy.mkdir(mode=0o755)
+        legacy.chmod(0o755)
+        target = state_root / "target.json"
+        target.write_text("{}\n", encoding="utf-8")
+        target.chmod(0o644)
+        (state_root / "redirect.json").symlink_to(target)
+        blocked = run_frontdoor(
+            state_root,
+            "state-permission-repair",
+            "--apply",
+            check=False,
+        )
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "unsafe migration exit")
+        assert_equal(payload["decision"], "blocked", "unsafe migration decision")
+        assert "state_permission_symlink_forbidden" in payload["reason"]
+        assert_equal(legacy.stat().st_mode & 0o777, 0o755, "unsafe scan made no repair")
+        assert_equal(target.stat().st_mode & 0o777, 0o644, "unsafe scan made no file repair")
+
+
+def test_host_launch_session_live_identity_negative_matrix() -> None:
+    frontdoor = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory(dir=ROOT) as raw_tmp:
+        root = Path(raw_tmp).resolve()
+        sessions = root / "launch-sessions"
+        sessions.mkdir(mode=0o700)
+        repo = root / "repo"
+        repo.mkdir(mode=0o700)
+        for args in (
+            ("init", "-b", "main"),
+            ("config", "user.name", "Launch Session Test"),
+            ("config", "user.email", "launch-session@example.invalid"),
+        ):
+            subprocess.run(
+                ["git", "-C", str(repo), *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        (repo / "README.md").write_text("launch fixture\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "README.md"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "fixture"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        checkout = frontdoor.resolve_checkout_identity(
+            workspace_id="Saber5656/Saihai",
+            managed_primary=repo,
+            checkout_root=repo,
+        )
+        profile = root / "codex-main-agent.profile"
+        profile.write_text("fixed profile\n", encoding="utf-8")
+        profile.chmod(0o600)
+        child = subprocess.Popen(
+            ["/bin/sleep", "60"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            child_token = frontdoor.run_lock.process_start_token(child.pid)
+            supervisor_token = frontdoor.run_lock.process_start_token(os.getpid())
+            assert child_token and supervisor_token
+            native = frontdoor.live_process_executable(child.pid)
+            import codex_main_agent_deployment as deployment
+
+            normal_launch_digest = "sha256:" + frontdoor.stable_digest(
+                deployment.native_codex_argv(str(native))
+            )
+
+            def digest(path: Path) -> str:
+                return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+            def record(**overrides) -> dict:
+                current = time.time()
+                value = {
+                    "launch_session_version": "2",
+                    "session_id": "launch-live-fixture",
+                    "deployment_id": "codex-main-agent-a-prime",
+                    "profile_id": "codex-main-agent-a-prime",
+                    "principal_id": "codex-main-agent-a-prime",
+                    "workspace_id": "Saber5656/Saihai",
+                    "subject_pid": child.pid,
+                    "process_start_token": child_token,
+                    "native_realpath": str(native),
+                    "native_digest": digest(native),
+                    "profile_realpath": str(profile),
+                    "profile_digest": digest(profile),
+                    "launch_argv_digest": normal_launch_digest,
+                    "checkout_realpath": checkout["checkout_realpath"],
+                    "checkout_identity_digest": checkout["identity_digest"],
+                    "issued_at": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(current - 60)
+                    ),
+                    "valid_until": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(current + 600)
+                    ),
+                    "status": "active",
+                    "session_kind": "standard",
+                    "commissioning_launch_reference": None,
+                    "commissioning_launch_digest": None,
+                    "supervisor_pid": os.getpid(),
+                    "supervisor_start_token": supervisor_token,
+                    "record_reference": "launch-sessions/launch-live-fixture.json",
+                    "record_digest": "sha256:" + "0" * 64,
+                }
+                value.update(overrides)
+                material = {
+                    key: value[key]
+                    for key in sorted(set(value) - {"record_digest"})
+                }
+                value["record_digest"] = "sha256:" + frontdoor.stable_digest(material)
+                return value
+
+            def write(value: dict, name: str = "launch-live-fixture.json") -> Path:
+                path = sessions / name
+                value = dict(value)
+                value["record_reference"] = f"launch-sessions/{name}"
+                material = {
+                    key: value[key]
+                    for key in sorted(set(value) - {"record_digest"})
+                }
+                value["record_digest"] = "sha256:" + frontdoor.stable_digest(material)
+                path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+                path.chmod(0o644)
+                return path
+
+            def clear() -> None:
+                for path in sessions.glob("*.json"):
+                    path.unlink()
+
+            def assert_launch_reason(expected: str, callback) -> None:
+                try:
+                    callback()
+                except frontdoor.FrontdoorError as exc:
+                    assert_equal(str(exc), expected, "launch negative reason")
+                else:
+                    raise AssertionError(f"expected launch failure {expected}")
+
+            verifier = frontdoor.HostLaunchSessionVerifier(
+                sessions,
+                expected_owner_uid=os.getuid(),
+            )
+            assert_launch_reason(
+                "launch_session_parent_record_not_unique",
+                lambda: verifier.verify_parent_session(
+                    subject_pid=os.getpid(),
+                    profile_id="codex-main-agent-a-prime",
+                    principal_id="codex-main-agent-a-prime",
+                    workspace_id="Saber5656/Saihai",
+                    checkout_identity=checkout,
+                ),
+            )
+
+            valid = record()
+            write(valid)
+            accepted = verifier.verify_parent_session(
+                subject_pid=child.pid,
+                profile_id="codex-main-agent-a-prime",
+                principal_id="codex-main-agent-a-prime",
+                workspace_id="Saber5656/Saihai",
+                checkout_identity=checkout,
+            )
+            assert_equal(accepted["process_start_token"], child_token, "live launch accepted")
+
+            sibling = root / "sibling"
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "worktree",
+                    "add",
+                    "-b",
+                    "launch-sibling",
+                    str(sibling),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            stable_checkout = frontdoor.resolve_checkout_identity(
+                workspace_id="Saber5656/Saihai",
+                managed_primary=repo,
+                checkout_root=repo,
+            )
+            assert_equal(
+                stable_checkout["identity_digest"],
+                checkout["identity_digest"],
+                "sibling worktree leaves launch identity stable",
+            )
+            revalidated = verifier.verify_parent_session(
+                subject_pid=child.pid,
+                profile_id="codex-main-agent-a-prime",
+                principal_id="codex-main-agent-a-prime",
+                workspace_id="Saber5656/Saihai",
+                checkout_identity=stable_checkout,
+            )
+            assert_equal(
+                revalidated["record_digest"],
+                accepted["record_digest"],
+                "existing launch record remains valid after sibling worktree change",
+            )
+
+            clear()
+            write(record(process_start_token="proc-" + "9" * 64))
+            assert_launch_reason(
+                "launch_session_parent_record_not_unique",
+                lambda: verifier.verify_parent_session(
+                    subject_pid=child.pid,
+                    profile_id="codex-main-agent-a-prime",
+                    principal_id="codex-main-agent-a-prime",
+                    workspace_id="Saber5656/Saihai",
+                    checkout_identity=checkout,
+                ),
+            )
+
+            clear()
+            write(valid)
+            write(
+                record(
+                    session_id="launch-stale-token",
+                    process_start_token="proc-" + "8" * 64,
+                ),
+                "launch-stale-token.json",
+            )
+            accepted_with_stale = verifier.verify_parent_session(
+                subject_pid=child.pid,
+                profile_id="codex-main-agent-a-prime",
+                principal_id="codex-main-agent-a-prime",
+                workspace_id="Saber5656/Saihai",
+                checkout_identity=checkout,
+            )
+            assert_equal(accepted_with_stale["session_id"], "launch-live-fixture", "stale PID token ignored")
+
+            write(
+                record(session_id="launch-duplicate"),
+                "launch-duplicate.json",
+            )
+            assert_launch_reason(
+                "launch_session_parent_record_not_unique",
+                lambda: verifier.verify_parent_session(
+                    subject_pid=child.pid,
+                    profile_id="codex-main-agent-a-prime",
+                    principal_id="codex-main-agent-a-prime",
+                    workspace_id="Saber5656/Saihai",
+                    checkout_identity=checkout,
+                ),
+            )
+
+            negative_records = [
+                (
+                    record(
+                        native_realpath="/usr/bin/true",
+                        native_digest=digest(Path("/usr/bin/true")),
+                        launch_argv_digest="sha256:"
+                        + frontdoor.stable_digest(
+                            deployment.native_codex_argv("/usr/bin/true")
+                        ),
+                    ),
+                    "launch_session_live_executable_mismatch",
+                ),
+                (
+                    record(
+                        supervisor_pid=child.pid,
+                        supervisor_start_token=child_token,
+                    ),
+                    "launch_session_supervisor_ancestry_mismatch",
+                ),
+                (
+                    record(
+                        supervisor_pid=999999,
+                        supervisor_start_token="proc-" + "7" * 64,
+                    ),
+                    "launch_session_process_identity_mismatch",
+                ),
+                (
+                    record(native_digest="sha256:" + "6" * 64),
+                    "launch_session_artifact_identity_mismatch",
+                ),
+                (
+                    record(
+                        issued_at="2020-01-01T00:00:00Z",
+                        valid_until="2020-01-02T00:00:00Z",
+                    ),
+                    "launch_session_expired_or_not_yet_valid",
+                ),
+            ]
+            for candidate, expected_reason in negative_records:
+                clear()
+                write(candidate)
+                assert_launch_reason(
+                    expected_reason,
+                    lambda candidate=candidate: verifier.revalidate(
+                        candidate,
+                        checkout_identity=checkout,
+                    ),
+                )
+
+            clear()
+            profile_bound = record()
+            write(profile_bound)
+            profile.write_text("drifted profile\n", encoding="utf-8")
+            profile.chmod(0o600)
+            assert_launch_reason(
+                "launch_session_artifact_identity_mismatch",
+                lambda: verifier.revalidate(profile_bound, checkout_identity=checkout),
+            )
+            profile.write_text("fixed profile\n", encoding="utf-8")
+            profile.chmod(0o600)
+
+            clear()
+            write(valid)
+            drifted_checkout = dict(checkout)
+            drifted_checkout["worktree_state_digest"] = "sha256:" + "d" * 64
+            checkout_material = {
+                key: drifted_checkout[key]
+                for key in drifted_checkout
+                if key != "identity_digest"
+            }
+            drifted_checkout["identity_digest"] = "sha256:" + frontdoor.stable_digest(
+                checkout_material
+            )
+            assert_launch_reason(
+                "launch_session_subject_mismatch",
+                lambda: verifier.revalidate(valid, checkout_identity=drifted_checkout),
+            )
+
+            clear()
+            commissioning_session_id = "launch-commissioning-fixture"
+            commissioning_reference = (
+                f"commissioning-launches/{commissioning_session_id}.json"
+            )
+            commissioning_probe_digest = "sha256:" + "5" * 64
+            commissioning_seed = record(session_id=commissioning_session_id)
+            companion_binding_material = {
+                "commissioning_launch_version": "1",
+                "session_id": commissioning_session_id,
+                "commissioning_id": "commissioning-fixture",
+                "generation_id": "generation-fixture",
+                "profile_id": commissioning_seed["profile_id"],
+                "probe_id": "frontend_filesystem_denial",
+                "nonce_digest": "sha256:" + "1" * 64,
+                "probe_argv_digest": commissioning_probe_digest,
+                "issued_at": commissioning_seed["issued_at"],
+                "valid_until": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 300)
+                ),
+                "record_reference": commissioning_reference,
+            }
+            commissioning_binding_digest = (
+                "sha256:" + frontdoor.stable_digest(companion_binding_material)
+            )
+            commissioning_record = record(
+                session_id=commissioning_session_id,
+                launch_argv_digest=commissioning_probe_digest,
+                session_kind="commissioning",
+                commissioning_launch_reference=commissioning_reference,
+                commissioning_launch_digest=commissioning_binding_digest,
+            )
+            write(commissioning_record)
+            assert_launch_reason(
+                "commissioning_launch_companion_required",
+                lambda: verifier.verify_parent_session(
+                    subject_pid=child.pid,
+                    profile_id="codex-main-agent-a-prime",
+                    principal_id="codex-main-agent-a-prime",
+                    workspace_id="Saber5656/Saihai",
+                    checkout_identity=checkout,
+                ),
+            )
+            commissioning_dir = root / "commissioning-launches"
+            commissioning_dir.mkdir(mode=0o700)
+
+            def commissioning_companion(**overrides) -> dict:
+                companion = {
+                    **companion_binding_material,
+                    "binding_digest": commissioning_binding_digest,
+                    "launch_session_digest": commissioning_record["record_digest"],
+                    "live_observation": None,
+                    "live_observation_digest": None,
+                    "state": "active",
+                    "record_digest": "sha256:" + "0" * 64,
+                }
+                companion.update(overrides)
+                material = {
+                    key: companion[key]
+                    for key in sorted(set(companion) - {"record_digest"})
+                }
+                companion["record_digest"] = "sha256:" + frontdoor.stable_digest(material)
+                return companion
+
+            def write_companion(companion: dict) -> None:
+                path = commissioning_dir / f"{commissioning_record['session_id']}.json"
+                path.write_text(
+                    json.dumps(companion, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                path.chmod(0o644)
+
+            write_companion(commissioning_companion())
+            commissioned = verifier.verify_parent_session(
+                subject_pid=child.pid,
+                profile_id="codex-main-agent-a-prime",
+                principal_id="codex-main-agent-a-prime",
+                workspace_id="Saber5656/Saihai",
+                checkout_identity=checkout,
+            )
+            assert_equal(
+                commissioned["session_id"],
+                "launch-commissioning-fixture",
+                "active commissioning session accepted",
+            )
+            write_companion(commissioning_companion(state="consumed"))
+            assert_launch_reason(
+                "commissioning_launch_binding_mismatch",
+                lambda: verifier.verify_parent_session(
+                    subject_pid=child.pid,
+                    profile_id="codex-main-agent-a-prime",
+                    principal_id="codex-main-agent-a-prime",
+                    workspace_id="Saber5656/Saihai",
+                    checkout_identity=checkout,
+                ),
+            )
+            write_companion(commissioning_companion())
+            assert_launch_reason(
+                "commissioning_launch_expired_or_not_yet_valid",
+                lambda: verifier.verify_parent_session(
+                    subject_pid=child.pid,
+                    profile_id="codex-main-agent-a-prime",
+                    principal_id="codex-main-agent-a-prime",
+                    workspace_id="Saber5656/Saihai",
+                    checkout_identity=checkout,
+                    now_epoch=time.time() + 400,
+                ),
+            )
+
+            write_companion(
+                commissioning_companion(binding_digest="sha256:" + "f" * 64)
+            )
+            assert_launch_reason(
+                "commissioning_launch_record_invalid",
+                lambda: verifier.verify_parent_session(
+                    subject_pid=child.pid,
+                    profile_id="codex-main-agent-a-prime",
+                    principal_id="codex-main-agent-a-prime",
+                    workspace_id="Saber5656/Saihai",
+                    checkout_identity=checkout,
+                ),
+            )
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
+
+def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() -> None:
+    frontdoor = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        current = time.time()
+        old = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(current - 3600))
+        recent = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(current))
+
+        def write(category: str, name: str, payload: dict) -> Path:
+            path = frontdoor.state_paths(state_root)[category] / name
+            frontdoor.write_json(path, payload)
+            return path
+
+        terminal_request = write(
+            "requests",
+            "req-terminal.json",
+            {
+                "request_id": "req-terminal",
+                "status": "complete",
+                "created_at": old,
+                "updated_at": old,
+                "user_prompt": "terminal secret prompt",
+            },
+        )
+        active_request = write(
+            "requests",
+            "req-active.json",
+            {
+                "request_id": "req-active",
+                "status": "waiting_human",
+                "created_at": old,
+                "updated_at": old,
+                "user_prompt": "active prompt must remain",
+            },
+        )
+        recent_request = write(
+            "requests",
+            "req-recent.json",
+            {
+                "request_id": "req-recent",
+                "status": "failed",
+                "created_at": recent,
+                "updated_at": recent,
+                "user_prompt": "recent terminal prompt",
+            },
+        )
+        terminal_idempotency = write(
+            "idempotency",
+            "key-terminal.json",
+            {"request_id": "req-terminal"},
+        )
+        active_idempotency = write(
+            "idempotency",
+            "key-active.json",
+            {"request_id": "req-active"},
+        )
+        recent_idempotency = write(
+            "idempotency",
+            "key-recent.json",
+            {"request_id": "req-recent"},
+        )
+        terminal_ack = write("acks", "req-terminal.json", {"request_id": "req-terminal"})
+        active_ack = write("acks", "req-active.json", {"request_id": "req-active"})
+        transaction = write(
+            "bridge_transactions",
+            "req-terminal-journal.json",
+            {"request_id": "req-terminal", "transaction_state": "prepared"},
+        )
+        rate = write(
+            "bridge_rate_limits",
+            "fixture-read.json",
+            {"operation": "read", "request_id": "req-terminal"},
+        )
+        os.utime(rate, (current - 3600, current - 3600), follow_symlinks=False)
+        rotated = state_root / "audit" / "events.1.jsonl"
+        frontdoor.run_store.append_json_line(rotated, {"old": True})
+        os.utime(rotated, (current - 3600, current - 3600), follow_symlinks=False)
+        protected = [
+            write("runs", "run-active.json", {"run_id": "run-active"}),
+            write("work_orders", "active.json", {"request_id": "req-terminal"}),
+            write(
+                "worker_capabilities",
+                "cap-active.json",
+                {"request_id": "req-terminal", "nonce_state": "unused"},
+            ),
+        ]
+
+        completed = run_frontdoor(
+            state_root,
+            "bridge-retention-purge",
+            "--terminal-retention-seconds",
+            "60",
+            "--audit-retention-seconds",
+            "60",
+        )
+        payload = load_payload(completed)
+        assert_equal(payload["decision"], "ok", "retention CLI decision")
+        assert_equal(payload["redacted_request_count"], 1, "retention redaction count")
+        assert_equal(payload["deleted_artifact_count"], 4, "retention deletion count")
+        terminal_after = frontdoor.read_json(terminal_request)
+        assert_equal(terminal_after["user_prompt"], "", "terminal prompt redacted")
+        assert terminal_after["retention"]["prompt_digest"].startswith("sha256:")
+        assert_equal(
+            frontdoor.read_json(active_request)["user_prompt"],
+            "active prompt must remain",
+            "active prompt retained",
+        )
+        assert_equal(
+            frontdoor.read_json(recent_request)["user_prompt"],
+            "recent terminal prompt",
+            "recent terminal retained",
+        )
+        assert not terminal_idempotency.exists()
+        assert not terminal_ack.exists()
+        for path in (
+            active_idempotency,
+            recent_idempotency,
+            active_ack,
+            transaction,
+            *protected,
+        ):
+            assert path.exists(), f"retention deleted active authority: {path}"
+        assert not rate.exists()
+        assert not rotated.exists()
+        assert (state_root / "audit" / "events.jsonl").exists()
+
+        replay = load_payload(
+            run_frontdoor(
+                state_root,
+                "bridge-retention-purge",
+                "--terminal-retention-seconds",
+                "60",
+                "--audit-retention-seconds",
+                "60",
+            )
+        )
+        assert_equal(replay["redacted_request_count"], 0, "retention idempotent redaction")
+        assert_equal(replay["deleted_artifact_count"], 0, "retention idempotent deletion")
+        try:
+            frontdoor.purge_bridge_retained_artifacts(
+                state_root=state_root,
+                principal=frontdoor.bridge_principal("codex"),
+                terminal_retention_seconds=0,
+                audit_retention_seconds=0,
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert "host operator principal" in str(exc)
+        else:
+            raise AssertionError("bridge principal ran retention")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        first_payload = {
+            "task_id": "TSK-quota-one",
+            "request_id": "req-quota-one",
+            "request_kind": "orchestrator_status_request",
+            "prompt": "first bounded request",
+            "refs": ["organization/runtime/workflows/README.md"],
+            "idempotency_key": "quota-one",
+            "frontdoor": "codex",
+        }
+        first = frontdoor.bridge_submit_request(
+            state_root=state_root,
+            payload=first_payload,
+            max_pending_requests=1,
+        )
+        assert_equal(first["request_status"], "waiting_human", "quota first request")
+        second_payload = {
+            **first_payload,
+            "task_id": "TSK-quota-two",
+            "request_id": "req-quota-two",
+            "idempotency_key": "quota-two",
+        }
+        try:
+            frontdoor.bridge_submit_request(
+                state_root=state_root,
+                payload=second_payload,
+                max_pending_requests=1,
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert "pending request count quota exceeded" in str(exc)
+        else:
+            raise AssertionError("pending quota accepted second request")
+        assert not frontdoor.request_path(state_root, "req-quota-two").exists()
+
+        projection = frontdoor.bridge_read_projection(
+            state_root=state_root,
+            request_id="req-quota-one",
+            frontdoor="codex",
+            chat_session_id="",
+            read_limit_per_minute=1,
+        )
+        try:
+            frontdoor.bridge_read_projection(
+                state_root=state_root,
+                request_id="req-quota-one",
+                frontdoor="codex",
+                chat_session_id="",
+                read_limit_per_minute=1,
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert "read rate limit exceeded" in str(exc)
+        else:
+            raise AssertionError("read rate limit was not durable")
+        frontdoor.bridge_ack_output(
+            state_root=state_root,
+            request_id="req-quota-one",
+            projection_digest=projection["projection_digest"],
+            frontdoor="codex",
+            chat_session_id="",
+            ack_limit_per_minute=1,
+        )
+        try:
+            frontdoor.bridge_ack_output(
+                state_root=state_root,
+                request_id="req-quota-one",
+                projection_digest=projection["projection_digest"],
+                frontdoor="codex",
+                chat_session_id="",
+                ack_limit_per_minute=1,
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert "ack rate limit exceeded" in str(exc)
+        else:
+            raise AssertionError("ack rate limit was not durable")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        try:
+            frontdoor.bridge_submit_request(
+                state_root=state_root,
+                payload={
+                    "task_id": "TSK-durable-quota",
+                    "request_id": "req-durable-quota",
+                    "request_kind": "orchestrator_status_request",
+                    "prompt": "must fail before durable request creation",
+                    "refs": ["organization/runtime/workflows/README.md"],
+                    "idempotency_key": "durable-quota",
+                    "frontdoor": "codex",
+                },
+                max_durable_artifacts=1,
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert "durable state artifact count quota exceeded" in str(exc)
+        else:
+            raise AssertionError("durable artifact quota was not enforced")
+        assert not frontdoor.request_path(state_root, "req-durable-quota").exists()
+
+
 def test_child_thread_create_rejects_empty_idempotency_and_bad_result_flags() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         plan = child_thread_plan(state_root, idempotency_key="   ")
+        write_approved_child_request(state_root, plan)
         result = {
             "status": "created",
             "thread_id": "thread-child-67",
@@ -3065,7 +4456,12 @@ def test_child_thread_create_rejects_empty_idempotency_and_bad_result_flags() ->
 def test_child_thread_create_verifies_instruction_ref_and_redacts_pending_id() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
-        plan = child_thread_plan(state_root, idempotency_key="pending-key")
+        plan = child_thread_plan(
+            state_root,
+            request_id="req-child-pending",
+            idempotency_key="pending-key",
+        )
+        write_approved_child_request(state_root, plan)
         pending_result = {
             "status": "pending",
             "pending_worktree_id": "pending-abc-123",
@@ -3091,19 +4487,9 @@ def test_child_thread_create_verifies_instruction_ref_and_redacts_pending_id() -
         projection = load_payload(
             run_frontdoor(
                 state_root,
-                "bridge-submit-request",
-                "--task-id",
-                plan["task_id"],
+                "bridge-read-projection",
                 "--request-id",
-                "req-child-pending",
-                "--request-kind",
-                "orchestrator_status_request",
-                "--prompt",
-                "Show child worktree status",
-                "--ref",
-                "organization/runtime/workflows/README.md",
-                "--idempotency-key",
-                "pending-summary-key",
+                plan["request_id"],
             )
         )
         summary = projection["child_thread_summaries"][0]
@@ -3114,7 +4500,13 @@ def test_child_thread_create_verifies_instruction_ref_and_redacts_pending_id() -
             state_root,
             "child-thread-create",
             "--plan-json",
-            json.dumps(child_thread_plan(state_root, idempotency_key="pending-unsafe-key")),
+            json.dumps(
+                child_thread_plan(
+                    state_root,
+                    request_id=plan["request_id"],
+                    idempotency_key="pending-unsafe-key",
+                )
+            ),
             "--result-json",
             json.dumps({**pending_result, "pending_worktree_id": "/tmp/worktree-path"}),
             check=False,
@@ -3189,6 +4581,8 @@ def main() -> None:
         test_state_root_is_fixed_by_host_configuration,
         test_state_root_catalog_is_loaded_only_from_primary_checkout,
         test_state_artifact_category_symlink_is_rejected,
+        test_state_reads_never_fall_back_to_repository_json_loader,
+        test_state_cleanup_and_audit_rotation_reject_category_symlinks,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
         test_manual_prepare_evidence_contract_validates_report,
@@ -3202,6 +4596,7 @@ def main() -> None:
         test_execution_principal_precheck_does_not_quarantine_corrupt_runs,
         test_propose_updates_waiting_request_and_blocks_duplicate_overwrite,
         test_create_run_validates_resume_policy_and_binds_request,
+        test_terminal_run_synchronizes_request_and_releases_pending_quota,
         test_approval_uses_requested_ref_forms_without_leaking_original_paths,
         test_frontdoor_blocks_unapproved_and_unbounded_requests,
         test_http_frontdoor_api_flow,
@@ -3212,6 +4607,7 @@ def main() -> None:
         test_bridge_rejects_smuggled_authority_fields_over_http,
         test_http_bridge_uses_authenticated_principal_and_verified_ack,
         test_context_ref_boundary_blocks_exfiltration_paths,
+        test_deterministic_ref_denylist_and_repo_name_validation,
         test_work_order_revalidates_refs_before_provider_handoff,
         test_validate_report_rejects_noncanonical_report_and_stale_evidence,
         test_validate_report_missing_report_waits_for_human,
@@ -3220,6 +4616,11 @@ def main() -> None:
         test_bridge_principal_cannot_execute_or_change_workflow_definitions,
         test_child_thread_create_gateway_records_redacted_summary_and_replays,
         test_child_thread_checkout_requires_registered_git_worktree,
+        test_projection_binding_hides_mismatch_legacy_and_cross_owner_records,
+        test_checkout_git_reads_use_pinned_binary_and_ambient_config_denials,
+        test_state_permission_repair_is_dry_run_by_default_and_fail_closed,
+        test_host_launch_session_live_identity_negative_matrix,
+        test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries,
         test_child_thread_create_blocks_bridge_and_arbitrary_paths,
         test_child_thread_create_rejects_empty_idempotency_and_bad_result_flags,
         test_child_thread_create_verifies_instruction_ref_and_redacts_pending_id,

@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saihai.local/schemas/workflows/agent-integration-attestation.schema.json",
+  "title": "Agent Integration Host Attestation",
+  "description": "A host-sealed index of digest-bound evidence. Claim results are recomputed by each consumer and are never trusted as declarations.",
+  "type": "object",
+  "required": [
+    "attestation_version",
+    "attestation_id",
+    "generation_id",
+    "profile_id",
+    "issued_at",
+    "valid_until",
+    "registry_subject_digest",
+    "target_claims",
+    "claim_results",
+    "bindings",
+    "launch_session",
+    "runtime_binding",
+    "worker_execution_binding",
+    "generation_manifest",
+    "evidence"
+  ],
+  "properties": {
+    "attestation_version": {"const": "2"},
+    "attestation_id": {"$ref": "#/$defs/safeId"},
+    "generation_id": {"$ref": "#/$defs/safeId"},
+    "profile_id": {"$ref": "#/$defs/safeId"},
+    "issued_at": {"type": "string", "format": "date-time", "maxLength": 40},
+    "valid_until": {"type": "string", "format": "date-time", "maxLength": 40},
+    "registry_subject_digest": {"$ref": "#/$defs/sha256"},
+    "target_claims": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/enforcedClaim"}
+    },
+    "claim_results": {
+      "type": "object",
+      "properties": {
+        "ingress_enforced": {"enum": ["pass", "fail"]},
+        "action_enforced": {"enum": ["pass", "fail"]},
+        "managed_worker": {"enum": ["pass", "fail"]}
+      },
+      "additionalProperties": false
+    },
+    "bindings": {"$ref": "#/$defs/bindings"},
+    "launch_session": {
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/launchSession"}
+      ]
+    },
+    "runtime_binding": {"$ref": "#/$defs/runtimeBinding"},
+    "worker_execution_binding": {
+      "anyOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/workerExecutionBinding"}
+      ]
+    },
+    "generation_manifest": {"$ref": "#/$defs/artifactReference"},
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": ["reference", "sha256"],
+        "properties": {
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+          },
+          "sha256": {"$ref": "#/$defs/sha256"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "safeId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "enforcedClaim": {
+      "enum": ["ingress_enforced", "action_enforced", "managed_worker"]
+    },
+    "artifactReference": {
+      "type": "object",
+      "required": ["reference", "sha256"],
+      "properties": {
+        "reference": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "runtimeBinding": {
+      "type": "object",
+      "required": [
+        "runtime_realpath", "runtime_digest", "argv", "argv_digest",
+        "profile_realpath", "profile_digest"
+      ],
+      "properties": {
+        "runtime_realpath": {"type": "string", "pattern": "^/"},
+        "runtime_digest": {"$ref": "#/$defs/sha256"},
+        "argv": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "argv_digest": {"$ref": "#/$defs/sha256"},
+        "profile_realpath": {"type": "string", "pattern": "^/"},
+        "profile_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "workerExecutionBinding": {
+      "type": "object",
+      "required": [
+        "binding_version", "runtime_realpath", "runtime_digest",
+        "profile_mode", "profile_realpath", "profile_digest",
+        "codex_home_realpath", "environment", "environment_digest",
+        "argv_template", "argv_digest", "runner_profile_digest"
+      ],
+      "properties": {
+        "binding_version": {"const": "1"},
+        "runtime_realpath": {"type": "string", "pattern": "^/"},
+        "runtime_digest": {"$ref": "#/$defs/sha256"},
+        "profile_mode": {"const": "ignored_by_fixed_argv"},
+        "profile_realpath": {"type": "null"},
+        "profile_digest": {"$ref": "#/$defs/sha256"},
+        "codex_home_realpath": {"type": "string", "pattern": "^/"},
+        "environment": {
+          "type": "object",
+          "required": ["PATH", "HOME", "CODEX_HOME", "LANG", "LC_ALL", "TMPDIR"],
+          "properties": {
+            "PATH": {"type": "string", "minLength": 1},
+            "HOME": {"type": "string", "minLength": 1},
+            "CODEX_HOME": {"type": "string", "minLength": 1},
+            "LANG": {"type": "string", "minLength": 1},
+            "LC_ALL": {"type": "string", "minLength": 1},
+            "TMPDIR": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        },
+        "environment_digest": {"$ref": "#/$defs/sha256"},
+        "argv_template": {
+          "type": "array", "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "argv_digest": {"$ref": "#/$defs/sha256"},
+        "runner_profile_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "launchSession": {
+      "type": "object",
+      "required": [
+        "launch_session_version", "session_id", "deployment_id", "profile_id",
+        "principal_id", "workspace_id", "subject_pid", "process_start_token",
+        "native_realpath", "native_digest", "profile_realpath", "profile_digest",
+        "launch_argv_digest", "checkout_realpath", "checkout_identity_digest",
+        "issued_at", "valid_until", "status", "session_kind",
+        "commissioning_launch_reference", "commissioning_launch_digest",
+        "supervisor_pid", "supervisor_start_token", "record_reference",
+        "record_digest"
+      ],
+      "properties": {
+        "launch_session_version": {"const": "2"},
+        "session_id": {"type": "string", "minLength": 1},
+        "deployment_id": {"type": "string", "minLength": 1},
+        "profile_id": {"type": "string", "minLength": 1},
+        "principal_id": {"type": "string", "minLength": 1},
+        "workspace_id": {"type": "string", "minLength": 1},
+        "subject_pid": {"type": "integer", "minimum": 1},
+        "process_start_token": {"type": "string", "minLength": 1},
+        "native_realpath": {"type": "string", "pattern": "^/"},
+        "native_digest": {"$ref": "#/$defs/sha256"},
+        "profile_realpath": {"type": "string", "pattern": "^/"},
+        "profile_digest": {"$ref": "#/$defs/sha256"},
+        "launch_argv_digest": {"$ref": "#/$defs/sha256"},
+        "checkout_realpath": {"type": "string", "pattern": "^/"},
+        "checkout_identity_digest": {"$ref": "#/$defs/sha256"},
+        "issued_at": {"type": "string", "format": "date-time"},
+        "valid_until": {"type": "string", "format": "date-time"},
+        "status": {"const": "active"},
+        "session_kind": {"enum": ["standard", "commissioning"]},
+        "commissioning_launch_reference": {
+          "anyOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^commissioning-launches/[A-Za-z0-9._-]+\\.json$"}
+          ]
+        },
+        "commissioning_launch_digest": {
+          "anyOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]
+        },
+        "supervisor_pid": {"type": "integer", "minimum": 1},
+        "supervisor_start_token": {"type": "string", "minLength": 1},
+        "record_reference": {"type": "string", "pattern": "^launch-sessions/[A-Za-z0-9._-]+\\.json$"},
+        "record_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "bindings": {
+      "type": "object",
+      "required": [
+        "configuration_digest",
+        "runtime_binary_digest",
+        "tool_inventory_digest",
+        "checkout_digest"
+      ],
+      "properties": {
+        "configuration_digest": {"$ref": "#/$defs/sha256"},
+        "runtime_binary_digest": {"$ref": "#/$defs/sha256"},
+        "tool_inventory_digest": {"$ref": "#/$defs/sha256"},
+        "checkout_digest": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
