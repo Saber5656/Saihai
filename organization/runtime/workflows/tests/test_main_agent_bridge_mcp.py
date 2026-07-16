@@ -603,6 +603,7 @@ def test_concurrent_idempotency_and_crash_journal_repair_are_atomic() -> None:
             idempotency_path.unlink()
             orphan_temp = state_root / "requests" / ".req-mcp-bridge.json.crashed.tmp"
             orphan_temp.write_text("partial", encoding="utf-8")
+            orphan_temp.chmod(0o600)
 
             repaired = call_tool(68, "submit_request", arguments)
             assert_equal(repaired["isError"], False, "crash journal repaired")

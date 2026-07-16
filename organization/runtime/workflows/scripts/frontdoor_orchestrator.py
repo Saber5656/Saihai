@@ -204,9 +204,18 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
 
 
-def load_json_path(path: Path) -> Any:
-    with path.open(encoding="utf-8") as handle:
-        return json.load(handle)
+def load_repo_json(path: Path) -> Any:
+    try:
+        repo_root = WORKFLOW_ROOT.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(repo_root)
+        metadata = resolved.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise FrontdoorError("repository JSON must be a regular file")
+        with resolved.open(encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise FrontdoorError(f"repository JSON must stay within workflow root: {path}") from exc
 
 
 def load_json_arg(raw: str) -> Any:
@@ -219,17 +228,56 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def read_json(path: Path) -> dict[str, Any]:
     try:
-        try:
-            path.resolve(strict=False).relative_to(WORKFLOW_ROOT)
-        except ValueError:
-            data = run_store.read_json(path)
-        else:
-            data = load_json_path(path)
+        data = run_store.read_json(path)
     except (OSError, run_store.RunStoreError) as exc:
         raise FrontdoorError(f"missing file: {path}") from exc
     if not isinstance(data, dict):
         raise FrontdoorError(f"expected object json: {path}")
     return data
+
+
+def state_file_exists(path: Path) -> bool:
+    try:
+        return run_store.private_artifact_exists(path)
+    except run_store.RunStoreError as exc:
+        raise FrontdoorError(f"unsafe state artifact: {path}") from exc
+
+
+def state_file_stat(path: Path) -> os.stat_result | None:
+    try:
+        return run_store.private_artifact_stat(path)
+    except run_store.RunStoreError as exc:
+        raise FrontdoorError(f"unsafe state artifact: {path}") from exc
+
+
+def list_state_files(
+    directory: Path,
+    *,
+    prefix: str = "",
+    suffix: str = "",
+) -> list[Path]:
+    try:
+        return run_store.list_private_artifacts(
+            directory,
+            prefix=prefix,
+            suffix=suffix,
+        )
+    except run_store.RunStoreError as exc:
+        raise FrontdoorError(f"unsafe state artifact directory: {directory}") from exc
+
+
+def unlink_state_file(path: Path, *, missing_ok: bool = False) -> bool:
+    try:
+        return run_store.unlink_private_file(path, missing_ok=missing_ok)
+    except run_store.RunStoreError as exc:
+        raise FrontdoorError(f"unsafe state artifact deletion: {path}") from exc
+
+
+def rotate_state_file(source: Path, target: Path) -> None:
+    try:
+        run_store.rotate_private_file(source, target)
+    except run_store.RunStoreError as exc:
+        raise FrontdoorError(f"unsafe state artifact rotation: {source}") from exc
 
 
 class FrontdoorError(RuntimeError):
@@ -764,18 +812,13 @@ def signing_key_path(state_root: Path, principal: dict[str, Any]) -> Path:
 
 def principal_key(state_root: Path, principal: dict[str, Any]) -> bytes:
     path = signing_key_path(state_root, principal)
-    run_store.ensure_private_directory(path.parent)
-    if not path.exists():
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            fd = os.open(path, flags, 0o600)
-        except FileExistsError:
-            pass
-        else:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(secrets.token_hex(32) + "\n")
+    try:
+        run_store.create_private_file(
+            path,
+            (secrets.token_hex(32) + "\n").encode("utf-8"),
+        )
+    except run_store.RunStoreError as exc:
+        raise FrontdoorError("principal signing key cannot be created safely") from exc
     return read_private_file_text(path, label="principal signing key").encode("utf-8")
 
 
@@ -838,17 +881,13 @@ def append_audit_event(
     encoded_size = len(
         (json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
     )
-    try:
-        current_size = path.stat().st_size
-    except FileNotFoundError:
-        current_size = 0
-    except OSError as exc:
-        raise FrontdoorError("audit artifact unavailable") from exc
+    metadata = state_file_stat(path)
+    current_size = metadata.st_size if metadata is not None else 0
     if current_size and current_size + encoded_size > BRIDGE_AUDIT_ROTATE_BYTES:
         rotated = path.with_name(f"events.{time.time_ns()}.jsonl")
-        if rotated.exists():
+        if state_file_exists(rotated):
             raise FrontdoorError("audit rotation conflict")
-        os.replace(path, rotated)
+        rotate_state_file(path, rotated)
     run_store.append_json_line(
         path,
         event,
@@ -1091,15 +1130,13 @@ def envelope_dir(state_root: Path, request_id: str) -> Path:
 
 def list_envelope_snapshots(state_root: Path, request_id: str) -> list[str]:
     directory = envelope_dir(state_root, request_id)
-    if not directory.exists():
-        return []
-    return [str(path) for path in sorted(directory.glob("*.json"))]
+    return [str(path) for path in list_state_files(directory, suffix=".json")]
 
 
 def snapshot_envelope(state_root: Path, request_id: str, envelope: dict[str, Any]) -> Path:
     directory = envelope_dir(state_root, request_id)
     run_store.ensure_private_directory(directory)
-    existing = sorted(directory.glob("*.json"))
+    existing = list_state_files(directory, suffix=".json")
     if existing:
         try:
             latest = read_json(existing[-1])
@@ -1213,48 +1250,26 @@ def resolve_contained_path(raw_path: str, *, parent: Path, label: str) -> Path:
 def channel_token_path(state_root: Path, channel: str) -> Path:
     if channel not in HTTP_CHANNEL_PRINCIPALS:
         raise FrontdoorError(f"unsupported channel: {channel}")
-    return state_paths(state_root)["channel_tokens"] / f"{channel}.token"
-
-
-def ensure_private_file(path: Path, *, label: str) -> None:
-    if path.is_symlink():
-        raise FrontdoorError(f"{label} must not be a symlink: {path}")
-    mode = path.stat().st_mode & 0o777
-    if mode & 0o077:
-        path.chmod(0o600)
-        mode = path.stat().st_mode & 0o777
-    if mode != 0o600:
-        raise FrontdoorError(f"{label} must have 0600 permissions: {path}")
+    safe_channel = validate_artifact_id(channel, "channel")
+    return state_paths(state_root)["channel_tokens"] / f"{safe_channel}.token"
 
 
 def read_private_file_text(path: Path, *, label: str) -> str:
-    ensure_private_file(path, label=label)
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
     try:
-        fd = os.open(path, flags)
-    except OSError as exc:
+        return run_store.read_bytes(path, max_bytes=64 * 1024).decode("utf-8").strip()
+    except (UnicodeError, run_store.RunStoreError) as exc:
         raise FrontdoorError(f"{label} cannot be opened safely: {path}") from exc
-    with os.fdopen(fd, "r", encoding="utf-8") as handle:
-        return handle.read().strip()
 
 
 def ensure_channel_token_file(state_root: Path, channel: str) -> None:
     path = channel_token_path(state_root, channel)
-    run_store.ensure_private_directory(path.parent)
-    if not path.exists():
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            fd = os.open(path, flags, 0o600)
-        except FileExistsError:
-            pass
-        else:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(secrets.token_urlsafe(32) + "\n")
-    ensure_private_file(path, label="channel token")
+    try:
+        run_store.create_private_file(
+            path,
+            (secrets.token_urlsafe(32) + "\n").encode("utf-8"),
+        )
+    except run_store.RunStoreError as exc:
+        raise FrontdoorError("channel token cannot be created safely") from exc
 
 
 def channel_token(state_root: Path, channel: str) -> str:
@@ -1548,7 +1563,10 @@ def load_template(workflow_id: str) -> dict[str, Any]:
         if entry.get("workflow_id") != workflow_id:
             continue
         path = REPO_ROOT / entry["path"]
-        return read_json(path)
+        data = load_repo_json(path)
+        if not isinstance(data, dict):
+            raise FrontdoorError(f"expected object json: {path}")
+        return data
     raise FrontdoorError(f"active workflow template not found: {workflow_id}")
 
 
@@ -1571,7 +1589,7 @@ def proposed_request(
     actor = principal or default_manual_principal()
     bounded = bounded_context(refs, allowed_paths)
     path = request_path(state_root, request_id)
-    existing_record = read_json(path) if path.exists() else None
+    existing_record = read_json(path) if state_file_exists(path) else None
     if existing_record is not None:
         if classification is None:
             if existing_record.get("status") == "waiting_human" and isinstance(existing_record.get("proposal"), dict):
@@ -2349,10 +2367,12 @@ def list_child_thread_summaries(
     except work_order_builder.WorkOrderError:
         return []
     directory = state_paths(state_root)["child_thread_actions"]
-    if not directory.exists():
-        return []
     summaries: list[dict[str, Any]] = []
-    for path in sorted(directory.glob("child-thread-*.json")):
+    for path in list_state_files(
+        directory,
+        prefix="child-thread-",
+        suffix=".json",
+    ):
         try:
             record = read_json(path)
         except FrontdoorError:
@@ -2427,7 +2447,7 @@ def child_thread_create_action(
         subject=subject,
         blocked_reason="child_thread_create requires action gateway executor",
     )
-    if idempotency_file.exists():
+    if state_file_exists(idempotency_file):
         replay = read_json(idempotency_file)
         action_id = str(replay["action_id"])
         record = read_json(child_thread_action_path(state_root, action_id))
@@ -2471,7 +2491,7 @@ def child_thread_create_action(
         }
     )[:20]
     action_path = child_thread_action_path(state_root, action_id)
-    if action_path.exists():
+    if state_file_exists(action_path):
         existing = read_json(action_path)
         if existing.get("plan_digest") != plan_digest or existing.get("result_digest") != result_digest:
             append_audit_event(
@@ -2628,11 +2648,8 @@ def bridge_transaction_path(
 def _remove_bridge_atomic_temps(state_root: Path) -> None:
     for category in ("requests", "idempotency", "bridge_transactions"):
         directory = state_paths(state_root)[category]
-        if not directory.is_dir():
-            continue
-        for path in directory.glob(".*.tmp"):
-            if path.is_file() and not path.is_symlink():
-                path.unlink(missing_ok=True)
+        for path in list_state_files(directory, prefix=".", suffix=".tmp"):
+            unlink_state_file(path, missing_ok=True)
 
 
 def recover_bridge_submit_transactions(state_root: Path) -> int:
@@ -2644,10 +2661,8 @@ def recover_bridge_submit_transactions(state_root: Path) -> int:
 
     _remove_bridge_atomic_temps(state_root)
     directory = state_paths(state_root)["bridge_transactions"]
-    if not directory.exists():
-        return 0
     repaired = 0
-    for transaction_path in sorted(directory.glob("*.json")):
+    for transaction_path in list_state_files(directory, suffix=".json"):
         transaction = read_json(transaction_path)
         if transaction.get("transaction_version") != "1":
             raise FrontdoorError("unsupported bridge transaction journal")
@@ -2689,19 +2704,19 @@ def recover_bridge_submit_transactions(state_root: Path) -> int:
             state_paths(state_root)["idempotency"]
             / f"key-{idempotency_digest.removeprefix('sha256:')}.json"
         )
-        if durable_request_path.exists():
+        if state_file_exists(durable_request_path):
             if read_json(durable_request_path) != request_record:
                 raise FrontdoorError("bridge transaction request conflict")
         else:
             write_json(durable_request_path, request_record)
             repaired += 1
-        if durable_idempotency_path.exists():
+        if state_file_exists(durable_idempotency_path):
             if read_json(durable_idempotency_path) != idempotency_record:
                 raise FrontdoorError("bridge transaction idempotency conflict")
         else:
             write_json(durable_idempotency_path, idempotency_record)
             repaired += 1
-        transaction_path.unlink(missing_ok=True)
+        unlink_state_file(transaction_path, missing_ok=True)
     return repaired
 
 
@@ -2712,10 +2727,8 @@ def bridge_pending_usage(
     count = 0
     total_bytes = 0
     requests_dir = state_paths(state_root)["requests"]
-    if not requests_dir.exists():
-        return count, total_bytes
     owner = redacted_principal(principal)
-    for path in sorted(requests_dir.glob("*.json")):
+    for path in list_state_files(requests_dir, suffix=".json"):
         record = read_json(path)
         if bridge_owner_principal(record) != owner:
             continue
@@ -2725,10 +2738,10 @@ def bridge_pending_usage(
         if str(record.get("status") or "") not in BRIDGE_PENDING_REQUEST_STATUSES:
             continue
         count += 1
-        try:
-            total_bytes += path.stat().st_size
-        except OSError as exc:
-            raise FrontdoorError("unable to measure pending bridge request") from exc
+        metadata = state_file_stat(path)
+        if metadata is None:
+            raise FrontdoorError("pending bridge request disappeared during measurement")
+        total_bytes += metadata.st_size
     return count, total_bytes
 
 
@@ -2811,7 +2824,7 @@ def consume_bridge_rate_limit(
         raise FrontdoorError("bridge rate limit invalid")
     current = time.time() if now_epoch is None else now_epoch
     path = _bridge_rate_path(state_root, principal, operation)
-    if path.exists():
+    if state_file_exists(path):
         record = read_json(path)
     else:
         record = {}
@@ -2866,38 +2879,35 @@ def purge_bridge_retained_artifacts(
         principal=actor,
     ):
         requests_dir = state_paths(state_root)["requests"]
-        if requests_dir.exists():
-            for path in sorted(requests_dir.glob("*.json")):
-                record = read_json(path)
-                if str(record.get("status") or "") not in BRIDGE_TERMINAL_STATUSES:
-                    continue
-                timestamp = _parse_host_timestamp(
-                    record.get("updated_at") or record.get("created_at"),
-                    label="terminal_request_timestamp",
-                )
-                if current - timestamp < terminal_retention_seconds:
-                    continue
-                request_id = str(record.get("request_id") or "")
-                terminal_ids.add(request_id)
-                prompt = str(record.get("user_prompt") or "")
-                if prompt:
-                    record["user_prompt"] = ""
-                    record["retention"] = {
-                        "retention_version": "1",
-                        "prompt_redacted": True,
-                        "prompt_digest": "sha256:" + hashlib.sha256(
-                            prompt.encode("utf-8")
-                        ).hexdigest(),
-                        "redacted_at": now_iso(),
-                    }
-                    write_json(path, record)
-                    redacted_requests.append(request_id)
+        for path in list_state_files(requests_dir, suffix=".json"):
+            record = read_json(path)
+            if str(record.get("status") or "") not in BRIDGE_TERMINAL_STATUSES:
+                continue
+            timestamp = _parse_host_timestamp(
+                record.get("updated_at") or record.get("created_at"),
+                label="terminal_request_timestamp",
+            )
+            if current - timestamp < terminal_retention_seconds:
+                continue
+            request_id = str(record.get("request_id") or "")
+            terminal_ids.add(request_id)
+            prompt = str(record.get("user_prompt") or "")
+            if prompt:
+                record["user_prompt"] = ""
+                record["retention"] = {
+                    "retention_version": "1",
+                    "prompt_redacted": True,
+                    "prompt_digest": "sha256:" + hashlib.sha256(
+                        prompt.encode("utf-8")
+                    ).hexdigest(),
+                    "redacted_at": now_iso(),
+                }
+                write_json(path, record)
+                redacted_requests.append(request_id)
 
         for category in ("idempotency", "acks"):
             directory = state_paths(state_root)[category]
-            if not directory.exists():
-                continue
-            for path in sorted(directory.glob("*.json")):
+            for path in list_state_files(directory, suffix=".json"):
                 record = read_json(path)
                 if str(record.get("request_id") or "") not in terminal_ids:
                     continue
@@ -2909,31 +2919,35 @@ def purge_bridge_retained_artifacts(
                 deleted.append({"category": category, "digest": digest})
 
         rate_dir = state_paths(state_root)["bridge_rate_limits"]
-        if rate_dir.exists():
-            for path in sorted(rate_dir.glob("*.json")):
-                if current - path.stat().st_mtime < terminal_retention_seconds:
-                    continue
-                try:
-                    raw = run_store.read_and_unlink_private_file(path)
-                except run_store.RunStoreError as exc:
-                    raise FrontdoorError("retention artifact changed during deletion") from exc
-                digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-                deleted.append({"category": "bridge_rate_limits", "digest": digest})
+        for path in list_state_files(rate_dir, suffix=".json"):
+            metadata = state_file_stat(path)
+            if metadata is None:
+                raise FrontdoorError("rate artifact disappeared during retention scan")
+            if current - metadata.st_mtime < terminal_retention_seconds:
+                continue
+            try:
+                raw = run_store.read_and_unlink_private_file(path)
+            except run_store.RunStoreError as exc:
+                raise FrontdoorError("retention artifact changed during deletion") from exc
+            digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+            deleted.append({"category": "bridge_rate_limits", "digest": digest})
 
         audit_dir = state_paths(state_root)["audit"]
-        if audit_dir.exists():
-            for path in sorted(audit_dir.glob("events.*.jsonl")):
-                if current - path.stat().st_mtime < audit_retention_seconds:
-                    continue
-                try:
-                    raw = run_store.read_and_unlink_private_file(
-                        path,
-                        max_bytes=BRIDGE_AUDIT_ROTATE_BYTES + 1024 * 1024,
-                    )
-                except run_store.RunStoreError as exc:
-                    raise FrontdoorError("retention artifact changed during deletion") from exc
-                digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-                deleted.append({"category": "audit_rotation", "digest": digest})
+        for path in list_state_files(audit_dir, prefix="events.", suffix=".jsonl"):
+            metadata = state_file_stat(path)
+            if metadata is None:
+                raise FrontdoorError("audit artifact disappeared during retention scan")
+            if current - metadata.st_mtime < audit_retention_seconds:
+                continue
+            try:
+                raw = run_store.read_and_unlink_private_file(
+                    path,
+                    max_bytes=BRIDGE_AUDIT_ROTATE_BYTES + 1024 * 1024,
+                )
+            except run_store.RunStoreError as exc:
+                raise FrontdoorError("retention artifact changed during deletion") from exc
+            digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+            deleted.append({"category": "audit_rotation", "digest": digest})
 
         event = append_audit_event(
             state_root=state_root,
@@ -3130,7 +3144,7 @@ def bridge_submit_request(
         ):
             repaired = recover_bridge_submit_transactions(state_root)
             idempotency_file = idempotency_path(state_root, idempotency_key)
-            if idempotency_file.exists():
+            if state_file_exists(idempotency_file):
                 existing = read_json(idempotency_file)
                 existing_key_digest = existing.get("key_digest")
                 if existing_key_digest is None:
@@ -3179,7 +3193,7 @@ def bridge_submit_request(
                 return projection
 
             path = request_path(state_root, str(payload["request_id"]))
-            if path.exists():
+            if state_file_exists(path):
                 existing_record = read_json(path)
                 try:
                     assert_bridge_request_owner(existing_record, principal)
@@ -3329,7 +3343,7 @@ def bridge_submit_request(
             write_json(transaction_file, transaction)
             write_json(path, record)
             write_json(idempotency_file, idempotency_record)
-            transaction_file.unlink(missing_ok=True)
+            unlink_state_file(transaction_file, missing_ok=True)
 
             append_audit_event(
                 state_root=state_root,
@@ -3719,7 +3733,7 @@ def bridge_ack_output(
     ack_path = state_paths(state_root)["acks"] / (
         f"{safe_id(request_id)}-{stable_digest(ack_binding)[:24]}.json"
     )
-    if ack_path.exists():
+    if state_file_exists(ack_path):
         existing_ack = read_json(ack_path)
         if (
             existing_ack.get("request_id") != request_id
@@ -4222,7 +4236,7 @@ def create_run(
             if bound_run_id and bound_run_id != effective_run_id:
                 raise FrontdoorError("request_id is already bound to a different run_id")
             path = run_store.run_path(state_root, effective_run_id)
-            if path.exists():
+            if state_file_exists(path):
                 existing = run_store.load_run(state_root, effective_run_id)
                 if existing.get("request_id") != request_id:
                     raise FrontdoorError("run_id conflict for different request")
@@ -4400,7 +4414,7 @@ def drain_run(
             work_order: dict[str, Any] = {}
             drained = False
             if not errors:
-                order_exists = order_path.exists()
+                order_exists = state_file_exists(order_path)
                 if order_exists:
                     work_order = read_json(order_path)
                 else:
@@ -4447,7 +4461,7 @@ def drain_run(
                     reason_class="work_order_invalid",
                     transition="drain_run",
                     principal=actor,
-                    artifact_refs=[str(order_path)] if order_path.exists() else [],
+                    artifact_refs=[str(order_path)] if state_file_exists(order_path) else [],
                     run=run,
                 )
                 path = run_store.run_path(state_root, run_id)
@@ -4834,12 +4848,12 @@ def _prepare_claude_adapter_locked(
     )
     artifact_paths = {
         "adapter_request": request_path,
-        "report": Path(str(work_order["report_path"])).expanduser(),
+        "report": report_path(state_root, run_id, step_id),
         "evidence": evidence_path,
         "transcript": transcript_path,
     }
     existing_artifacts = sorted(
-        label for label, artifact_path in artifact_paths.items() if artifact_path.exists()
+        label for label, artifact_path in artifact_paths.items() if state_file_exists(artifact_path)
     )
     if existing_artifacts:
         append_audit_event(

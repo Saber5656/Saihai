@@ -374,8 +374,15 @@ def test_channel_token_permissions_are_private() -> None:
         assert_equal(token_path.stat().st_mode & 0o777, 0o600, "created token mode")
 
         token_path.chmod(0o644)
+        try:
+            frontdoor_module.channel_token(state_root, "operator")
+        except frontdoor_module.FrontdoorError as exc:
+            assert "cannot be created safely" in str(exc)
+        else:
+            raise AssertionError("wrong-mode channel token should fail closed")
+        assert_equal(token_path.stat().st_mode & 0o777, 0o644, "token mode remains unchanged")
+        token_path.chmod(0o600)
         assert_equal(frontdoor_module.channel_token(state_root, "operator"), token, "existing token")
-        assert_equal(token_path.stat().st_mode & 0o777, 0o600, "tightened token mode")
         cli_payload = load_payload(run_frontdoor(state_root, "channel-token", "--channel", "operator"))
         assert "token" not in cli_payload, "channel token must not be emitted to stdout"
         assert_equal(cli_payload["token_exposed"], False, "channel token output marker")
@@ -388,9 +395,27 @@ def test_channel_token_permissions_are_private() -> None:
         try:
             frontdoor_module.channel_token(state_root, "operator")
         except frontdoor_module.FrontdoorError as exc:
-            assert "must not be a symlink" in str(exc)
+            assert "cannot be created safely" in str(exc)
         else:
             raise AssertionError("channel token symlink should be blocked")
+        token_path.unlink()
+
+        hardlink_target = state_root / "external-token"
+        hardlink_target.write_text("external\n", encoding="utf-8")
+        hardlink_target.chmod(0o600)
+        os.link(hardlink_target, token_path)
+        try:
+            frontdoor_module.channel_token(state_root, "operator")
+        except frontdoor_module.FrontdoorError as exc:
+            assert "cannot be created safely" in str(exc)
+        else:
+            raise AssertionError("channel token hardlink should be blocked")
+        assert_equal(
+            hardlink_target.read_text(encoding="utf-8"),
+            "external\n",
+            "channel token hardlink target",
+        )
+        assert_equal(hardlink_target.stat().st_mode & 0o777, 0o600, "hardlink target mode")
 
 
 def test_state_root_is_fixed_by_host_configuration() -> None:
@@ -639,6 +664,73 @@ def test_state_artifact_category_symlink_is_rejected() -> None:
         assert_equal(list(outside.iterdir()), [], "outside directory remains untouched")
 
 
+def test_state_reads_never_fall_back_to_repository_json_loader() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        schema_directory = ROOT / "organization/runtime/workflows/schemas"
+        (state_root / "requests").symlink_to(schema_directory, target_is_directory=True)
+        frontdoor = load_server_module().frontdoor
+        path = frontdoor.request_path(state_root, "workflow-template.schema")
+        try:
+            frontdoor.read_json(path)
+        except frontdoor.FrontdoorError as exc:
+            assert "missing file" in str(exc)
+        else:
+            raise AssertionError("state JSON read followed a category symlink into the repository")
+
+
+def test_state_cleanup_and_audit_rotation_reject_category_symlinks() -> None:
+    frontdoor = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp, tempfile.TemporaryDirectory() as raw_outside:
+        state_root = Path(raw_tmp)
+        outside = Path(raw_outside)
+
+        temporary = outside / ".victim.tmp"
+        temporary.write_text("must remain\n", encoding="utf-8")
+        temporary.chmod(0o600)
+        (state_root / "requests").symlink_to(outside, target_is_directory=True)
+        try:
+            frontdoor._remove_bridge_atomic_temps(state_root)
+        except frontdoor.FrontdoorError:
+            pass
+        else:
+            raise AssertionError("bridge cleanup followed a category symlink")
+        assert temporary.exists(), "bridge cleanup removed an artifact outside state root"
+
+        (state_root / "requests").unlink()
+        audit_file = outside / "events.jsonl"
+        audit_file.write_text('{"existing":true}\n', encoding="utf-8")
+        audit_file.chmod(0o600)
+        (state_root / "audit").symlink_to(outside, target_is_directory=True)
+        original_limit = frontdoor.BRIDGE_AUDIT_ROTATE_BYTES
+        frontdoor.BRIDGE_AUDIT_ROTATE_BYTES = 1
+        try:
+            try:
+                frontdoor.append_audit_event(
+                    state_root=state_root,
+                    event_type="symlink-boundary-test",
+                    principal=frontdoor.default_manual_principal(),
+                    subject={"request_id": "req-symlink-boundary"},
+                    outcome="blocked",
+                )
+            except frontdoor.FrontdoorError:
+                pass
+            else:
+                raise AssertionError("audit rotation followed a category symlink")
+        finally:
+            frontdoor.BRIDGE_AUDIT_ROTATE_BYTES = original_limit
+        assert_equal(
+            audit_file.read_text(encoding="utf-8"),
+            '{"existing":true}\n',
+            "outside audit artifact",
+        )
+        assert_equal(
+            list(outside.glob("events.*.jsonl")),
+            [],
+            "outside rotated audit artifacts",
+        )
+
+
 def test_principal_key_permissions_are_private() -> None:
     frontdoor_module = load_server_module().frontdoor
     with tempfile.TemporaryDirectory() as raw_tmp:
@@ -651,8 +743,14 @@ def test_principal_key_permissions_are_private() -> None:
         assert_equal(key_path.stat().st_mode & 0o777, 0o600, "principal key mode")
 
         key_path.chmod(0o644)
-        frontdoor_module.principal_key(state_root, principal)
-        assert_equal(key_path.stat().st_mode & 0o777, 0o600, "principal key mode tightened")
+        try:
+            frontdoor_module.principal_key(state_root, principal)
+        except frontdoor_module.FrontdoorError as exc:
+            assert "cannot be created safely" in str(exc)
+        else:
+            raise AssertionError("wrong-mode principal key should fail closed")
+        assert_equal(key_path.stat().st_mode & 0o777, 0o644, "principal key mode unchanged")
+        key_path.chmod(0o600)
 
         key_path.unlink()
         symlink_target = state_root / "leaked-principal-key"
@@ -661,9 +759,27 @@ def test_principal_key_permissions_are_private() -> None:
         try:
             frontdoor_module.principal_key(state_root, principal)
         except frontdoor_module.FrontdoorError as exc:
-            assert "must not be a symlink" in str(exc)
+            assert "cannot be created safely" in str(exc)
         else:
             raise AssertionError("principal key symlink should be blocked")
+        key_path.unlink()
+
+        hardlink_target = state_root / "external-principal-key"
+        hardlink_target.write_text("external\n", encoding="utf-8")
+        hardlink_target.chmod(0o600)
+        os.link(hardlink_target, key_path)
+        try:
+            frontdoor_module.principal_key(state_root, principal)
+        except frontdoor_module.FrontdoorError as exc:
+            assert "cannot be created safely" in str(exc)
+        else:
+            raise AssertionError("principal key hardlink should be blocked")
+        assert_equal(
+            hardlink_target.read_text(encoding="utf-8"),
+            "external\n",
+            "principal key hardlink target",
+        )
+        assert_equal(hardlink_target.stat().st_mode & 0o777, 0o600, "principal hardlink mode")
 
 
 def test_frontdoor_propose_approve_create_run_and_drain() -> None:
@@ -4443,6 +4559,8 @@ def main() -> None:
         test_state_root_is_fixed_by_host_configuration,
         test_state_root_catalog_is_loaded_only_from_primary_checkout,
         test_state_artifact_category_symlink_is_rejected,
+        test_state_reads_never_fall_back_to_repository_json_loader,
+        test_state_cleanup_and_audit_rotation_reject_category_symlinks,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
         test_manual_prepare_evidence_contract_validates_report,
