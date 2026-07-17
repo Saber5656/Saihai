@@ -21,14 +21,16 @@ The bridge client submits through a host instance pinned to one registered
 `frontend_kind`. An HTTP body may repeat that value, but a conflicting value is
 rejected; the client cannot select a different surface or submit
 `surface_identity`, `assurance_state`, or claims. The host derives and stores an
-identity snapshot, keeps the existing request digest bound to its
-`frontend_kind`, and re-evaluates the effective assurance state when it returns
-each redacted projection.
+identity snapshot, binds request identity to a canonical digest of the complete
+closed static descriptor, and re-evaluates only the effective assurance state
+and claims when it returns each redacted projection. Static descriptor drift
+fails closed on replay and projection.
 
 ```json
 {
   "identity_version": "1",
   "frontend_kind": "codex",
+  "descriptor_digest": "sha256:<digest-of-complete-static-descriptor>",
   "assurance_state": "advisory",
   "target_assurance_state": "action_enforced",
   "assurance_profile_id": "codex-main-agent-a-prime",
@@ -53,11 +55,17 @@ Codex profile intentionally targets only `action_enforced`.
 | `ingress_enforced` | The descriptor targets `ingress_enforced`; the assurance profile requires all three ingress operations to be `saihai_gateway_only`; current administrator-owned evidence verifies the claim. | The identity reports `ingress_enforced`. Any authority consumer must still revalidate the claim; the identity itself is not authority. |
 | `action_enforced` | The descriptor targets `action_enforced`; the profile requires denial of every direct action operation and the gateway positive path; current administrator-owned evidence verifies the claim. | The identity reports `action_enforced`. Scoped-worker capability derive/execute still call the existing live-bound claim gate and also require independent `managed_worker`. |
 
-Missing, stale, malformed, drifted, candidate, unavailable, or otherwise
-uncommissioned evidence produces `assurance_state = advisory`, an empty
-`commissioned_claims`, and the target claims in `suppressed_claims`. It never
-falls forward to a requested state. A surface whose descriptor requires a
-launch session is also suppressed to `advisory` when that request has no launch
+Assurance is promoted per claim, not only as one all-or-nothing profile result.
+Each independently passing targeted claim remains in `commissioned_claims`,
+while each failing claim is listed in `suppressed_claims`; the highest passing
+claim determines `assurance_state`. For example, when ingress evidence passes
+but action evidence fails, `ingress_enforced` remains commissioned and reported
+while `action_enforced` is suppressed. If no targeted claim passes, missing,
+stale, malformed, drifted, candidate, unavailable, or otherwise uncommissioned
+evidence produces `assurance_state = advisory`, an empty `commissioned_claims`,
+and all target claims in `suppressed_claims`. It never falls forward to a
+requested state. A surface whose descriptor requires a launch session also
+suppresses all current claims to `advisory` when that request has no launch
 session, even if an unrelated current assurance generation exists.
 
 ## Registering a New Frontend

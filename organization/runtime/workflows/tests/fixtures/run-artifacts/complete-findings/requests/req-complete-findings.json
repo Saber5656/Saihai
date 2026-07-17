@@ -246,6 +246,7 @@
     "assurance_profile_id": "codex-main-agent-a-prime",
     "assurance_state": "advisory",
     "commissioned_claims": [],
+    "descriptor_digest": "sha256:3baf674b27b3035fb115e7661708016e65aeed48c444f2ef08df1d285f8a8b29",
     "frontend_kind": "codex",
     "identity_version": "1",
     "submit_contract_version": "1",

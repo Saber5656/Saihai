@@ -344,6 +344,7 @@ def _submit(arguments: dict[str, Any]) -> dict[str, Any]:
     launch_session_identity = _host_launch_session_identity()
     return frontdoor.bridge_submit_request(
         state_root=_canonical_state_root(),
+        frontend_kind=FRONTDOOR_ID,
         principal=_host_principal(),
         workspace_id=WORKSPACE_ID,
         checkout_identity=checkout_identity,

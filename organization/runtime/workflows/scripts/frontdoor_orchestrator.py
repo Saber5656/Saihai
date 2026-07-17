@@ -323,6 +323,7 @@ def surface_contract_binding(identity: dict[str, Any]) -> dict[str, Any]:
         for key in (
             "identity_version",
             "frontend_kind",
+            "descriptor_digest",
             "target_assurance_state",
             "assurance_profile_id",
             "submit_contract_version",
@@ -1888,6 +1889,24 @@ def idempotency_path(state_root: Path, key: str) -> Path:
     return state_paths(state_root)["idempotency"] / f"key-{idempotency_key_digest(key).removeprefix('sha256:')}.json"
 
 
+def bridge_idempotency_key_digest(
+    key: str,
+    surface_identity: dict[str, Any],
+) -> str:
+    """Bind a bridge idempotency key digest to the static surface descriptor."""
+
+    descriptor_digest = normalize_sha256_digest(
+        surface_identity.get("descriptor_digest"),
+        "surface_identity.descriptor_digest",
+    )
+    return "sha256:" + stable_digest(
+        {
+            "key_digest": idempotency_key_digest(key),
+            "surface_descriptor_digest": descriptor_digest,
+        }
+    )
+
+
 def child_thread_idempotency_path(state_root: Path, key: str) -> Path:
     return (
         state_paths(state_root)["child_thread_actions"]
@@ -2637,21 +2656,17 @@ def child_thread_create_action(
 def request_digest(
     payload: dict[str, Any],
     *,
+    surface_identity: dict[str, Any],
     workspace_id: str = "",
     checkout_identity: dict[str, Any] | None = None,
     launch_session_identity: dict[str, Any] | None = None,
-    surface_identity: dict[str, Any] | None = None,
-    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> str:
-    normalized_surface = surface_identity or resolve_surface_identity(
-        str(payload.get("frontdoor") or "codex"),
-        registry=surface_registry,
-        expected_checkout=(
-            Path(str(checkout_identity["checkout_realpath"]))
-            if isinstance(checkout_identity, dict)
-            and checkout_identity.get("checkout_realpath")
-            else None
-        ),
+    frontend_kind = str(surface_identity.get("frontend_kind") or "")
+    if not frontend_kind:
+        raise FrontdoorError("surface_identity frontend_kind is required")
+    descriptor_digest = normalize_sha256_digest(
+        surface_identity.get("descriptor_digest"),
+        "surface_identity.descriptor_digest",
     )
     material = {
         "task_id": payload.get("task_id"),
@@ -2661,7 +2676,8 @@ def request_digest(
         "refs": list(payload.get("refs") or []),
         "allowed_paths": list(payload.get("allowed_paths") or []),
         "expires_at": payload.get("expires_at") or "run_terminal",
-        "frontdoor": normalized_surface["frontend_kind"],
+        "frontdoor": frontend_kind,
+        "surface_descriptor_digest": descriptor_digest,
         "workspace_id": workspace_id,
         "checkout_identity_digest": (
             str((checkout_identity or {}).get("identity_digest") or "")
@@ -3152,6 +3168,7 @@ def bridge_submit_request(
     *,
     state_root: Path,
     payload: dict[str, Any],
+    frontend_kind: str,
     principal: dict[str, Any] | None = None,
     peer: dict[str, Any] | None = None,
     workspace_id: str = "",
@@ -3164,7 +3181,11 @@ def bridge_submit_request(
     surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> dict[str, Any]:
     errors = validate_bridge_submit_payload(payload)
-    frontdoor_name = str(payload.get("frontdoor") or "codex")
+    frontdoor_name = str(frontend_kind or "")
+    if not frontdoor_name:
+        errors.append("host frontend_kind must be non-empty string")
+    if "frontdoor" in payload and payload.get("frontdoor") != frontdoor_name:
+        errors.append("payload frontdoor conflicts with host frontend_kind")
     chat_session_id = str(payload.get("chat_session_id") or "")
     principal = principal or bridge_principal(frontdoor_name, chat_session_id)
     normalized_checkout: dict[str, str] | None = None
@@ -3267,10 +3288,12 @@ def bridge_submit_request(
         checkout_identity=normalized_checkout,
         launch_session_identity=normalized_launch_session,
         surface_identity=normalized_surface,
-        surface_registry=active_surface_registry,
     )
     idempotency_key = str(payload["idempotency_key"])
-    idempotency_digest = idempotency_key_digest(idempotency_key)
+    idempotency_digest = bridge_idempotency_key_digest(
+        idempotency_key,
+        normalized_surface,
+    )
 
     def block(reason: str) -> None:
         append_audit_event(
@@ -3302,7 +3325,7 @@ def bridge_submit_request(
                 if existing_key_digest is None:
                     existing_key_digest = existing.get("idempotency_key_digest")
                 if existing_key_digest not in {None, idempotency_digest}:
-                    block("idempotency key digest conflict for bridge submit_request")
+                    block("idempotency key surface descriptor drifted")
                 existing_request_id = validate_artifact_id(
                     str(existing.get("request_id") or ""),
                     "request_id",
@@ -3352,6 +3375,13 @@ def bridge_submit_request(
                     assert_bridge_request_owner(existing_record, principal)
                 except FrontdoorError:
                     block("request_id is owned by another installed frontend principal")
+                existing_surface = existing_record.get("surface_identity")
+                if "surface_identity" in existing_record and (
+                    not isinstance(existing_surface, dict)
+                    or surface_contract_binding(existing_surface)
+                    != surface_contract_binding(normalized_surface)
+                ):
+                    block("bridge request surface contract drifted")
                 if existing_record.get("request_digest") != digest:
                     block("request_id conflict for bridge submit_request")
                 existing_idempotency_digest = existing_record.get("idempotency_key_digest")
@@ -6094,6 +6124,7 @@ def main() -> None:
         elif args.command == "bridge-submit-request":
             payload = bridge_submit_request(
                 state_root=state_root,
+                frontend_kind=args.frontdoor,
                 payload={
                     "task_id": args.task_id,
                     "request_id": args.request_id,

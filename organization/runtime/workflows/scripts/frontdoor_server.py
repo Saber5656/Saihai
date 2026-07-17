@@ -615,6 +615,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = frontdoor.bridge_submit_request(
                     state_root=self.state_root,
                     payload=submit_body,
+                    frontend_kind=self._frontend_kind(body),
                     principal=principal,
                     peer=self._peer_details(),
                     surface_registry=self.surface_registry,

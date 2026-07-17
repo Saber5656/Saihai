@@ -2415,7 +2415,11 @@ def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
             "chat_session_id": "thread-replay",
             "idempotency_key": "replay-key",
         }
-        digest = frontdoor_module.request_digest(payload)
+        surface_identity = frontdoor_module.resolve_surface_identity("codex")
+        digest = frontdoor_module.request_digest(
+            payload,
+            surface_identity=surface_identity,
+        )
         now = frontdoor_module.now_iso()
         frontdoor_module.write_json(
             frontdoor_module.request_path(state_root, "req-replay"),
@@ -2459,7 +2463,11 @@ def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
             },
         )
 
-        replayed = frontdoor_module.bridge_submit_request(state_root=state_root, payload=payload)
+        replayed = frontdoor_module.bridge_submit_request(
+            state_root=state_root,
+            payload=payload,
+            frontend_kind="codex",
+        )
         assert_equal(replayed["replayed"], True, "idempotent replay")
         assert_equal(replayed["request_status"], "waiting_human", "replayed request status")
 
@@ -4299,6 +4307,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
         first = frontdoor.bridge_submit_request(
             state_root=state_root,
             payload=first_payload,
+            frontend_kind="codex",
             max_pending_requests=1,
         )
         assert_equal(first["request_status"], "waiting_human", "quota first request")
@@ -4312,6 +4321,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
             frontdoor.bridge_submit_request(
                 state_root=state_root,
                 payload=second_payload,
+                frontend_kind="codex",
                 max_pending_requests=1,
             )
         except frontdoor.FrontdoorError as exc:
@@ -4366,6 +4376,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
         try:
             frontdoor.bridge_submit_request(
                 state_root=state_root,
+                frontend_kind="codex",
                 payload={
                     "task_id": "TSK-durable-quota",
                     "request_id": "req-durable-quota",
@@ -4563,7 +4574,11 @@ def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
             "git_command": "git switch main",
         }
         try:
-            frontdoor_module.bridge_submit_request(state_root=state_root, payload=payload)
+            frontdoor_module.bridge_submit_request(
+                state_root=state_root,
+                payload=payload,
+                frontend_kind="codex",
+            )
         except frontdoor_module.FrontdoorError as exc:
             reason = str(exc)
             assert "forbidden_fields:" in reason, reason

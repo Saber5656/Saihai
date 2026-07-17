@@ -1421,6 +1421,7 @@ def _submit_routing_request(fx: Fixture, state_root: Path) -> tuple[dict, str]:
     key = "routing-idempotency-001"
     projection = frontdoor.bridge_submit_request(
         state_root=state_root,
+        frontend_kind="codex",
         payload={
             "task_id": "TSK-routing",
             "request_id": "req-routing",

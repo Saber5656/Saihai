@@ -16,6 +16,7 @@ suppressed.  Runtime authority continues to come only from
 from __future__ import annotations
 
 import json
+import hashlib
 import importlib
 import re
 from dataclasses import dataclass
@@ -77,6 +78,7 @@ class SurfaceDescriptor:
     requirements_id: str
     assurance_profile_id: str | None
     target_assurance_state: str
+    descriptor_digest: str
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,7 @@ class SurfaceIdentity:
     """Host-derived identity carried by ingress and bridge artifacts."""
 
     frontend_kind: str
+    descriptor_digest: str
     assurance_state: str
     target_assurance_state: str
     assurance_profile_id: str | None
@@ -95,6 +98,7 @@ class SurfaceIdentity:
         return {
             "identity_version": "1",
             "frontend_kind": self.frontend_kind,
+            "descriptor_digest": self.descriptor_digest,
             "assurance_state": self.assurance_state,
             "target_assurance_state": self.target_assurance_state,
             "assurance_profile_id": self.assurance_profile_id,
@@ -236,6 +240,18 @@ def validate_registry(
     return sorted(set(errors))
 
 
+def descriptor_digest(value: Mapping[str, Any]) -> str:
+    """Digest the complete, closed static surface descriptor."""
+
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def _descriptor(value: Mapping[str, Any]) -> SurfaceDescriptor:
     submit = value["submit_contract"]
     launcher = value["launcher"]
@@ -262,6 +278,7 @@ def _descriptor(value: Mapping[str, Any]) -> SurfaceDescriptor:
             str(assurance["profile_id"]) if assurance["profile_id"] is not None else None
         ),
         target_assurance_state=str(assurance["target_state"]),
+        descriptor_digest=descriptor_digest(value),
     )
 
 
@@ -381,6 +398,7 @@ class SurfaceRegistry:
             state = "advisory"
         return SurfaceIdentity(
             frontend_kind=descriptor.frontend_kind,
+            descriptor_digest=descriptor.descriptor_digest,
             assurance_state=state,
             target_assurance_state=descriptor.target_assurance_state,
             assurance_profile_id=profile_id,

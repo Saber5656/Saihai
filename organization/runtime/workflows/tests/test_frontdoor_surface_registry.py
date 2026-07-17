@@ -70,6 +70,7 @@ def fake_descriptor() -> dict[str, Any]:
 def fixture_registry(
     *,
     commissioned: bool | dict[str, bool],
+    descriptor: dict[str, Any] | None = None,
 ) -> surfaces.SurfaceRegistry:
     assurance_registry = fake_assurance_registry()
 
@@ -88,7 +89,7 @@ def fixture_registry(
         assurance_registry=assurance_registry,
         assurance_evaluator=evaluate,
     )
-    registered = registry.register(fake_descriptor())
+    registered = registry.register(descriptor or fake_descriptor())
     assert registered.frontend_kind == "fixture"
     return registry
 
@@ -129,6 +130,7 @@ def test_shipped_registry_and_schema_are_closed_and_codex_first() -> None:
         "$ref": "#/$defs/surface_identity"
     }
     assert projection_schema["$defs"]["surface_identity"]["additionalProperties"] is False
+    assert "descriptor_digest" in projection_schema["$defs"]["surface_identity"]["required"]
 
 
 def test_fake_surface_registers_and_routes_through_deterministic_pipeline() -> None:
@@ -138,6 +140,7 @@ def test_fake_surface_registers_and_routes_through_deterministic_pipeline() -> N
         submitted = frontdoor.bridge_submit_request(
             state_root=state_root,
             payload=bridge_payload("req-surface-fixture", "fixture"),
+            frontend_kind="fixture",
             surface_registry=registry,
         )
         identity = submitted["surface_identity"]
@@ -209,6 +212,7 @@ def test_unknown_surface_is_rejected_before_request_creation() -> None:
             frontdoor.bridge_submit_request(
                 state_root=state_root,
                 payload=bridge_payload("req-unknown-surface", "unknown-fixture"),
+                frontend_kind="unknown-fixture",
             )
         except frontdoor.FrontdoorError as exc:
             assert "surface_not_registered:unknown-fixture" in str(exc)
@@ -228,6 +232,7 @@ def test_uncommissioned_registered_surface_is_advisory_and_suppressed() -> None:
         projection = frontdoor.bridge_submit_request(
             state_root=Path(raw_tmp),
             payload=bridge_payload("req-uncommissioned-surface", "fixture"),
+            frontend_kind="fixture",
             surface_registry=registry,
         )
         assert projection["surface_identity"] == identity
@@ -259,9 +264,11 @@ def test_projection_and_replay_recheck_assurance_downgrade() -> None:
         submitted = frontdoor.bridge_submit_request(
             state_root=state_root,
             payload=payload,
+            frontend_kind="fixture",
             surface_registry=registry,
         )
         assert submitted["surface_identity"]["assurance_state"] == "ingress_enforced"
+        descriptor_digest = submitted["surface_identity"]["descriptor_digest"]
         commissioned["value"] = False
         projection = frontdoor.bridge_read_projection(
             state_root=state_root,
@@ -273,9 +280,11 @@ def test_projection_and_replay_recheck_assurance_downgrade() -> None:
         )
         assert projection["surface_identity"]["assurance_state"] == "advisory"
         assert projection["surface_identity"]["commissioned_claims"] == []
+        assert projection["surface_identity"]["descriptor_digest"] == descriptor_digest
         replayed = frontdoor.bridge_submit_request(
             state_root=state_root,
             payload=payload,
+            frontend_kind="fixture",
             surface_registry=registry,
         )
         assert replayed["replayed"] is True
@@ -283,12 +292,15 @@ def test_projection_and_replay_recheck_assurance_downgrade() -> None:
 
 
 def test_stored_surface_identity_is_validated_with_explicit_legacy_support() -> None:
+    """Compatibility proof for records created before surface_identity existed."""
+
     registry = fixture_registry(commissioned=False)
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         frontdoor.bridge_submit_request(
             state_root=state_root,
             payload=bridge_payload("req-surface-record", "fixture"),
+            frontend_kind="fixture",
             surface_registry=registry,
         )
         path = frontdoor.request_path(state_root, "req-surface-record")
@@ -322,6 +334,115 @@ def test_stored_surface_identity_is_validated_with_explicit_legacy_support() -> 
             raise AssertionError("malformed stored surface identity was accepted")
 
 
+def test_core_requires_host_owned_surface_and_rejects_payload_conflict() -> None:
+    registry = fixture_registry(commissioned=False)
+    payload = bridge_payload("req-host-context", "fixture")
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        try:
+            frontdoor.bridge_submit_request(
+                state_root=state_root,
+                payload=payload,
+                surface_registry=registry,
+            )
+        except TypeError as exc:
+            assert "frontend_kind" in str(exc)
+        else:
+            raise AssertionError("payload-only surface context was accepted")
+
+        try:
+            frontdoor.bridge_submit_request(
+                state_root=state_root,
+                payload=payload,
+                frontend_kind="codex",
+                surface_registry=registry,
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert "payload frontdoor conflicts with host frontend_kind" in str(exc)
+        else:
+            raise AssertionError("conflicting client surface was accepted")
+        assert not frontdoor.request_path(state_root, "req-host-context").exists()
+
+
+def test_static_descriptor_drift_fails_closed() -> None:
+    original = fixture_registry(commissioned=False)
+    payload = bridge_payload("req-static-drift", "fixture")
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        submitted = frontdoor.bridge_submit_request(
+            state_root=state_root,
+            payload=payload,
+            frontend_kind="fixture",
+            surface_registry=original,
+        )
+        original_digest = submitted["surface_identity"]["descriptor_digest"]
+
+        mutations = (
+            ("launcher_id", ("launcher", "launcher_id"), "fixture-launcher-v2"),
+            ("requirements_id", ("requirements", "requirements_id"), "fixture-requirements-v2"),
+            ("verifier_module", ("launcher", "verifier_module"), "fixture_verifier"),
+            ("verifier_class", ("launcher", "verifier_class"), "FixtureVerifier"),
+        )
+        for label, path, value in mutations:
+            descriptor = fake_descriptor()
+            descriptor[path[0]][path[1]] = value
+            drifted = fixture_registry(commissioned=False, descriptor=descriptor)
+            assert drifted.identify("fixture").descriptor_digest != original_digest
+            try:
+                frontdoor.bridge_read_projection(
+                    state_root=state_root,
+                    request_id="req-static-drift",
+                    frontdoor="fixture",
+                    chat_session_id="",
+                    enforce_rate_limit=False,
+                    surface_registry=drifted,
+                )
+            except frontdoor.FrontdoorError as exc:
+                assert "surface contract drifted" in str(exc), label
+            else:
+                raise AssertionError(f"{label} descriptor drift was accepted")
+
+        replay_descriptor = fake_descriptor()
+        replay_descriptor["launcher"]["launcher_id"] = "fixture-launcher-replay"
+        replay_registry = fixture_registry(
+            commissioned=False,
+            descriptor=replay_descriptor,
+        )
+        try:
+            frontdoor.bridge_submit_request(
+                state_root=state_root,
+                payload=payload,
+                frontend_kind="fixture",
+                surface_registry=replay_registry,
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert "idempotency key surface descriptor drifted" in str(exc)
+        else:
+            raise AssertionError("static descriptor drift replay was accepted")
+
+        different_request = bridge_payload(
+            "req-static-drift-second",
+            "fixture",
+        )
+        different_request["idempotency_key"] = payload["idempotency_key"]
+        try:
+            frontdoor.bridge_submit_request(
+                state_root=state_root,
+                payload=different_request,
+                frontend_kind="fixture",
+                surface_registry=replay_registry,
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert "idempotency key surface descriptor drifted" in str(exc)
+        else:
+            raise AssertionError("descriptor drift split the idempotency namespace")
+        assert not frontdoor.request_path(
+            state_root,
+            "req-static-drift-second",
+        ).exists()
+        assert len(list((state_root / "idempotency").glob("*.json"))) == 1
+
+
 def test_http_surface_is_host_pinned() -> None:
     handler = object.__new__(frontdoor_server.Handler)
     handler.server = SimpleNamespace(frontend_kind="codex")
@@ -344,6 +465,8 @@ def main() -> None:
         test_required_launcher_without_session_suppresses_current_claim,
         test_projection_and_replay_recheck_assurance_downgrade,
         test_stored_surface_identity_is_validated_with_explicit_legacy_support,
+        test_core_requires_host_owned_surface_and_rejects_payload_conflict,
+        test_static_descriptor_drift_fails_closed,
         test_http_surface_is_host_pinned,
     ]
     for test in tests:

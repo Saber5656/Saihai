@@ -308,7 +308,10 @@ def test_real_frontdoor_submit_projection_ack_and_idempotency() -> None:
         assert_equal(submitted["transition_effect"], "none", "submit transition")
         assert_equal(
             submitted["idempotency_key_digest"],
-            mcp.frontdoor.idempotency_key_digest(arguments["idempotency_key"]),
+            mcp.frontdoor.bridge_idempotency_key_digest(
+                arguments["idempotency_key"],
+                submitted["surface_identity"],
+            ),
             "projection idempotency digest",
         )
         assert arguments["idempotency_key"] not in json.dumps(submitted_result)

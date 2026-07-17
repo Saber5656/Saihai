@@ -30,6 +30,7 @@
       "required": [
         "identity_version",
         "frontend_kind",
+        "descriptor_digest",
         "assurance_state",
         "target_assurance_state",
         "assurance_profile_id",
@@ -42,6 +43,10 @@
         "frontend_kind": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"
+        },
+        "descriptor_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
         },
         "assurance_state": {
           "type": "string",
