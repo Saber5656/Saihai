@@ -242,6 +242,19 @@
   ],
   "run_id": "run-failed-invalid-report",
   "status": "failed",
+  "surface_identity": {
+    "assurance_profile_id": "codex-main-agent-a-prime",
+    "assurance_state": "advisory",
+    "commissioned_claims": [],
+    "descriptor_digest": "sha256:424e8f80b203e2688789f3eea70e19edd4648325b7a875f3b7f8c2df213ed96c",
+    "frontend_kind": "codex",
+    "identity_version": "1",
+    "submit_contract_version": "1",
+    "suppressed_claims": [
+      "action_enforced"
+    ],
+    "target_assurance_state": "action_enforced"
+  },
   "task_id": "TSK-failed-invalid-report",
   "updated_at": "2026-01-01T00:00:00+0000",
   "user_prompt": "Run bounded offline external review."

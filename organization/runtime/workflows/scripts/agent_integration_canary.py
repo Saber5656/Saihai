@@ -2996,6 +2996,7 @@ def finish_routing_acceptance(
 
     if (idempotency_key_digest is None) == (idempotency_key is None):
         raise CanaryError("routing_idempotency_input_conflict")
+    expected_idempotency_filename: str | None = None
     if idempotency_key_digest is not None:
         key_digest = str(idempotency_key_digest)
         if not assurance.SHA256.fullmatch(key_digest):
@@ -3006,7 +3007,14 @@ def finish_routing_acceptance(
         try:
             import frontdoor_orchestrator as frontdoor
 
-            key_digest = frontdoor.idempotency_key_digest(idempotency_key)
+            raw_key_digest = frontdoor.idempotency_key_digest(idempotency_key)
+            key_digest = frontdoor.bridge_idempotency_key_digest(
+                idempotency_key,
+                frontdoor.resolve_surface_identity("codex"),
+            )
+            expected_idempotency_filename = (
+                f"key-{raw_key_digest.removeprefix('sha256:')}.json"
+            )
         except Exception as exc:
             raise CanaryError("idempotency_key_invalid") from exc
         idempotency_key = None
@@ -3152,6 +3160,7 @@ def finish_routing_acceptance(
             },
             workspace_id=challenge["workspace_id"],
             checkout_identity=challenge["checkout_identity"],
+            surface_identity=request["surface_identity"],
         )
     except Exception as exc:
         raise CanaryError("routing_checkout_or_idempotency_invalid") from exc
@@ -3161,16 +3170,19 @@ def finish_routing_acceptance(
         raise CanaryError("routing_request_digest_mismatch")
     if request.get("idempotency_key_digest") != key_digest:
         raise CanaryError("routing_idempotency_contract_mismatch")
-    idempotency_filename = f"key-{key_digest.removeprefix('sha256:')}.json"
-    if idempotency_filename in baseline["idempotency_files"]:
-        raise CanaryError("routing_idempotency_not_fresh")
     current_idempotency_files = _routing_json_names(state_root, "idempotency")
     baseline_idempotency_files = set(baseline["idempotency_files"])
     idempotency_delta = set(current_idempotency_files) - baseline_idempotency_files
-    if idempotency_delta != {idempotency_filename} or not baseline_idempotency_files.issubset(
-        current_idempotency_files
+    if (
+        len(idempotency_delta) != 1
+        or not baseline_idempotency_files.issubset(current_idempotency_files)
+        or (
+            expected_idempotency_filename is not None
+            and idempotency_delta != {expected_idempotency_filename}
+        )
     ):
         raise CanaryError("routing_idempotency_delta_not_exactly_one")
+    idempotency_filename = next(iter(idempotency_delta))
     idempotency, idempotency_digest = _load_state_json(
         state_root,
         Path("idempotency") / idempotency_filename,

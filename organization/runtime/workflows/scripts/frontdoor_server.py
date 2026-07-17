@@ -319,7 +319,6 @@ INDEX_HTML = """<!doctype html>
         prompt: fields.prompt.value,
         refs: lines(fields.refs.value),
         allowed_paths: lines(fields.allowedPaths.value),
-        frontdoor: "codex",
         chat_session_id: "frontdoor-ui",
         idempotency_key: fields.idempotencyKey.value,
       }),
@@ -339,7 +338,6 @@ INDEX_HTML = """<!doctype html>
         return call("POST", "/main-agent/ack-output", {
           request_id: fields.requestId.value,
           projection_digest: digest,
-          frontdoor: "codex",
           chat_session_id: "frontdoor-ui",
         });
       },
@@ -358,9 +356,23 @@ INDEX_HTML = """<!doctype html>
 
 
 class FrontdoorServer(ThreadingHTTPServer):
-    def __init__(self, server_address, handler_class, *, state_root: Path):
+    def __init__(
+        self,
+        server_address,
+        handler_class,
+        *,
+        state_root: Path,
+        frontend_kind: str = "codex",
+    ):
+        surface_registry = frontdoor.load_surface_registry()
+        try:
+            surface_registry.descriptor(frontend_kind)
+        except frontdoor.frontdoor_surface_registry.SurfaceRegistryError as exc:
+            raise frontdoor.FrontdoorError(str(exc)) from exc
         super().__init__(server_address, handler_class)
         self.state_root = state_root
+        self.surface_registry = surface_registry
+        self.frontend_kind = frontend_kind
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -372,6 +384,18 @@ class Handler(BaseHTTPRequestHandler):
     @property
     def state_root(self) -> Path:
         return self.server.state_root  # type: ignore[attr-defined]
+
+    @property
+    def surface_registry(self):
+        return self.server.surface_registry  # type: ignore[attr-defined]
+
+    def _frontend_kind(self, body: dict | None = None) -> str:
+        supplied = str((body or {}).get("frontdoor") or "")
+        if supplied and supplied != self.server.frontend_kind:  # type: ignore[attr-defined]
+            raise frontdoor.FrontdoorError(
+                "request surface does not match host-configured frontend"
+            )
+        return self.server.frontend_kind  # type: ignore[attr-defined]
 
     def _peer_details(self) -> dict[str, str]:
         return {
@@ -490,10 +514,11 @@ class Handler(BaseHTTPRequestHandler):
                 payload = frontdoor.bridge_read_projection(
                     state_root=self.state_root,
                     request_id=bridge_projection_match.group(1),
-                    frontdoor="codex",
+                    frontdoor=self._frontend_kind(),
                     chat_session_id="frontdoor-ui",
                     principal=principal,
                     peer=self._peer_details(),
+                    surface_registry=self.surface_registry,
                 )
                 self._send_json(payload)
                 return
@@ -586,11 +611,14 @@ class Handler(BaseHTTPRequestHandler):
                         "task_id": str(body.get("task_id") or ""),
                     },
                 )
+                submit_body = {**body, "frontdoor": self._frontend_kind(body)}
                 payload = frontdoor.bridge_submit_request(
                     state_root=self.state_root,
-                    payload=body,
+                    payload=submit_body,
+                    frontend_kind=self._frontend_kind(body),
                     principal=principal,
                     peer=self._peer_details(),
+                    surface_registry=self.surface_registry,
                 )
                 self._send_json(payload)
                 return
@@ -607,10 +635,11 @@ class Handler(BaseHTTPRequestHandler):
                     state_root=self.state_root,
                     request_id=str(body["request_id"]),
                     projection_digest=str(body["projection_digest"]),
-                    frontdoor=str(body.get("frontdoor") or "codex"),
+                    frontdoor=self._frontend_kind(body),
                     chat_session_id=str(body.get("chat_session_id") or "frontdoor-ui"),
                     principal=principal,
                     peer=self._peer_details(),
+                    surface_registry=self.surface_registry,
                 )
                 self._send_json(payload)
                 return
@@ -624,9 +653,10 @@ class Handler(BaseHTTPRequestHandler):
                     classification=body.get("classification") if isinstance(body.get("classification"), dict) else None,
                     allowed_paths=list(body.get("allowed_paths") or []),
                     expires_at=str(body.get("expires_at") or "run_terminal"),
-                    frontdoor=str(body.get("frontdoor") or "codex"),
+                    frontdoor=self._frontend_kind(body),
                     chat_session_id=str(body.get("chat_session_id") or ""),
                     principal=self._channel_principal(body, allowed_channels={"operator"}),
+                    surface_registry=self.surface_registry,
                 )
                 status = 400 if payload.get("decision") == "blocked" else 200
                 self._send_json(payload, status)
@@ -794,6 +824,11 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--state-root", default="")
+    parser.add_argument(
+        "--frontend-kind",
+        choices=frontdoor.registered_surface_kinds(),
+        default="codex",
+    )
     args = parser.parse_args()
 
     try:
@@ -804,6 +839,7 @@ def main() -> None:
         (args.host, args.port),
         Handler,
         state_root=state_root,
+        frontend_kind=args.frontend_kind,
     )
     print(f"P0 frontdoor API: http://{args.host}:{server.server_port}/")
     try:

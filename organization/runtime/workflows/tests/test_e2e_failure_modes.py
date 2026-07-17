@@ -291,7 +291,13 @@ def scenario_bridge_smuggled_authority(harness: OrchestratorHarness) -> dict[str
         "classification": harness.classification(),
         "run_id": "run-attacker-selected",
     }
-    blocked = capture_blocked(lambda: harness.frontdoor.bridge_submit_request(state_root=harness.state_root, payload=payload))
+    blocked = capture_blocked(
+        lambda: harness.frontdoor.bridge_submit_request(
+            state_root=harness.state_root,
+            payload=payload,
+            frontend_kind="codex",
+        )
+    )
     require_equal(
         blocked["reason"],
         "invalid bridge submit_request: unexpected_fields:classification,run_id; forbidden_fields:classification,run_id; request_kind unsupported:'external_review'",
