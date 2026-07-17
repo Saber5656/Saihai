@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -24,6 +25,7 @@ SHA_C = "sha256:" + "c" * 64
 SHA_D = "sha256:" + "d" * 64
 SHA_E = "sha256:" + "e" * 64
 BASE_REVISION = "1" * 40
+RESULT_RECEIVED_AT = datetime(2026, 7, 17, 0, 4, 59, tzinfo=timezone.utc)
 
 
 def generation() -> dict:
@@ -94,8 +96,24 @@ def input_envelope() -> dict:
     }
 
 
+def regular_text_change(
+    path: str = "README.md",
+    content: bytes = b"updated readme\n",
+    operation: str = "replace",
+) -> dict:
+    return {
+        "operation": operation,
+        "relative_path": path,
+        "file_type": "regular",
+        "content_encoding": "base64",
+        "content_media_type": "text/plain; charset=utf-8",
+        "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+        "size_bytes": len(content),
+        "content_base64": base64.b64encode(content).decode("ascii"),
+    }
+
+
 def result_envelope() -> dict:
-    patch_bytes = b"diff --git a/README.md b/README.md\n"
     return {
         "transport_version": "1",
         "message_type": "worker_result",
@@ -123,12 +141,10 @@ def result_envelope() -> dict:
             ],
         },
         "patch": {
-            "artifact_id": "worktree-patch",
-            "media_type": "text/x-diff",
-            "encoding": "base64",
-            "sha256": "sha256:" + hashlib.sha256(patch_bytes).hexdigest(),
-            "size_bytes": len(patch_bytes),
-            "content_base64": base64.b64encode(patch_bytes).decode("ascii"),
+            "artifact_id": "worktree-file-changes",
+            "media_type": "application/vnd.saihai.regular-text-file-changes+json",
+            "format_version": "1",
+            "changes": [regular_text_change()],
         },
         "worker_self_reported_execution_evidence": {
             "input_digest_verified": True,
@@ -151,7 +167,9 @@ def expect_reason(reason: str, callback) -> transport.IsolatedWorkerTransportErr
 
 def test_valid_typed_exchange_is_bound_and_path_free() -> None:
     incoming, outgoing = transport.validate_exchange(
-        input_envelope(), result_envelope()
+        input_envelope(),
+        result_envelope(),
+        result_received_at=RESULT_RECEIVED_AT,
     )
     assert incoming["authority"]["max_execution_count"] == 1
     assert incoming["execution_id"] == outgoing["execution_id"]
@@ -210,13 +228,22 @@ def test_worker_result_cannot_name_host_writeback_targets() -> None:
 def test_worker_changed_paths_are_guest_relative_only() -> None:
     for changed_path in (
         "/primary-host/Agents-Vault/task.md",
+        "b/../../Agents-Vault/task.md",
+        "../../.codex/state/runs/run.json",
         "../state/runs/run.json",
         "nested/../../state",
         "nested\\escape",
+        "C:/host/state/run.json",
+        "nul\x00byte",
+        ".git/config",
+        "nested/.HG/store",
+        ".jj/repo/store",
+        "docs/cafe\u0301.md",
         ".",
     ):
         changed = result_envelope()
         changed["worker_result"]["changed_paths"] = [changed_path]
+        changed["patch"]["changes"][0]["relative_path"] = changed_path
         exc = expect_reason(
             "isolated_worker_result_invalid",
             lambda changed=changed: transport.validate_result_envelope(changed),
@@ -224,14 +251,14 @@ def test_worker_changed_paths_are_guest_relative_only() -> None:
         assert any("changed_path_invalid" in item for item in exc.errors), exc.errors
 
 
-def test_patch_and_exchange_bindings_fail_closed() -> None:
+def test_typed_file_change_content_and_exchange_bindings_fail_closed() -> None:
     changed = result_envelope()
-    changed["patch"]["sha256"] = SHA_A
+    changed["patch"]["changes"][0]["sha256"] = SHA_A
     exc = expect_reason(
         "isolated_worker_result_invalid",
         lambda: transport.validate_result_envelope(changed),
     )
-    assert "patch_digest_mismatch" in exc.errors
+    assert "file_change_digest_mismatch:$[0]" in exc.errors
 
     for field in ("transfer_id", "execution_id", "work_order_digest", "run_id"):
         changed = result_envelope()
@@ -246,7 +273,11 @@ def test_patch_and_exchange_bindings_fail_closed() -> None:
         )
         exc = expect_reason(
             "isolated_worker_exchange_invalid",
-            lambda changed=changed: transport.validate_exchange(input_envelope(), changed),
+            lambda changed=changed: transport.validate_exchange(
+                input_envelope(),
+                changed,
+                result_received_at=RESULT_RECEIVED_AT,
+            ),
         )
         assert f"exchange_binding_mismatch:{field}" in exc.errors
 
@@ -283,9 +314,185 @@ def test_execution_id_and_freshness_window_are_required_and_bound() -> None:
     changed["expires_at"] = "2026-07-17T00:04:59Z"
     exc = expect_reason(
         "isolated_worker_exchange_invalid",
-        lambda: transport.validate_exchange(input_envelope(), changed),
+        lambda: transport.validate_exchange(
+            input_envelope(),
+            changed,
+            result_received_at=RESULT_RECEIVED_AT,
+        ),
     )
     assert "exchange_binding_mismatch:expires_at" in exc.errors
+
+
+def test_result_receipt_uses_closed_open_trusted_clock_window() -> None:
+    issued_at = datetime(2026, 7, 17, 0, 0, 0, tzinfo=timezone.utc)
+    transport.validate_exchange(
+        input_envelope(), result_envelope(), result_received_at=issued_at
+    )
+
+    expires_at = datetime(2026, 7, 17, 0, 5, 0, tzinfo=timezone.utc)
+    exc = expect_reason(
+        "isolated_worker_exchange_invalid",
+        lambda: transport.validate_exchange(
+            input_envelope(), result_envelope(), result_received_at=expires_at
+        ),
+    )
+    assert "freshness_window_expired" in exc.errors
+
+    exc = expect_reason(
+        "isolated_worker_exchange_invalid",
+        lambda: transport.validate_exchange(
+            input_envelope(),
+            result_envelope(),
+            result_received_at=datetime(2026, 7, 16, 23, 59, 59, tzinfo=timezone.utc),
+        ),
+    )
+    assert "freshness_window_not_yet_valid" in exc.errors
+
+
+def test_changed_paths_and_typed_change_paths_are_exact_unique_sets() -> None:
+    duplicate_declaration = result_envelope()
+    duplicate_declaration["worker_result"]["changed_paths"] = [
+        "README.md",
+        "README.md",
+    ]
+    exc = expect_reason(
+        "isolated_worker_result_invalid",
+        lambda: transport.validate_result_envelope(duplicate_declaration),
+    )
+    assert "changed_path_duplicate:README.md" in exc.errors
+
+    missing_change = result_envelope()
+    missing_change["worker_result"]["changed_paths"].append("docs/design.md")
+    exc = expect_reason(
+        "isolated_worker_result_invalid",
+        lambda: transport.validate_result_envelope(missing_change),
+    )
+    assert (
+        "changed_path_set_mismatch:missing_file_change:docs/design.md" in exc.errors
+    )
+
+    undeclared_change = result_envelope()
+    undeclared_change["patch"]["changes"].append(
+        regular_text_change("docs/design.md", b"design\n", "create")
+    )
+    exc = expect_reason(
+        "isolated_worker_result_invalid",
+        lambda: transport.validate_result_envelope(undeclared_change),
+    )
+    assert (
+        "changed_path_set_mismatch:undeclared_file_change:docs/design.md"
+        in exc.errors
+    )
+
+    duplicate_change = result_envelope()
+    duplicate_change["patch"]["changes"].append(regular_text_change())
+    exc = expect_reason(
+        "isolated_worker_result_invalid",
+        lambda: transport.validate_result_envelope(duplicate_change),
+    )
+    assert "file_change_path_duplicate:README.md" in exc.errors
+
+    case_collision = result_envelope()
+    case_collision["worker_result"]["changed_paths"] = [
+        "README.md",
+        "readme.md",
+    ]
+    case_collision["patch"]["changes"].append(
+        regular_text_change("readme.md", b"collision\n")
+    )
+    exc = expect_reason(
+        "isolated_worker_result_invalid",
+        lambda: transport.validate_result_envelope(case_collision),
+    )
+    assert "changed_path_collision:readme.md" in exc.errors
+    assert "file_change_path_collision:readme.md" in exc.errors
+
+    deletion = result_envelope()
+    deletion["worker_result"]["changed_paths"] = ["docs/obsolete.md"]
+    deletion["patch"]["changes"] = [
+        {
+            "operation": "delete",
+            "relative_path": "docs/obsolete.md",
+            "file_type": "regular",
+        }
+    ]
+    validated = transport.validate_result_envelope(deletion)
+    assert validated["patch"]["changes"][0]["operation"] == "delete"
+
+
+def test_opaque_diff_and_non_regular_operations_are_unrepresentable() -> None:
+    adversarial_diffs = (
+        b"diff --git a/README.md b/../../Agents-Vault/task.md\n",
+        b"diff --git a/README.md b/.git/config\n",
+        b'diff --git "a/README.md" "b/../../state-tree/run.json"\n',
+        (
+            b"diff --git a/old.md b/new.md\nsimilarity index 100%\n"
+            b"rename from old.md\nrename to new.md\n"
+        ),
+        (
+            b"diff --git a/source.md b/copy.md\nsimilarity index 100%\n"
+            b"copy from source.md\ncopy to copy.md\n"
+        ),
+        b"diff --git a/link b/link\nnew file mode 120000\n+/primary-host/Agents-Vault\n",
+    )
+    for raw_diff in adversarial_diffs:
+        changed = result_envelope()
+        changed["patch"] = {
+            "artifact_id": "worktree-patch",
+            "media_type": "text/x-diff",
+            "encoding": "base64",
+            "sha256": "sha256:" + hashlib.sha256(raw_diff).hexdigest(),
+            "size_bytes": len(raw_diff),
+            "content_base64": base64.b64encode(raw_diff).decode("ascii"),
+        }
+        expect_reason(
+            "isolated_worker_result_invalid",
+            lambda changed=changed: transport.validate_result_envelope(changed),
+        )
+
+    for unsupported in (
+        {"operation": "rename", "old_path": "old.md", "relative_path": "new.md"},
+        {"operation": "copy", "old_path": "old.md", "relative_path": "new.md"},
+        {
+            "operation": "create",
+            "relative_path": "link",
+            "file_type": "symlink",
+            "mode": "120000",
+            "target": "/primary-host/Agents-Vault",
+        },
+        {
+            "operation": "create",
+            "relative_path": "vendor/module",
+            "file_type": "submodule",
+            "mode": "160000",
+        },
+    ):
+        changed = result_envelope()
+        changed["worker_result"]["changed_paths"] = [unsupported["relative_path"]]
+        changed["patch"]["changes"] = [unsupported]
+        expect_reason(
+            "isolated_worker_result_invalid",
+            lambda changed=changed: transport.validate_result_envelope(changed),
+        )
+
+
+def test_structured_quoted_path_is_unambiguous_and_binary_content_is_rejected() -> None:
+    quoted_path = 'docs/"quoted".md'
+    changed = result_envelope()
+    changed["worker_result"]["changed_paths"] = [quoted_path]
+    changed["patch"]["changes"] = [
+        regular_text_change(quoted_path, b"quoted path\n", "create")
+    ]
+    validated = transport.validate_result_envelope(changed)
+    assert validated["patch"]["changes"][0]["relative_path"] == quoted_path
+
+    binary = result_envelope()
+    binary["patch"]["changes"] = [regular_text_change(content=b"\xff\x00")]
+    exc = expect_reason(
+        "isolated_worker_result_invalid",
+        lambda: transport.validate_result_envelope(binary),
+    )
+    assert "file_change_binary_content_forbidden:$[0]" in exc.errors
 
 
 def _bind_input_artifacts(envelope: dict, artifacts: dict[str, bytes]) -> None:
@@ -334,7 +541,7 @@ def test_input_artifact_bytes_are_size_digest_and_limit_checked() -> None:
     assert "artifact_too_large:approved-work-order" in exc.errors
 
 
-def test_result_raw_and_patch_bytes_are_bounded_before_trust() -> None:
+def test_result_raw_and_file_change_bytes_are_bounded_before_trust() -> None:
     raw = json.dumps(result_envelope(), separators=(",", ":")).encode("utf-8")
     assert transport.validate_result_bytes(raw)["message_type"] == "worker_result"
 
@@ -359,13 +566,7 @@ def test_result_raw_and_patch_bytes_are_bounded_before_trust() -> None:
 
     patch_bytes = b"x" * (transport.MAX_PATCH_BYTES + 1)
     changed = result_envelope()
-    changed["patch"]["content_base64"] = base64.b64encode(patch_bytes).decode(
-        "ascii"
-    )
-    changed["patch"]["size_bytes"] = len(patch_bytes)
-    changed["patch"]["sha256"] = (
-        "sha256:" + hashlib.sha256(patch_bytes).hexdigest()
-    )
+    changed["patch"]["changes"] = [regular_text_change(content=patch_bytes)]
     exc = expect_reason(
         "isolated_worker_result_invalid",
         lambda: transport.validate_result_envelope(changed),
@@ -397,10 +598,14 @@ def main() -> None:
         test_input_rejects_host_and_vault_location_fields,
         test_worker_result_cannot_name_host_writeback_targets,
         test_worker_changed_paths_are_guest_relative_only,
-        test_patch_and_exchange_bindings_fail_closed,
+        test_typed_file_change_content_and_exchange_bindings_fail_closed,
         test_execution_id_and_freshness_window_are_required_and_bound,
+        test_result_receipt_uses_closed_open_trusted_clock_window,
+        test_changed_paths_and_typed_change_paths_are_exact_unique_sets,
+        test_opaque_diff_and_non_regular_operations_are_unrepresentable,
+        test_structured_quoted_path_is_unambiguous_and_binary_content_is_rejected,
         test_input_artifact_bytes_are_size_digest_and_limit_checked,
-        test_result_raw_and_patch_bytes_are_bounded_before_trust,
+        test_result_raw_and_file_change_bytes_are_bounded_before_trust,
         test_worker_self_reports_are_preserved_but_never_authoritative,
         test_contract_schemas_are_strict_at_boundary_objects,
     ]

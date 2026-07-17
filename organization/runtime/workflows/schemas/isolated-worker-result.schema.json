@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://saihai.local/schemas/workflows/isolated-worker-result.schema.json",
   "title": "Isolated Worker Result Envelope",
-  "description": "Path-free result captured from an isolated worker and treated as inert, untrusted data until authoritative host-side capability, artifact, and diff verification complete. Worker self-reports never promote claims.",
+  "description": "Destination-free result captured from an isolated worker and treated as inert, untrusted data until authoritative host-side capability, artifact, and diff verification complete. Worker self-reports never promote claims.",
   "type": "object",
   "required": [
     "transport_version",
@@ -103,7 +103,7 @@
       "additionalProperties": false
     },
     "patch": {
-      "description": "The only result artifact. Its declared digest and size are verified against decoded bytes, and the decoded payload is limited to 16 MiB.",
+      "description": "The only result artifact: a typed set of complete UTF-8 regular-file operations. Unified diffs, binary deltas, renames, copies, symlinks, submodules, special files, and file modes are not representable.",
       "anyOf": [
         { "type": "null" },
         { "$ref": "#/$defs/patchPayload" }
@@ -167,14 +167,49 @@
     },
     "patchPayload": {
       "type": "object",
-      "required": ["artifact_id", "media_type", "encoding", "sha256", "size_bytes", "content_base64"],
+      "required": ["artifact_id", "media_type", "format_version", "changes"],
       "properties": {
-        "artifact_id": { "const": "worktree-patch" },
-        "media_type": { "const": "text/x-diff" },
-        "encoding": { "const": "base64" },
+        "artifact_id": { "const": "worktree-file-changes" },
+        "media_type": { "const": "application/vnd.saihai.regular-text-file-changes+json" },
+        "format_version": { "const": "1" },
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "anyOf": [
+              { "$ref": "#/$defs/writeRegularTextFile" },
+              { "$ref": "#/$defs/deleteRegularFile" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "writeRegularTextFile": {
+      "type": "object",
+      "required": [
+        "operation", "relative_path", "file_type", "content_encoding",
+        "content_media_type", "sha256", "size_bytes", "content_base64"
+      ],
+      "properties": {
+        "operation": { "enum": ["create", "replace"] },
+        "relative_path": { "type": "string" },
+        "file_type": { "const": "regular" },
+        "content_encoding": { "const": "base64" },
+        "content_media_type": { "const": "text/plain; charset=utf-8" },
         "sha256": { "$ref": "#/$defs/sha256" },
-        "size_bytes": { "type": "integer", "minimum": 1, "maximum": 16777216 },
+        "size_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
         "content_base64": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "deleteRegularFile": {
+      "type": "object",
+      "required": ["operation", "relative_path", "file_type"],
+      "properties": {
+        "operation": { "const": "delete" },
+        "relative_path": { "type": "string" },
+        "file_type": { "const": "regular" }
       },
       "additionalProperties": false
     }

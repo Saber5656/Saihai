@@ -14,8 +14,9 @@ import binascii
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -37,6 +38,23 @@ MAX_PATCH_BYTES = 16 * 1024 * 1024
 MAX_RESULT_ENVELOPE_BYTES = 24 * 1024 * 1024
 MAX_EXECUTION_WINDOW_SECONDS = 5 * 60
 MAX_RESULT_NESTING_DEPTH = 64
+VCS_CONTROL_PATH_COMPONENTS = frozenset(
+    {
+        ".git",
+        ".gitmodules",
+        ".hg",
+        ".svn",
+        ".bzr",
+        "_darcs",
+        ".pijul",
+        ".fossil-settings",
+        ".jj",
+        ".sl",
+        "cvs",
+        "rcs",
+        "sccs",
+    }
+)
 INPUT_ARTIFACT_FIELDS = (
     "approved_work_order",
     "repository_snapshot",
@@ -76,6 +94,7 @@ SUPPORTED_SCHEMA_TYPES = frozenset(
 _UTC_TIMESTAMP_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
 )
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:")
 FORBIDDEN_LOCATION_KEYS = frozenset(
     {
         "file_path",
@@ -223,15 +242,33 @@ def _forbidden_location_fields(value: Any, path: str = "$") -> list[str]:
 
 
 def _relative_changed_path(value: Any) -> bool:
-    if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or "\x00" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or _WINDOWS_DRIVE_PATH_RE.match(value)
+        or unicodedata.normalize("NFC", value) != value
+    ):
         return False
     candidate = PurePosixPath(value)
     return (
         not candidate.is_absolute()
         and value != "."
         and all(part not in {"", ".", ".."} for part in candidate.parts)
+        and all(
+            part.casefold() not in VCS_CONTROL_PATH_COMPONENTS
+            for part in candidate.parts
+        )
         and candidate.as_posix() == value
     )
+
+
+def _path_identity(value: str) -> str:
+    """Conservative identity for case-insensitive host filesystem safety."""
+
+    return unicodedata.normalize("NFC", value).casefold()
 
 
 def _result_structure_errors(value: Any) -> list[str]:
@@ -341,26 +378,77 @@ def validate_input_envelope(
     return json.loads(json.dumps(value))
 
 
-def _validate_patch(patch: Any) -> list[str]:
+def _validate_patch(patch: Any, changed_paths: Any) -> list[str]:
+    """Validate typed, complete regular-text-file operations and their path set."""
+
     if patch is None:
         return []
     if not isinstance(patch, dict):
         return ["patch_invalid"]
-    encoded = patch.get("content_base64")
-    if not isinstance(encoded, str):
-        return ["patch_content_invalid"]
-    try:
-        raw = base64.b64decode(encoded, validate=True)
-    except (ValueError, binascii.Error):
-        return ["patch_content_invalid"]
     errors: list[str] = []
-    if len(raw) > MAX_PATCH_BYTES:
+    changes = patch.get("changes")
+    if not isinstance(changes, list):
+        return ["patch_changes_invalid"]
+
+    patch_paths: list[str] = []
+    total_content_bytes = 0
+    for index, change in enumerate(changes):
+        if not isinstance(change, dict):
+            errors.append(f"file_change_invalid:$[{index}]")
+            continue
+        path = change.get("relative_path")
+        if not _relative_changed_path(path):
+            errors.append(f"file_change_path_invalid:$[{index}]")
+        else:
+            patch_paths.append(path)
+
+        operation = change.get("operation")
+        if operation not in {"create", "replace"}:
+            continue
+        encoded = change.get("content_base64")
+        if not isinstance(encoded, str):
+            errors.append(f"file_change_content_invalid:$[{index}]")
+            continue
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            errors.append(f"file_change_content_invalid:$[{index}]")
+            continue
+        total_content_bytes += len(raw)
+        if change.get("size_bytes") != len(raw):
+            errors.append(f"file_change_size_mismatch:$[{index}]")
+        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        if change.get("sha256") != digest:
+            errors.append(f"file_change_digest_mismatch:$[{index}]")
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            errors.append(f"file_change_binary_content_forbidden:$[{index}]")
+        else:
+            if "\x00" in decoded:
+                errors.append(f"file_change_binary_content_forbidden:$[{index}]")
+
+    if total_content_bytes > MAX_PATCH_BYTES:
         errors.append("patch_too_large")
-    if patch.get("size_bytes") != len(raw):
-        errors.append("patch_size_mismatch")
-    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-    if patch.get("sha256") != digest:
-        errors.append("patch_digest_mismatch")
+
+    seen_patch_paths: set[str] = set()
+    seen_patch_identities: set[str] = set()
+    for path in patch_paths:
+        if path in seen_patch_paths:
+            errors.append(f"file_change_path_duplicate:{path}")
+        elif _path_identity(path) in seen_patch_identities:
+            errors.append(f"file_change_path_collision:{path}")
+        seen_patch_paths.add(path)
+        seen_patch_identities.add(_path_identity(path))
+
+    if isinstance(changed_paths, list):
+        declared_paths = {
+            path for path in changed_paths if _relative_changed_path(path)
+        }
+        for path in sorted(declared_paths - seen_patch_paths):
+            errors.append(f"changed_path_set_mismatch:missing_file_change:{path}")
+        for path in sorted(seen_patch_paths - declared_paths):
+            errors.append(f"changed_path_set_mismatch:undeclared_file_change:{path}")
     return errors
 
 
@@ -379,14 +467,28 @@ def validate_result_envelope(value: Any) -> dict[str, Any]:
         if isinstance(result, dict):
             changed_paths = result.get("changed_paths")
             if isinstance(changed_paths, list):
+                seen_changed_paths: set[str] = set()
+                seen_changed_identities: set[str] = set()
                 for index, changed_path in enumerate(changed_paths):
                     if not _relative_changed_path(changed_path):
                         errors.append(f"changed_path_invalid:$[{index}]")
+                    elif changed_path in seen_changed_paths:
+                        errors.append(f"changed_path_duplicate:{changed_path}")
+                    elif _path_identity(changed_path) in seen_changed_identities:
+                        errors.append(f"changed_path_collision:{changed_path}")
+                    else:
+                        seen_changed_paths.add(changed_path)
+                        seen_changed_identities.add(_path_identity(changed_path))
                 if changed_paths and patch is None:
                     errors.append("patch_required_for_changed_paths")
                 if not changed_paths and patch is not None:
                     errors.append("patch_for_unchanged_result")
-        errors.extend(_validate_patch(patch))
+        errors.extend(
+            _validate_patch(
+                patch,
+                result.get("changed_paths") if isinstance(result, dict) else None,
+            )
+        )
     if errors:
         raise IsolatedWorkerTransportError("isolated_worker_result_invalid", errors)
     return json.loads(json.dumps(value))
@@ -417,10 +519,37 @@ def validate_result_bytes(raw: bytes) -> dict[str, Any]:
         ) from exc
 
 
+def _trusted_clock_errors(value: dict[str, Any], observed_at: Any) -> list[str]:
+    if (
+        not isinstance(observed_at, datetime)
+        or observed_at.tzinfo is None
+        or observed_at.utcoffset() is None
+    ):
+        return ["trusted_clock_invalid"]
+    try:
+        issued_at = datetime.strptime(
+            value["issued_at"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        expires_at = datetime.strptime(
+            value["expires_at"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+    except (KeyError, TypeError, ValueError):
+        return ["trusted_clock_window_invalid"]
+    instant = observed_at.astimezone(timezone.utc)
+    if instant < issued_at:
+        return ["freshness_window_not_yet_valid"]
+    if instant >= expires_at:
+        return ["freshness_window_expired"]
+    return []
+
+
 def validate_exchange(
-    input_envelope: Any, result_envelope: Any
+    input_envelope: Any,
+    result_envelope: Any,
+    *,
+    result_received_at: datetime,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Bind one result to exactly one previously validated host input."""
+    """Bind one result and its trusted first-byte receipt time to one input."""
 
     incoming = validate_input_envelope(input_envelope)
     outgoing = validate_result_envelope(result_envelope)
@@ -446,6 +575,7 @@ def validate_exchange(
         "base_revision"
     ):
         errors.append("exchange_binding_mismatch:base_revision")
+    errors.extend(_trusted_clock_errors(incoming, result_received_at))
     if errors:
         raise IsolatedWorkerTransportError("isolated_worker_exchange_invalid", errors)
     return incoming, outgoing
