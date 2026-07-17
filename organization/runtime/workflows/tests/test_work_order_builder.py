@@ -131,6 +131,9 @@ def build(state_root: Path, **overrides) -> dict:
             "provider_adapter_id", "claude_headless_p0"
         ),
         intended_model_value=overrides.pop("intended_model", "claude-sonnet-4-6"),
+        effective_model_policy_value=overrides.pop(
+            "effective_model_policy", "required_exact_match"
+        ),
     )
 
 
@@ -148,6 +151,11 @@ def test_build_valid_p0_order() -> None:
         assert_equal(order["external_provider_allowed"], True, "external provider")
         assert_equal(order["provider_adapter_id"], "claude_headless_p0", "provider adapter")
         assert_equal(order["intended_model"], "claude-sonnet-4-6", "intended model")
+        assert_equal(
+            order["effective_model_policy"],
+            "required_exact_match",
+            "effective model policy",
+        )
         assert_equal(order["activation_scope"]["step_budget"], 1, "step budget")
         assert_equal(order["activation_scope"]["allowed_ops"], {"edit": False, "commit": False, "push": False, "network": False}, "ops")
         assert "Step 'review'" in order["instruction"], "instruction includes step id"

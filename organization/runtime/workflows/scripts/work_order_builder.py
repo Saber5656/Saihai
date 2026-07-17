@@ -34,6 +34,7 @@ REQUIRED_WORK_ORDER_FIELDS = [
     "external_provider_allowed",
     "provider_adapter_id",
     "intended_model",
+    "effective_model_policy",
     "report_path",
     "policy_digest",
     "requester",
@@ -417,6 +418,7 @@ def build_work_order(
     report_path_value: str,
     provider_adapter_id_value: str,
     intended_model_value: str,
+    effective_model_policy_value: str,
     worker_execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     step_id = str(step["id"])
@@ -444,6 +446,7 @@ def build_work_order(
         "external_provider_allowed": external_provider_allowed,
         "provider_adapter_id": provider_adapter_id_value,
         "intended_model": intended_model_value,
+        "effective_model_policy": effective_model_policy_value,
         "report_path": report_path_value,
         "policy_digest": policy_digest_value,
         "requester": run.get("requester") or {"frontdoor": "manual"},

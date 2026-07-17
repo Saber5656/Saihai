@@ -22,6 +22,7 @@
     "external_provider_allowed",
     "provider_adapter_id",
     "intended_model",
+    "effective_model_policy",
     "report_path",
     "policy_digest",
     "requester",
@@ -123,6 +124,13 @@
     "intended_model": {
       "type": "string",
       "minLength": 1
+    },
+    "effective_model_policy": {
+      "type": "string",
+      "enum": [
+        "required_exact_match",
+        "record_without_equality"
+      ]
     },
     "max_budget_usd": {
       "type": "string"

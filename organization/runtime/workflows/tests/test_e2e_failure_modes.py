@@ -500,6 +500,11 @@ def scenario_resume_after_interrupt(harness: OrchestratorHarness) -> dict[str, A
         "execution_version": "1",
         "step_id": str(run["current_step"]),
         "adapter_id": "claude_headless_p0",
+        "provider_binding": {
+            "provider_adapter_id": "claude_headless_p0",
+            "intended_model": "claude-sonnet-4-6",
+            "effective_model_policy": "required_exact_match",
+        },
         "work_order_digest": "sha256:" + "1" * 64,
         "adapter_request_digest": "sha256:" + "2" * 64,
         "context_snapshot_digest": "sha256:" + "3" * 64,

@@ -1485,6 +1485,7 @@ def test_drain_blocks_invalid_existing_work_order() -> None:
             "external_provider_allowed": True,
             "provider_adapter_id": "claude_headless_p0",
             "intended_model": "claude-sonnet-4-6",
+            "effective_model_policy": "required_exact_match",
             "report_path": str(state_root / "reports" / "run-invalid-work-order" / "review-external-review-report.json"),
             "policy_digest": "sha256:" + "1" * 64,
             "requester": {"frontdoor": "codex"},

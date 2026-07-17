@@ -517,6 +517,8 @@ def validate_work_order_for_runner(
         "provider_adapter_id"
     ):
         errors.append("provider_adapter_id must be non-empty string")
+    if work_order.get("effective_model_policy") not in EFFECTIVE_MODEL_POLICIES:
+        errors.append("effective_model_policy unsupported")
     allowed_ops = ((work_order.get("activation_scope") or {}).get("allowed_ops") or {})
     for op in ("edit", "commit", "push", "network"):
         if allowed_ops.get(op) is not False:
@@ -549,10 +551,26 @@ def validate_work_order_for_runner(
 def provider_adapter_model_binding_matches(
     work_order: dict[str, Any], adapter: dict[str, Any]
 ) -> bool:
-    return (
-        work_order.get("provider_adapter_id") == adapter.get("provider_adapter_id")
-        and work_order.get("intended_model") == adapter.get("default_model")
-    )
+    return work_order_model_policy_binding(work_order) == adapter_model_policy_binding(adapter)
+
+
+def work_order_model_policy_binding(work_order: dict[str, Any]) -> dict[str, str]:
+    return {
+        "provider_adapter_id": str(work_order.get("provider_adapter_id") or ""),
+        "intended_model": str(work_order.get("intended_model") or ""),
+        "effective_model_policy": str(work_order.get("effective_model_policy") or ""),
+    }
+
+
+def approved_model_policy_binding(run: dict[str, Any]) -> dict[str, str]:
+    approved = run.get("approved_provider_binding")
+    if not isinstance(approved, dict):
+        return {}
+    return {
+        "provider_adapter_id": str(approved.get("provider_adapter_id") or ""),
+        "intended_model": str(approved.get("default_model") or ""),
+        "effective_model_policy": str(approved.get("effective_model_policy") or ""),
+    }
 
 
 def adapter_model_policy_binding(adapter: dict[str, Any]) -> dict[str, str]:
@@ -732,15 +750,13 @@ def recover_completed_provider_attempt(
         )
     except (scoped_worker_executor.ScopedWorkerError, ValueError, TypeError) as exc:
         raise ProviderRunnerError(PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH) from exc
-    frozen_binding = {
-        "provider_adapter_id": str(frozen_work_order.get("provider_adapter_id") or ""),
-        "intended_model": str(frozen_work_order.get("intended_model") or ""),
-        "effective_model_policy": str(current_binding.get("effective_model_policy") or ""),
-    }
+    frozen_binding = work_order_model_policy_binding(frozen_work_order)
+    approved_binding = approved_model_policy_binding(run)
     if (
         not expected_work_order_digest
         or frozen_digest != expected_work_order_digest
         or not isinstance(recorded_binding, dict)
+        or frozen_binding != approved_binding
         or recorded_binding != current_binding
         or frozen_binding != current_binding
     ):
@@ -781,8 +797,8 @@ def recover_completed_provider_attempt(
     request_adapter = request.get("adapter")
     if (
         not isinstance(request_adapter, dict)
-        or adapter_model_policy_binding(request_adapter) != recorded_binding
-        or str(request.get("intended_model") or "") != recorded_binding.get("intended_model")
+        or adapter_model_policy_binding(request_adapter) != frozen_binding
+        or str(request.get("intended_model") or "") != frozen_binding["intended_model"]
     ):
         raise ProviderRunnerError(PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
     request_copy = dict(request)
@@ -1621,6 +1637,30 @@ def run_provider(
                     "reason": exc.reason_class,
                     "workflow_run": run,
                 }
+            frozen_binding = work_order_model_policy_binding(work_order)
+            current_binding = adapter_model_policy_binding(adapter)
+            approved_binding = approved_model_policy_binding(run)
+            previous_execution = run.get("provider_execution")
+            has_previous_execution = isinstance(previous_execution, dict)
+            previous_binding = (
+                previous_execution.get("provider_binding")
+                if has_previous_execution
+                else None
+            )
+            if (
+                frozen_binding != approved_binding
+                or frozen_binding != current_binding
+                or (
+                    has_previous_execution
+                    and previous_binding != frozen_binding
+                )
+            ):
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+                    "workflow_run": run,
+                }
             work_order_errors = validate_work_order_for_runner(work_order, state_root=state_root, run=run)
             if work_order_errors:
                 return {
@@ -1728,6 +1768,30 @@ def run_provider(
                     "reason": str(exc),
                     "workflow_run": run,
                 }
+            planned_execution = build_provider_execution(
+                run=run,
+                adapter_id=adapter_id,
+                work_order_digest=order_digest,
+                request=request,
+                attempt_id=attempt_id,
+                lease_id=lease_id,
+                timeout_seconds=timeout_seconds,
+                principal=principal,
+            )
+            request_adapter = request.get("adapter")
+            if (
+                not isinstance(request_adapter, dict)
+                or adapter_model_policy_binding(request_adapter) != frozen_binding
+                or str(request.get("intended_model") or "")
+                != frozen_binding["intended_model"]
+                or planned_execution.get("provider_binding") != frozen_binding
+            ):
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+                    "workflow_run": run,
+                }
             request_path = adapter_request_path(state_root, run_id, step_id, adapter["provider_adapter_id"])
             secure_directory(state_root, request_path.parent.parent)
             private_atomic_write_json(state_root, request_path, request)
@@ -1745,16 +1809,7 @@ def run_provider(
                     "reason": str(exc),
                     "workflow_run": run,
                 }
-            run["provider_execution"] = build_provider_execution(
-                run=run,
-                adapter_id=adapter_id,
-                work_order_digest=order_digest,
-                request=request,
-                attempt_id=attempt_id,
-                lease_id=lease_id,
-                timeout_seconds=timeout_seconds,
-                principal=principal,
-            )
+            run["provider_execution"] = planned_execution
             run_lifecycle.transition_run(
                 state_root,
                 run_id,

@@ -49,6 +49,7 @@
       "mode": "refs_only",
       "raw_transcript_sharing": "forbidden"
     },
+    "effective_model_policy": "required_exact_match",
     "expected_output": "external_review_report",
     "external_provider_allowed": true,
     "from_role": "frontdoor",

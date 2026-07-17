@@ -278,6 +278,55 @@ def test_runner_binding_blocks_unapproved_adapter_candidate() -> None:
         ).exists()
 
 
+def test_policy_drift_after_approval_blocks_initial_dispatch_without_artifacts() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-policy-drift-dispatch"
+        prepare_run(
+            state_root,
+            request_id="req-provider-policy-drift-dispatch",
+            run_id=run_id,
+        )
+        original_loader = provider_runner.load_provider_adapters
+        drifted_adapters = json.loads(json.dumps(original_loader()))
+        drifted_adapters["claude_headless_p0"][
+            "effective_model_policy"
+        ] = "record_without_equality"
+        provider_runner.load_provider_adapters = lambda registry=None: drifted_adapters
+        try:
+            blocked = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                fake_provider_mode="success",
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "policy-drift-dispatch-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.load_provider_adapters = original_loader
+
+        assert_equal(blocked["decision"], "blocked", "policy drift dispatch decision")
+        assert_equal(
+            blocked["reason"],
+            provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+            "policy drift dispatch reason",
+        )
+        canonical_paths = (
+            state_root
+            / "adapter-requests"
+            / run_id
+            / "review-claude_headless_p0.json",
+            state_root / "reports" / run_id / "review-external-review-report.json",
+            state_root / "provider-evidence" / run_id / "review-provider-evidence.json",
+            state_root / "provider-evidence" / run_id / "review-provider-transcript.json",
+        )
+        assert all(not path.exists() for path in canonical_paths), (
+            "policy drift dispatch wrote canonical artifacts"
+        )
+
+
 def test_waiting_provider_retry_records_fresh_request_authority() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -1224,6 +1273,11 @@ def test_direct_runner_accounts_expired_attempt_before_new_claim() -> None:
             "execution_version": "1",
             "step_id": "review",
             "adapter_id": "claude_headless_p0",
+            "provider_binding": {
+                "provider_adapter_id": "claude_headless_p0",
+                "intended_model": "claude-sonnet-4-6",
+                "effective_model_policy": "required_exact_match",
+            },
             "work_order_digest": digest,
             "adapter_request_digest": "sha256:" + "2" * 64,
             "context_snapshot_digest": "sha256:" + "3" * 64,
@@ -1446,6 +1500,96 @@ def test_recovery_reverifies_frozen_provider_model_binding_before_promotion() ->
             )
 
 
+def test_policy_drift_after_approval_blocks_recovery_without_canonical_outputs() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-policy-drift-recovery"
+        prepare_run(
+            state_root,
+            request_id="req-provider-policy-drift-recovery",
+            run_id=run_id,
+        )
+        original_store = run_store.store_run
+
+        def crash_before_result_ready_store(root, candidate, **kwargs):
+            execution = candidate.get("provider_execution")
+            if isinstance(execution, dict) and execution.get("phase") == "result_ready":
+                raise RuntimeError("simulated policy-drift recovery crash")
+            return original_store(root, candidate, **kwargs)
+
+        run_store.store_run = crash_before_result_ready_store
+        try:
+            try:
+                provider_runner.run_provider(
+                    state_root=state_root,
+                    run_id=run_id,
+                    fake_provider_mode="success",
+                    principal={
+                        "principal_type": "harness_runner",
+                        "principal_id": "policy-drift-recovery-crash-test",
+                        "authn_method": "local_test",
+                    },
+                )
+            except RuntimeError as exc:
+                assert_equal(
+                    str(exc),
+                    "simulated policy-drift recovery crash",
+                    "policy drift recovery crash point",
+                )
+            else:
+                raise AssertionError("policy drift recovery crash did not occur")
+        finally:
+            run_store.store_run = original_store
+
+        canonical_paths = (
+            state_root / "reports" / run_id / "review-external-review-report.json",
+            state_root / "provider-evidence" / run_id / "review-provider-evidence.json",
+            state_root / "provider-evidence" / run_id / "review-provider-transcript.json",
+        )
+        for path in canonical_paths:
+            if path.exists():
+                path.unlink()
+        interrupted = run_store.load_run(state_root, run_id)
+        interrupted["provider_execution"]["lease"][
+            "lease_expires_at"
+        ] = "2000-01-01T00:00:00+00:00"
+        original_store(
+            state_root,
+            interrupted,
+            expected_current_state="waiting_provider",
+        )
+
+        original_loader = provider_runner.load_provider_adapters
+        drifted_adapters = json.loads(json.dumps(original_loader()))
+        drifted_adapters["claude_headless_p0"][
+            "effective_model_policy"
+        ] = "record_without_equality"
+        provider_runner.load_provider_adapters = lambda registry=None: drifted_adapters
+        try:
+            blocked = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                fake_provider_mode="success",
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "policy-drift-recovery-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.load_provider_adapters = original_loader
+
+        assert_equal(blocked["decision"], "blocked", "policy drift recovery decision")
+        assert_equal(
+            blocked["reason"],
+            provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+            "policy drift recovery reason",
+        )
+        assert all(not path.exists() for path in canonical_paths), (
+            "policy drift recovery promoted canonical outputs"
+        )
+
+
 def test_failed_attempt_journal_preserves_typed_outcome_without_reinvocation() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -1619,6 +1763,7 @@ if __name__ == "__main__":
         test_fake_provider_missing_effective_model_waits_for_human,
         test_runner_rejects_adapter_work_order_model_binding_mismatch,
         test_runner_binding_blocks_unapproved_adapter_candidate,
+        test_policy_drift_after_approval_blocks_initial_dispatch_without_artifacts,
         test_waiting_provider_retry_records_fresh_request_authority,
         test_completion_rejects_tampered_runner_evidence_identity_path_and_type,
         test_report_gate_promotes_model_assurance_tamper_to_typed_reason,
@@ -1647,6 +1792,7 @@ if __name__ == "__main__":
         test_direct_runner_accounts_expired_attempt_before_new_claim,
         test_completed_attempt_journal_recovers_without_provider_reinvocation,
         test_recovery_reverifies_frozen_provider_model_binding_before_promotion,
+        test_policy_drift_after_approval_blocks_recovery_without_canonical_outputs,
         test_failed_attempt_journal_preserves_typed_outcome_without_reinvocation,
         test_serialized_context_limit_blocks_before_claim_without_retry,
         test_request_artifact_paths_are_recomputed_and_confined,

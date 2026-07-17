@@ -5774,6 +5774,7 @@ def build_work_order(
         report_path_value=str(report_path(state_root, str(run["run_id"]), step_id)),
         provider_adapter_id_value=provider_adapter_id,
         intended_model_value=intended_model,
+        effective_model_policy_value=current_binding["effective_model_policy"],
         worker_execution_plan=worker_execution_plan,
     )
     unsigned_digest = stable_digest(work_order)
