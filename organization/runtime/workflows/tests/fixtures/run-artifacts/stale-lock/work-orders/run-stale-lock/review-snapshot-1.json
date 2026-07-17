@@ -56,6 +56,7 @@
     "intended_model": "claude-sonnet-4-6",
     "permission_mode": "readonly",
     "policy_digest": "sha256:20f1efdd5bd67071d0fc5090f3105574f1d09a6313f294c7b74180da07d5740a",
+    "provider_adapter_id": "claude_headless_p0",
     "report_path": "__STATE_ROOT__/reports/run-stale-lock/review-external-review-report.json",
     "request_id": "req-stale-lock",
     "requester": {

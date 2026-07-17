@@ -24,6 +24,7 @@
     "context_freshness": "fresh_process",
     "default_model": "claude-sonnet-4-6",
     "default_timeout_seconds": 1800,
+    "effective_model_policy": "required_exact_match",
     "environment_policy": "minimal_allowlist",
     "execution_profile_id": "claude-tools-disabled-pinned-v1",
     "max_context_bytes": 1000000,

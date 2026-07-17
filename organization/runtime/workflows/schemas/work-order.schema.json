@@ -20,6 +20,7 @@
     "context_scope",
     "permission_mode",
     "external_provider_allowed",
+    "provider_adapter_id",
     "intended_model",
     "report_path",
     "policy_digest",
@@ -114,6 +115,10 @@
     },
     "external_provider_allowed": {
       "type": "boolean"
+    },
+    "provider_adapter_id": {
+      "type": "string",
+      "minLength": 1
     },
     "intended_model": {
       "type": "string",

@@ -44,6 +44,17 @@ def request() -> dict:
     }
 
 
+def codex_request() -> dict:
+    candidate = request()
+    candidate["intended_model"] = "operator-selected-openai"
+    candidate["adapter"] = {
+        "provider_adapter_id": "codex_cli_openai_p0",
+        "default_model": "operator-selected-openai",
+        "effective_model_policy": "record_without_equality",
+    }
+    return candidate
+
+
 class FakeProcess:
     def __init__(
         self,
@@ -213,7 +224,9 @@ def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
             "SAIHAI_CODEX_EXECUTABLE_SHA256": digest,
         }
         with patched_environ(incomplete):
-            unavailable = provider_adapters.invoke_codex_exec(request(), timeout_seconds=10)
+            unavailable = provider_adapters.invoke_codex_exec(
+                codex_request(), timeout_seconds=10
+            )
         assert unavailable["status"] == "unavailable"
         assert unavailable["reason"].startswith("codex_confinement_unavailable:")
 
@@ -222,6 +235,7 @@ def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
             provider_adapters.invoke_codex_exec,
             binding,
             (FIXTURE_DIR / "codex_exec_events.jsonl").read_bytes(),
+            request_value=codex_request(),
         )
     assert result["status"] == "ok"
     command = calls[0]["command"]
@@ -305,6 +319,7 @@ def test_codex_structured_auth_nonzero_and_malformed_classes() -> None:
                 stdout,
                 stderr,
                 returncode,
+                request_value=codex_request(),
             )
             assert result["status"] == expected_status
             assert result["reason"] == expected_reason

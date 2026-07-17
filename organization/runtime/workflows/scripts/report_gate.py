@@ -26,6 +26,14 @@ EXECUTION_PRINCIPAL_TYPES = {
 }
 FORBIDDEN_REPORT_CONTENT_KEYS = provider_evidence_contract.FORBIDDEN_RAW_CONTENT_KEYS
 ADAPTER_METADATA_FIELDS = ("transport", "bridge_pattern", "surface_metadata")
+ADAPTER_DESCRIPTOR_BINDING_FIELDS = ADAPTER_METADATA_FIELDS + (
+    "default_model",
+    "effective_model_policy",
+)
+EFFECTIVE_MODEL_POLICIES = {
+    "required_exact_match",
+    "record_without_equality",
+}
 
 
 class ReportGateError(RuntimeError):
@@ -261,7 +269,7 @@ def authoritative_adapter_request(
     else:
         if str(registered.get("provider_target") or "") != adapter_target:
             errors.append("adapter_request_authority.provider_target does not match registry")
-        for field in ADAPTER_METADATA_FIELDS:
+        for field in ADAPTER_DESCRIPTOR_BINDING_FIELDS:
             if field in registered and adapter.get(field) != registered[field]:
                 errors.append(f"adapter_request_authority.{field} does not match registry")
 
@@ -285,7 +293,7 @@ def authoritative_adapter_request(
         "provider_target": adapter_target,
     }
     if registered is not None:
-        for field in ADAPTER_METADATA_FIELDS:
+        for field in ADAPTER_DESCRIPTOR_BINDING_FIELDS:
             if field in registered:
                 authoritative_metadata[field] = registered[field]
     return authoritative_metadata, []
@@ -502,6 +510,32 @@ def validate_external_review_report(
     return errors
 
 
+def validate_effective_model_binding(
+    value: dict[str, Any],
+    *,
+    work_order: dict[str, Any],
+    adapter_identity: dict[str, Any] | None,
+    label: str,
+) -> list[str]:
+    if adapter_identity is None:
+        return [f"{label}.effective_model policy authority unavailable"]
+    errors: list[str] = []
+    if adapter_identity.get("provider_adapter_id") != work_order.get(
+        "provider_adapter_id"
+    ):
+        errors.append(f"{label}.provider_adapter_id mismatch with work order")
+    if adapter_identity.get("default_model") != work_order.get("intended_model"):
+        errors.append(f"{label}.intended_model mismatch with adapter registry")
+    policy = adapter_identity.get("effective_model_policy")
+    if policy not in EFFECTIVE_MODEL_POLICIES:
+        errors.append(f"{label}.effective_model policy unsupported")
+    elif policy == "required_exact_match" and value.get("effective_model") != value.get(
+        "intended_model"
+    ):
+        errors.append(f"{label}.effective_model must match intended_model")
+    return errors
+
+
 def validate_provider_evidence(
     value: Any,
     run: dict[str, Any],
@@ -530,8 +564,20 @@ def validate_provider_evidence(
         errors.append("provider_evidence.request_id mismatch")
     if str(value.get("intended_model") or "") != str(work_order.get("intended_model") or ""):
         errors.append("provider_evidence.intended_model mismatch")
-    if str(value.get("effective_model") or "") != str(value.get("intended_model") or ""):
-        errors.append("provider_evidence effective_model must match intended_model")
+    adapter_identity, adapter_errors = authoritative_adapter_request(
+        state_root,
+        run=run,
+        work_order=work_order,
+    )
+    errors.extend(adapter_errors)
+    errors.extend(
+        validate_effective_model_binding(
+            value,
+            work_order=work_order,
+            adapter_identity=adapter_identity,
+            label="provider_evidence",
+        )
+    )
     for field in ("provider", "intended_model", "effective_model", "provider_session_id", "transcript_path", "evidence_path"):
         if not isinstance(value.get(field), str) or not value.get(field):
             errors.append(f"provider_evidence.{field} must be non-empty string")
@@ -603,8 +649,6 @@ def validate_normalized_provider_evidence(
             errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
     if str(value.get("intended_model") or "") != str(work_order.get("intended_model") or ""):
         errors.append("normalized_evidence.intended_model mismatch with work order")
-    if str(value.get("effective_model") or "") != str(value.get("intended_model") or ""):
-        errors.append("normalized_evidence.effective_model must match intended_model")
 
     adapter_identity, adapter_errors = authoritative_adapter_request(
         state_root,
@@ -613,9 +657,18 @@ def validate_normalized_provider_evidence(
     )
     errors.extend(adapter_errors)
     if adapter_identity is not None:
-        for field, expected in adapter_identity.items():
+        for field in ("provider_adapter_id", "provider_target", *ADAPTER_METADATA_FIELDS):
+            expected = adapter_identity.get(field)
             if value.get(field) != expected:
                 errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
+    errors.extend(
+        validate_effective_model_binding(
+            value,
+            work_order=work_order,
+            adapter_identity=adapter_identity,
+            label="normalized_evidence",
+        )
+    )
 
     expected_evidence_path = provider_evidence_path(
         state_root,

@@ -1583,6 +1583,7 @@ def proposed_request(
     frontdoor: str,
     chat_session_id: str,
     principal: dict[str, Any] | None = None,
+    provider_adapter_id: str = "",
 ) -> dict[str, Any]:
     validate_artifact_id(request_id, "request_id")
     validate_artifact_id(task_id, "task_id")
@@ -1631,9 +1632,13 @@ def proposed_request(
             "context_refs": bounded["context_refs"],
             "allowed_paths": bounded["allowed_paths"],
             "expires_at": expires_at,
+            "requested_provider_adapter_id": provider_adapter_id,
         }
         for key, value in expected.items():
-            if existing_record.get(key) != value:
+            existing_value = existing_record.get(key)
+            if key == "requested_provider_adapter_id":
+                existing_value = str(existing_value or "")
+            if existing_value != value:
                 immutable_mismatches.append(key)
         if immutable_mismatches:
             append_audit_event(
@@ -1669,6 +1674,7 @@ def proposed_request(
             "expires_at": expires_at,
             "classification": None,
             "requester": requester(frontdoor, chat_session_id),
+            "requested_provider_adapter_id": provider_adapter_id,
             "status": "waiting_human",
             "proposal": payload,
         }
@@ -1702,6 +1708,7 @@ def proposed_request(
             **bounded,
             "expires_at": expires_at,
             "requester": requester(frontdoor, chat_session_id),
+            "requested_provider_adapter_id": provider_adapter_id,
         }
     else:
         record = dict(existing_record)
@@ -1711,6 +1718,7 @@ def proposed_request(
             "classification": classification,
             "status": envelope["activation_status"],
             "proposal": envelope,
+            "requested_provider_adapter_id": provider_adapter_id,
         }
     )
     attach_approval_summary(record)
@@ -1756,6 +1764,7 @@ def approval_action_id(record: dict[str, Any]) -> str:
         "resolved_context_refs": record.get("resolved_context_refs") or [],
         "allowed_paths": record.get("allowed_paths") or [],
         "expires_at": record.get("expires_at"),
+        "requested_provider_adapter_id": record.get("requested_provider_adapter_id"),
     }
     return "approve-" + stable_digest(material)[:20]
 
@@ -1771,6 +1780,25 @@ def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
         str(checkout_identity.get("checkout_realpath"))
         if isinstance(checkout_identity, dict) and checkout_identity.get("checkout_realpath")
         else str(REPO_ROOT)
+    )
+    workflow_id = str(workflow_selection.get("workflow_id") or "")
+    initial_step = str(workflow_selection.get("initial_step") or "")
+    template = load_template(workflow_id)
+    step = next(
+        (
+            item
+            for item in template.get("steps", [])
+            if isinstance(item, dict) and item.get("id") == initial_step
+        ),
+        None,
+    )
+    if not isinstance(step, dict):
+        raise FrontdoorError("provider_adapter_selection_step_missing")
+    provider_capability = provider_capability_for_step(
+        template=template,
+        step=step,
+        worker_execution_plan=None,
+        requested_adapter_id=str(record.get("requested_provider_adapter_id") or ""),
     )
     return {
         "approval_view_version": "1",
@@ -1793,7 +1821,7 @@ def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
                 list(record.get("resolved_allowed_paths") or [])
             ),
             "denied_ops": denied_ops,
-            "provider_adapter": "claude_headless_p0",
+            "provider_adapter": provider_capability["provider_adapter_id"],
             "ref_boundary": {
                 "workspace_root": approval_workspace_root,
                 "max_ref_count": MAX_CONTEXT_REF_COUNT,
@@ -4687,22 +4715,58 @@ def abort_run(
 def claude_headless_capability() -> dict[str, Any]:
     adapters = provider_runner.load_provider_adapters()
     adapter = adapters.get("claude_headless_p0")
-    if adapter:
-        return adapter
-    return {
-        "adapter_contract_version": "1",
-        "provider_adapter_id": "claude_headless_p0",
-        "provider_target": "claude_headless",
-        "transport": "headless_cli",
-        "sync_mode": "sync",
-        "context_freshness": "fresh_process",
-        "concurrency_unit": "process",
-        "permission_enforcement": "harness",
-        "supports_structured_output": True,
-        "requires_marker": False,
-        "reset_strategy": "new_session",
-        "report_authority": "typed_report_and_evidence_file",
-    }
+    if adapter is None or provider_runner.validate_adapter_descriptor(adapter):
+        raise FrontdoorError("provider_adapter_descriptor_invalid")
+    return adapter
+
+
+def provider_capability_for_step(
+    *,
+    template: dict[str, Any],
+    step: dict[str, Any],
+    worker_execution_plan: dict[str, Any] | None,
+    requested_adapter_id: str = "",
+) -> dict[str, Any]:
+    provider_route = (
+        step.get("provider_route")
+        if isinstance(step.get("provider_route"), dict)
+        else {}
+    )
+    template_adapter = (
+        template.get("provider_adapter")
+        if isinstance(template.get("provider_adapter"), dict)
+        else {}
+    )
+    default_provider = str(provider_route.get("default_provider") or "")
+    default_transport = str(
+        provider_route.get("default_transport")
+        or template_adapter.get("default_transport")
+        or ""
+    )
+    if worker_execution_plan is not None or default_transport == "codex_exec":
+        default_adapter_id = "codex_cli_openai_p0"
+    elif default_provider in {"", "claude_cli"} and default_transport in {
+        "",
+        "headless_cli",
+        "tmux_interactive",
+    }:
+        default_adapter_id = "claude_headless_p0"
+    else:
+        raise FrontdoorError("provider_adapter_selection_unsupported")
+    if requested_adapter_id:
+        if (
+            provider_route.get("adapter_kind") != "external_provider"
+            and requested_adapter_id != default_adapter_id
+        ):
+            raise FrontdoorError("provider_adapter_route_mismatch")
+        adapter_id = requested_adapter_id
+    else:
+        adapter_id = default_adapter_id
+
+    adapter = provider_runner.load_provider_adapters().get(adapter_id)
+    if adapter is None or provider_runner.validate_adapter_descriptor(adapter):
+        raise FrontdoorError("provider_adapter_descriptor_invalid")
+    return adapter
 
 
 def manual_provider_evidence_contract(
@@ -4839,6 +4903,14 @@ def _prepare_claude_adapter_locked(
         }
 
     capability = claude_headless_capability()
+    if not provider_runner.provider_adapter_model_binding_matches(
+        work_order, capability
+    ):
+        return {
+            "schema_version": 1,
+            "decision": "blocked",
+            "reason": provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+        }
     evidence_path = provider_evidence_path(state_root, run_id, step_id)
     transcript_path = provider_transcript_path(state_root, run_id, step_id)
     request_path = adapter_request_path(
@@ -5494,10 +5566,6 @@ def build_work_order(
     step: dict[str, Any],
     issuer_principal: dict[str, Any],
 ) -> dict[str, Any]:
-    capability = claude_headless_capability()
-    intended_model = str(capability.get("default_model") or "")
-    if not intended_model:
-        raise FrontdoorError("provider_intended_model_missing")
     resolved_refs = verified_context_refs_for_work_order(request_record)
     if not isinstance(resolved_refs, list) or not resolved_refs:
         refs = run["activation"]["context_scope"]["refs"]
@@ -5524,6 +5592,18 @@ def build_work_order(
             )
         except scoped_worker_executor.ScopedWorkerError as exc:
             raise FrontdoorError(exc.reason_class) from exc
+    capability = provider_capability_for_step(
+        template=template,
+        step=step,
+        worker_execution_plan=worker_execution_plan,
+        requested_adapter_id=str(
+            request_record.get("requested_provider_adapter_id") or ""
+        ),
+    )
+    provider_adapter_id = str(capability.get("provider_adapter_id") or "")
+    intended_model = str(capability.get("default_model") or "")
+    if not provider_adapter_id or not intended_model:
+        raise FrontdoorError("provider_adapter_model_binding_missing")
     work_order = work_order_builder.build_work_order(
         run=run,
         request_record=request_record,
@@ -5534,6 +5614,7 @@ def build_work_order(
         policy_digest_value=policy_digest(request_record["approved_activation"]),
         signature=None,
         report_path_value=str(report_path(state_root, str(run["run_id"]), step_id)),
+        provider_adapter_id_value=provider_adapter_id,
         intended_model_value=intended_model,
         worker_execution_plan=worker_execution_plan,
     )
@@ -5566,6 +5647,7 @@ def parser() -> argparse.ArgumentParser:
         default="codex",
     )
     propose.add_argument("--chat-session-id", default="")
+    propose.add_argument("--provider-adapter-id", default="")
     propose.add_argument("--principal-type", default="manual_operator")
     propose.add_argument("--principal-id", default="manual-cli")
     propose.add_argument("--authn-method", default="local_cli")
@@ -5768,6 +5850,7 @@ def main() -> None:
                 frontdoor=args.frontdoor,
                 chat_session_id=args.chat_session_id,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
+                provider_adapter_id=args.provider_adapter_id,
             )
         elif args.command == "approve":
             payload = approve_request(

@@ -1278,7 +1278,44 @@ def test_drain_allows_edit_capable_code_change_gate() -> None:
         assert_equal(drained["workflow_run"]["run_state"], "step_queued", "code change drain run state")
         assert_equal(work_order["step_id"], "implement", "code change step")
         assert_equal(work_order["permission_mode"], "edit", "code change permission")
+        assert_equal(
+            work_order["provider_adapter_id"],
+            "codex_cli_openai_p0",
+            "code change provider adapter",
+        )
+        assert_equal(
+            work_order["intended_model"],
+            "operator-selected-openai",
+            "code change intended model",
+        )
+        assert work_order["intended_model"] != "claude-sonnet-4-6"
         assert_equal(work_order["activation_scope"]["allowed_ops"]["edit"], True, "later edit allowance preserved")
+
+        mismatched = run_frontdoor(
+            state_root,
+            "propose",
+            "--task-id",
+            "TSK-code-change-wrong-adapter",
+            "--request-id",
+            "req-code-change-wrong-adapter",
+            "--prompt",
+            "Implement bounded code change with a mismatched backend",
+            "--classification",
+            json.dumps(classification),
+            "--ref",
+            "organization/runtime/workflows/README.md",
+            "--allowed-path",
+            "organization/runtime/workflows",
+            "--provider-adapter-id",
+            "claude_headless_p0",
+            check=False,
+        )
+        mismatch_payload = load_payload(mismatched)
+        assert_equal(mismatched.returncode, 2, "route mismatch exit")
+        assert "provider_adapter_route_mismatch" in mismatch_payload["reason"]
+        assert not (
+            state_root / "requests" / "req-code-change-wrong-adapter.json"
+        ).exists()
 
 
 def test_drain_blocks_invalid_existing_work_order() -> None:
@@ -1341,6 +1378,7 @@ def test_drain_blocks_invalid_existing_work_order() -> None:
             "context_scope": {"mode": "refs_only", "raw_transcript_sharing": "forbidden"},
             "permission_mode": "readonly",
             "external_provider_allowed": True,
+            "provider_adapter_id": "claude_headless_p0",
             "intended_model": "claude-sonnet-4-6",
             "report_path": str(state_root / "reports" / "run-invalid-work-order" / "review-external-review-report.json"),
             "policy_digest": "sha256:" + "1" * 64,

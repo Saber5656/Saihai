@@ -30,6 +30,7 @@
   "intended_model": "claude-sonnet-4-6",
   "permission_mode": "readonly",
   "policy_digest": "sha256:d028f5cefac398298296c14d33ff8f0402e1ae4ac57b265bdc7bd8bcf8729c45",
+  "provider_adapter_id": "claude_headless_p0",
   "report_path": "__STATE_ROOT__/reports/run-complete-pass/review-external-review-report.json",
   "request_id": "req-complete-pass",
   "requester": {

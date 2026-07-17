@@ -226,6 +226,7 @@
   "requested_context_refs": [
     ".tmp/e2e-harness-fixture/ref.md"
   ],
+  "requested_provider_adapter_id": "",
   "requester": {
     "chat_session_id": "harness",
     "frontdoor": "codex"

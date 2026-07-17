@@ -27,7 +27,18 @@ from test_frontdoor_orchestrator import (
 )
 
 
-def prepare_run(state_root: Path, *, request_id: str, run_id: str) -> None:
+def prepare_run(
+    state_root: Path,
+    *,
+    request_id: str,
+    run_id: str,
+    provider_adapter_id: str = "",
+) -> None:
+    provider_args = (
+        ["--provider-adapter-id", provider_adapter_id]
+        if provider_adapter_id
+        else []
+    )
     proposed = load_payload(
         run_frontdoor(
             state_root,
@@ -42,6 +53,7 @@ def prepare_run(state_root: Path, *, request_id: str, run_id: str) -> None:
             json.dumps(external_review_classification()),
             "--ref",
             "organization/runtime/workflows/README.md",
+            *provider_args,
         )
     )
     load_payload(
@@ -187,27 +199,28 @@ def test_fake_provider_missing_effective_model_waits_for_human() -> None:
         assert not (state_root / "reports" / run_id / "review-external-review-report.json").exists()
 
 
-def test_runner_dispatches_through_adapter_metadata() -> None:
+def test_runner_rejects_adapter_work_order_model_binding_mismatch() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         prepare_run(state_root, request_id="req-provider-cursor", run_id="run-provider-cursor")
 
-        payload = load_payload(
-            run_provider(
-                state_root,
-                run_id="run-provider-cursor",
-                adapter_id="cursor_cli_p0",
-            )
+        blocked = run_provider(
+            state_root,
+            run_id="run-provider-cursor",
+            adapter_id="cursor_cli_p0",
+            check=False,
         )
+        payload = load_payload(blocked)
+        assert_equal(blocked.returncode, 2, "binding mismatch exit")
+        assert_equal(
+            payload["reason"],
+            provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+            "typed binding mismatch",
+        )
+        assert not (state_root / "adapter-requests" / "run-provider-cursor").exists()
 
-        evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
-        report = json.loads(Path(payload["report_path"]).read_text(encoding="utf-8"))
-        assert_equal(evidence["provider_adapter_id"], "cursor_cli_p0", "adapter id")
-        assert_equal(evidence["provider_target"], "cursor_cli", "provider target")
-        assert_equal(report["provider_evidence"]["provider"], "cursor_cli", "report provider")
 
-
-def test_runner_transition_request_wins_over_manual_adapter_candidate() -> None:
+def test_runner_binding_blocks_unapproved_adapter_candidate() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         run_id = "run-provider-current-request"
@@ -217,24 +230,22 @@ def test_runner_transition_request_wins_over_manual_adapter_candidate() -> None:
         )
         manual_path = Path(manual["adapter_request_path"])
 
-        payload = load_payload(
-            run_provider(
-                state_root,
-                run_id=run_id,
-                adapter_id="cursor_cli_p0",
-            )
+        blocked = run_provider(
+            state_root,
+            run_id=run_id,
+            adapter_id="cursor_cli_p0",
+            check=False,
         )
-
-        runner_path = Path(payload["adapter_request_path"])
+        payload = load_payload(blocked)
         assert manual_path.exists(), "manual request should remain as a bounded fallback artifact"
-        assert runner_path.exists(), "runner request should exist"
-        assert manual_path != runner_path, "test requires two adapter request candidates"
-        assert_equal(payload["report_gate"]["outcome"], "report_valid", "current request gate")
         assert_equal(
-            payload["provider_evidence"]["provider_adapter_id"],
-            "cursor_cli_p0",
-            "transition-selected adapter",
+            payload["reason"],
+            provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+            "candidate binding reason",
         )
+        assert not (
+            state_root / "adapter-requests" / run_id / "review-cursor_cli_p0.json"
+        ).exists()
 
 
 def test_waiting_provider_retry_records_fresh_request_authority() -> None:
@@ -286,7 +297,7 @@ def test_waiting_provider_retry_records_fresh_request_authority() -> None:
             run_provider(
                 state_root,
                 run_id=run_id,
-                adapter_id="cursor_cli_p0",
+                adapter_id="claude_headless_p0",
             )
         )
 
@@ -301,7 +312,7 @@ def test_waiting_provider_retry_records_fresh_request_authority() -> None:
         assert_equal(payload["report_gate"]["outcome"], "report_valid", "retry gate outcome")
         assert_equal(
             payload["provider_evidence"]["provider_adapter_id"],
-            "cursor_cli_p0",
+            "claude_headless_p0",
             "retry adapter authority",
         )
 
@@ -364,22 +375,39 @@ def test_completion_rejects_tampered_runner_evidence_identity_path_and_type() ->
 
 
 def test_hermes_evidence_records_bridge_pattern_without_async_claim() -> None:
-    with tempfile.TemporaryDirectory() as raw_tmp:
-        state_root = Path(raw_tmp)
-        prepare_run(state_root, request_id="req-provider-hermes", run_id="run-provider-hermes")
-
-        payload = load_payload(
-            run_provider(
+    for adapter_id, expected_model in (
+        ("hermes_agent_oneshot_p0", "operator-selected-hermes"),
+        ("cursor_cli_p0", "operator-selected-cursor"),
+    ):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            suffix = adapter_id.split("_")[0]
+            run_id = f"run-provider-{suffix}"
+            prepare_run(
                 state_root,
-                run_id="run-provider-hermes",
-                adapter_id="hermes_agent_oneshot_p0",
+                request_id=f"req-provider-{suffix}",
+                run_id=run_id,
+                provider_adapter_id=adapter_id,
             )
-        )
-
-        evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
-        assert_equal(evidence["provider_target"], "hermes_agent", "provider target")
-        assert_equal(evidence["bridge_pattern"], "oneshot", "bridge pattern")
-        assert_equal(evidence["surface_metadata"]["async_callback_supported"], False, "async claim")
+            payload = load_payload(
+                run_provider(
+                    state_root,
+                    run_id=run_id,
+                    adapter_id=adapter_id,
+                )
+            )
+            evidence = provider_runner.read_json(Path(payload["evidence_path"]))
+            assert_equal(evidence["provider_adapter_id"], adapter_id, "fake adapter id")
+            assert_equal(evidence["intended_model"], expected_model, "fake intended model")
+            assert evidence["intended_model"] != "claude-sonnet-4-6"
+            assert_equal(payload["report_gate"]["outcome"], "report_valid", "fake report gate")
+            if adapter_id == "hermes_agent_oneshot_p0":
+                assert_equal(evidence["bridge_pattern"], "oneshot", "bridge pattern")
+                assert_equal(
+                    evidence["surface_metadata"]["async_callback_supported"],
+                    False,
+                    "async claim",
+                )
 
 
 def test_provider_unavailable_waits_for_human() -> None:
@@ -753,7 +781,186 @@ def test_patched_live_missing_parsed_model_rejects_report_self_claim() -> None:
         assert not (state_root / "reports" / run_id / "review-external-review-report.json").exists()
 
 
-def test_run_provider_step_honors_adapter_alias() -> None:
+def test_live_codex_uses_declared_non_equality_model_semantics() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-live-codex"
+        request_id = "req-live-codex"
+        prepare_run(
+            state_root,
+            request_id=request_id,
+            run_id=run_id,
+            provider_adapter_id="codex_cli_openai_p0",
+        )
+        order = provider_runner.read_json(
+            provider_runner.work_order_path(state_root, run_id, "review")
+        )
+        assert_equal(order["provider_adapter_id"], "codex_cli_openai_p0", "Codex WO adapter")
+        assert_equal(order["intended_model"], "operator-selected-openai", "Codex WO model")
+        report = {
+            "report_version": "1",
+            "report_id": "report-live-codex",
+            "request_id": request_id,
+            "run_id": run_id,
+            "workflow_id": "single_step_external_review",
+            "step_id": "review",
+            "result": "pass",
+            "summary": "Codex completed.",
+            "provider_evidence": {},
+            "findings": [],
+            "authority": {
+                "canonical_result": "typed_report_file",
+                "stdout_is_signal_only": True,
+                "raw_transcript_shared": False,
+            },
+        }
+        invocation = {
+            "status": "ok",
+            "reason": "ok",
+            "exit_code": 0,
+            "stdout": b"{}",
+            "stderr": b"",
+            "duration_ms": 1,
+            "report": report,
+            "evidence_fields": {
+                "provider": "openai",
+                "effective_model": "gpt-runtime-reported",
+                "provider_request_id": "codex-request",
+                "provider_session_id": "codex-session",
+                "usage": {},
+            },
+        }
+        original = provider_runner.LIVE_ADAPTERS["codex_cli_openai_p0"]
+        original_binding = provider_runner.provider_adapters.resolve_execution_binding
+        original_env = os.environ.get(provider_runner.LIVE_ENV_FLAG)
+        provider_runner.LIVE_ADAPTERS["codex_cli_openai_p0"] = (
+            lambda *_args, **_kwargs: invocation
+        )
+        provider_runner.provider_adapters.resolve_execution_binding = lambda _adapter_id: {
+            "binding_version": "1",
+            "binary": {"path": "/fixture/codex", "sha256": "sha256:" + "a" * 64},
+            "wrapper": {"path": "/fixture/wrapper", "sha256": "sha256:" + "b" * 64},
+            "profile": {"path": "/fixture/profile", "sha256": "sha256:" + "c" * 64},
+            "confinement": "test",
+        }
+        os.environ[provider_runner.LIVE_ENV_FLAG] = "1"
+        try:
+            payload = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                adapter_id="codex_cli_openai_p0",
+                live=True,
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "live-codex-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.LIVE_ADAPTERS["codex_cli_openai_p0"] = original
+            provider_runner.provider_adapters.resolve_execution_binding = original_binding
+            if original_env is None:
+                os.environ.pop(provider_runner.LIVE_ENV_FLAG, None)
+            else:
+                os.environ[provider_runner.LIVE_ENV_FLAG] = original_env
+        assert_equal(payload["decision"], "ok", "live Codex runner decision")
+        assert_equal(payload["report_gate"]["outcome"], "report_valid", "Codex report gate")
+        evidence = provider_runner.read_json(Path(payload["evidence_path"]))
+        assert_equal(evidence["intended_model"], "operator-selected-openai", "Codex evidence intended")
+        assert_equal(evidence["effective_model"], "gpt-runtime-reported", "Codex evidence effective")
+
+
+def test_adapter_request_rejects_tampered_intended_model_binding() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-model-binding"
+        prepare_run(state_root, request_id="req-provider-model-binding", run_id=run_id)
+        run = run_store.load_run(state_root, run_id)
+        work_order = provider_runner.read_json(
+            provider_runner.work_order_path(state_root, run_id, "review")
+        )
+        work_order["intended_model"] = "operator-selected-openai"
+        try:
+            provider_runner.adapter_request(
+                state_root=state_root,
+                run=run,
+                work_order=work_order,
+                adapter=provider_runner.load_provider_adapters()["claude_headless_p0"],
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "binding-test",
+                    "authn_method": "local_test",
+                },
+            )
+        except provider_runner.ProviderRunnerError as exc:
+            assert_equal(
+                str(exc),
+                provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+                "tampered model binding reason",
+            )
+        else:
+            raise AssertionError("tampered intended_model must fail closed")
+
+
+def test_adapter_descriptor_requires_effective_model_policy_declaration() -> None:
+    adapter = dict(provider_runner.load_provider_adapters()["codex_cli_openai_p0"])
+    adapter.pop("effective_model_policy")
+    errors = provider_runner.validate_adapter_descriptor(adapter)
+    assert any("effective_model_policy" in error for error in errors), errors
+
+
+def test_waiting_provider_revalidates_recorded_adapter_policy() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-recorded-adapter-policy"
+        prepare_run(
+            state_root,
+            request_id="req-recorded-adapter-policy",
+            run_id=run_id,
+        )
+        run = run_store.load_run(state_root, run_id)
+        principal = {
+            "principal_type": "harness_runner",
+            "principal_id": "recorded-policy-test",
+            "authn_method": "local_test",
+        }
+        run["run_state"] = "waiting_provider"
+        run["provider_execution"] = provider_runner.build_provider_execution(
+            run=run,
+            adapter_id="cursor_cli_p0",
+            work_order_digest="sha256:" + "1" * 64,
+            request={
+                "step_id": "review",
+                "adapter_request_digest": "sha256:" + "2" * 64,
+                "context_snapshot_digest": "sha256:" + "3" * 64,
+            },
+            attempt_id="provider-attempt-recorded-policy",
+            lease_id="provider-lease-recorded-policy",
+            timeout_seconds=1800,
+            principal=principal,
+        )
+        run_store.store_run(state_root, run, expected_current_state="step_queued")
+        adapters = provider_runner.load_provider_adapters()
+        adapters["cursor_cli_p0"] = dict(adapters["cursor_cli_p0"])
+        adapters["cursor_cli_p0"].pop("effective_model_policy")
+        original_loader = provider_runner.load_provider_adapters
+        provider_runner.load_provider_adapters = lambda _registry=None: adapters
+        try:
+            payload = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                adapter_id="claude_headless_p0",
+                fake_provider_mode="success",
+                principal=principal,
+            )
+        finally:
+            provider_runner.load_provider_adapters = original_loader
+        assert_equal(payload["decision"], "blocked", "recorded policy decision")
+        assert_equal(payload["reason"], "adapter_descriptor_invalid", "recorded policy reason")
+        assert any("effective_model_policy" in error for error in payload["errors"])
+
+
+def test_run_provider_step_rejects_unbound_adapter_alias() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         prepare_run(state_root, request_id="req-provider-step-alias", run_id="run-provider-step-alias")
@@ -763,10 +970,11 @@ def test_run_provider_step_honors_adapter_alias() -> None:
             run_id="run-provider-step-alias",
             adapter="cursor_cli_p0",
         )
-
-        evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
-        assert_equal(evidence["provider_adapter_id"], "cursor_cli_p0", "adapter alias id")
-        assert_equal(evidence["provider_target"], "cursor_cli", "adapter alias target")
+        assert_equal(
+            payload["reason"],
+            provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+            "adapter alias binding reason",
+        )
 
 
 def test_undecodable_provider_stdout_is_malformed_output() -> None:
@@ -961,7 +1169,7 @@ def test_completed_attempt_journal_recovers_without_provider_reinvocation() -> N
                 provider_runner.run_provider(
                     state_root=state_root,
                     run_id=run_id,
-                    adapter_id="cursor_cli_p0",
+                    adapter_id="claude_headless_p0",
                     fake_provider_mode="success",
                     principal={
                         "principal_type": "harness_runner",
@@ -1019,7 +1227,7 @@ def test_completed_attempt_journal_recovers_without_provider_reinvocation() -> N
         assert_equal(recovered["workflow_run"]["run_state"], "complete", "journal recovery state")
         assert_equal(
             recovered["provider_evidence"]["provider_adapter_id"],
-            "cursor_cli_p0",
+            "claude_headless_p0",
             "journal uses recorded adapter",
         )
         assert recovered["workflow_run"]["provider_execution"]["last_outcome"].get(
@@ -1198,8 +1406,8 @@ if __name__ == "__main__":
         test_fake_provider_success_completes_with_normalized_evidence,
         test_fake_provider_model_mismatch_waits_for_human_without_accepting_report,
         test_fake_provider_missing_effective_model_waits_for_human,
-        test_runner_dispatches_through_adapter_metadata,
-        test_runner_transition_request_wins_over_manual_adapter_candidate,
+        test_runner_rejects_adapter_work_order_model_binding_mismatch,
+        test_runner_binding_blocks_unapproved_adapter_candidate,
         test_waiting_provider_retry_records_fresh_request_authority,
         test_completion_rejects_tampered_runner_evidence_identity_path_and_type,
         test_hermes_evidence_records_bridge_pattern_without_async_claim,
@@ -1215,7 +1423,11 @@ if __name__ == "__main__":
         test_live_guard_requires_flag_and_environment,
         test_patched_live_adapter_completes_without_raw_output_leakage,
         test_patched_live_missing_parsed_model_rejects_report_self_claim,
-        test_run_provider_step_honors_adapter_alias,
+        test_live_codex_uses_declared_non_equality_model_semantics,
+        test_adapter_request_rejects_tampered_intended_model_binding,
+        test_adapter_descriptor_requires_effective_model_policy_declaration,
+        test_waiting_provider_revalidates_recorded_adapter_policy,
+        test_run_provider_step_rejects_unbound_adapter_alias,
         test_undecodable_provider_stdout_is_malformed_output,
         test_provider_invocation_releases_global_lock_and_renews_lease,
         test_call_immediate_snapshot_recheck_blocks_provider,
