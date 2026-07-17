@@ -237,12 +237,18 @@ After the human administrator completes frontend commissioning and sealing:
    ```
 
 2. Confirm that the report resolves the selected sealed generation with
-   `decision = allow`, `claim_results.action_enforced = pass`,
-   `action_enforced` in `effective_claims`, and a non-null
-   `attestation_digest`. A missing, stale, drifted, or unselected generation is
-   a suppressed claim, not an acceptable result.
-3. Record the exact report output, `commissioning_id`, sealed `generation_id`,
-   and selected active-generation id in the Agents-Vault task record.
+   top-level `decision = allow`,
+   `profiles[0].claim_results.action_enforced = pass`, `action_enforced` in
+   `profiles[0].effective_claims`, and a non-null
+   `profiles[0].attestation_digest`. A missing, stale, drifted, or unselected
+   generation is a suppressed claim, not an acceptable result.
+3. Record the exact report output; `commissioning.commissioning_id` and
+   `commissioning.generation_id` from the `commission-seal` output, checked
+   against `commissioning_id` and `generation_id` in
+   `generations/<profile_id>/<generation_id>/manifest.json`; and the selected
+   `generation_id` and `activation_id` from `active/<profile_id>.json` in the
+   Agents-Vault task record. The sealed and selected generation ids must match
+   across these sources.
 4. Complete the deployment and runtime acceptance checks in
    [`verify_enforcement.md`](../../organization/runtime/workflows/profiles/verify_enforcement.md),
    including its final simple research check, and attach the command outputs
