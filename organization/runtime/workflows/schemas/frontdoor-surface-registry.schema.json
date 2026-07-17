@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saihai.local/schemas/workflows/frontdoor-surface-registry.schema.json",
+  "title": "Frontdoor Surface Registry",
+  "description": "Static frontend registration. Effective assurance remains host-evidenced and is never granted by this descriptor.",
+  "type": "object",
+  "required": ["registry_version", "surfaces"],
+  "properties": {
+    "registry_version": {"const": "1"},
+    "surfaces": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/surfaceDescriptor"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"
+    },
+    "safeModule": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.]{0,95}$"
+    },
+    "safeSymbol": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,95}$"
+    },
+    "surfaceDescriptor": {
+      "type": "object",
+      "required": [
+        "descriptor_version",
+        "frontend_kind",
+        "submit_contract",
+        "launcher",
+        "requirements",
+        "assurance"
+      ],
+      "properties": {
+        "descriptor_version": {"const": "1"},
+        "frontend_kind": {"$ref": "#/$defs/safeId"},
+        "submit_contract": {
+          "type": "object",
+          "required": ["contract_id", "contract_version"],
+          "properties": {
+            "contract_id": {"const": "main-agent-bridge-submit"},
+            "contract_version": {"const": "1"}
+          },
+          "additionalProperties": false
+        },
+        "launcher": {
+          "type": "object",
+          "required": [
+            "launcher_id",
+            "launch_session_required",
+            "verifier_module",
+            "verifier_class"
+          ],
+          "properties": {
+            "launcher_id": {"$ref": "#/$defs/safeId"},
+            "launch_session_required": {"type": "boolean"},
+            "verifier_module": {
+              "anyOf": [{"$ref": "#/$defs/safeModule"}, {"type": "null"}]
+            },
+            "verifier_class": {
+              "anyOf": [{"$ref": "#/$defs/safeSymbol"}, {"type": "null"}]
+            }
+          },
+          "additionalProperties": false
+        },
+        "requirements": {
+          "type": "object",
+          "required": ["requirements_id"],
+          "properties": {
+            "requirements_id": {"$ref": "#/$defs/safeId"}
+          },
+          "additionalProperties": false
+        },
+        "assurance": {
+          "type": "object",
+          "required": ["profile_id", "target_state"],
+          "properties": {
+            "profile_id": {
+              "anyOf": [
+                {"$ref": "#/$defs/safeId"},
+                {"type": "null"}
+              ]
+            },
+            "target_state": {
+              "enum": ["advisory", "ingress_enforced", "action_enforced"]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
