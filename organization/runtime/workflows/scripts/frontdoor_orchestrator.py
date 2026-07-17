@@ -1886,7 +1886,20 @@ def attach_approval_summary(record: dict[str, Any]) -> None:
 
 
 def idempotency_path(state_root: Path, key: str) -> Path:
-    return state_paths(state_root)["idempotency"] / f"key-{idempotency_key_digest(key).removeprefix('sha256:')}.json"
+    return idempotency_path_from_digest(state_root, idempotency_key_digest(key))
+
+
+def idempotency_path_from_digest(state_root: Path, path_digest: str) -> Path:
+    """Resolve the durable idempotency index from a raw-key digest."""
+
+    normalized_digest = normalize_sha256_digest(
+        path_digest,
+        "idempotency_path_digest",
+    )
+    return (
+        state_paths(state_root)["idempotency"]
+        / f"key-{normalized_digest.removeprefix('sha256:')}.json"
+    )
 
 
 def bridge_idempotency_key_digest(
@@ -2816,6 +2829,10 @@ def recover_bridge_submit_transactions(state_root: Path) -> int:
             transaction.get("idempotency_key_digest"),
             "idempotency_key_digest",
         )
+        idempotency_path_digest = normalize_sha256_digest(
+            transaction.get("idempotency_path_digest"),
+            "idempotency_path_digest",
+        )
         expected_transaction_path = bridge_transaction_path(
             state_root,
             request_id,
@@ -2834,9 +2851,9 @@ def recover_bridge_submit_transactions(state_root: Path) -> int:
             raise FrontdoorError("bridge transaction binding mismatch")
 
         durable_request_path = request_path(state_root, request_id)
-        durable_idempotency_path = (
-            state_paths(state_root)["idempotency"]
-            / f"key-{idempotency_digest.removeprefix('sha256:')}.json"
+        durable_idempotency_path = idempotency_path_from_digest(
+            state_root,
+            idempotency_path_digest,
         )
         if state_file_exists(durable_request_path):
             if read_json(durable_request_path) != request_record:
@@ -3290,6 +3307,7 @@ def bridge_submit_request(
         surface_identity=normalized_surface,
     )
     idempotency_key = str(payload["idempotency_key"])
+    idempotency_path_digest = idempotency_key_digest(idempotency_key)
     idempotency_digest = bridge_idempotency_key_digest(
         idempotency_key,
         normalized_surface,
@@ -3318,7 +3336,10 @@ def bridge_submit_request(
             principal=principal,
         ):
             repaired = recover_bridge_submit_transactions(state_root)
-            idempotency_file = idempotency_path(state_root, idempotency_key)
+            idempotency_file = idempotency_path_from_digest(
+                state_root,
+                idempotency_path_digest,
+            )
             if state_file_exists(idempotency_file):
                 existing = read_json(idempotency_file)
                 existing_key_digest = existing.get("key_digest")
@@ -3520,6 +3541,7 @@ def bridge_submit_request(
                 "request_id": str(payload["request_id"]),
                 "request_digest": digest,
                 "idempotency_key_digest": idempotency_digest,
+                "idempotency_path_digest": idempotency_path_digest,
                 "owner_principal": owner_principal,
                 "request_record": record,
                 "idempotency_record": idempotency_record,

@@ -592,6 +592,9 @@ def test_concurrent_idempotency_and_crash_journal_repair_are_atomic() -> None:
                 "request_id": request_record["request_id"],
                 "request_digest": request_record["request_digest"],
                 "idempotency_key_digest": request_record["idempotency_key_digest"],
+                "idempotency_path_digest": mcp.frontdoor.idempotency_key_digest(
+                    arguments["idempotency_key"]
+                ),
                 "owner_principal": request_record["owner_principal"],
                 "request_record": request_record,
                 "idempotency_record": idempotency_record,

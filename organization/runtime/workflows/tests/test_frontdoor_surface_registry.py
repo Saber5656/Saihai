@@ -107,6 +107,49 @@ def bridge_payload(request_id: str, frontend_kind: str) -> dict[str, Any]:
     }
 
 
+class SimulatedBridgeSubmitCrash(RuntimeError):
+    pass
+
+
+def crash_bridge_submit_after_request_write(
+    *,
+    state_root: Path,
+    payload: dict[str, Any],
+    registry: surfaces.SurfaceRegistry,
+) -> dict[str, Any]:
+    idempotency_file = frontdoor.idempotency_path(
+        state_root,
+        str(payload["idempotency_key"]),
+    )
+    original_write_json = frontdoor.write_json
+
+    def crash_before_idempotency_write(path: Path, value: dict[str, Any]) -> None:
+        if path == idempotency_file:
+            raise SimulatedBridgeSubmitCrash("crash before idempotency record write")
+        original_write_json(path, value)
+
+    frontdoor.write_json = crash_before_idempotency_write
+    try:
+        frontdoor.bridge_submit_request(
+            state_root=state_root,
+            payload=payload,
+            frontend_kind="fixture",
+            surface_registry=registry,
+        )
+    except SimulatedBridgeSubmitCrash:
+        pass
+    else:
+        raise AssertionError("failure injection did not interrupt bridge submit")
+    finally:
+        frontdoor.write_json = original_write_json
+
+    assert frontdoor.request_path(state_root, str(payload["request_id"])).exists()
+    assert not idempotency_file.exists()
+    transaction_files = list((state_root / "bridge-transactions").glob("*.json"))
+    assert len(transaction_files) == 1
+    return frontdoor.read_json(transaction_files[0])
+
+
 def test_shipped_registry_and_schema_are_closed_and_codex_first() -> None:
     schema = json.loads(surfaces.SCHEMA_PATH.read_text(encoding="utf-8"))
     assert schema["title"] == "Frontdoor Surface Registry"
@@ -443,6 +486,106 @@ def test_static_descriptor_drift_fails_closed() -> None:
         assert len(list((state_root / "idempotency").glob("*.json"))) == 1
 
 
+def test_bridge_crash_recovery_uses_raw_key_index_and_deduplicates() -> None:
+    registry = fixture_registry(commissioned=False)
+    payload = bridge_payload("req-crash-recovery", "fixture")
+    raw_key = str(payload["idempotency_key"])
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        transaction = crash_bridge_submit_after_request_write(
+            state_root=state_root,
+            payload=payload,
+            registry=registry,
+        )
+        raw_path_digest = frontdoor.idempotency_key_digest(raw_key)
+        bound_contract_digest = frontdoor.bridge_idempotency_key_digest(
+            raw_key,
+            registry.identify("fixture").as_dict(),
+        )
+        normal_path = frontdoor.idempotency_path(state_root, raw_key)
+        journal_path = frontdoor.idempotency_path_from_digest(
+            state_root,
+            str(transaction["idempotency_path_digest"]),
+        )
+        assert transaction["idempotency_path_digest"] == raw_path_digest
+        assert transaction["idempotency_key_digest"] == bound_contract_digest
+        assert raw_path_digest != bound_contract_digest
+        assert journal_path == normal_path
+
+        assert frontdoor.recover_bridge_submit_transactions(state_root) == 1
+        assert normal_path.exists()
+        assert not frontdoor.idempotency_path_from_digest(
+            state_root,
+            bound_contract_digest,
+        ).exists()
+
+        replayed = frontdoor.bridge_submit_request(
+            state_root=state_root,
+            payload=payload,
+            frontend_kind="fixture",
+            surface_registry=registry,
+        )
+        assert replayed["replayed"] is True
+        assert replayed["request_id"] == payload["request_id"]
+
+        duplicate = bridge_payload("req-crash-recovery-duplicate", "fixture")
+        duplicate["idempotency_key"] = raw_key
+        try:
+            frontdoor.bridge_submit_request(
+                state_root=state_root,
+                payload=duplicate,
+                frontend_kind="fixture",
+                surface_registry=registry,
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert "idempotency conflict" in str(exc)
+        else:
+            raise AssertionError("recovered idempotency key accepted a second request")
+        assert not frontdoor.request_path(
+            state_root,
+            str(duplicate["request_id"]),
+        ).exists()
+        assert len(list((state_root / "idempotency").glob("*.json"))) == 1
+
+
+def test_bridge_crash_recovery_descriptor_drift_fails_closed() -> None:
+    original = fixture_registry(commissioned=False)
+    payload = bridge_payload("req-crash-drift", "fixture")
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        crash_bridge_submit_after_request_write(
+            state_root=state_root,
+            payload=payload,
+            registry=original,
+        )
+        assert frontdoor.recover_bridge_submit_transactions(state_root) == 1
+
+        drifted_descriptor = fake_descriptor()
+        drifted_descriptor["launcher"]["launcher_id"] = "fixture-launcher-drifted"
+        drifted = fixture_registry(
+            commissioned=False,
+            descriptor=drifted_descriptor,
+        )
+        replay = bridge_payload("req-crash-drift-replay", "fixture")
+        replay["idempotency_key"] = payload["idempotency_key"]
+        try:
+            frontdoor.bridge_submit_request(
+                state_root=state_root,
+                payload=replay,
+                frontend_kind="fixture",
+                surface_registry=drifted,
+            )
+        except frontdoor.FrontdoorError as exc:
+            assert "idempotency key surface descriptor drifted" in str(exc)
+        else:
+            raise AssertionError("descriptor drift split the recovered idempotency namespace")
+        assert not frontdoor.request_path(
+            state_root,
+            str(replay["request_id"]),
+        ).exists()
+        assert len(list((state_root / "idempotency").glob("*.json"))) == 1
+
+
 def test_http_surface_is_host_pinned() -> None:
     handler = object.__new__(frontdoor_server.Handler)
     handler.server = SimpleNamespace(frontend_kind="codex")
@@ -467,6 +610,8 @@ def main() -> None:
         test_stored_surface_identity_is_validated_with_explicit_legacy_support,
         test_core_requires_host_owned_surface_and_rejects_payload_conflict,
         test_static_descriptor_drift_fails_closed,
+        test_bridge_crash_recovery_uses_raw_key_index_and_deduplicates,
+        test_bridge_crash_recovery_descriptor_drift_fails_closed,
         test_http_surface_is_host_pinned,
     ]
     for test in tests:
