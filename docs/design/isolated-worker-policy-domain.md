@@ -363,19 +363,28 @@ fields or enum values. Write content is inline base64, and the semantic
 validator verifies each decoded byte count and SHA-256, rejects invalid UTF-8
 and NUL content, and limits aggregate decoded content to 16 MiB. The entire
 captured result envelope is independently bounded to 24 MiB before parsing.
+`MAX_FILE_CHANGES` is sealed to 512 for this managed-worker generation and is
+enforced on both `changed_paths` and `patch.changes`; changing it requires a new
+generation. Each array is also limited to 256 KiB of aggregate UTF-8 path bytes.
 
 Every `relative_path` and every `changed_paths` entry must be one canonical
-POSIX repository-relative path: no absolute form, empty/dot/dot-dot component,
-non-canonical repeated separator, backslash, NUL/control byte, or reserved VCS
-control component (`.git`, `.gitmodules`, `.hg`, `.svn`, `.bzr`, `_darcs`,
-`.pijul`, `.fossil-settings`, `.jj`, `.sl`, `CVS`, `RCS`, or `SCCS`,
-case-insensitive) is allowed. Windows drive prefixes and non-NFC Unicode are
-also rejected. JSON escaping is resolved before this check, so a literal quote
-in a structured path is unambiguous; there is no diff-header quoting grammar.
-Both lists must themselves be unique without case-insensitive filesystem
-collisions, and their canonical path sets must match exactly in both directions.
-A non-empty `changed_paths` list requires a non-empty file-change payload, and
-an empty list forbids one.
+UTF-8/NFC POSIX repository-relative path. The supported filesystem namespace is
+the portable intersection used by POSIX staging and NTFS-safe write-back:
+slash-separated components, regular files only, at most 255 UTF-8 bytes per
+component and 1024 UTF-8 bytes for the whole relative path. Every path and
+component must consist only of Unicode scalar values and round-trip exactly
+through strict UTF-8 encode/decode. Absolute forms, empty/dot/dot-dot
+components, non-canonical repeated separators, backslashes, colons (including
+NTFS alternate-data-stream syntax), C0/C1 controls, Unicode format/bidi control
+characters, and reserved VCS control components (`.git`, `.gitmodules`, `.hg`,
+`.svn`, `.bzr`, `_darcs`, `.pijul`, `.fossil-settings`, `.jj`, `.sl`, `CVS`,
+`RCS`, or `SCCS`, case-insensitive) are forbidden. Windows drive prefixes,
+surrogate code points, and non-NFC Unicode are therefore rejected. JSON escaping
+is resolved before this check, so a literal quote in a structured path is
+unambiguous; there is no diff-header quoting grammar. Both lists must themselves
+be unique without case-insensitive filesystem collisions, and their canonical
+path sets must match exactly in both directions. A non-empty `changed_paths`
+list requires a non-empty file-change payload, and an empty list forbids one.
 
 Before any task-worktree mutation, the future host controller must interpret
 the typed operation only in a disposable staging copy of the exact
@@ -386,6 +395,16 @@ semantics, and recompute the resulting diff and exact path set. Only after the
 existing capability and diff verification passes may a host-owned primitive
 apply the independently reconstructed regular-file result to the task
 worktree. A valid envelope is data, not authority to apply a change.
+
+For this generation, staging must budget no more than 512 target-inode
+operations and no more than 16 MiB of result-supplied file content. The
+disposable staging tree still requires the exact base-revision footprint; above
+that baseline, the controller must reserve bounded space for the 16 MiB content
+plus filesystem metadata and the recomputed diff, and fail closed on exhaustion.
+Commissioning must enforce a host-owned 60-second staging and verification
+deadline. These inode, disk, and time budgets are controller obligations; this
+contract validator only enforces the input amplification bounds available before
+staging exists.
 
 Both `worker_result.self_reported_evidence` and
 `worker_self_reported_execution_evidence` are UNTRUSTED worker self-reports for
@@ -406,18 +425,22 @@ filesystem mutation functions. It provides:
 | Function | Check |
 |---|---|
 | `validate_input_envelope` | Strict schema; supported-schema preflight; no location/write-target fields; five-minute freshness-window shape; unique payload identifiers; work-order descriptor digest binding; declared artifact bounds; optional actual input-artifact byte-count/digest verification |
-| `validate_result_envelope` | Rejects structures nested beyond 64 levels before recursive validation; strict schema; supported-schema preflight; freshness-window shape; canonical guest-relative paths excluding VCS control metadata; duplicate rejection and exact unique path-set equality; typed UTF-8 regular-file operations only; per-content base64/size/digest consistency and 16 MiB aggregate bound; no location/write-target fields or promotion from worker self-reports |
-| `validate_result_bytes` | Requires bytes and rejects a result over 24 MiB before UTF-8 decoding or JSON parsing, normalizes parser/delegated recursion failures to typed fail-closed errors, then delegates to `validate_result_envelope` |
+| `validate_result_envelope` | Rejects structures nested beyond 64 levels before recursive validation; strict schema; supported-schema preflight; freshness-window shape; at most 512 changes; strict UTF-8/NFC portable guest-relative paths with component, total, and aggregate byte bounds; VCS-control-path exclusion; path duplicate rejection and exact unique path-set equality; typed UTF-8 regular-file operations only; per-content base64/size/digest consistency and 16 MiB aggregate bound; no location/write-target fields or promotion from worker self-reports |
+| `validate_result_bytes` | Requires bytes and rejects a result over 24 MiB before UTF-8 decoding or JSON parsing, parses once with recursive duplicate-member rejection, normalizes parser/delegated recursion failures to typed fail-closed errors, then delegates only the normalized object to `validate_result_envelope` |
 | `validate_exchange` | Exact transfer, execution, issued-at, expiry, task, request, run, step, work-order, generation, and base-revision binding; required trusted first-byte receipt time satisfying `issued_at <= t < expires_at` |
 
-Both sides validate the input before execution. The host alone validates the
-result and exchange before any state transition. The small schema evaluator
-implements every keyword used by these two schemas, including ordinary
-`allOf`. A schema preflight rejects every unsupported or unknown keyword,
+Both sides validate the input before execution. For results, first-byte capture
+necessarily performs the durable `launched -> consumed` transition before JSON,
+schema, or exchange validation. The host alone then validates the captured
+result and exchange before terminal acceptance and before any write-back. The
+small schema evaluator implements every keyword used by these two schemas,
+including ordinary `allOf` and the array `maxItems` bounds. A schema preflight
+rejects every unsupported or unknown keyword,
 including applicators such as `oneOf`, rather than silently skipping it.
 Unknown payload fields, absolute paths, `..`, Windows separators, VCS metadata,
-duplicate or mismatched change sets, unsupported file operations/types, binary
-content, path/URI/write-target fields, malformed or overlong freshness windows,
+duplicate JSON members, duplicate or mismatched change sets, unsupported file
+operations/types, binary content, path/URI/write-target fields, malformed or
+overlong freshness windows,
 trusted-clock expiry (including exact equality), digest or size mismatch,
 oversized or over-nested results, generation mismatch, and transfer/execution
 misbinding fail closed. Atomic first-byte consumption and replay rejection
@@ -440,12 +463,14 @@ The property is established at two layers:
 
 `test_isolated_worker_transport.py` verifies a valid bound exchange and rejects
 the exact `b/../../Agents-Vault/task.md` bypass, primary-host Vault/state-tree
-targets, absolute/traversal/backslash/NUL and VCS paths, duplicate declarations,
+targets, absolute/traversal/backslash/NUL, surrogate, bidi/format-control,
+overlong, ADS-like, and VCS paths, duplicate JSON members and path declarations,
 path-set mismatches in both directions, old opaque/quoted/rename/copy diff
 payloads, symlink/submodule/mode objects, binary content, and tampered file
-content. It also covers an unambiguous structured quoted path, exact-expiry
-rejection, input and result bounds, cross-transfer binding changes, and inert
-self-reports. This is contract-level evidence only. The runtime no-mount,
+content. It also covers exact path, operation-count, aggregate-path-byte, and
+expiry boundaries, an unambiguous structured quoted path, input and result
+bounds, cross-transfer binding changes, and inert self-reports. This is
+contract-level evidence only. The runtime no-mount,
 safe-staging, broker-channel, atomic-consumption, and replay properties must be
 proven again during VM commissioning and on every launch.
 

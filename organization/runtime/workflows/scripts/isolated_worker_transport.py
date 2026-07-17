@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import hashlib
 import json
 import re
@@ -38,6 +39,10 @@ MAX_PATCH_BYTES = 16 * 1024 * 1024
 MAX_RESULT_ENVELOPE_BYTES = 24 * 1024 * 1024
 MAX_EXECUTION_WINDOW_SECONDS = 5 * 60
 MAX_RESULT_NESTING_DEPTH = 64
+MAX_FILE_CHANGES = 512
+MAX_PATH_COMPONENT_BYTES = 255
+MAX_RELATIVE_PATH_BYTES = 1024
+MAX_AGGREGATE_PATH_BYTES = 256 * 1024
 VCS_CONTROL_PATH_COMPONENTS = frozenset(
     {
         ".git",
@@ -79,6 +84,7 @@ SUPPORTED_SCHEMA_KEYWORDS = frozenset(
         "enum",
         "items",
         "maximum",
+        "maxItems",
         "minimum",
         "minItems",
         "pattern",
@@ -121,6 +127,23 @@ class IsolatedWorkerTransportError(RuntimeError):
         self.reason = reason
         self.errors = tuple(errors or (reason,))
         super().__init__(reason)
+
+
+class _DuplicateJsonMember(ValueError):
+    """Internal signal for an ambiguous untrusted JSON object."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        super().__init__(name)
+
+
+def _reject_duplicate_json_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for name, child in pairs:
+        if name in value:
+            raise _DuplicateJsonMember(name)
+        value[name] = child
+    return value
 
 
 def _load_schema(path: Path) -> dict[str, Any]:
@@ -202,10 +225,17 @@ def _schema_definition_errors(
             re.compile(schema["pattern"])
         except (re.error, TypeError):
             errors.append(f"schema_definition:{path}.pattern:invalid")
-    for keyword in ("minimum", "maximum", "minItems"):
+    for keyword in ("minimum", "maximum"):
         if keyword in schema and (
             not isinstance(schema[keyword], (int, float))
             or isinstance(schema[keyword], bool)
+        ):
+            errors.append(f"schema_definition:{path}.{keyword}:invalid")
+    for keyword in ("minItems", "maxItems"):
+        if keyword in schema and (
+            not isinstance(schema[keyword], int)
+            or isinstance(schema[keyword], bool)
+            or schema[keyword] < 0
         ):
             errors.append(f"schema_definition:{path}.{keyword}:invalid")
     for keyword in ("$schema", "$id", "$ref", "title", "description"):
@@ -242,12 +272,22 @@ def _forbidden_location_fields(value: Any, path: str = "$") -> list[str]:
 
 
 def _relative_changed_path(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        encoded_path = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
     if (
-        not isinstance(value, str)
-        or not value
+        not value
         or "\\" in value
-        or "\x00" in value
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or ":" in value
+        or len(encoded_path) > MAX_RELATIVE_PATH_BYTES
+        or encoded_path.decode("utf-8", errors="strict") != value
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf"}
+            for character in value
+        )
         or _WINDOWS_DRIVE_PATH_RE.match(value)
         or unicodedata.normalize("NFC", value) != value
     ):
@@ -257,6 +297,15 @@ def _relative_changed_path(value: Any) -> bool:
         not candidate.is_absolute()
         and value != "."
         and all(part not in {"", ".", ".."} for part in candidate.parts)
+        and all(
+            len(part.encode("utf-8", errors="strict"))
+            <= MAX_PATH_COMPONENT_BYTES
+            and part.encode("utf-8", errors="strict").decode(
+                "utf-8", errors="strict"
+            )
+            == part
+            for part in candidate.parts
+        )
         and all(
             part.casefold() not in VCS_CONTROL_PATH_COMPONENTS
             for part in candidate.parts
@@ -269,6 +318,25 @@ def _path_identity(value: str) -> str:
     """Conservative identity for case-insensitive host filesystem safety."""
 
     return unicodedata.normalize("NFC", value).casefold()
+
+
+def _path_array_bound_errors(paths: Any, label: str) -> list[str]:
+    if not isinstance(paths, list):
+        return []
+    errors: list[str] = []
+    if len(paths) > MAX_FILE_CHANGES:
+        errors.append(f"{label}_too_many")
+    total_path_bytes = 0
+    for path in paths:
+        if not isinstance(path, str):
+            continue
+        try:
+            total_path_bytes += len(path.encode("utf-8", errors="strict"))
+        except UnicodeEncodeError:
+            continue
+    if total_path_bytes > MAX_AGGREGATE_PATH_BYTES:
+        errors.append(f"{label}_aggregate_path_bytes_too_large")
+    return errors
 
 
 def _result_structure_errors(value: Any) -> list[str]:
@@ -375,7 +443,7 @@ def validate_input_envelope(
                 errors.append("work_order_descriptor_digest_mismatch")
     if errors:
         raise IsolatedWorkerTransportError("isolated_worker_input_invalid", errors)
-    return json.loads(json.dumps(value))
+    return copy.deepcopy(value)
 
 
 def _validate_patch(patch: Any, changed_paths: Any) -> list[str]:
@@ -389,6 +457,15 @@ def _validate_patch(patch: Any, changed_paths: Any) -> list[str]:
     changes = patch.get("changes")
     if not isinstance(changes, list):
         return ["patch_changes_invalid"]
+    errors.extend(
+        _path_array_bound_errors(
+            [
+                change.get("relative_path") if isinstance(change, dict) else None
+                for change in changes
+            ],
+            "file_changes",
+        )
+    )
 
     patch_paths: list[str] = []
     total_content_bytes = 0
@@ -467,6 +544,9 @@ def validate_result_envelope(value: Any) -> dict[str, Any]:
         if isinstance(result, dict):
             changed_paths = result.get("changed_paths")
             if isinstance(changed_paths, list):
+                errors.extend(
+                    _path_array_bound_errors(changed_paths, "changed_paths")
+                )
                 seen_changed_paths: set[str] = set()
                 seen_changed_identities: set[str] = set()
                 for index, changed_path in enumerate(changed_paths):
@@ -491,7 +571,7 @@ def validate_result_envelope(value: Any) -> dict[str, Any]:
         )
     if errors:
         raise IsolatedWorkerTransportError("isolated_worker_result_invalid", errors)
-    return json.loads(json.dumps(value))
+    return copy.deepcopy(value)
 
 
 def validate_result_bytes(raw: bytes) -> dict[str, Any]:
@@ -506,7 +586,15 @@ def validate_result_bytes(raw: bytes) -> dict[str, Any]:
             "isolated_worker_result_too_large", ["result_envelope_too_large"]
         )
     try:
-        value = json.loads(raw.decode("utf-8"))
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_members,
+        )
+    except _DuplicateJsonMember as exc:
+        raise IsolatedWorkerTransportError(
+            "isolated_worker_result_malformed",
+            ["result_json_duplicate_member"],
+        ) from exc
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise IsolatedWorkerTransportError(
             "isolated_worker_result_malformed", ["result_json_invalid"]

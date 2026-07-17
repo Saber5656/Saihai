@@ -156,6 +156,31 @@ def result_envelope() -> dict:
     }
 
 
+def result_with_paths(paths: list[str]) -> dict:
+    changed = result_envelope()
+    changed["worker_result"]["changed_paths"] = paths
+    changed["patch"]["changes"] = [
+        regular_text_change(path, b"", "create") for path in paths
+    ]
+    return changed
+
+
+def fixed_length_paths(count: int, byte_length: int) -> list[str]:
+    paths = []
+    for index in range(count):
+        prefix = f"d{index:03}/"
+        final_component_length = byte_length - len(prefix) - 256
+        assert 0 < final_component_length <= transport.MAX_PATH_COMPONENT_BYTES
+        paths.append(
+            prefix
+            + "a" * transport.MAX_PATH_COMPONENT_BYTES
+            + "/"
+            + "b" * final_component_length
+        )
+    assert all(len(path.encode("utf-8")) == byte_length for path in paths)
+    return paths
+
+
 def expect_reason(reason: str, callback) -> transport.IsolatedWorkerTransportError:
     try:
         callback()
@@ -194,6 +219,15 @@ def test_regular_all_of_and_unknown_schema_keywords_fail_closed() -> None:
         },
     )
     assert any("unsupported_keyword" in error for error in errors), errors
+
+    assert transport._validate_schema_value(
+        [1, 2],
+        {"type": "array", "maxItems": 1, "items": {"type": "integer"}},
+    ) == ["schema:$:max_items"]
+    invalid_bound_errors = transport._validate_schema_value(
+        [], {"type": "array", "maxItems": 1.5}
+    )
+    assert any("maxItems:invalid" in error for error in invalid_bound_errors)
 
 
 def test_input_rejects_host_and_vault_location_fields() -> None:
@@ -249,6 +283,97 @@ def test_worker_changed_paths_are_guest_relative_only() -> None:
             lambda changed=changed: transport.validate_result_envelope(changed),
         )
         assert any("changed_path_invalid" in item for item in exc.errors), exc.errors
+
+
+def test_worker_paths_require_strict_portable_utf8_and_byte_limits() -> None:
+    component_at_limit = "a" * transport.MAX_PATH_COMPONENT_BYTES
+    path_at_limit = "/".join(
+        ["a" * 255, "b" * 255, "c" * 255, "d" * 254, "e"]
+    )
+    assert len(path_at_limit.encode("utf-8")) == transport.MAX_RELATIVE_PATH_BYTES
+    transport.validate_result_envelope(
+        result_with_paths([component_at_limit, path_at_limit])
+    )
+
+    for invalid_path in (
+        "a" * (transport.MAX_PATH_COMPONENT_BYTES + 1),
+        path_at_limit + "e",
+        "docs/reordered-\u202evalue.md",
+        "docs/file.txt:stream",
+    ):
+        exc = expect_reason(
+            "isolated_worker_result_invalid",
+            lambda invalid_path=invalid_path: transport.validate_result_envelope(
+                result_with_paths([invalid_path])
+            ),
+        )
+        assert "changed_path_invalid:$[0]" in exc.errors, exc.errors
+        assert "file_change_path_invalid:$[0]" in exc.errors, exc.errors
+
+    surrogate_path = "docs/bad-\udc80.md"
+    raw = json.dumps(
+        result_with_paths([surrogate_path]), separators=(",", ":")
+    ).encode("ascii")
+    assert b"\\udc80" in raw
+    exc = expect_reason(
+        "isolated_worker_result_invalid",
+        lambda: transport.validate_result_bytes(raw),
+    )
+    assert "changed_path_invalid:$[0]" in exc.errors, exc.errors
+    assert "file_change_path_invalid:$[0]" in exc.errors, exc.errors
+
+
+def test_file_change_count_and_aggregate_path_bounds() -> None:
+    at_count_limit = [
+        f"bounded/file-{index:03}.md" for index in range(transport.MAX_FILE_CHANGES)
+    ]
+    transport.validate_result_envelope(result_with_paths(at_count_limit))
+
+    over_count_limit = at_count_limit + ["bounded/file-over-limit.md"]
+    changed_paths_over = result_with_paths(over_count_limit)
+    changed_paths_over["patch"]["changes"] = changed_paths_over["patch"][
+        "changes"
+    ][:-1]
+    exc = expect_reason(
+        "isolated_worker_result_invalid",
+        lambda: transport.validate_result_envelope(changed_paths_over),
+    )
+    assert "schema:$.worker_result.changed_paths:max_items" in exc.errors
+    assert "changed_paths_too_many" in exc.errors
+
+    changes_over = result_with_paths(over_count_limit)
+    changes_over["worker_result"]["changed_paths"] = changes_over[
+        "worker_result"
+    ]["changed_paths"][:-1]
+    exc = expect_reason(
+        "isolated_worker_result_invalid",
+        lambda: transport.validate_result_envelope(changes_over),
+    )
+    assert "schema:$.patch:any_of" in exc.errors
+    assert "file_changes_too_many" in exc.errors
+
+    aggregate_path_length = (
+        transport.MAX_AGGREGATE_PATH_BYTES // transport.MAX_FILE_CHANGES
+    )
+    assert (
+        aggregate_path_length * transport.MAX_FILE_CHANGES
+        == transport.MAX_AGGREGATE_PATH_BYTES
+    )
+    aggregate_at_limit = fixed_length_paths(
+        transport.MAX_FILE_CHANGES, aggregate_path_length
+    )
+    transport.validate_result_envelope(result_with_paths(aggregate_at_limit))
+
+    aggregate_over_limit = aggregate_at_limit.copy()
+    aggregate_over_limit[0] += "b"
+    exc = expect_reason(
+        "isolated_worker_result_invalid",
+        lambda: transport.validate_result_envelope(
+            result_with_paths(aggregate_over_limit)
+        ),
+    )
+    assert "changed_paths_aggregate_path_bytes_too_large" in exc.errors
+    assert "file_changes_aggregate_path_bytes_too_large" in exc.errors
 
 
 def test_typed_file_change_content_and_exchange_bindings_fail_closed() -> None:
@@ -574,6 +699,35 @@ def test_result_raw_and_file_change_bytes_are_bounded_before_trust() -> None:
     assert "patch_too_large" in exc.errors
 
 
+def test_result_raw_json_rejects_duplicate_members_at_every_depth() -> None:
+    raw = json.dumps(result_envelope(), separators=(",", ":")).encode("utf-8")
+    duplicate_cases = (
+        b'{"message_type":"worker_result",' + raw[1:],
+        (
+            raw.replace(
+                b'"worker_result":{',
+                b'"worker_result":{"status":"completed",',
+                1,
+            )
+        ),
+        (
+            raw.replace(
+                b'"changes":[{',
+                b'"changes":[{"operation":"replace",',
+                1,
+            )
+        ),
+    )
+    for duplicate_raw in duplicate_cases:
+        exc = expect_reason(
+            "isolated_worker_result_malformed",
+            lambda duplicate_raw=duplicate_raw: transport.validate_result_bytes(
+                duplicate_raw
+            ),
+        )
+        assert exc.errors == ("result_json_duplicate_member",)
+
+
 def test_worker_self_reports_are_preserved_but_never_authoritative() -> None:
     changed = result_envelope()
     self_report = changed["worker_self_reported_execution_evidence"]
@@ -590,6 +744,20 @@ def test_contract_schemas_are_strict_at_boundary_objects() -> None:
         assert schema["additionalProperties"] is False
         assert not ({"host_path", "vault_path", "state_root"} & set(schema["properties"]))
 
+    result_schema = json.loads(transport.RESULT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert (
+        result_schema["properties"]["worker_result"]["properties"][
+            "changed_paths"
+        ]["maxItems"]
+        == transport.MAX_FILE_CHANGES
+    )
+    assert (
+        result_schema["$defs"]["patchPayload"]["properties"]["changes"][
+            "maxItems"
+        ]
+        == transport.MAX_FILE_CHANGES
+    )
+
 
 def main() -> None:
     tests = [
@@ -598,6 +766,8 @@ def main() -> None:
         test_input_rejects_host_and_vault_location_fields,
         test_worker_result_cannot_name_host_writeback_targets,
         test_worker_changed_paths_are_guest_relative_only,
+        test_worker_paths_require_strict_portable_utf8_and_byte_limits,
+        test_file_change_count_and_aggregate_path_bounds,
         test_typed_file_change_content_and_exchange_bindings_fail_closed,
         test_execution_id_and_freshness_window_are_required_and_bound,
         test_result_receipt_uses_closed_open_trusted_clock_window,
@@ -606,6 +776,7 @@ def main() -> None:
         test_structured_quoted_path_is_unambiguous_and_binary_content_is_rejected,
         test_input_artifact_bytes_are_size_digest_and_limit_checked,
         test_result_raw_and_file_change_bytes_are_bounded_before_trust,
+        test_result_raw_json_rejects_duplicate_members_at_every_depth,
         test_worker_self_reports_are_preserved_but_never_authoritative,
         test_contract_schemas_are_strict_at_boundary_objects,
     ]

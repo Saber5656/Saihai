@@ -276,6 +276,9 @@ def _validate_schema_fragment(
         min_items = schema.get("minItems")
         if isinstance(min_items, int) and len(value) < min_items:
             errors.append(f"schema:{path}:min_items")
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            errors.append(f"schema:{path}:max_items")
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):

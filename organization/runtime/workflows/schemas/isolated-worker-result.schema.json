@@ -63,6 +63,7 @@
         "summary": { "type": "string" },
         "changed_paths": {
           "type": "array",
+          "maxItems": 512,
           "items": { "type": "string" }
         },
         "tests": {
@@ -175,6 +176,7 @@
         "changes": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 512,
           "items": {
             "anyOf": [
               { "$ref": "#/$defs/writeRegularTextFile" },
