@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saihai.local/schemas/workflows/isolated-worker-result.schema.json",
+  "title": "Isolated Worker Result Envelope",
+  "description": "Destination-free result captured from an isolated worker and treated as inert, untrusted data until authoritative host-side capability, artifact, and diff verification complete. Worker self-reports never promote claims.",
+  "type": "object",
+  "required": [
+    "transport_version",
+    "message_type",
+    "transfer_id",
+    "execution_id",
+    "issued_at",
+    "expires_at",
+    "task_id",
+    "request_id",
+    "run_id",
+    "step_id",
+    "work_order_digest",
+    "managed_worker_generation",
+    "base_revision",
+    "worker_result",
+    "patch",
+    "worker_self_reported_execution_evidence"
+  ],
+  "properties": {
+    "transport_version": { "const": "1" },
+    "message_type": { "const": "worker_result" },
+    "transfer_id": { "$ref": "#/$defs/transferId" },
+    "execution_id": {
+      "$ref": "#/$defs/executionId",
+      "description": "Unmodified echo of the opaque host-assigned, single-use execution identifier."
+    },
+    "issued_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "Unmodified echo of the host-assigned freshness-window start."
+    },
+    "expires_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "Unmodified echo of the host-assigned freshness-window end."
+    },
+    "task_id": { "$ref": "#/$defs/safeId" },
+    "request_id": { "$ref": "#/$defs/safeId" },
+    "run_id": { "$ref": "#/$defs/safeId" },
+    "step_id": { "const": "implement" },
+    "work_order_digest": { "$ref": "#/$defs/sha256" },
+    "managed_worker_generation": { "$ref": "#/$defs/generationBinding" },
+    "base_revision": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "worker_result": {
+      "type": "object",
+      "required": [
+        "result_version",
+        "status",
+        "summary",
+        "changed_paths",
+        "tests",
+        "self_reported_evidence"
+      ],
+      "properties": {
+        "result_version": { "const": "1" },
+        "status": { "enum": ["completed", "failed", "blocked"] },
+        "summary": { "type": "string" },
+        "changed_paths": {
+          "type": "array",
+          "maxItems": 512,
+          "items": { "type": "string" }
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "status", "summary"],
+            "properties": {
+              "name": { "type": "string" },
+              "status": { "enum": ["pass", "fail", "not_run"] },
+              "summary": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "self_reported_evidence": {
+          "description": "Untrusted worker-provided diagnostic references. They do not satisfy host-side assurance, capability, artifact, test, or diff verification.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "label", "status", "sha256"],
+            "properties": {
+              "kind": { "enum": ["diff", "runtime", "test"] },
+              "label": { "type": "string" },
+              "status": { "enum": ["pass", "fail", "not_observed"] },
+              "sha256": {
+                "description": "Worker-self-reported digest reference only; the host must independently compute any digest used for authority.",
+                "anyOf": [
+                  { "$ref": "#/$defs/sha256" },
+                  { "type": "null" }
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "patch": {
+      "description": "The only result artifact: a typed set of complete UTF-8 regular-file operations. Unified diffs, binary deltas, renames, copies, symlinks, submodules, special files, and file modes are not representable.",
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/patchPayload" }
+      ]
+    },
+    "worker_self_reported_execution_evidence": {
+      "description": "UNTRUSTED worker self-report for diagnostics only. No value in this object satisfies or promotes a host-side capability, isolation, artifact, schema, diff, or assurance check.",
+      "type": "object",
+      "required": [
+        "input_digest_verified",
+        "result_schema_verified",
+        "network_egress_observed",
+        "credential_material_observed",
+        "host_mounts_observed"
+      ],
+      "properties": {
+        "input_digest_verified": { "type": "boolean", "description": "Untrusted worker claim." },
+        "result_schema_verified": { "type": "boolean", "description": "Untrusted worker claim." },
+        "network_egress_observed": { "type": "boolean", "description": "Untrusted worker observation." },
+        "credential_material_observed": { "type": "boolean", "description": "Untrusted worker observation." },
+        "host_mounts_observed": { "type": "boolean", "description": "Untrusted worker observation." }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    },
+    "transferId": {
+      "type": "string",
+      "pattern": "^xfer-[0-9a-f]{24}$"
+    },
+    "executionId": {
+      "type": "string",
+      "pattern": "^exec-[0-9a-f]{24}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "generationBinding": {
+      "type": "object",
+      "required": [
+        "profile_id",
+        "generation_id",
+        "attestation_digest",
+        "bindings_digest",
+        "evidence_set_digest"
+      ],
+      "properties": {
+        "profile_id": { "const": "codex-scoped-worker" },
+        "generation_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$" },
+        "attestation_digest": { "$ref": "#/$defs/sha256" },
+        "bindings_digest": { "$ref": "#/$defs/sha256" },
+        "evidence_set_digest": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "patchPayload": {
+      "type": "object",
+      "required": ["artifact_id", "media_type", "format_version", "changes"],
+      "properties": {
+        "artifact_id": { "const": "worktree-file-changes" },
+        "media_type": { "const": "application/vnd.saihai.regular-text-file-changes+json" },
+        "format_version": { "const": "1" },
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 512,
+          "items": {
+            "anyOf": [
+              { "$ref": "#/$defs/writeRegularTextFile" },
+              { "$ref": "#/$defs/deleteRegularFile" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "writeRegularTextFile": {
+      "type": "object",
+      "required": [
+        "operation", "relative_path", "file_type", "content_encoding",
+        "content_media_type", "sha256", "size_bytes", "content_base64"
+      ],
+      "properties": {
+        "operation": { "enum": ["create", "replace"] },
+        "relative_path": { "type": "string" },
+        "file_type": { "const": "regular" },
+        "content_encoding": { "const": "base64" },
+        "content_media_type": { "const": "text/plain; charset=utf-8" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size_bytes": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "content_base64": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "deleteRegularFile": {
+      "type": "object",
+      "required": ["operation", "relative_path", "file_type"],
+      "properties": {
+        "operation": { "const": "delete" },
+        "relative_path": { "type": "string" },
+        "file_type": { "const": "regular" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

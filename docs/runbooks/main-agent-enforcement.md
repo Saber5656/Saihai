@@ -250,6 +250,14 @@ is intentionally non-promotable, so worker `commission-seal` fails closed with
 the corresponding configuration is not mechanical denial evidence. Hardening
 on that rootfs is defense in depth, not an active `managed_worker` claim.
 
+The selected future policy-domain substrate, denial-fact mapping, typed
+host-mediated transport, no-write-back contract, and deferred commissioning
+procedure are specified in
+[Isolated Worker Policy Domain and Transport Contract](../design/isolated-worker-policy-domain.md).
+That design and its schema tests do not activate `managed_worker`; the current
+promotion blocker remains authoritative until isolated-domain evidence support
+is implemented and commissioned.
+
 ## Limits
 
 - The first workspace binding remains the supported Saihai primary checkout

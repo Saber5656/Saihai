@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://saihai.local/schemas/workflows/isolated-worker-input.schema.json",
+  "title": "Isolated Worker Input Envelope",
+  "description": "Host-owned manifest for one approved work order delivered to an isolated worker without host filesystem locations or credentials. The worker must echo the host-assigned execution and freshness bindings; no worker self-report is authoritative host evidence.",
+  "type": "object",
+  "required": [
+    "transport_version",
+    "message_type",
+    "transfer_id",
+    "execution_id",
+    "issued_at",
+    "expires_at",
+    "task_id",
+    "request_id",
+    "run_id",
+    "step_id",
+    "work_order_digest",
+    "authority",
+    "managed_worker_generation",
+    "execution_policy",
+    "approved_work_order",
+    "repository_snapshot",
+    "result_contract"
+  ],
+  "properties": {
+    "transport_version": { "const": "1" },
+    "message_type": { "const": "approved_work_order" },
+    "transfer_id": { "$ref": "#/$defs/transferId" },
+    "execution_id": {
+      "$ref": "#/$defs/executionId",
+      "description": "Opaque, host-assigned, single-use execution identifier. The worker must echo it unmodified and cannot allocate or reuse it."
+    },
+    "issued_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "Host-assigned UTC start of the execution freshness window."
+    },
+    "expires_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "Host-assigned UTC end of the freshness window, strictly after issued_at and no more than five minutes later."
+    },
+    "task_id": { "$ref": "#/$defs/safeId" },
+    "request_id": { "$ref": "#/$defs/safeId" },
+    "run_id": { "$ref": "#/$defs/safeId" },
+    "step_id": { "const": "implement" },
+    "work_order_digest": { "$ref": "#/$defs/sha256" },
+    "authority": {
+      "type": "object",
+      "required": [
+        "approval_state",
+        "capability_digest",
+        "assurance_binding_digest",
+        "max_execution_count"
+      ],
+      "properties": {
+        "approval_state": { "const": "approved" },
+        "capability_digest": { "$ref": "#/$defs/sha256" },
+        "assurance_binding_digest": { "$ref": "#/$defs/sha256" },
+        "max_execution_count": { "const": 1 }
+      },
+      "additionalProperties": false
+    },
+    "managed_worker_generation": { "$ref": "#/$defs/generationBinding" },
+    "execution_policy": {
+      "type": "object",
+      "required": [
+        "permission_mode",
+        "allowed_operations",
+        "allowed_paths",
+        "network_egress",
+        "provider_dispatch",
+        "credential_access",
+        "host_write_back"
+      ],
+      "properties": {
+        "permission_mode": { "const": "edit" },
+        "allowed_operations": {
+          "const": ["read_context", "write_result", "edit_worktree", "run_tests"]
+        },
+        "allowed_paths": { "const": ["."] },
+        "network_egress": { "const": "denied" },
+        "provider_dispatch": { "const": "denied" },
+        "credential_access": { "const": "denied" },
+        "host_write_back": { "const": "denied" }
+      },
+      "additionalProperties": false
+    },
+    "approved_work_order": {
+      "description": "Host-computed descriptor for the immutable work-order bytes; maximum size is 1 MiB.",
+      "allOf": [
+        { "$ref": "#/$defs/payloadDescriptor" },
+        {
+          "properties": {
+            "artifact_id": { "const": "approved-work-order" },
+            "media_type": { "const": "application/vnd.saihai.work-order+json" }
+          }
+        }
+      ]
+    },
+    "repository_snapshot": {
+      "description": "Host-computed descriptor for the immutable repository snapshot bytes; maximum size is 256 MiB.",
+      "type": "object",
+      "required": [
+        "artifact_id",
+        "media_type",
+        "sha256",
+        "size_bytes",
+        "repo_full_name",
+        "base_revision",
+        "git_metadata"
+      ],
+      "properties": {
+        "artifact_id": { "const": "repository-snapshot" },
+        "media_type": { "const": "application/vnd.saihai.repository-snapshot+tar" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "repo_full_name": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "base_revision": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+        "git_metadata": { "const": "excluded" }
+      },
+      "additionalProperties": false
+    },
+    "result_contract": {
+      "description": "Host-computed descriptor for the immutable result-schema bytes; maximum size is 1 MiB. The described result may carry worker self-reports, but those reports are never authoritative host evidence.",
+      "allOf": [
+        { "$ref": "#/$defs/payloadDescriptor" },
+        {
+          "properties": {
+            "artifact_id": { "const": "isolated-worker-result-schema" },
+            "media_type": { "const": "application/schema+json" }
+          }
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
+    },
+    "transferId": {
+      "type": "string",
+      "pattern": "^xfer-[0-9a-f]{24}$"
+    },
+    "executionId": {
+      "type": "string",
+      "pattern": "^exec-[0-9a-f]{24}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "payloadDescriptor": {
+      "type": "object",
+      "required": ["artifact_id", "media_type", "sha256", "size_bytes"],
+      "properties": {
+        "artifact_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+        "media_type": { "type": "string", "pattern": "^[a-z0-9.+-]+/[a-z0-9.+-]+$" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576 }
+      },
+      "additionalProperties": false
+    },
+    "generationBinding": {
+      "type": "object",
+      "required": [
+        "profile_id",
+        "generation_id",
+        "attestation_digest",
+        "bindings_digest",
+        "evidence_set_digest"
+      ],
+      "properties": {
+        "profile_id": { "const": "codex-scoped-worker" },
+        "generation_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$" },
+        "attestation_digest": { "$ref": "#/$defs/sha256" },
+        "bindings_digest": { "$ref": "#/$defs/sha256" },
+        "evidence_set_digest": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
