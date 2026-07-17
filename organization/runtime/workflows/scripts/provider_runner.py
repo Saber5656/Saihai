@@ -45,6 +45,10 @@ EFFECTIVE_MODEL_POLICIES = {
     "required_exact_match",
     "record_without_equality",
 }
+MODEL_ASSURANCE_FOR_POLICY = {
+    "required_exact_match": "exact_match_enforced",
+    "record_without_equality": "provider_reported_only",
+}
 MAX_LIVE_CONTEXT_REFS = 20
 MAX_LIVE_CONTEXT_FILE_BYTES = 256_000
 MAX_LIVE_CONTEXT_TOTAL_BYTES = 1_000_000
@@ -551,6 +555,14 @@ def provider_adapter_model_binding_matches(
     )
 
 
+def adapter_model_policy_binding(adapter: dict[str, Any]) -> dict[str, str]:
+    return {
+        "provider_adapter_id": str(adapter.get("provider_adapter_id") or ""),
+        "intended_model": str(adapter.get("default_model") or ""),
+        "effective_model_policy": str(adapter.get("effective_model_policy") or ""),
+    }
+
+
 def runner_claim_is_live(work_order: dict[str, Any]) -> bool:
     return run_lifecycle.provider_claim_is_live({}, work_order)
 
@@ -705,6 +717,34 @@ def recover_completed_provider_attempt(
     )
     if journal.get("abandoned") is True:
         return None
+    step_id = str(execution.get("step_id") or "")
+    expected_work_order_digest = str(execution.get("work_order_digest") or "")
+    recorded_binding = execution.get("provider_binding")
+    current_binding = adapter_model_policy_binding(adapter)
+    try:
+        frozen_work_order, frozen_digest, _ = scoped_worker_executor.verify_frozen_work_order(
+            state_root,
+            run_id=str(run.get("run_id") or ""),
+            step_id=step_id,
+            expected_run_states={"waiting_provider"},
+            expected_iteration=int(run.get("iteration") or 0),
+            expected_work_order_digest=expected_work_order_digest,
+        )
+    except (scoped_worker_executor.ScopedWorkerError, ValueError, TypeError) as exc:
+        raise ProviderRunnerError(PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH) from exc
+    frozen_binding = {
+        "provider_adapter_id": str(frozen_work_order.get("provider_adapter_id") or ""),
+        "intended_model": str(frozen_work_order.get("intended_model") or ""),
+        "effective_model_policy": str(current_binding.get("effective_model_policy") or ""),
+    }
+    if (
+        not expected_work_order_digest
+        or frozen_digest != expected_work_order_digest
+        or not isinstance(recorded_binding, dict)
+        or recorded_binding != current_binding
+        or frozen_binding != current_binding
+    ):
+        raise ProviderRunnerError(PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
     expected_bindings = {
         "attempt_id": attempt_id,
         "lease_id": lease_id,
@@ -734,11 +774,17 @@ def recover_completed_provider_attempt(
     if journal.get("transcript_sha256") != file_sha256(attempt_transcript_path):
         raise ProviderRunnerError("provider_attempt_transcript_digest_mismatch")
 
-    step_id = str(execution.get("step_id") or "")
     request_path = adapter_request_path(
         state_root, str(run["run_id"]), step_id, str(adapter["provider_adapter_id"])
     )
     request = read_private_json(state_root, request_path, artifact_kind="adapter_request")
+    request_adapter = request.get("adapter")
+    if (
+        not isinstance(request_adapter, dict)
+        or adapter_model_policy_binding(request_adapter) != recorded_binding
+        or str(request.get("intended_model") or "") != recorded_binding.get("intended_model")
+    ):
+        raise ProviderRunnerError(PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
     request_copy = dict(request)
     supplied_digest = str(request_copy.pop("adapter_request_digest", ""))
     if (
@@ -830,6 +876,9 @@ def build_provider_execution(
         "execution_version": "1",
         "step_id": request["step_id"],
         "adapter_id": adapter_id,
+        "provider_binding": adapter_model_policy_binding(
+            request.get("adapter") if isinstance(request.get("adapter"), dict) else {}
+        ),
         "work_order_digest": work_order_digest,
         "adapter_request_digest": request["adapter_request_digest"],
         "context_snapshot_digest": request["context_snapshot_digest"],
@@ -1154,6 +1203,24 @@ def enforce_effective_model_policy(
             None,
             {**details, "reason": PROVIDER_MODEL_MISMATCH},
         )
+    assurance = MODEL_ASSURANCE_FOR_POLICY[effective_model_policy]
+    report = dict(report)
+    provider_evidence = (
+        dict(report.get("provider_evidence"))
+        if isinstance(report.get("provider_evidence"), dict)
+        else {}
+    )
+    provider_evidence.update(
+        {
+            "provider_adapter_id": str(adapter.get("provider_adapter_id") or ""),
+            "intended_model": intended_model,
+            "effective_model_policy": effective_model_policy,
+            "model_assurance": assurance,
+        }
+    )
+    report["provider_evidence"] = provider_evidence
+    details["effective_model_policy"] = effective_model_policy
+    details["model_assurance"] = assurance
     return outcome, report, details
 
 
@@ -1175,6 +1242,10 @@ def normalized_evidence(
         "provider": details.get("provider") or report_evidence.get("provider") or adapter["provider_target"],
         "intended_model": request.get("intended_model") or "unknown",
         "effective_model": details.get("effective_model") or report_evidence.get("effective_model") or "unknown",
+        "effective_model_policy": str(adapter.get("effective_model_policy") or ""),
+        "model_assurance": MODEL_ASSURANCE_FOR_POLICY.get(
+            str(adapter.get("effective_model_policy") or ""), ""
+        ),
         "request_id": request["request_id"],
         "run_id": request["run_id"],
         "workflow_id": request["workflow_id"],
@@ -1574,6 +1645,7 @@ def run_provider(
                         "execution_version": "1",
                         "step_id": step_id,
                         "adapter_id": adapter_id,
+                        "provider_binding": adapter_model_policy_binding(adapter),
                         "work_order_digest": order_digest,
                         "adapter_request_digest": "sha256:" + "0" * 64,
                         "context_snapshot_digest": "sha256:" + "0" * 64,

@@ -34,6 +34,11 @@ EFFECTIVE_MODEL_POLICIES = {
     "required_exact_match",
     "record_without_equality",
 }
+MODEL_ASSURANCE_FOR_POLICY = {
+    "required_exact_match": "exact_match_enforced",
+    "record_without_equality": "provider_reported_only",
+}
+PROVIDER_MODEL_ASSURANCE_MISMATCH = "provider_model_assurance_mismatch"
 
 
 class ReportGateError(RuntimeError):
@@ -445,6 +450,8 @@ def classify_report_outcome(
         return "report_invalid", ["report must be object"]
     errors = validate_external_review_report(report, run=run, work_order=work_order, state_root=state_root)
     if errors:
+        if PROVIDER_MODEL_ASSURANCE_MISMATCH in errors:
+            return PROVIDER_MODEL_ASSURANCE_MISMATCH, errors
         return "report_invalid", errors
     if report.get("result") == "blocked":
         return "provider_reported_blocked", []
@@ -520,19 +527,33 @@ def validate_effective_model_binding(
     if adapter_identity is None:
         return [f"{label}.effective_model policy authority unavailable"]
     errors: list[str] = []
-    if adapter_identity.get("provider_adapter_id") != work_order.get(
-        "provider_adapter_id"
-    ):
+    expected_adapter_id = adapter_identity.get("provider_adapter_id")
+    expected_policy = adapter_identity.get("effective_model_policy")
+    expected_assurance = MODEL_ASSURANCE_FOR_POLICY.get(str(expected_policy or ""))
+    assurance_mismatch = False
+    if expected_adapter_id != work_order.get("provider_adapter_id"):
         errors.append(f"{label}.provider_adapter_id mismatch with work order")
+    if value.get("provider_adapter_id") != expected_adapter_id:
+        errors.append(f"{label}.provider_adapter_id mismatch with adapter registry")
     if adapter_identity.get("default_model") != work_order.get("intended_model"):
         errors.append(f"{label}.intended_model mismatch with adapter registry")
-    policy = adapter_identity.get("effective_model_policy")
-    if policy not in EFFECTIVE_MODEL_POLICIES:
+    if value.get("intended_model") != adapter_identity.get("default_model"):
+        errors.append(f"{label}.intended_model mismatch with adapter descriptor")
+    if expected_policy not in EFFECTIVE_MODEL_POLICIES:
         errors.append(f"{label}.effective_model policy unsupported")
-    elif policy == "required_exact_match" and value.get("effective_model") != value.get(
+        assurance_mismatch = True
+    elif value.get("effective_model_policy") != expected_policy:
+        errors.append(f"{label}.effective_model_policy mismatch with adapter registry")
+        assurance_mismatch = True
+    if value.get("model_assurance") != expected_assurance:
+        errors.append(f"{label}.model_assurance mismatch with declared policy")
+        assurance_mismatch = True
+    if expected_policy == "required_exact_match" and value.get("effective_model") != value.get(
         "intended_model"
     ):
         errors.append(f"{label}.effective_model must match intended_model")
+    if assurance_mismatch:
+        return [PROVIDER_MODEL_ASSURANCE_MISMATCH, *errors]
     return errors
 
 
@@ -547,8 +568,11 @@ def validate_provider_evidence(
         return ["provider_evidence must be object"]
     required = {
         "provider",
+        "provider_adapter_id",
         "intended_model",
         "effective_model",
+        "effective_model_policy",
+        "model_assurance",
         "request_id",
         "provider_session_id",
         "transcript_path",
@@ -578,7 +602,17 @@ def validate_provider_evidence(
             label="provider_evidence",
         )
     )
-    for field in ("provider", "intended_model", "effective_model", "provider_session_id", "transcript_path", "evidence_path"):
+    for field in (
+        "provider",
+        "provider_adapter_id",
+        "intended_model",
+        "effective_model",
+        "effective_model_policy",
+        "model_assurance",
+        "provider_session_id",
+        "transcript_path",
+        "evidence_path",
+    ):
         if not isinstance(value.get(field), str) or not value.get(field):
             errors.append(f"provider_evidence.{field} must be non-empty string")
     try:
@@ -643,7 +677,15 @@ def validate_normalized_provider_evidence(
         if str(value.get(field) or "") != expected:
             errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
 
-    for field in ("provider", "intended_model", "effective_model", "provider_session_id"):
+    for field in (
+        "provider",
+        "provider_adapter_id",
+        "intended_model",
+        "effective_model",
+        "effective_model_policy",
+        "model_assurance",
+        "provider_session_id",
+    ):
         expected = str(report_provider_evidence.get(field) or "")
         if str(value.get(field) or "") != expected:
             errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
@@ -1062,6 +1104,15 @@ def gate_report(
                 decision = "blocked"
                 history_status = "blocked"
                 audit_outcome = "blocked"
+            elif outcome == PROVIDER_MODEL_ASSURANCE_MISMATCH:
+                to_state = "failed"
+                report_status = "blocked"
+                terminal_status = "blocked"
+                terminal_reason = PROVIDER_MODEL_ASSURANCE_MISMATCH
+                reason_class = PROVIDER_MODEL_ASSURANCE_MISMATCH
+                decision = "blocked"
+                history_status = "blocked"
+                audit_outcome = "blocked"
             elif outcome == "scope_violation":
                 to_state = "waiting_human"
                 report_status = "waiting_human"
@@ -1213,7 +1264,11 @@ def gate_report(
                 payload=transition_payload,
             )
             rejection_artifact_path = None
-            if outcome in {"report_invalid", "scope_violation"}:
+            if outcome in {
+                "report_invalid",
+                "scope_violation",
+                PROVIDER_MODEL_ASSURANCE_MISMATCH,
+            }:
                 rejection_payload = {
                     "rejection_version": "1",
                     "run_id": run_id,

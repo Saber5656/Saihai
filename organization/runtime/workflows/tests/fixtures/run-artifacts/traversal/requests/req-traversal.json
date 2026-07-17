@@ -30,7 +30,9 @@
         "network",
         "push"
       ],
+      "effective_model_policy": "required_exact_match",
       "initial_step": "review",
+      "intended_model": "claude-sonnet-4-6",
       "permission_mode": "readonly",
       "provider_adapter": "claude_headless_p0",
       "ref_boundary": {
@@ -67,12 +69,25 @@
     "display_digest": "sha256:d50aa757f656c159a7546cd47ac04aba5a24ddb8f4cb7cc1d57f93fe2881dde0",
     "human_action_id": "approve-fixture",
     "proposal_digest": "sha256:4c2984d11a993e92a49111fe94fc1e5be8918811cb3c9e16593becec509138e3",
+    "provider_binding": {
+      "default_model": "claude-sonnet-4-6",
+      "effective_model_policy": "required_exact_match",
+      "provider_adapter_id": "claude_headless_p0"
+    },
+    "provider_binding_digest": "sha256:9af16d674ad720e6eee2e5ab8653994f8ace0dfee3032488435608a7c2cee7e9",
     "refs_digest": "sha256:dbcfcf5cfd1bfcf5a2d4879443746229d44d8cae1f4f6eeae018a94a41106911",
     "request_digest": "sha256:8b1b200af5350aa4f6544444d00a0bd31361b5edb3bfd4531b350343cf7a71e1",
     "signature": {
       "algorithm": "sha256-hmac-sha256-local-principal-key",
       "signature": "sha256:78c584067d287f8b4c0c0482bbbb2f4f2fe36a4cfc519f925ff4388e7e493d38",
       "signed_at": "2026-01-01T00:00:00+0000"
+    },
+    "signature_transition": "approve_request",
+    "signed_subject": {
+      "human_action_id": "approve-fixture",
+      "provider_binding_digest": "sha256:c06b85d2ce40902f184c8096b544c256cbd76a065c59905d4d025e6898216084",
+      "request_id": "req-traversal",
+      "task_id": "TSK-traversal"
     }
   },
   "approved_activation": {

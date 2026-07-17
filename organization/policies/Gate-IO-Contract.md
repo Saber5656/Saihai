@@ -72,8 +72,11 @@ TSK-1244 以降、Gate 間 I/O は「ロールを読んだ」「その Skill の
 | `status` | Yes | `done` / `failed` |
 | `result` | Yes | 完了、失敗、blocker など |
 | `evidence.provider` | Yes | `anthropic` / `openai` |
+| `evidence.provider_adapter_id` | Yes | runner が固定した provider adapter descriptor ID |
 | `evidence.intended_model` | Yes | model-registry の primary model |
 | `evidence.effective_model` | Provider実行時 | transcript / session log で確認した実モデル |
+| `evidence.effective_model_policy` | Yes | adapter 宣言の `required_exact_match` / `record_without_equality` snapshot |
+| `evidence.model_assurance` | Yes | runner-owned の `exact_match_enforced` / `provider_reported_only` marker |
 | `evidence.provider_session_id` | Provider実行時 | Claude output session id、Codex session id など |
 | `evidence.request_id` | Provider実行時 | request / turn を識別できる ID |
 | `evidence.usage_source` | Yes | `claude_print_json`、`codex_exec` など |

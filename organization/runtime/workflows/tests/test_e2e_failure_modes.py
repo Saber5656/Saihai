@@ -127,7 +127,7 @@ def write_review_artifacts(
     evidence = {
         **fixed_fields,
         "provider": "claude_headless",
-        "effective_model": "offline-failure-fixture",
+        "effective_model": fixed_fields["intended_model"],
         "provider_request_id": f"provider-{run_id}",
         "provider_session_id": f"session-{run_id}",
         "duration_ms": 1,
@@ -147,7 +147,11 @@ def write_review_artifacts(
         "summary": "Offline failure-matrix fixture.",
         "provider_evidence": {
             "provider": "claude_headless",
-            "effective_model": "offline-failure-fixture",
+            "provider_adapter_id": fixed_fields["provider_adapter_id"],
+            "intended_model": fixed_fields["intended_model"],
+            "effective_model": fixed_fields["intended_model"],
+            "effective_model_policy": fixed_fields["effective_model_policy"],
+            "model_assurance": fixed_fields["model_assurance"],
             "request_id": request["request_id"],
             "provider_session_id": f"session-{run_id}",
             "transcript_path": str(transcript_path),

@@ -148,6 +148,10 @@ def test_detail_complete_pass() -> None:
     assert detail["run"]["terminal"] == {"status": "complete", "reason": "report_valid"}
     assert detail["report"]["result"] == "pass"
     assert detail["evidence"]["effective_model"]
+    assert detail["evidence"]["provider_adapter_id"] == "claude_headless_p0"
+    assert detail["evidence"]["intended_model"] == "claude-sonnet-4-6"
+    assert detail["evidence"]["effective_model_policy"] == "required_exact_match"
+    assert detail["evidence"]["model_assurance"] == "exact_match_enforced"
     assert detail["transitions"]
 
 

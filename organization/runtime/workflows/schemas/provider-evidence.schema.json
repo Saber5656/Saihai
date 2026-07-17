@@ -11,6 +11,8 @@
     "provider",
     "intended_model",
     "effective_model",
+    "effective_model_policy",
+    "model_assurance",
     "request_id",
     "run_id",
     "workflow_id",
@@ -53,6 +55,20 @@
     "effective_model": {
       "type": "string",
       "minLength": 1
+    },
+    "effective_model_policy": {
+      "type": "string",
+      "enum": [
+        "required_exact_match",
+        "record_without_equality"
+      ]
+    },
+    "model_assurance": {
+      "type": "string",
+      "enum": [
+        "exact_match_enforced",
+        "provider_reported_only"
+      ]
     },
     "request_id": {
       "type": "string",

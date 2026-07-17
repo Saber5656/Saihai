@@ -7,7 +7,9 @@
   "details": {
     "duration_ms": 0,
     "effective_model": "claude-sonnet-4-6",
+    "effective_model_policy": "required_exact_match",
     "intended_model": "claude-sonnet-4-6",
+    "model_assurance": "exact_match_enforced",
     "transcript_sha256": "sha256:8a1f743a73a4e8b17f0166d1149fa6eb646f970d36804a738976d692f6c95719"
   },
   "lease_id": "provider-lease-fixture",
@@ -23,9 +25,12 @@
     "findings": [],
     "provider_evidence": {
       "effective_model": "claude-sonnet-4-6",
+      "effective_model_policy": "required_exact_match",
       "evidence_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/review-provider-evidence.json",
       "intended_model": "claude-sonnet-4-6",
+      "model_assurance": "exact_match_enforced",
       "provider": "claude_headless",
+      "provider_adapter_id": "claude_headless_p0",
       "provider_session_id": "fake-session-run-complete-pass",
       "request_id": "req-complete-pass",
       "transcript_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/review-provider-transcript.json"
@@ -40,6 +45,6 @@
     "workflow_id": "single_step_external_review"
   },
   "transcript_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/attempts/provider-attempt-ed8bce540417405905fdd89559847d8b-transcript.json",
-  "transcript_sha256": "sha256:f6e5f20cd9729047c63c60081f35b04dcd562d7cc70e9a6e14cbd184beab3d2b",
+  "transcript_sha256": "sha256:052582f5ae847a4c792d177fc44ad422e423d45d9addcdf82bb36bb0b807268d",
   "work_order_digest": "sha256:b06cc20f4831c3639ba67beb0950324dd7155f49663cb8599c93fef828fc0db3"
 }

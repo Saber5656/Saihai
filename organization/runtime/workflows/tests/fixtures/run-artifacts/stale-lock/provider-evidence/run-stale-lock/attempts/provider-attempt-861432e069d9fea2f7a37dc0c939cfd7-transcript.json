@@ -3,7 +3,9 @@
     "details": {
       "duration_ms": 0,
       "effective_model": "claude-sonnet-4-6",
-      "intended_model": "claude-sonnet-4-6"
+      "effective_model_policy": "required_exact_match",
+      "intended_model": "claude-sonnet-4-6",
+      "model_assurance": "exact_match_enforced"
     },
     "outcome": "ok"
   },

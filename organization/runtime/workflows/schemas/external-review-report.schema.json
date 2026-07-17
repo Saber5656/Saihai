@@ -52,8 +52,11 @@
       "type": "object",
       "required": [
         "provider",
+        "provider_adapter_id",
         "intended_model",
         "effective_model",
+        "effective_model_policy",
+        "model_assurance",
         "request_id",
         "provider_session_id",
         "transcript_path",
@@ -63,11 +66,27 @@
         "provider": {
           "type": "string"
         },
+        "provider_adapter_id": {
+          "type": "string",
+          "minLength": 1
+        },
         "intended_model": {
           "type": "string"
         },
         "effective_model": {
           "type": "string"
+        },
+        "effective_model_policy": {
+          "enum": [
+            "required_exact_match",
+            "record_without_equality"
+          ]
+        },
+        "model_assurance": {
+          "enum": [
+            "exact_match_enforced",
+            "provider_reported_only"
+          ]
         },
         "request_id": {
           "type": "string"

@@ -693,6 +693,8 @@ def test_provider_evidence_schema_uses_completion_version_contract() -> None:
             "provider",
             "intended_model",
             "effective_model",
+            "effective_model_policy",
+            "model_assurance",
             "request_id",
             "run_id",
             "workflow_id",

@@ -351,8 +351,13 @@ def external_review_report(
         "summary": "Review completed.",
         "provider_evidence": {
             "provider": adapter["provider_target"],
+            "provider_adapter_id": adapter["provider_adapter_id"],
             "intended_model": adapter_request["evidence_contract"]["fixed_fields"]["intended_model"],
             "effective_model": adapter.get("default_model") or "claude-sonnet-test",
+            "effective_model_policy": adapter["effective_model_policy"],
+            "model_assurance": adapter_request["evidence_contract"]["fixed_fields"][
+                "model_assurance"
+            ],
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",
             "transcript_path": adapter_request["transcript_path"],
@@ -1033,8 +1038,13 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "summary": "No findings.",
             "provider_evidence": {
                 "provider": adapter["provider_target"],
+                "provider_adapter_id": adapter["provider_adapter_id"],
                 "intended_model": adapter_request["evidence_contract"]["fixed_fields"]["intended_model"],
                 "effective_model": adapter.get("default_model") or "claude-sonnet-test",
+                "effective_model_policy": adapter["effective_model_policy"],
+                "model_assurance": adapter_request["evidence_contract"]["fixed_fields"][
+                    "model_assurance"
+                ],
                 "request_id": "req-frontdoor",
                 "provider_session_id": "claude-session-test",
                 "transcript_path": str(transcript_path),
@@ -1090,6 +1100,101 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(terminal_payload["reason"], "run_not_preparable", "terminal prepare reason")
         assert_equal(terminal_payload["run_state"], "complete", "terminal prepare state")
         assert_equal(transcript_path.read_bytes(), transcript_before, "terminal prepare transcript")
+
+
+def test_approved_provider_binding_blocks_request_adapter_and_model_mutation() -> None:
+    def approve_cursor(state_root: Path, request_id: str) -> None:
+        proposed = load_payload(
+            run_frontdoor(
+                state_root,
+                "propose",
+                "--task-id",
+                f"TSK-{request_id}",
+                "--request-id",
+                request_id,
+                "--prompt",
+                "Run bounded external review",
+                "--classification",
+                json.dumps(external_review_classification()),
+                "--ref",
+                "organization/runtime/workflows/README.md",
+                "--provider-adapter-id",
+                "cursor_cli_p0",
+            )
+        )
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "approve",
+                "--request-id",
+                request_id,
+                "--human-action-id",
+                proposed["approval"]["human_action_id"],
+            )
+        )
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-approved-adapter-mutation"
+        approve_cursor(state_root, request_id)
+        request_file = state_root / "requests" / f"{request_id}.json"
+        request_record = json.loads(request_file.read_text(encoding="utf-8"))
+        request_record["requested_provider_adapter_id"] = "hermes_agent_oneshot_p0"
+        request_file.write_text(json.dumps(request_record) + "\n", encoding="utf-8")
+        request_file.chmod(0o600)
+
+        blocked = run_frontdoor(
+            state_root,
+            "create-run",
+            "--request-id",
+            request_id,
+            "--run-id",
+            "run-approved-adapter-mutation",
+            check=False,
+        )
+        assert_equal(blocked.returncode, 2, "adapter mutation exit")
+        assert_equal(
+            load_payload(blocked)["reason"],
+            "provider_adapter_model_binding_mismatch",
+            "adapter mutation typed reason",
+        )
+        assert not (state_root / "work-orders").exists()
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-approved-model-mutation"
+        run_id = "run-approved-model-mutation"
+        approve_cursor(state_root, request_id)
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "create-run",
+                "--request-id",
+                request_id,
+                "--run-id",
+                run_id,
+            )
+        )
+        request_file = state_root / "requests" / f"{request_id}.json"
+        request_record = json.loads(request_file.read_text(encoding="utf-8"))
+        request_record["approval_record"]["provider_binding"]["default_model"] = "tampered-model"
+        request_file.write_text(json.dumps(request_record) + "\n", encoding="utf-8")
+        request_file.chmod(0o600)
+
+        blocked = run_frontdoor(
+            state_root,
+            "drain",
+            "--run-id",
+            run_id,
+            check=False,
+        )
+        assert_equal(blocked.returncode, 2, "model mutation exit")
+        assert_equal(
+            load_payload(blocked)["reason"],
+            "provider_adapter_model_binding_mismatch",
+            "model mutation typed reason",
+        )
+        assert not (state_root / "work-orders" / run_id).exists()
 
 
 def test_manual_prepare_evidence_contract_validates_report() -> None:
@@ -4627,6 +4732,7 @@ def main() -> None:
         test_state_cleanup_and_audit_rotation_reject_category_symlinks,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
+        test_approved_provider_binding_blocks_request_adapter_and_model_mutation,
         test_manual_prepare_evidence_contract_validates_report,
         test_concurrent_manual_prepare_writes_canonical_artifacts_once,
         test_drain_allows_edit_capable_code_change_gate,

@@ -246,8 +246,15 @@ class OrchestratorHarness:
             "summary": "Offline harness fixture report.",
             "provider_evidence": {
                 "provider": "harness_fixture",
+                "provider_adapter_id": adapter_request["adapter"]["provider_adapter_id"],
                 "intended_model": adapter_request["intended_model"],
                 "effective_model": adapter_request["intended_model"],
+                "effective_model_policy": adapter_request["adapter"][
+                    "effective_model_policy"
+                ],
+                "model_assurance": adapter_request["evidence_contract"]["fixed_fields"][
+                    "model_assurance"
+                ],
                 "request_id": adapter_request["request_id"],
                 "provider_session_id": f"session-{run_id}",
                 "transcript_path": str(transcript_path),

@@ -1755,6 +1755,7 @@ def requester(frontdoor: str, chat_session_id: str = "") -> dict[str, str]:
 
 def approval_action_id(record: dict[str, Any]) -> str:
     proposal = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
+    provider_binding = approval_provider_binding(record)
     material = {
         "task_id": record.get("task_id"),
         "request_id": record.get("request_id"),
@@ -1764,22 +1765,19 @@ def approval_action_id(record: dict[str, Any]) -> str:
         "resolved_context_refs": record.get("resolved_context_refs") or [],
         "allowed_paths": record.get("allowed_paths") or [],
         "expires_at": record.get("expires_at"),
-        "requested_provider_adapter_id": record.get("requested_provider_adapter_id"),
+        "provider_binding": provider_binding,
     }
     return "approve-" + stable_digest(material)[:20]
 
 
-def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
+def approval_provider_binding(record: dict[str, Any]) -> dict[str, str]:
+    """Resolve the provider descriptor material that the human is approving."""
+
     proposal = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
-    workflow_selection = proposal.get("workflow_selection") if isinstance(proposal.get("workflow_selection"), dict) else {}
-    activation_scope = proposal.get("activation_scope") if isinstance(proposal.get("activation_scope"), dict) else {}
-    allowed_ops = activation_scope.get("allowed_ops") if isinstance(activation_scope.get("allowed_ops"), dict) else {}
-    denied_ops = sorted(op for op, allowed in allowed_ops.items() if allowed is False)
-    checkout_identity = record.get("checkout_identity")
-    approval_workspace_root = (
-        str(checkout_identity.get("checkout_realpath"))
-        if isinstance(checkout_identity, dict) and checkout_identity.get("checkout_realpath")
-        else str(REPO_ROOT)
+    workflow_selection = (
+        proposal.get("workflow_selection")
+        if isinstance(proposal.get("workflow_selection"), dict)
+        else {}
     )
     workflow_id = str(workflow_selection.get("workflow_id") or "")
     initial_step = str(workflow_selection.get("initial_step") or "")
@@ -1794,12 +1792,35 @@ def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
     )
     if not isinstance(step, dict):
         raise FrontdoorError("provider_adapter_selection_step_missing")
-    provider_capability = provider_capability_for_step(
+    descriptor = provider_capability_for_step(
         template=template,
         step=step,
         worker_execution_plan=None,
         requested_adapter_id=str(record.get("requested_provider_adapter_id") or ""),
     )
+    binding = {
+        "provider_adapter_id": str(descriptor.get("provider_adapter_id") or ""),
+        "default_model": str(descriptor.get("default_model") or ""),
+        "effective_model_policy": str(descriptor.get("effective_model_policy") or ""),
+    }
+    if not all(binding.values()):
+        raise FrontdoorError("provider_adapter_model_binding_missing")
+    return binding
+
+
+def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
+    proposal = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
+    workflow_selection = proposal.get("workflow_selection") if isinstance(proposal.get("workflow_selection"), dict) else {}
+    activation_scope = proposal.get("activation_scope") if isinstance(proposal.get("activation_scope"), dict) else {}
+    allowed_ops = activation_scope.get("allowed_ops") if isinstance(activation_scope.get("allowed_ops"), dict) else {}
+    denied_ops = sorted(op for op, allowed in allowed_ops.items() if allowed is False)
+    checkout_identity = record.get("checkout_identity")
+    approval_workspace_root = (
+        str(checkout_identity.get("checkout_realpath"))
+        if isinstance(checkout_identity, dict) and checkout_identity.get("checkout_realpath")
+        else str(REPO_ROOT)
+    )
+    provider_binding = approval_provider_binding(record)
     return {
         "approval_view_version": "1",
         "source": "orchestrator_structured_state",
@@ -1821,7 +1842,9 @@ def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
                 list(record.get("resolved_allowed_paths") or [])
             ),
             "denied_ops": denied_ops,
-            "provider_adapter": provider_capability["provider_adapter_id"],
+            "provider_adapter": provider_binding["provider_adapter_id"],
+            "intended_model": provider_binding["default_model"],
+            "effective_model_policy": provider_binding["effective_model_policy"],
             "ref_boundary": {
                 "workspace_root": approval_workspace_root,
                 "max_ref_count": MAX_CONTEXT_REF_COUNT,
@@ -3869,6 +3892,9 @@ def approval_record_for(
     principal: dict[str, Any],
     signature: dict[str, Any],
     activation_source: str,
+    provider_binding: dict[str, str],
+    signed_subject: dict[str, Any],
+    signature_transition: str,
 ) -> dict[str, Any]:
     return {
         "approval_record_version": "1",
@@ -3889,8 +3915,85 @@ def approval_record_for(
         ),
         "refs_digest": "sha256:" + stable_digest(record.get("resolved_context_refs") or record.get("context_refs") or []),
         "display_digest": "sha256:" + stable_digest(record.get("approval") or {}),
+        "provider_binding": provider_binding,
+        "provider_binding_digest": "sha256:" + stable_digest(provider_binding),
+        "signed_subject": signed_subject,
+        "signature_transition": signature_transition,
         "signature": signature,
     }
+
+
+def verify_transition_signature(
+    *,
+    state_root: Path,
+    principal: dict[str, Any],
+    transition: str,
+    subject: dict[str, Any],
+    signature: Any,
+) -> bool:
+    if not isinstance(signature, dict) or signature.get("algorithm") != TRANSITION_SIGNATURE_ALGORITHM:
+        return False
+    material = {
+        "principal": redacted_principal(principal),
+        "transition": transition,
+        "subject": subject,
+    }
+    signature_material = {
+        "algorithm": TRANSITION_SIGNATURE_ALGORITHM,
+        "material": material,
+    }
+    keyed_digest = hmac.new(
+        principal_key(state_root, principal),
+        canonical_json(signature_material),
+        hashlib.sha256,
+    ).digest()
+    expected = "sha256:" + hashlib.new("sha256", keyed_digest).hexdigest()
+    return hmac.compare_digest(str(signature.get("signature") or ""), expected)
+
+
+def verify_approved_provider_binding(
+    *,
+    state_root: Path,
+    record: dict[str, Any],
+) -> dict[str, str]:
+    """Fail closed if mutable request or registry state diverges from human approval."""
+
+    approval_record = record.get("approval_record")
+    if not isinstance(approval_record, dict):
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
+    stored_binding = approval_record.get("provider_binding")
+    signed_subject = approval_record.get("signed_subject")
+    principal = approval_record.get("approved_by_principal")
+    if not all(isinstance(value, dict) for value in (stored_binding, signed_subject, principal)):
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
+    try:
+        current_binding = approval_provider_binding(record)
+        expected_action_id = approval_action_id(record)
+    except FrontdoorError as exc:
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH) from exc
+    binding_digest = "sha256:" + stable_digest(stored_binding)
+    expected_subject = {
+        "request_id": str(record.get("request_id") or ""),
+        "task_id": str(record.get("task_id") or ""),
+        "human_action_id": str(record.get("human_action_id") or ""),
+        "provider_binding_digest": binding_digest,
+    }
+    if (
+        stored_binding != current_binding
+        or approval_record.get("provider_binding_digest") != binding_digest
+        or signed_subject != expected_subject
+        or approval_record.get("human_action_id") != record.get("human_action_id")
+        or expected_action_id != record.get("human_action_id")
+        or not verify_transition_signature(
+            state_root=state_root,
+            principal=principal,
+            transition=str(approval_record.get("signature_transition") or ""),
+            subject=expected_subject,
+            signature=approval_record.get("signature"),
+        )
+    ):
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
+    return current_binding
 
 
 def enforce_frontdoor_approval_gate(envelope: dict[str, Any], classification: dict[str, Any]) -> dict[str, Any]:
@@ -3930,14 +4033,15 @@ def _approve_core(
     actor = principal
     path = request_path(state_root, request_id)
     record = read_json(path)
-    signature = assert_allowed_principal(
-        state_root=state_root,
-        principal=actor,
-        allowed_types=allowed_principal_types,
-        transition=audit_event_type,
-        subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
-        blocked_reason="unsupported approval principal",
-    )
+    if str(actor.get("principal_type") or "") not in allowed_principal_types:
+        assert_allowed_principal(
+            state_root=state_root,
+            principal=actor,
+            allowed_types=allowed_principal_types,
+            transition=audit_event_type,
+            subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
+            blocked_reason="unsupported approval principal",
+        )
     classification = record.get("classification")
     if not isinstance(classification, dict):
         raise FrontdoorError("typed classification is required before approval")
@@ -3981,6 +4085,21 @@ def _approve_core(
             details={"reason": "approval_rate_limited", "failed_attempts": failed_attempts},
         )
         raise FrontdoorError("approval challenge rate limit exceeded")
+    provider_binding = approval_provider_binding(record)
+    signed_subject = {
+        "request_id": request_id,
+        "task_id": str(record.get("task_id") or ""),
+        "human_action_id": human_action_id,
+        "provider_binding_digest": "sha256:" + stable_digest(provider_binding),
+    }
+    signature = assert_allowed_principal(
+        state_root=state_root,
+        principal=actor,
+        allowed_types=allowed_principal_types,
+        transition=audit_event_type,
+        subject=signed_subject,
+        blocked_reason="unsupported approval principal",
+    )
     envelope = workflow_selector.activation_envelope(
         classification,
         activation_source=activation_source,
@@ -4008,6 +4127,9 @@ def _approve_core(
         principal=actor,
         signature=signature,
         activation_source=activation_source,
+        provider_binding=provider_binding,
+        signed_subject=signed_subject,
+        signature_transition=audit_event_type,
     )
     write_json(path, record)
     snapshot_path = snapshot_envelope(state_root, request_id, envelope)
@@ -4237,6 +4359,10 @@ def create_run(
     envelope = record.get("approved_activation")
     if not isinstance(envelope, dict) or envelope.get("activation_status") != "approved":
         raise FrontdoorError("approved activation envelope required")
+    approved_provider_binding = verify_approved_provider_binding(
+        state_root=state_root,
+        record=record,
+    )
     selection = envelope.get("workflow_selection") or {}
     workflow_id = selection.get("workflow_id")
     initial_step = selection.get("initial_step")
@@ -4260,6 +4386,10 @@ def create_run(
             principal=actor,
         ):
             record = read_json(request_path(state_root, request_id))
+            approved_provider_binding = verify_approved_provider_binding(
+                state_root=state_root,
+                record=record,
+            )
             bound_run_id = str(record.get("run_id") or "")
             if bound_run_id and bound_run_id != effective_run_id:
                 raise FrontdoorError("request_id is already bound to a different run_id")
@@ -4321,6 +4451,7 @@ def create_run(
                     "step_local_snapshot": "immutable_step_attempt_snapshot",
                     "provider_transcript": "confined_evidence_path_only",
                 },
+                "approved_provider_binding": approved_provider_binding,
                 "transitions": [],
                 "transition_provenance": [
                     {
@@ -4391,6 +4522,17 @@ def drain_run(
         ):
             run = run_store.load_run(state_root, run_id)
             subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
+            request_record = read_json(
+                request_path(state_root, str(run.get("request_id") or ""))
+            )
+            approved_provider_binding = verify_approved_provider_binding(
+                state_root=state_root,
+                record=request_record,
+            )
+            if run.get("approved_provider_binding") != approved_provider_binding:
+                raise FrontdoorError(
+                    provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH
+                )
             signature = assert_execution_principal(
                 state_root=state_root,
                 principal=actor,
@@ -4446,7 +4588,6 @@ def drain_run(
                 if order_exists:
                     work_order = read_json(order_path)
                 else:
-                    request_record = read_json(request_path(state_root, str(run["request_id"])))
                     try:
                         work_order = build_work_order(
                             state_root=state_root,
@@ -4783,6 +4924,10 @@ def manual_provider_evidence_contract(
         "provider_adapter_id": capability["provider_adapter_id"],
         "provider_target": capability["provider_target"],
         "intended_model": capability["default_model"],
+        "effective_model_policy": capability["effective_model_policy"],
+        "model_assurance": provider_runner.MODEL_ASSURANCE_FOR_POLICY[
+            capability["effective_model_policy"]
+        ],
         "request_id": run["request_id"],
         "run_id": run["run_id"],
         "workflow_id": run["workflow_id"],
@@ -5592,6 +5737,12 @@ def build_work_order(
             )
         except scoped_worker_executor.ScopedWorkerError as exc:
             raise FrontdoorError(exc.reason_class) from exc
+    approved_provider_binding = verify_approved_provider_binding(
+        state_root=state_root,
+        record=request_record,
+    )
+    if run.get("approved_provider_binding") != approved_provider_binding:
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
     capability = provider_capability_for_step(
         template=template,
         step=step,
@@ -5604,6 +5755,13 @@ def build_work_order(
     intended_model = str(capability.get("default_model") or "")
     if not provider_adapter_id or not intended_model:
         raise FrontdoorError("provider_adapter_model_binding_missing")
+    current_binding = {
+        "provider_adapter_id": provider_adapter_id,
+        "default_model": intended_model,
+        "effective_model_policy": str(capability.get("effective_model_policy") or ""),
+    }
+    if current_binding != approved_provider_binding:
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
     work_order = work_order_builder.build_work_order(
         run=run,
         request_record=request_record,

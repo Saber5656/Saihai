@@ -108,6 +108,16 @@ def test_fake_provider_success_completes_with_normalized_evidence() -> None:
         assert_equal(evidence["provider_target"], "claude_headless", "provider target")
         assert_equal(evidence["intended_model"], "claude-sonnet-4-6", "intended model")
         assert_equal(evidence["effective_model"], evidence["intended_model"], "model match")
+        assert_equal(
+            evidence["effective_model_policy"],
+            "required_exact_match",
+            "exact-match policy snapshot",
+        )
+        assert_equal(
+            evidence["model_assurance"],
+            "exact_match_enforced",
+            "exact-match assurance",
+        )
         assert_equal(evidence["request_id"], "req-provider-ok", "evidence request id")
         assert_equal(evidence["run_id"], "run-provider-ok", "evidence run id")
         assert_equal(evidence["workflow_id"], "single_step_external_review", "evidence workflow id")
@@ -149,6 +159,26 @@ def test_fake_provider_success_completes_with_normalized_evidence() -> None:
             completion["evidence"]["verification_decision"],
             "complete",
             "completion evidence decision",
+        )
+        assert_equal(
+            completion["evidence"]["provider_adapter_id"],
+            "claude_headless_p0",
+            "completion adapter snapshot",
+        )
+        assert_equal(
+            completion["evidence"]["intended_model"],
+            "claude-sonnet-4-6",
+            "completion intended model snapshot",
+        )
+        assert_equal(
+            completion["evidence"]["effective_model_policy"],
+            "required_exact_match",
+            "completion policy snapshot",
+        )
+        assert_equal(
+            completion["evidence"]["model_assurance"],
+            "exact_match_enforced",
+            "completion assurance snapshot",
         )
 
 
@@ -330,11 +360,27 @@ def test_completion_rejects_tampered_runner_evidence_identity_path_and_type() ->
     def change_duration_type(evidence: dict, _state_root: Path) -> None:
         evidence["duration_ms"] = "12"
 
+    def change_model_assurance(evidence: dict, _state_root: Path) -> None:
+        evidence["model_assurance"] = "provider_reported_only"
+
+    def remove_model_assurance(evidence: dict, _state_root: Path) -> None:
+        evidence.pop("model_assurance")
+
     variants = (
         ("request-id", change_request_id, "normalized_evidence.request_id mismatch"),
         ("self-path", change_self_path, "must reference its own artifact"),
         ("transcript-path", change_transcript_path, "must match current run transcript path"),
         ("duration-type", change_duration_type, "schema:$.duration_ms:type"),
+        (
+            "assurance-mismatch",
+            change_model_assurance,
+            "provider_model_assurance_mismatch",
+        ),
+        (
+            "assurance-missing",
+            remove_model_assurance,
+            "provider_model_assurance_mismatch",
+        ),
     )
     for name, mutate, expected_error in variants:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -364,13 +410,77 @@ def test_completion_rejects_tampered_runner_evidence_identity_path_and_type() ->
             blocked = load_payload(blocked_process)
             assert_equal(blocked_process.returncode, 2, f"{name} completion exit")
             assert_equal(blocked["decision"], "blocked", f"{name} completion decision")
+            expected_reason_class = (
+                "provider_model_assurance_mismatch"
+                if name.startswith("assurance-")
+                else "invalid_provider_evidence"
+            )
             invalid_details = [
                 item["detail"]
                 for item in blocked["reasons"]
-                if item["reason_class"] == "invalid_provider_evidence"
+                if item["reason_class"] == expected_reason_class
             ]
             assert any(expected_error in detail for detail in invalid_details), (
                 f"{name} missing invalid evidence detail: {invalid_details}"
+            )
+            if name.startswith("assurance-"):
+                assert_equal(
+                    blocked["reason"],
+                    "provider_model_assurance_mismatch",
+                    f"{name} top-level typed reason",
+                )
+
+
+def test_report_gate_promotes_model_assurance_tamper_to_typed_reason() -> None:
+    for variant in ("missing", "mismatch"):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = f"run-report-assurance-{variant}"
+            prepare_run(
+                state_root,
+                request_id=f"req-report-assurance-{variant}",
+                run_id=run_id,
+            )
+            original_normalizer = provider_runner.normalized_evidence
+
+            def tampered_normalizer(**kwargs):
+                evidence = original_normalizer(**kwargs)
+                if variant == "missing":
+                    evidence.pop("model_assurance")
+                else:
+                    evidence["model_assurance"] = "provider_reported_only"
+                return evidence
+
+            provider_runner.normalized_evidence = tampered_normalizer
+            try:
+                payload = provider_runner.run_provider(
+                    state_root=state_root,
+                    run_id=run_id,
+                    fake_provider_mode="success",
+                    principal={
+                        "principal_type": "harness_runner",
+                        "principal_id": f"assurance-gate-{variant}",
+                        "authn_method": "local_test",
+                    },
+                )
+            finally:
+                provider_runner.normalized_evidence = original_normalizer
+
+            assert_equal(payload["decision"], "blocked", f"{variant} gate decision")
+            assert_equal(
+                payload["reason"],
+                "provider_model_assurance_mismatch",
+                f"{variant} top-level report reason",
+            )
+            assert_equal(
+                payload["report_gate"]["outcome"],
+                "provider_model_assurance_mismatch",
+                f"{variant} report outcome",
+            )
+            assert_equal(
+                payload["workflow_run"]["terminal"]["reason"],
+                "provider_model_assurance_mismatch",
+                f"{variant} terminal reason",
             )
 
 
@@ -868,6 +978,16 @@ def test_live_codex_uses_declared_non_equality_model_semantics() -> None:
         evidence = provider_runner.read_json(Path(payload["evidence_path"]))
         assert_equal(evidence["intended_model"], "operator-selected-openai", "Codex evidence intended")
         assert_equal(evidence["effective_model"], "gpt-runtime-reported", "Codex evidence effective")
+        assert_equal(
+            evidence["effective_model_policy"],
+            "record_without_equality",
+            "Codex policy snapshot",
+        )
+        assert_equal(
+            evidence["model_assurance"],
+            "provider_reported_only",
+            "Codex assurance",
+        )
 
 
 def test_adapter_request_rejects_tampered_intended_model_binding() -> None:
@@ -1235,6 +1355,97 @@ def test_completed_attempt_journal_recovers_without_provider_reinvocation() -> N
         )
 
 
+def test_recovery_reverifies_frozen_provider_model_binding_before_promotion() -> None:
+    variants = ("pre-fix-record", "missing-binding-field", "tampered-work-order")
+    for variant in variants:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = f"run-recovery-binding-{variant}"
+            prepare_run(
+                state_root,
+                request_id=f"req-recovery-binding-{variant}",
+                run_id=run_id,
+            )
+            original_store = run_store.store_run
+
+            def crash_before_result_ready_store(root, candidate, **kwargs):
+                execution = candidate.get("provider_execution")
+                if isinstance(execution, dict) and execution.get("phase") == "result_ready":
+                    raise RuntimeError("simulated recovery-boundary crash")
+                return original_store(root, candidate, **kwargs)
+
+            run_store.store_run = crash_before_result_ready_store
+            try:
+                try:
+                    provider_runner.run_provider(
+                        state_root=state_root,
+                        run_id=run_id,
+                        fake_provider_mode="success",
+                        principal={
+                            "principal_type": "harness_runner",
+                            "principal_id": f"recovery-crash-{variant}",
+                            "authn_method": "local_test",
+                        },
+                    )
+                except RuntimeError as exc:
+                    assert_equal(
+                        str(exc),
+                        "simulated recovery-boundary crash",
+                        f"{variant} crash point",
+                    )
+                else:
+                    raise AssertionError(f"{variant} simulated crash did not occur")
+            finally:
+                run_store.store_run = original_store
+
+            canonical_paths = (
+                state_root / "reports" / run_id / "review-external-review-report.json",
+                state_root / "provider-evidence" / run_id / "review-provider-evidence.json",
+                state_root / "provider-evidence" / run_id / "review-provider-transcript.json",
+            )
+            for path in canonical_paths:
+                if path.exists():
+                    path.unlink()
+
+            interrupted = run_store.load_run(state_root, run_id)
+            execution = interrupted["provider_execution"]
+            execution["lease"]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
+            if variant == "pre-fix-record":
+                execution.pop("provider_binding")
+            elif variant == "missing-binding-field":
+                execution["provider_binding"].pop("intended_model")
+            else:
+                order_path = provider_runner.work_order_path(state_root, run_id, "review")
+                work_order = provider_runner.read_json(order_path)
+                work_order["intended_model"] = "tampered-model"
+                run_store.atomic_write_json(order_path, work_order)
+            original_store(
+                state_root,
+                interrupted,
+                expected_current_state="waiting_provider",
+            )
+
+            blocked = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                fake_provider_mode="success",
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": f"recovery-check-{variant}",
+                    "authn_method": "local_test",
+                },
+            )
+            assert_equal(blocked["decision"], "blocked", f"{variant} decision")
+            assert_equal(
+                blocked["reason"],
+                provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+                f"{variant} typed recovery reason",
+            )
+            assert all(not path.exists() for path in canonical_paths), (
+                f"{variant} promoted canonical artifacts"
+            )
+
+
 def test_failed_attempt_journal_preserves_typed_outcome_without_reinvocation() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -1410,6 +1621,7 @@ if __name__ == "__main__":
         test_runner_binding_blocks_unapproved_adapter_candidate,
         test_waiting_provider_retry_records_fresh_request_authority,
         test_completion_rejects_tampered_runner_evidence_identity_path_and_type,
+        test_report_gate_promotes_model_assurance_tamper_to_typed_reason,
         test_hermes_evidence_records_bridge_pattern_without_async_claim,
         test_provider_unavailable_waits_for_human,
         test_provider_nonzero_exit_waits_for_human,
@@ -1434,6 +1646,7 @@ if __name__ == "__main__":
         test_timeout_contract_and_private_transcript_permissions,
         test_direct_runner_accounts_expired_attempt_before_new_claim,
         test_completed_attempt_journal_recovers_without_provider_reinvocation,
+        test_recovery_reverifies_frozen_provider_model_binding_before_promotion,
         test_failed_attempt_journal_preserves_typed_outcome_without_reinvocation,
         test_serialized_context_limit_blocks_before_claim_without_retry,
         test_request_artifact_paths_are_recomputed_and_confined,

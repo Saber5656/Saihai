@@ -11,7 +11,7 @@
   },
   "rejection_version": "1",
   "report_path": "__STATE_ROOT__/reports/run-failed-invalid-report/review-external-review-report.json",
-  "report_sha256": "sha256:dbcd3fd736d4e04b9b1107e1ac26b1289e316ecab7d531e95a5c7875a3ac9a07",
+  "report_sha256": "sha256:2b7687455a63d64985d4439c642f5471b037f52d4706849252aba2f9e5f71b4b",
   "run_id": "run-failed-invalid-report",
   "step_id": "review"
 }
