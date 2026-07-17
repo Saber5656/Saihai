@@ -98,6 +98,7 @@
           "requires": [
             "provider_session_id",
             "request_id",
+            "intended_model",
             "effective_model",
             "transcript_path",
             "evidence_path"

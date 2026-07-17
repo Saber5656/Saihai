@@ -20,7 +20,8 @@
     "terminal",
     "requester",
     "scheduling",
-    "context_sharing"
+    "context_sharing",
+    "approved_provider_binding"
   ],
   "properties": {
     "run_version": {
@@ -40,6 +41,32 @@
     },
     "workflow_id": {
       "type": "string"
+    },
+    "approved_provider_binding": {
+      "type": "object",
+      "required": [
+        "provider_adapter_id",
+        "default_model",
+        "effective_model_policy"
+      ],
+      "properties": {
+        "provider_adapter_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "default_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effective_model_policy": {
+          "type": "string",
+          "enum": [
+            "required_exact_match",
+            "record_without_equality"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "goal_state": {
       "type": "string",
@@ -394,7 +421,7 @@
     "provider_execution": {
       "type": "object",
       "required": [
-        "execution_version", "step_id", "adapter_id", "work_order_digest",
+        "execution_version", "step_id", "adapter_id", "provider_binding", "work_order_digest",
         "adapter_request_digest", "context_snapshot_digest", "phase",
         "attempt_number", "attempt_id", "timeout_seconds", "lease", "retry", "last_outcome"
       ],
@@ -402,6 +429,18 @@
         "execution_version": { "const": "1" },
         "step_id": { "type": "string", "minLength": 1 },
         "adapter_id": { "type": "string", "minLength": 1 },
+        "provider_binding": {
+          "type": "object",
+          "required": ["provider_adapter_id", "intended_model", "effective_model_policy"],
+          "properties": {
+            "provider_adapter_id": { "type": "string", "minLength": 1 },
+            "intended_model": { "type": "string", "minLength": 1 },
+            "effective_model_policy": {
+              "enum": ["required_exact_match", "record_without_equality"]
+            }
+          },
+          "additionalProperties": false
+        },
         "work_order_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "adapter_request_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "context_snapshot_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
@@ -451,6 +490,10 @@
         "decision",
         "report_sha256",
         "evidence_sha256",
+        "provider_adapter_id",
+        "intended_model",
+        "effective_model_policy",
+        "model_assurance",
         "verifier"
       ],
       "properties": {
@@ -467,6 +510,20 @@
         "evidence_sha256": {
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "provider_adapter_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "intended_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effective_model_policy": {
+          "enum": ["required_exact_match", "record_without_equality"]
+        },
+        "model_assurance": {
+          "enum": ["exact_match_enforced", "provider_reported_only"]
         },
         "verifier": {
           "type": "object",

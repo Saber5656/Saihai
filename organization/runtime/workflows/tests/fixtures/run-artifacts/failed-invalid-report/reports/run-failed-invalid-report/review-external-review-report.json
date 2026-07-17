@@ -6,9 +6,13 @@
   },
   "findings": [],
   "provider_evidence": {
-    "effective_model": "offline-fixture",
+    "effective_model": "claude-sonnet-4-6",
+    "effective_model_policy": "required_exact_match",
     "evidence_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-evidence.json",
+    "intended_model": "claude-sonnet-4-6",
+    "model_assurance": "exact_match_enforced",
     "provider": "harness_fixture",
+    "provider_adapter_id": "claude_headless_p0",
     "provider_session_id": "session-run-failed-invalid-report",
     "request_id": "req-failed-invalid-report",
     "transcript_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-transcript.json"

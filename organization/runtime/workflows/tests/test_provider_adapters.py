@@ -25,11 +25,14 @@ import provider_adapters
 def request() -> dict:
     content = "README.md\nFixture content approved by the runner."
     encoded = content.encode()
+    intended_model = "claude-sonnet-4-6"
     return {
         "request_id": "req-live",
         "run_id": "run-live",
         "workflow_id": "single_step_external_review",
         "step_id": "review",
+        "intended_model": intended_model,
+        "adapter": {"command_argv": provider_adapters.claude_argv_template(intended_model)},
         "instruction": "Review the bounded fixture.",
         "context_snapshot": {
             "content": content,
@@ -39,6 +42,17 @@ def request() -> dict:
         "evidence_path": "/tmp/evidence",
         "transcript_path": "/tmp/transcript",
     }
+
+
+def codex_request() -> dict:
+    candidate = request()
+    candidate["intended_model"] = "operator-selected-openai"
+    candidate["adapter"] = {
+        "provider_adapter_id": "codex_cli_openai_p0",
+        "default_model": "operator-selected-openai",
+        "effective_model_policy": "record_without_equality",
+    }
+    return candidate
 
 
 class FakeProcess:
@@ -124,13 +138,21 @@ def codex_binding(root: Path) -> dict[str, str]:
     }
 
 
-def invoke_with_fake(adapter, binding: dict[str, str], stdout: bytes, stderr: bytes = b"", returncode: int = 0):
+def invoke_with_fake(
+    adapter,
+    binding: dict[str, str],
+    stdout: bytes,
+    stderr: bytes = b"",
+    returncode: int = 0,
+    *,
+    request_value: dict | None = None,
+):
     factory, calls = fake_popen(stdout, stderr, returncode)
     original = provider_adapters._popen
     provider_adapters._popen = factory
     try:
         with patched_environ(binding):
-            result = adapter(request(), timeout_seconds=10)
+            result = adapter(request_value or request(), timeout_seconds=10)
     finally:
         provider_adapters._popen = original
     return result, calls
@@ -168,6 +190,7 @@ def test_claude_fixture_fixed_command_and_minimal_env() -> None:
     assert command[0] == binding["SAIHAI_CLAUDE_EXECUTABLE_PATH"]
     assert command[command.index("--tools") + 1] == ""
     assert command[command.index("--permission-mode") + 1] == "plan"
+    assert command[command.index("--model") + 1] == request()["intended_model"]
     assert calls[0]["shell"] is False
     assert calls[0]["start_new_session"] is True
     assert calls[0]["cwd"] != str(provider_adapters.REPO_ROOT)
@@ -177,6 +200,19 @@ def test_claude_fixture_fixed_command_and_minimal_env() -> None:
     assert calls[0]["env"]["LC_ALL"] == "C.UTF-8"
     assert calls[0]["env"]["TMPDIR"] == calls[0]["cwd"]
     assert "SECRET_TOKEN" not in calls[0]["env"]
+
+    tampered = request()
+    tampered["adapter"]["command_argv"][3] = "claude-opus-tampered"
+    with tempfile.TemporaryDirectory() as raw:
+        blocked, blocked_calls = invoke_with_fake(
+            provider_adapters.invoke_claude_cli,
+            claude_binding(Path(raw)),
+            (FIXTURE_DIR / "claude_print_result.json").read_bytes(),
+            request_value=tampered,
+        )
+    assert blocked["status"] == "unavailable"
+    assert blocked["reason"] == "claude_argv_template_mismatch"
+    assert blocked_calls == []
 
 
 def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
@@ -188,7 +224,9 @@ def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
             "SAIHAI_CODEX_EXECUTABLE_SHA256": digest,
         }
         with patched_environ(incomplete):
-            unavailable = provider_adapters.invoke_codex_exec(request(), timeout_seconds=10)
+            unavailable = provider_adapters.invoke_codex_exec(
+                codex_request(), timeout_seconds=10
+            )
         assert unavailable["status"] == "unavailable"
         assert unavailable["reason"].startswith("codex_confinement_unavailable:")
 
@@ -197,6 +235,7 @@ def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
             provider_adapters.invoke_codex_exec,
             binding,
             (FIXTURE_DIR / "codex_exec_events.jsonl").read_bytes(),
+            request_value=codex_request(),
         )
     assert result["status"] == "ok"
     command = calls[0]["command"]
@@ -280,6 +319,7 @@ def test_codex_structured_auth_nonzero_and_malformed_classes() -> None:
                 stdout,
                 stderr,
                 returncode,
+                request_value=codex_request(),
             )
             assert result["status"] == expected_status
             assert result["reason"] == expected_reason

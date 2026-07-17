@@ -188,6 +188,22 @@ def test_registry_provider_adapters_are_data_driven() -> None:
     )
     assert_equal(adapters["hermes_agent_oneshot_p0"]["bridge_pattern"], "oneshot", "Hermes bridge")
     assert_equal(
+        adapters["claude_headless_p0"]["effective_model_policy"],
+        "required_exact_match",
+        "Claude effective model policy",
+    )
+    for adapter_id in (
+        "codex_cli_openai_p0",
+        "hermes_agent_oneshot_p0",
+        "cursor_cli_p0",
+        "grok_build_cli_candidate_p0",
+    ):
+        assert_equal(
+            adapters[adapter_id]["effective_model_policy"],
+            "record_without_equality",
+            f"{adapter_id} effective model policy",
+        )
+    assert_equal(
         adapters["hermes_agent_oneshot_p0"]["surface_metadata"]["async_callback_supported"],
         False,
         "Hermes async callback claim",
@@ -213,6 +229,12 @@ def test_single_step_external_review_template() -> None:
     assert_equal(template["initial_step"], "review", "initial_step")
     assert_equal(template["max_steps"], 1, "max_steps")
     assert_equal(len(template["steps"]), 1, "step count")
+    provider_gate = next(
+        gate
+        for gate in template["steps"][0]["quality_gates"]
+        if gate["gate"] == "provider_evidence_gate"
+    )
+    assert "intended_model" in provider_gate["requires"]
     assert "tmux_interactive" in template["provider_adapter"]["allowed_transports"]
     assert "typed_report_file" in template["result_authority"]["canonical"]
     assert "provider_transcript" in template["result_authority"]["signals_only"]
@@ -669,7 +691,10 @@ def test_provider_evidence_schema_uses_completion_version_contract() -> None:
             "provider_adapter_id",
             "provider_target",
             "provider",
+            "intended_model",
             "effective_model",
+            "effective_model_policy",
+            "model_assurance",
             "request_id",
             "run_id",
             "workflow_id",

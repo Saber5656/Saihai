@@ -39,6 +39,16 @@ MAX_PROVIDER_TIMEOUT_SECONDS = 86400
 DEFAULT_PROVIDER_LEASE_SECONDS = 90
 DEFAULT_PROVIDER_HEARTBEAT_SECONDS = 30
 DEFAULT_MAX_AUTO_RETRIES = 5
+PROVIDER_MODEL_MISMATCH = "provider_model_mismatch"
+PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH = "provider_adapter_model_binding_mismatch"
+EFFECTIVE_MODEL_POLICIES = {
+    "required_exact_match",
+    "record_without_equality",
+}
+MODEL_ASSURANCE_FOR_POLICY = {
+    "required_exact_match": "exact_match_enforced",
+    "record_without_equality": "provider_reported_only",
+}
 MAX_LIVE_CONTEXT_REFS = 20
 MAX_LIVE_CONTEXT_FILE_BYTES = 256_000
 MAX_LIVE_CONTEXT_TOTAL_BYTES = 1_000_000
@@ -457,6 +467,8 @@ def validate_adapter_descriptor(adapter: dict[str, Any]) -> list[str]:
         "requires_marker",
         "reset_strategy",
         "report_authority",
+        "default_model",
+        "effective_model_policy",
     }
     missing = sorted(required - set(adapter))
     if missing:
@@ -473,6 +485,14 @@ def validate_adapter_descriptor(adapter: dict[str, Any]) -> list[str]:
         errors.append("report_authority must be typed_report_and_evidence_file")
     if adapter.get("supports_structured_output") is not True:
         errors.append("supports_structured_output must be true")
+    if not isinstance(adapter.get("default_model"), str) or not adapter.get("default_model"):
+        errors.append("default_model must be non-empty string")
+    if adapter.get("effective_model_policy") not in EFFECTIVE_MODEL_POLICIES:
+        errors.append("effective_model_policy unsupported")
+    if adapter.get("provider_adapter_id") == "claude_headless_p0" and adapter.get(
+        "command_argv"
+    ) != provider_adapters.claude_argv_template(str(adapter.get("default_model") or "")):
+        errors.append("claude command_argv must match the registry-pinned model template")
     return errors
 
 
@@ -491,6 +511,14 @@ def validate_work_order_for_runner(
         errors.append("permission_mode must be readonly")
     if work_order.get("external_provider_allowed") is not True:
         errors.append("external_provider_allowed must be true")
+    if not isinstance(work_order.get("intended_model"), str) or not work_order.get("intended_model"):
+        errors.append("intended_model must be non-empty string")
+    if not isinstance(work_order.get("provider_adapter_id"), str) or not work_order.get(
+        "provider_adapter_id"
+    ):
+        errors.append("provider_adapter_id must be non-empty string")
+    if work_order.get("effective_model_policy") not in EFFECTIVE_MODEL_POLICIES:
+        errors.append("effective_model_policy unsupported")
     allowed_ops = ((work_order.get("activation_scope") or {}).get("allowed_ops") or {})
     for op in ("edit", "commit", "push", "network"):
         if allowed_ops.get(op) is not False:
@@ -518,6 +546,39 @@ def validate_work_order_for_runner(
             if report_path.resolve() != canonical_report_path.resolve():
                 errors.append("report_path must match current run report path")
     return errors
+
+
+def provider_adapter_model_binding_matches(
+    work_order: dict[str, Any], adapter: dict[str, Any]
+) -> bool:
+    return work_order_model_policy_binding(work_order) == adapter_model_policy_binding(adapter)
+
+
+def work_order_model_policy_binding(work_order: dict[str, Any]) -> dict[str, str]:
+    return {
+        "provider_adapter_id": str(work_order.get("provider_adapter_id") or ""),
+        "intended_model": str(work_order.get("intended_model") or ""),
+        "effective_model_policy": str(work_order.get("effective_model_policy") or ""),
+    }
+
+
+def approved_model_policy_binding(run: dict[str, Any]) -> dict[str, str]:
+    approved = run.get("approved_provider_binding")
+    if not isinstance(approved, dict):
+        return {}
+    return {
+        "provider_adapter_id": str(approved.get("provider_adapter_id") or ""),
+        "intended_model": str(approved.get("default_model") or ""),
+        "effective_model_policy": str(approved.get("effective_model_policy") or ""),
+    }
+
+
+def adapter_model_policy_binding(adapter: dict[str, Any]) -> dict[str, str]:
+    return {
+        "provider_adapter_id": str(adapter.get("provider_adapter_id") or ""),
+        "intended_model": str(adapter.get("default_model") or ""),
+        "effective_model_policy": str(adapter.get("effective_model_policy") or ""),
+    }
 
 
 def runner_claim_is_live(work_order: dict[str, Any]) -> bool:
@@ -549,6 +610,11 @@ def adapter_request(
     context_bytes = context_json.encode("utf-8")
     if len(context_bytes) > provider_adapters.MAX_CONTEXT_BYTES:
         raise ProviderRunnerError("context_snapshot_serialized_limit")
+    if not provider_adapter_model_binding_matches(work_order, adapter):
+        raise ProviderRunnerError(PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
+    intended_model = str(work_order.get("intended_model") or "")
+    if not intended_model:
+        raise ProviderRunnerError("intended_model_missing")
     request = {
         "adapter_request_version": "1",
         "adapter": adapter,
@@ -556,6 +622,7 @@ def adapter_request(
         "request_id": run["request_id"],
         "workflow_id": run["workflow_id"],
         "step_id": step_id,
+        "intended_model": intended_model,
         "work_order_path": str(work_order_path(state_root, run_id, step_id)),
         "report_path": str(report_path),
         "evidence_path": str(evidence_path),
@@ -668,6 +735,32 @@ def recover_completed_provider_attempt(
     )
     if journal.get("abandoned") is True:
         return None
+    step_id = str(execution.get("step_id") or "")
+    expected_work_order_digest = str(execution.get("work_order_digest") or "")
+    recorded_binding = execution.get("provider_binding")
+    current_binding = adapter_model_policy_binding(adapter)
+    try:
+        frozen_work_order, frozen_digest, _ = scoped_worker_executor.verify_frozen_work_order(
+            state_root,
+            run_id=str(run.get("run_id") or ""),
+            step_id=step_id,
+            expected_run_states={"waiting_provider"},
+            expected_iteration=int(run.get("iteration") or 0),
+            expected_work_order_digest=expected_work_order_digest,
+        )
+    except (scoped_worker_executor.ScopedWorkerError, ValueError, TypeError) as exc:
+        raise ProviderRunnerError(PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH) from exc
+    frozen_binding = work_order_model_policy_binding(frozen_work_order)
+    approved_binding = approved_model_policy_binding(run)
+    if (
+        not expected_work_order_digest
+        or frozen_digest != expected_work_order_digest
+        or not isinstance(recorded_binding, dict)
+        or frozen_binding != approved_binding
+        or recorded_binding != current_binding
+        or frozen_binding != current_binding
+    ):
+        raise ProviderRunnerError(PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
     expected_bindings = {
         "attempt_id": attempt_id,
         "lease_id": lease_id,
@@ -697,11 +790,17 @@ def recover_completed_provider_attempt(
     if journal.get("transcript_sha256") != file_sha256(attempt_transcript_path):
         raise ProviderRunnerError("provider_attempt_transcript_digest_mismatch")
 
-    step_id = str(execution.get("step_id") or "")
     request_path = adapter_request_path(
         state_root, str(run["run_id"]), step_id, str(adapter["provider_adapter_id"])
     )
     request = read_private_json(state_root, request_path, artifact_kind="adapter_request")
+    request_adapter = request.get("adapter")
+    if (
+        not isinstance(request_adapter, dict)
+        or adapter_model_policy_binding(request_adapter) != frozen_binding
+        or str(request.get("intended_model") or "") != frozen_binding["intended_model"]
+    ):
+        raise ProviderRunnerError(PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
     request_copy = dict(request)
     supplied_digest = str(request_copy.pop("adapter_request_digest", ""))
     if (
@@ -793,6 +892,9 @@ def build_provider_execution(
         "execution_version": "1",
         "step_id": request["step_id"],
         "adapter_id": adapter_id,
+        "provider_binding": adapter_model_policy_binding(
+            request.get("adapter") if isinstance(request.get("adapter"), dict) else {}
+        ),
         "work_order_digest": work_order_digest,
         "adapter_request_digest": request["adapter_request_digest"],
         "context_snapshot_digest": request["context_snapshot_digest"],
@@ -922,6 +1024,20 @@ def fake_provider_report(
     elif mode == "blocked":
         result = "blocked"
     provider = str(adapter.get("provider_target") or adapter.get("provider_adapter_id"))
+    effective_model = str(request.get("intended_model") or "")
+    if mode == "model_mismatch":
+        effective_model = "claude-model-mismatch"
+    provider_evidence = {
+        "provider": provider,
+        "intended_model": str(request.get("intended_model") or ""),
+        "effective_model": effective_model,
+        "request_id": request["request_id"],
+        "provider_session_id": f"fake-session-{request['run_id']}",
+        "transcript_path": request["transcript_path"],
+        "evidence_path": request["evidence_path"],
+    }
+    if mode == "missing_effective_model":
+        provider_evidence.pop("effective_model")
     return {
         "report_version": "1",
         "report_id": f"report-{request['run_id']}",
@@ -931,14 +1047,7 @@ def fake_provider_report(
         "step_id": request["step_id"],
         "result": result,
         "summary": "Fake provider completed the bounded work order.",
-        "provider_evidence": {
-            "provider": provider,
-            "effective_model": str(adapter.get("default_model") or "fake-model"),
-            "request_id": request["request_id"],
-            "provider_session_id": f"fake-session-{request['run_id']}",
-            "transcript_path": request["transcript_path"],
-            "evidence_path": request["evidence_path"],
-        },
+        "provider_evidence": provider_evidence,
         "findings": findings,
         "authority": {
             "canonical_result": "typed_report_file",
@@ -971,7 +1080,13 @@ def execute_provider(
         if fake_provider_mode == "unavailable":
             return "provider_unavailable", None, {"reason": "fake_provider_unavailable"}
         report = fake_provider_report(request=request, adapter=adapter, mode=fake_provider_mode)
-        return "ok", report, {"duration_ms": int((time.monotonic() - started) * 1000)}
+        report_evidence = report.get("provider_evidence")
+        details = {"duration_ms": int((time.monotonic() - started) * 1000)}
+        if isinstance(report_evidence, dict):
+            effective_model = report_evidence.get("effective_model")
+            if isinstance(effective_model, str) and effective_model:
+                details["effective_model"] = effective_model
+        return "ok", report, details
 
     adapter_id = str(adapter.get("provider_adapter_id") or "")
     if adapter_id not in LIVE_ADAPTERS:
@@ -1041,7 +1156,8 @@ def bind_live_report(
     supplied = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
     bound["provider_evidence"] = {
         "provider": details.get("provider") or supplied.get("provider") or adapter["provider_target"],
-        "effective_model": details.get("effective_model") or supplied.get("effective_model") or adapter.get("default_model") or "unknown",
+        "intended_model": request.get("intended_model") or "",
+        "effective_model": details.get("effective_model") or "",
         "request_id": request["request_id"],
         "provider_session_id": details.get("provider_session_id") or supplied.get("provider_session_id") or f"session-{request['run_id']}",
         "transcript_path": request["transcript_path"],
@@ -1066,6 +1182,64 @@ def parse_provider_stdout(stdout: bytes | str) -> tuple[str, dict[str, Any] | No
     return "ok", payload, {"stdout_sha256": stdout_sha256}
 
 
+def parsed_effective_model(details: dict[str, Any]) -> str:
+    candidate = details.get("effective_model")
+    if isinstance(candidate, str) and candidate:
+        return candidate
+    return ""
+
+
+def enforce_effective_model_policy(
+    *,
+    outcome: str,
+    report: dict[str, Any] | None,
+    details: dict[str, Any],
+    request: dict[str, Any],
+    adapter: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
+    if outcome != "ok" or report is None:
+        return outcome, report, details
+    intended_model = str(request.get("intended_model") or "")
+    effective_model = parsed_effective_model(details)
+    details["intended_model"] = intended_model
+    if effective_model:
+        details["effective_model"] = effective_model
+    effective_model_policy = str(adapter.get("effective_model_policy") or "")
+    if effective_model_policy not in EFFECTIVE_MODEL_POLICIES:
+        return (
+            "adapter_descriptor_invalid",
+            None,
+            {**details, "reason": "effective_model_policy_unsupported"},
+        )
+    if effective_model_policy == "required_exact_match" and (
+        not intended_model or effective_model != intended_model
+    ):
+        return (
+            PROVIDER_MODEL_MISMATCH,
+            None,
+            {**details, "reason": PROVIDER_MODEL_MISMATCH},
+        )
+    assurance = MODEL_ASSURANCE_FOR_POLICY[effective_model_policy]
+    report = dict(report)
+    provider_evidence = (
+        dict(report.get("provider_evidence"))
+        if isinstance(report.get("provider_evidence"), dict)
+        else {}
+    )
+    provider_evidence.update(
+        {
+            "provider_adapter_id": str(adapter.get("provider_adapter_id") or ""),
+            "intended_model": intended_model,
+            "effective_model_policy": effective_model_policy,
+            "model_assurance": assurance,
+        }
+    )
+    report["provider_evidence"] = provider_evidence
+    details["effective_model_policy"] = effective_model_policy
+    details["model_assurance"] = assurance
+    return outcome, report, details
+
+
 def normalized_evidence(
     *,
     request: dict[str, Any],
@@ -1082,7 +1256,12 @@ def normalized_evidence(
         "provider_adapter_id": adapter["provider_adapter_id"],
         "provider_target": adapter["provider_target"],
         "provider": details.get("provider") or report_evidence.get("provider") or adapter["provider_target"],
-        "effective_model": details.get("effective_model") or report_evidence.get("effective_model") or adapter.get("default_model") or "unknown",
+        "intended_model": request.get("intended_model") or "unknown",
+        "effective_model": details.get("effective_model") or report_evidence.get("effective_model") or "unknown",
+        "effective_model_policy": str(adapter.get("effective_model_policy") or ""),
+        "model_assurance": MODEL_ASSURANCE_FOR_POLICY.get(
+            str(adapter.get("effective_model_policy") or ""), ""
+        ),
         "request_id": request["request_id"],
         "run_id": request["run_id"],
         "workflow_id": request["workflow_id"],
@@ -1255,6 +1434,15 @@ def run_provider(
                             "reason": "recorded_provider_adapter_unavailable",
                             "workflow_run": run,
                         }
+                    recorded_adapter_errors = validate_adapter_descriptor(recorded_adapter)
+                    if recorded_adapter_errors:
+                        return {
+                            "schema_version": 1,
+                            "decision": "blocked",
+                            "reason": "adapter_descriptor_invalid",
+                            "errors": recorded_adapter_errors,
+                            "workflow_run": run,
+                        }
                     adapter_id = recorded_adapter_id
                     adapter = recorded_adapter
                     subject["adapter_id"] = recorded_adapter_id
@@ -1314,6 +1502,7 @@ def run_provider(
                             "live_execution_not_enabled",
                             "live_env_guard_missing",
                             "lease_lost",
+                            PROVIDER_MODEL_MISMATCH,
                         }
                         retry = not non_retryable and int(
                             retry_state["auto_retries_used"]
@@ -1448,6 +1637,30 @@ def run_provider(
                     "reason": exc.reason_class,
                     "workflow_run": run,
                 }
+            frozen_binding = work_order_model_policy_binding(work_order)
+            current_binding = adapter_model_policy_binding(adapter)
+            approved_binding = approved_model_policy_binding(run)
+            previous_execution = run.get("provider_execution")
+            has_previous_execution = isinstance(previous_execution, dict)
+            previous_binding = (
+                previous_execution.get("provider_binding")
+                if has_previous_execution
+                else None
+            )
+            if (
+                frozen_binding != approved_binding
+                or frozen_binding != current_binding
+                or (
+                    has_previous_execution
+                    and previous_binding != frozen_binding
+                )
+            ):
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+                    "workflow_run": run,
+                }
             work_order_errors = validate_work_order_for_runner(work_order, state_root=state_root, run=run)
             if work_order_errors:
                 return {
@@ -1455,6 +1668,13 @@ def run_provider(
                     "decision": "blocked",
                     "reason": "work_order_not_provider_safe",
                     "errors": work_order_errors,
+                }
+            if not provider_adapter_model_binding_matches(work_order, adapter):
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+                    "workflow_run": run,
                 }
             execution_binding: dict[str, Any] = {}
             if live and os.environ.get(LIVE_ENV_FLAG) == "1":
@@ -1465,6 +1685,7 @@ def run_provider(
                         "execution_version": "1",
                         "step_id": step_id,
                         "adapter_id": adapter_id,
+                        "provider_binding": adapter_model_policy_binding(adapter),
                         "work_order_digest": order_digest,
                         "adapter_request_digest": "sha256:" + "0" * 64,
                         "context_snapshot_digest": "sha256:" + "0" * 64,
@@ -1547,6 +1768,30 @@ def run_provider(
                     "reason": str(exc),
                     "workflow_run": run,
                 }
+            planned_execution = build_provider_execution(
+                run=run,
+                adapter_id=adapter_id,
+                work_order_digest=order_digest,
+                request=request,
+                attempt_id=attempt_id,
+                lease_id=lease_id,
+                timeout_seconds=timeout_seconds,
+                principal=principal,
+            )
+            request_adapter = request.get("adapter")
+            if (
+                not isinstance(request_adapter, dict)
+                or adapter_model_policy_binding(request_adapter) != frozen_binding
+                or str(request.get("intended_model") or "")
+                != frozen_binding["intended_model"]
+                or planned_execution.get("provider_binding") != frozen_binding
+            ):
+                return {
+                    "schema_version": 1,
+                    "decision": "blocked",
+                    "reason": PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+                    "workflow_run": run,
+                }
             request_path = adapter_request_path(state_root, run_id, step_id, adapter["provider_adapter_id"])
             secure_directory(state_root, request_path.parent.parent)
             private_atomic_write_json(state_root, request_path, request)
@@ -1564,16 +1809,7 @@ def run_provider(
                     "reason": str(exc),
                     "workflow_run": run,
                 }
-            run["provider_execution"] = build_provider_execution(
-                run=run,
-                adapter_id=adapter_id,
-                work_order_digest=order_digest,
-                request=request,
-                attempt_id=attempt_id,
-                lease_id=lease_id,
-                timeout_seconds=timeout_seconds,
-                principal=principal,
-            )
+            run["provider_execution"] = planned_execution
             run_lifecycle.transition_run(
                 state_root,
                 run_id,
@@ -1623,6 +1859,14 @@ def run_provider(
         if outcome == "ok" and report is None:
             outcome = "report_not_written"
             details = {**details, "reason": "report_not_written"}
+        else:
+            outcome, report, details = enforce_effective_model_policy(
+                outcome=outcome,
+                report=report,
+                details=details,
+                request=request,
+                adapter=adapter,
+            )
 
         raw_stdout = details.pop("_raw_stdout", b"")
         raw_stderr = details.pop("_raw_stderr", b"")
@@ -1750,6 +1994,7 @@ def run_provider(
                     "live_execution_not_enabled",
                     "live_env_guard_missing",
                     "lease_lost",
+                    PROVIDER_MODEL_MISMATCH,
                 } or bool(authorization_error)
                 retry = not non_retryable and int(retry_state["auto_retries_used"]) < int(retry_state["max_auto_retries"])
                 if retry:
