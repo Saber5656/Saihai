@@ -28,6 +28,12 @@ audit is in
 
 Create the file in the primary checkout, or validate an existing file:
 
+The setup command requires the eight directory options shown below.
+`SAIHAI_ROOT`, the ninth required canonical path, defaults to the primary
+checkout that contains the catalog; pass `--saihai-root` only to override that
+default. Every supplied path must already exist as a readable directory, and
+the Agents Vault must also be writable.
+
 ```sh
 python3 scripts/setup_directory_paths.py \
   --agents-vault /absolute/path/to/Agents-Vault \
@@ -48,8 +54,8 @@ The setup command refuses to overwrite an existing file.
 
 The loader locates the catalog in this order:
 
-1. path supplied by process variable `SAIHAI_DIRECTORY_PATH_ENV` (or legacy `SAHAI_DIRECTORY_PATH_ENV`);
-2. `directory-path.env` below process `SAIHAI_ROOT` or legacy `SAHAI_ROOT`;
+1. path supplied by process variable `SAIHAI_DIRECTORY_PATH_ENV`;
+2. `directory-path.env` below process `SAIHAI_ROOT`;
 3. `directory-path.env` in the current Saihai checkout;
 4. `directory-path.env` in the primary checkout of a linked Git worktree;
 5. no file.
@@ -79,8 +85,10 @@ values.
 
 Normal Saihai entrypoints fail closed unless all nine canonical directory paths
 listed as required below exist and are readable. `AGENTS_VAULT_ROOT` must also
-be writable. Bootstrap-only consumers may load the catalog without enforcing
-the complete contract so that recovery remains possible.
+be writable. The setup command applies the same checks before creating the
+catalog and refuses to overwrite an existing file. Bootstrap-only consumers
+may load the catalog without enforcing the complete contract so that recovery
+remains possible.
 
 ## Canonical variables
 
@@ -111,6 +119,7 @@ emits value-free deprecation diagnostics.
 | `YASU_VAULT_ROOT` | `USER_VAULT_ROOT` |
 | `SKILLS_REPO_SKILLS_ROOT` | `SKILLS_ROOT` |
 | `DEV_REPO_ROOT` | `DEV_ROOT` |
+| `SAHAI_DIRECTORY_PATH_ENV` | `SAIHAI_DIRECTORY_PATH_ENV` |
 | `SAHAI_ORCH_STATE_ROOT` | `SAIHAI_ORCH_STATE_ROOT` |
 | `SAHAI_ITB_STATE_ROOTS` | `SAIHAI_ITB_STATE_ROOTS` |
 
@@ -132,5 +141,5 @@ python3 scripts/setup_directory_paths.py --check
 ```
 
 To recover from an invalid explicit selector, unset
-`SAIHAI_DIRECTORY_PATH_ENV` (and legacy `SAHAI_DIRECTORY_PATH_ENV`) so normal
-primary-checkout discovery can resume.
+`SAIHAI_DIRECTORY_PATH_ENV` so normal primary-checkout discovery can resume.
+Compatibility selector names are listed only in the table above.
