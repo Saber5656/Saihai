@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,13 @@ ROLE_AGENT_REGISTRY = (
 MODEL_REGISTRY = (
     REPO_ROOT / "organization/runtime/infra-team-bootstrap/references/model-registry.md"
 )
+MODEL_REGISTRY_STATUSES = {"active", "reference", "deprecated"}
+
+
+class ModelRegistryError(ValueError):
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
 
 
 def relative_path(path: Path, repo_root: Path) -> str:
@@ -46,8 +54,8 @@ def markdown_cells(line: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("|").split("|")]
 
 
-def load_model_roles(path: Path) -> set[str]:
-    """Return agent ids from the model registry's Model Routing table."""
+def load_model_role_statuses(path: Path) -> dict[str, str]:
+    """Return agent ids and statuses from the model registry's Model Routing table."""
     lines = path.read_text(encoding="utf-8").splitlines()
     header_index = -1
     header: list[str] = []
@@ -61,9 +69,15 @@ def load_model_roles(path: Path) -> set[str]:
             break
     if header_index < 0:
         raise ValueError("Model Routing table header is missing")
+    if "status" not in header:
+        raise ModelRegistryError(
+            "model_registry_status_missing",
+            "Model Routing table is missing required status column",
+        )
 
     agent_index = header.index("agent_id")
-    roles: set[str] = set()
+    status_index = header.index("status")
+    role_statuses: dict[str, str] = {}
     for line in lines[header_index + 1 :]:
         if not line.lstrip().startswith("|"):
             break
@@ -77,12 +91,23 @@ def load_model_roles(path: Path) -> set[str]:
         role_id = cells[agent_index]
         if not role_id:
             raise ValueError("Model Routing row has an empty agent_id")
-        if role_id in roles:
+        if role_id in role_statuses:
             raise ValueError(f"Model Routing has duplicate agent_id: {role_id}")
-        roles.add(role_id)
-    if not roles:
+        status = cells[status_index]
+        if not status:
+            raise ModelRegistryError(
+                "model_registry_status_missing",
+                f"Model Routing row has an empty status: {role_id}",
+            )
+        if status not in MODEL_REGISTRY_STATUSES:
+            raise ModelRegistryError(
+                "model_registry_status_invalid",
+                f"Model Routing row has invalid status {status!r}: {role_id}",
+            )
+        role_statuses[role_id] = status
+    if not role_statuses:
         raise ValueError("Model Routing table has no role entries")
-    return roles
+    return role_statuses
 
 
 def role_resolution_error(
@@ -137,12 +162,15 @@ def validate_template_roles(
         registered_roles = set()
 
     try:
-        model_roles = load_model_roles(model_registry_path)
+        model_role_statuses = load_model_role_statuses(model_registry_path)
+    except ModelRegistryError as exc:
+        errors.append(source_error(model_registry_path, repo_root, exc.code, str(exc)))
+        model_role_statuses = {}
     except (OSError, ValueError) as exc:
         errors.append(
             source_error(model_registry_path, repo_root, "model_registry_invalid", str(exc))
         )
-        model_roles = set()
+        model_role_statuses = {}
 
     if not roles_root.is_dir():
         errors.append(source_error(roles_root, repo_root, "roles_root_missing", "not a directory"))
@@ -248,7 +276,8 @@ def validate_template_roles(
                         detail="role id is absent from role-agent-registry role_layers",
                     )
                 )
-            if role_id not in model_roles:
+            model_status = model_role_statuses.get(role_id)
+            if model_status is None:
                 errors.append(
                     role_resolution_error(
                         code="model_registry_entry_missing",
@@ -258,6 +287,18 @@ def validate_template_roles(
                         step_index=step_index,
                         role_id=role_id,
                         detail="role id is absent from model-registry Model Routing",
+                    )
+                )
+            elif model_status != "active":
+                errors.append(
+                    role_resolution_error(
+                        code="model_registry_entry_not_active",
+                        template_path=template_path,
+                        repo_root=repo_root,
+                        step_id=step_id,
+                        step_index=step_index,
+                        role_id=role_id,
+                        detail=f"model-registry status is {model_status!r}; expected 'active'",
                     )
                 )
 
@@ -271,8 +312,29 @@ def validate_template_roles(
     }
 
 
-def main() -> None:
-    result = validate_template_roles()
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description="Validate active workflow template roles against organization registries"
+    )
+    parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+    parser.add_argument("--workflow-registry", type=Path)
+    parser.add_argument("--roles-root", type=Path)
+    parser.add_argument("--role-agent-registry", type=Path)
+    parser.add_argument("--model-registry", type=Path)
+    args = parser.parse_args(argv)
+    repo_root = args.repo_root.resolve()
+    result = validate_template_roles(
+        repo_root=repo_root,
+        workflow_registry_path=args.workflow_registry
+        or repo_root / "organization/runtime/workflows/registry.yaml",
+        roles_root=args.roles_root or repo_root / "organization/roles",
+        role_agent_registry_path=args.role_agent_registry
+        or repo_root
+        / "organization/runtime/infra-team-bootstrap/config/role-agent-registry.yaml",
+        model_registry_path=args.model_registry
+        or repo_root
+        / "organization/runtime/infra-team-bootstrap/references/model-registry.md",
+    )
     print(json.dumps(result, ensure_ascii=False))
     raise SystemExit(0 if result["decision"] == "ok" else 1)
 
