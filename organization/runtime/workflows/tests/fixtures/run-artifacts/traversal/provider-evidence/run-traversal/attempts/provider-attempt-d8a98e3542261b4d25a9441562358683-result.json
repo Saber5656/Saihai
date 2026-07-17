@@ -6,6 +6,8 @@
   "context_snapshot_digest": "sha256:c61d64e6821d5f5afe31b40398cfabc0b0aec8803664fbec2d9e1a121291d559",
   "details": {
     "duration_ms": 0,
+    "effective_model": "claude-sonnet-4-6",
+    "intended_model": "claude-sonnet-4-6",
     "transcript_sha256": "sha256:b775d5f3ca3017e8cf72bbaf6642c89f511e4cc2949e7d85cee236f3fab6e8a8"
   },
   "lease_id": "provider-lease-fixture",
@@ -20,8 +22,9 @@
     },
     "findings": [],
     "provider_evidence": {
-      "effective_model": "claude-sonnet-operator-selected",
+      "effective_model": "claude-sonnet-4-6",
       "evidence_path": "__STATE_ROOT__/provider-evidence/run-traversal/review-provider-evidence.json",
+      "intended_model": "claude-sonnet-4-6",
       "provider": "claude_headless",
       "provider_session_id": "fake-session-run-traversal",
       "request_id": "req-traversal",
@@ -37,6 +40,6 @@
     "workflow_id": "single_step_external_review"
   },
   "transcript_path": "__STATE_ROOT__/provider-evidence/run-traversal/attempts/provider-attempt-d8a98e3542261b4d25a9441562358683-transcript.json",
-  "transcript_sha256": "sha256:920a9421f473626d6ceabf933247af2b375d4e0010e60647f7d3fb609a1bd8a5",
+  "transcript_sha256": "sha256:f6e5f20cd9729047c63c60081f35b04dcd562d7cc70e9a6e14cbd184beab3d2b",
   "work_order_digest": "sha256:4b64c196f2bc487d1e487a68bc4fd2876d7e5b74b924f4c1ef05e97f3b4f97bf"
 }

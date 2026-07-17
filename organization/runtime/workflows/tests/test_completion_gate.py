@@ -161,7 +161,8 @@ def prepare_terminal_run(
     evidence = {
         **fixed_fields,
         "provider": "claude_headless",
-        "effective_model": "claude-sonnet-test",
+        "intended_model": fixed_fields["intended_model"],
+        "effective_model": fixed_fields["intended_model"],
         "provider_request_id": f"provider-{request_id}",
         "provider_session_id": f"session-{run_id}",
         "duration_ms": 12,
@@ -184,7 +185,8 @@ def prepare_terminal_run(
         "summary": "Review completed.",
         "provider_evidence": {
             "provider": "claude_headless",
-            "effective_model": "claude-sonnet-test",
+            "intended_model": fixed_fields["intended_model"],
+            "effective_model": fixed_fields["intended_model"],
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",
             "transcript_path": str(transcript_path),

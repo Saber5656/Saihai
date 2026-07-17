@@ -94,6 +94,8 @@ def test_fake_provider_success_completes_with_normalized_evidence() -> None:
         assert "provider_evidence_version" not in evidence
         assert_equal(evidence["provider_adapter_id"], "claude_headless_p0", "adapter id")
         assert_equal(evidence["provider_target"], "claude_headless", "provider target")
+        assert_equal(evidence["intended_model"], "claude-sonnet-4-6", "intended model")
+        assert_equal(evidence["effective_model"], evidence["intended_model"], "model match")
         assert_equal(evidence["request_id"], "req-provider-ok", "evidence request id")
         assert_equal(evidence["run_id"], "run-provider-ok", "evidence run id")
         assert_equal(evidence["workflow_id"], "single_step_external_review", "evidence workflow id")
@@ -136,6 +138,53 @@ def test_fake_provider_success_completes_with_normalized_evidence() -> None:
             "complete",
             "completion evidence decision",
         )
+
+
+def test_fake_provider_model_mismatch_waits_for_human_without_accepting_report() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-model-mismatch"
+        prepare_run(state_root, request_id="req-provider-model-mismatch", run_id=run_id)
+
+        blocked = run_provider(
+            state_root,
+            run_id=run_id,
+            mode="model_mismatch",
+            check=False,
+        )
+        payload = load_payload(blocked)
+        evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
+
+        assert_equal(blocked.returncode, 2, "model mismatch exit")
+        assert_equal(payload["reason"], provider_runner.PROVIDER_MODEL_MISMATCH, "typed reason")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "mismatch state")
+        assert_equal(evidence["outcome"], provider_runner.PROVIDER_MODEL_MISMATCH, "evidence outcome")
+        assert_equal(evidence["intended_model"], "claude-sonnet-4-6", "intended model")
+        assert_equal(evidence["effective_model"], "claude-model-mismatch", "effective model")
+        assert not (state_root / "reports" / run_id / "review-external-review-report.json").exists()
+
+
+def test_fake_provider_missing_effective_model_waits_for_human() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-model-missing"
+        prepare_run(state_root, request_id="req-provider-model-missing", run_id=run_id)
+
+        blocked = run_provider(
+            state_root,
+            run_id=run_id,
+            mode="missing_effective_model",
+            check=False,
+        )
+        payload = load_payload(blocked)
+        evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
+
+        assert_equal(blocked.returncode, 2, "missing model exit")
+        assert_equal(payload["reason"], provider_runner.PROVIDER_MODEL_MISMATCH, "typed reason")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "missing model state")
+        assert_equal(evidence["intended_model"], "claude-sonnet-4-6", "intended model")
+        assert_equal(evidence["effective_model"], "unknown", "missing effective sentinel")
+        assert not (state_root / "reports" / run_id / "review-external-review-report.json").exists()
 
 
 def test_runner_dispatches_through_adapter_metadata() -> None:
@@ -209,6 +258,11 @@ def test_waiting_provider_retry_records_fresh_request_authority() -> None:
             work_order=work_order,
             adapter=first_adapter,
             principal=principal,
+        )
+        assert_equal(
+            first_request["adapter"]["command_argv"][3],
+            first_request["intended_model"],
+            "digest-pinned argv model",
         )
         first_request_path = provider_runner.adapter_request_path(
             state_root,
@@ -569,7 +623,7 @@ def test_patched_live_adapter_completes_without_raw_output_leakage() -> None:
             "report": report,
             "evidence_fields": {
                 "provider": "anthropic",
-                "effective_model": "claude-fixture",
+                "effective_model": "claude-sonnet-4-6",
                 "provider_request_id": "provider-request-fixture",
                 "provider_session_id": "provider-session-fixture",
                 "usage": {"input_tokens": 1, "output_tokens": 2},
@@ -610,6 +664,7 @@ def test_patched_live_adapter_completes_without_raw_output_leakage() -> None:
         typed_report = json.loads(Path(payload["report_path"]).read_text(encoding="utf-8"))
         assert base64.b64decode(transcript["stdout_base64"]) == marker
         assert_equal(evidence["provider_request_id"], "provider-request-fixture", "provider request id")
+        assert_equal(evidence["intended_model"], evidence["effective_model"], "live model match")
         assert_equal(evidence["usage"], {"input_tokens": 1, "output_tokens": 2}, "provider usage")
         assert_equal(evidence["stdout_sha256"], provider_runner.sha256_bytes(marker), "raw stdout digest")
         assert_equal(
@@ -619,6 +674,83 @@ def test_patched_live_adapter_completes_without_raw_output_leakage() -> None:
         )
         shared = json.dumps({"run": payload["workflow_run"], "evidence": evidence, "report": typed_report})
         assert marker.decode() not in shared
+
+
+def test_patched_live_missing_parsed_model_rejects_report_self_claim() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-provider-live-model-missing"
+        request_id = "req-provider-live-model-missing"
+        prepare_run(state_root, request_id=request_id, run_id=run_id)
+        report = {
+            "report_version": "1",
+            "report_id": f"report-{run_id}",
+            "request_id": request_id,
+            "run_id": run_id,
+            "workflow_id": "single_step_external_review",
+            "step_id": "review",
+            "result": "pass",
+            "summary": "Provider-authored model claim must not replace CLI metadata.",
+            "provider_evidence": {
+                "effective_model": "claude-sonnet-4-6",
+            },
+            "findings": [],
+            "authority": {
+                "canonical_result": "typed_report_file",
+                "stdout_is_signal_only": True,
+                "raw_transcript_shared": False,
+            },
+        }
+        invocation = {
+            "status": "ok",
+            "reason": "ok",
+            "exit_code": 0,
+            "stdout": b"{}",
+            "stderr": b"",
+            "duration_ms": 1,
+            "report": report,
+            "evidence_fields": {
+                "provider": "anthropic",
+                "provider_request_id": "provider-request-model-missing",
+                "provider_session_id": "provider-session-model-missing",
+                "usage": {},
+            },
+        }
+        original = provider_runner.LIVE_ADAPTERS["claude_headless_p0"]
+        original_binding = provider_runner.provider_adapters.resolve_execution_binding
+        original_env = os.environ.get(provider_runner.LIVE_ENV_FLAG)
+        provider_runner.LIVE_ADAPTERS["claude_headless_p0"] = lambda *_args, **_kwargs: invocation
+        provider_runner.provider_adapters.resolve_execution_binding = lambda _adapter_id: {
+            "binding_version": "1",
+            "binary": {"path": "/fixture/claude", "sha256": "sha256:" + "a" * 64},
+            "confinement": "test",
+        }
+        os.environ[provider_runner.LIVE_ENV_FLAG] = "1"
+        try:
+            payload = provider_runner.run_provider(
+                state_root=state_root,
+                run_id=run_id,
+                live=True,
+                principal={
+                    "principal_type": "harness_runner",
+                    "principal_id": "live-model-missing-test",
+                    "authn_method": "local_test",
+                },
+            )
+        finally:
+            provider_runner.LIVE_ADAPTERS["claude_headless_p0"] = original
+            provider_runner.provider_adapters.resolve_execution_binding = original_binding
+            if original_env is None:
+                os.environ.pop(provider_runner.LIVE_ENV_FLAG, None)
+            else:
+                os.environ[provider_runner.LIVE_ENV_FLAG] = original_env
+
+        evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
+        assert_equal(payload["decision"], "blocked", "live missing model decision")
+        assert_equal(payload["reason"], provider_runner.PROVIDER_MODEL_MISMATCH, "typed reason")
+        assert_equal(payload["workflow_run"]["run_state"], "waiting_human", "human gate")
+        assert_equal(evidence["effective_model"], "unknown", "parsed model missing sentinel")
+        assert not (state_root / "reports" / run_id / "review-external-review-report.json").exists()
 
 
 def test_run_provider_step_honors_adapter_alias() -> None:
@@ -1064,6 +1196,8 @@ def test_request_artifact_paths_are_recomputed_and_confined() -> None:
 if __name__ == "__main__":
     tests = (
         test_fake_provider_success_completes_with_normalized_evidence,
+        test_fake_provider_model_mismatch_waits_for_human_without_accepting_report,
+        test_fake_provider_missing_effective_model_waits_for_human,
         test_runner_dispatches_through_adapter_metadata,
         test_runner_transition_request_wins_over_manual_adapter_candidate,
         test_waiting_provider_retry_records_fresh_request_authority,
@@ -1080,6 +1214,7 @@ if __name__ == "__main__":
         test_arbitrary_live_command_adapter_is_rejected,
         test_live_guard_requires_flag_and_environment,
         test_patched_live_adapter_completes_without_raw_output_leakage,
+        test_patched_live_missing_parsed_model_rejects_report_self_claim,
         test_run_provider_step_honors_adapter_alias,
         test_undecodable_provider_stdout_is_malformed_output,
         test_provider_invocation_releases_global_lock_and_renews_lease,

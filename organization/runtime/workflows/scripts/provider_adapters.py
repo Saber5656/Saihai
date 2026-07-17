@@ -49,6 +49,27 @@ class AdapterConfigurationError(ValueError):
     """A fail-closed adapter configuration or request error."""
 
 
+def claude_argv_template(intended_model: str) -> list[str]:
+    return [
+        "{executable}",
+        "--print",
+        "--model",
+        intended_model,
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "plan",
+        "--tools",
+        "",
+        "--disable-slash-commands",
+        "--safe-mode",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+    ]
+
+
 def extract_json_object(text: str) -> dict[str, Any] | None:
     stripped = text.strip()
     candidates = [stripped]
@@ -614,22 +635,15 @@ def invoke_claude_cli(
         binary = Path(binding["binary"]["path"])
     except AdapterConfigurationError as exc:
         return _configuration_failure(str(exc))
-    command = [
-        str(binary),
-        "--print",
-        "--output-format",
-        "json",
-        "--permission-mode",
-        "plan",
-        "--tools",
-        "",
-        "--disable-slash-commands",
-        "--safe-mode",
-        "--no-session-persistence",
-        "--strict-mcp-config",
-        "--mcp-config",
-        '{"mcpServers":{}}',
-    ]
+    intended_model = request.get("intended_model")
+    if not isinstance(intended_model, str) or not intended_model:
+        return _configuration_failure("intended_model_missing")
+    adapter = request.get("adapter")
+    template = adapter.get("command_argv") if isinstance(adapter, dict) else None
+    expected_template = claude_argv_template(intended_model)
+    if template != expected_template:
+        return _configuration_failure("claude_argv_template_mismatch")
+    command = [str(binary) if item == "{executable}" else item for item in template]
     return _invoke(
         command=command,
         request=request,

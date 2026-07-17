@@ -3,6 +3,8 @@
   "payload": {
     "details": {
       "duration_ms": 0,
+      "effective_model": "claude-sonnet-4-6",
+      "intended_model": "claude-sonnet-4-6",
       "transcript_sha256": "sha256:d6f4c14513257814bf56e6af199cb4bf36a7f6030fd5ad112916fad0bcacdc5b"
     },
     "outcome": "ok"

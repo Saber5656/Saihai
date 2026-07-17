@@ -127,6 +127,7 @@ def build(state_root: Path, **overrides) -> dict:
             "report_path",
             str(state_root / "reports" / "run-work-order" / "review-external-review-report.json"),
         ),
+        intended_model_value=overrides.pop("intended_model", "claude-sonnet-4-6"),
     )
 
 
@@ -142,6 +143,7 @@ def test_build_valid_p0_order() -> None:
         assert_equal(order["permission_mode"], "readonly", "permission")
         assert_equal(order["assignment_role"], "reviewer", "assignment")
         assert_equal(order["external_provider_allowed"], True, "external provider")
+        assert_equal(order["intended_model"], "claude-sonnet-4-6", "intended model")
         assert_equal(order["activation_scope"]["step_budget"], 1, "step budget")
         assert_equal(order["activation_scope"]["allowed_ops"], {"edit": False, "commit": False, "push": False, "network": False}, "ops")
         assert "Step 'review'" in order["instruction"], "instruction includes step id"

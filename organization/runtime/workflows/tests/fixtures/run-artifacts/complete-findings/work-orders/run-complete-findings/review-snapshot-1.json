@@ -53,6 +53,7 @@
     "external_provider_allowed": true,
     "from_role": "frontdoor",
     "instruction": "Send one bounded readonly review or consultation work order to an external provider adapter and require an authoritative typed report/evidence file. Step 'review' (reviewer): follow the input work order contract and produce external_review_report.",
+    "intended_model": "claude-sonnet-4-6",
     "permission_mode": "readonly",
     "policy_digest": "sha256:20f1efdd5bd67071d0fc5090f3105574f1d09a6313f294c7b74180da07d5740a",
     "report_path": "__STATE_ROOT__/reports/run-complete-findings/review-external-review-report.json",

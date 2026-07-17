@@ -1,7 +1,9 @@
 {
   "payload": {
     "details": {
-      "duration_ms": 0
+      "duration_ms": 0,
+      "effective_model": "claude-sonnet-4-6",
+      "intended_model": "claude-sonnet-4-6"
     },
     "outcome": "ok"
   },

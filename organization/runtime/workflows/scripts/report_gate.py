@@ -513,6 +513,7 @@ def validate_provider_evidence(
         return ["provider_evidence must be object"]
     required = {
         "provider",
+        "intended_model",
         "effective_model",
         "request_id",
         "provider_session_id",
@@ -527,7 +528,11 @@ def validate_provider_evidence(
         errors.append("provider_evidence unexpected:" + ",".join(extra))
     if str(value.get("request_id")) != str(run.get("request_id")):
         errors.append("provider_evidence.request_id mismatch")
-    for field in ("provider", "effective_model", "provider_session_id", "transcript_path", "evidence_path"):
+    if str(value.get("intended_model") or "") != str(work_order.get("intended_model") or ""):
+        errors.append("provider_evidence.intended_model mismatch")
+    if str(value.get("effective_model") or "") != str(value.get("intended_model") or ""):
+        errors.append("provider_evidence effective_model must match intended_model")
+    for field in ("provider", "intended_model", "effective_model", "provider_session_id", "transcript_path", "evidence_path"):
         if not isinstance(value.get(field), str) or not value.get(field):
             errors.append(f"provider_evidence.{field} must be non-empty string")
     try:
@@ -592,10 +597,14 @@ def validate_normalized_provider_evidence(
         if str(value.get(field) or "") != expected:
             errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
 
-    for field in ("provider", "effective_model", "provider_session_id"):
+    for field in ("provider", "intended_model", "effective_model", "provider_session_id"):
         expected = str(report_provider_evidence.get(field) or "")
         if str(value.get(field) or "") != expected:
             errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")
+    if str(value.get("intended_model") or "") != str(work_order.get("intended_model") or ""):
+        errors.append("normalized_evidence.intended_model mismatch with work order")
+    if str(value.get("effective_model") or "") != str(value.get("intended_model") or ""):
+        errors.append("normalized_evidence.effective_model must match intended_model")
 
     adapter_identity, adapter_errors = authoritative_adapter_request(
         state_root,

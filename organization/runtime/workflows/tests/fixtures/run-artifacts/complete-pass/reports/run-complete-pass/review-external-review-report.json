@@ -6,8 +6,9 @@
   },
   "findings": [],
   "provider_evidence": {
-    "effective_model": "claude-sonnet-operator-selected",
+    "effective_model": "claude-sonnet-4-6",
     "evidence_path": "__STATE_ROOT__/provider-evidence/run-complete-pass/review-provider-evidence.json",
+    "intended_model": "claude-sonnet-4-6",
     "provider": "claude_headless",
     "provider_session_id": "fake-session-run-complete-pass",
     "request_id": "req-complete-pass",

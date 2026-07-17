@@ -4718,6 +4718,7 @@ def manual_provider_evidence_contract(
         "evidence_version": "1",
         "provider_adapter_id": capability["provider_adapter_id"],
         "provider_target": capability["provider_target"],
+        "intended_model": capability["default_model"],
         "request_id": run["request_id"],
         "run_id": run["run_id"],
         "workflow_id": run["workflow_id"],
@@ -4892,6 +4893,7 @@ def _prepare_claude_adapter_locked(
         "request_id": run["request_id"],
         "workflow_id": run["workflow_id"],
         "step_id": step_id,
+        "intended_model": work_order["intended_model"],
         "work_order_path": str(order_path),
         "report_path": work_order["report_path"],
         "evidence_path": str(evidence_path),
@@ -5492,6 +5494,10 @@ def build_work_order(
     step: dict[str, Any],
     issuer_principal: dict[str, Any],
 ) -> dict[str, Any]:
+    capability = claude_headless_capability()
+    intended_model = str(capability.get("default_model") or "")
+    if not intended_model:
+        raise FrontdoorError("provider_intended_model_missing")
     resolved_refs = verified_context_refs_for_work_order(request_record)
     if not isinstance(resolved_refs, list) or not resolved_refs:
         refs = run["activation"]["context_scope"]["refs"]
@@ -5528,6 +5534,7 @@ def build_work_order(
         policy_digest_value=policy_digest(request_record["approved_activation"]),
         signature=None,
         report_path_value=str(report_path(state_root, str(run["run_id"]), step_id)),
+        intended_model_value=intended_model,
         worker_execution_plan=worker_execution_plan,
     )
     unsigned_digest = stable_digest(work_order)
@@ -5638,7 +5645,18 @@ def parser() -> argparse.ArgumentParser:
     run_provider_parser.add_argument("--live", action="store_true")
     run_provider_parser.add_argument(
         "--fake-provider-mode",
-        choices=["", "success", "findings", "blocked", "timeout", "nonzero", "malformed", "unavailable"],
+        choices=[
+            "",
+            "success",
+            "findings",
+            "blocked",
+            "timeout",
+            "nonzero",
+            "malformed",
+            "unavailable",
+            "model_mismatch",
+            "missing_effective_model",
+        ],
         default="",
     )
     run_provider_parser.add_argument("--principal-type", default="harness_runner")

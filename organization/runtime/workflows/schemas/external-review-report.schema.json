@@ -52,6 +52,7 @@
       "type": "object",
       "required": [
         "provider",
+        "intended_model",
         "effective_model",
         "request_id",
         "provider_session_id",
@@ -60,6 +61,9 @@
       ],
       "properties": {
         "provider": {
+          "type": "string"
+        },
+        "intended_model": {
           "type": "string"
         },
         "effective_model": {

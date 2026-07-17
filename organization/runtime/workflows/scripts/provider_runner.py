@@ -39,6 +39,7 @@ MAX_PROVIDER_TIMEOUT_SECONDS = 86400
 DEFAULT_PROVIDER_LEASE_SECONDS = 90
 DEFAULT_PROVIDER_HEARTBEAT_SECONDS = 30
 DEFAULT_MAX_AUTO_RETRIES = 5
+PROVIDER_MODEL_MISMATCH = "provider_model_mismatch"
 MAX_LIVE_CONTEXT_REFS = 20
 MAX_LIVE_CONTEXT_FILE_BYTES = 256_000
 MAX_LIVE_CONTEXT_TOTAL_BYTES = 1_000_000
@@ -457,6 +458,7 @@ def validate_adapter_descriptor(adapter: dict[str, Any]) -> list[str]:
         "requires_marker",
         "reset_strategy",
         "report_authority",
+        "default_model",
     }
     missing = sorted(required - set(adapter))
     if missing:
@@ -473,6 +475,12 @@ def validate_adapter_descriptor(adapter: dict[str, Any]) -> list[str]:
         errors.append("report_authority must be typed_report_and_evidence_file")
     if adapter.get("supports_structured_output") is not True:
         errors.append("supports_structured_output must be true")
+    if not isinstance(adapter.get("default_model"), str) or not adapter.get("default_model"):
+        errors.append("default_model must be non-empty string")
+    if adapter.get("provider_adapter_id") == "claude_headless_p0" and adapter.get(
+        "command_argv"
+    ) != provider_adapters.claude_argv_template(str(adapter.get("default_model") or "")):
+        errors.append("claude command_argv must match the registry-pinned model template")
     return errors
 
 
@@ -491,6 +499,8 @@ def validate_work_order_for_runner(
         errors.append("permission_mode must be readonly")
     if work_order.get("external_provider_allowed") is not True:
         errors.append("external_provider_allowed must be true")
+    if not isinstance(work_order.get("intended_model"), str) or not work_order.get("intended_model"):
+        errors.append("intended_model must be non-empty string")
     allowed_ops = ((work_order.get("activation_scope") or {}).get("allowed_ops") or {})
     for op in ("edit", "commit", "push", "network"):
         if allowed_ops.get(op) is not False:
@@ -549,6 +559,9 @@ def adapter_request(
     context_bytes = context_json.encode("utf-8")
     if len(context_bytes) > provider_adapters.MAX_CONTEXT_BYTES:
         raise ProviderRunnerError("context_snapshot_serialized_limit")
+    intended_model = str(work_order.get("intended_model") or "")
+    if not intended_model:
+        raise ProviderRunnerError("intended_model_missing")
     request = {
         "adapter_request_version": "1",
         "adapter": adapter,
@@ -556,6 +569,7 @@ def adapter_request(
         "request_id": run["request_id"],
         "workflow_id": run["workflow_id"],
         "step_id": step_id,
+        "intended_model": intended_model,
         "work_order_path": str(work_order_path(state_root, run_id, step_id)),
         "report_path": str(report_path),
         "evidence_path": str(evidence_path),
@@ -922,6 +936,20 @@ def fake_provider_report(
     elif mode == "blocked":
         result = "blocked"
     provider = str(adapter.get("provider_target") or adapter.get("provider_adapter_id"))
+    effective_model = str(request.get("intended_model") or "")
+    if mode == "model_mismatch":
+        effective_model = "claude-model-mismatch"
+    provider_evidence = {
+        "provider": provider,
+        "intended_model": str(request.get("intended_model") or ""),
+        "effective_model": effective_model,
+        "request_id": request["request_id"],
+        "provider_session_id": f"fake-session-{request['run_id']}",
+        "transcript_path": request["transcript_path"],
+        "evidence_path": request["evidence_path"],
+    }
+    if mode == "missing_effective_model":
+        provider_evidence.pop("effective_model")
     return {
         "report_version": "1",
         "report_id": f"report-{request['run_id']}",
@@ -931,14 +959,7 @@ def fake_provider_report(
         "step_id": request["step_id"],
         "result": result,
         "summary": "Fake provider completed the bounded work order.",
-        "provider_evidence": {
-            "provider": provider,
-            "effective_model": str(adapter.get("default_model") or "fake-model"),
-            "request_id": request["request_id"],
-            "provider_session_id": f"fake-session-{request['run_id']}",
-            "transcript_path": request["transcript_path"],
-            "evidence_path": request["evidence_path"],
-        },
+        "provider_evidence": provider_evidence,
         "findings": findings,
         "authority": {
             "canonical_result": "typed_report_file",
@@ -971,7 +992,13 @@ def execute_provider(
         if fake_provider_mode == "unavailable":
             return "provider_unavailable", None, {"reason": "fake_provider_unavailable"}
         report = fake_provider_report(request=request, adapter=adapter, mode=fake_provider_mode)
-        return "ok", report, {"duration_ms": int((time.monotonic() - started) * 1000)}
+        report_evidence = report.get("provider_evidence")
+        details = {"duration_ms": int((time.monotonic() - started) * 1000)}
+        if isinstance(report_evidence, dict):
+            effective_model = report_evidence.get("effective_model")
+            if isinstance(effective_model, str) and effective_model:
+                details["effective_model"] = effective_model
+        return "ok", report, details
 
     adapter_id = str(adapter.get("provider_adapter_id") or "")
     if adapter_id not in LIVE_ADAPTERS:
@@ -1041,7 +1068,8 @@ def bind_live_report(
     supplied = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
     bound["provider_evidence"] = {
         "provider": details.get("provider") or supplied.get("provider") or adapter["provider_target"],
-        "effective_model": details.get("effective_model") or supplied.get("effective_model") or adapter.get("default_model") or "unknown",
+        "intended_model": request.get("intended_model") or "",
+        "effective_model": details.get("effective_model") or "",
         "request_id": request["request_id"],
         "provider_session_id": details.get("provider_session_id") or supplied.get("provider_session_id") or f"session-{request['run_id']}",
         "transcript_path": request["transcript_path"],
@@ -1066,6 +1094,13 @@ def parse_provider_stdout(stdout: bytes | str) -> tuple[str, dict[str, Any] | No
     return "ok", payload, {"stdout_sha256": stdout_sha256}
 
 
+def parsed_effective_model(details: dict[str, Any]) -> str:
+    candidate = details.get("effective_model")
+    if isinstance(candidate, str) and candidate:
+        return candidate
+    return ""
+
+
 def normalized_evidence(
     *,
     request: dict[str, Any],
@@ -1082,7 +1117,8 @@ def normalized_evidence(
         "provider_adapter_id": adapter["provider_adapter_id"],
         "provider_target": adapter["provider_target"],
         "provider": details.get("provider") or report_evidence.get("provider") or adapter["provider_target"],
-        "effective_model": details.get("effective_model") or report_evidence.get("effective_model") or adapter.get("default_model") or "unknown",
+        "intended_model": request.get("intended_model") or "unknown",
+        "effective_model": details.get("effective_model") or report_evidence.get("effective_model") or "unknown",
         "request_id": request["request_id"],
         "run_id": request["run_id"],
         "workflow_id": request["workflow_id"],
@@ -1314,6 +1350,7 @@ def run_provider(
                             "live_execution_not_enabled",
                             "live_env_guard_missing",
                             "lease_lost",
+                            PROVIDER_MODEL_MISMATCH,
                         }
                         retry = not non_retryable and int(
                             retry_state["auto_retries_used"]
@@ -1623,6 +1660,16 @@ def run_provider(
         if outcome == "ok" and report is None:
             outcome = "report_not_written"
             details = {**details, "reason": "report_not_written"}
+        elif outcome == "ok":
+            intended_model = str(request.get("intended_model") or "")
+            effective_model = parsed_effective_model(details)
+            details["intended_model"] = intended_model
+            if effective_model:
+                details["effective_model"] = effective_model
+            if not intended_model or effective_model != intended_model:
+                outcome = PROVIDER_MODEL_MISMATCH
+                report = None
+                details["reason"] = PROVIDER_MODEL_MISMATCH
 
         raw_stdout = details.pop("_raw_stdout", b"")
         raw_stderr = details.pop("_raw_stderr", b"")
@@ -1750,6 +1797,7 @@ def run_provider(
                     "live_execution_not_enabled",
                     "live_env_guard_missing",
                     "lease_lost",
+                    PROVIDER_MODEL_MISMATCH,
                 } or bool(authorization_error)
                 retry = not non_retryable and int(retry_state["auto_retries_used"]) < int(retry_state["max_auto_retries"])
                 if retry:

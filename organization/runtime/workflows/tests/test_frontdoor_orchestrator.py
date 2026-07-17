@@ -265,6 +265,7 @@ def write_normalized_provider_evidence(
     evidence = {
         **fixed_fields,
         "provider": adapter["provider_target"],
+        "intended_model": fixed_fields["intended_model"],
         "effective_model": adapter.get("default_model") or "claude-sonnet-test",
         "provider_request_id": f"provider-{request_id}",
         "provider_session_id": provider_session_id or f"session-{run_id}",
@@ -350,6 +351,7 @@ def external_review_report(
         "summary": "Review completed.",
         "provider_evidence": {
             "provider": adapter["provider_target"],
+            "intended_model": adapter_request["evidence_contract"]["fixed_fields"]["intended_model"],
             "effective_model": adapter.get("default_model") or "claude-sonnet-test",
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",
@@ -1031,6 +1033,7 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "summary": "No findings.",
             "provider_evidence": {
                 "provider": adapter["provider_target"],
+                "intended_model": adapter_request["evidence_contract"]["fixed_fields"]["intended_model"],
                 "effective_model": adapter.get("default_model") or "claude-sonnet-test",
                 "request_id": "req-frontdoor",
                 "provider_session_id": "claude-session-test",
@@ -1338,6 +1341,7 @@ def test_drain_blocks_invalid_existing_work_order() -> None:
             "context_scope": {"mode": "refs_only", "raw_transcript_sharing": "forbidden"},
             "permission_mode": "readonly",
             "external_provider_allowed": True,
+            "intended_model": "claude-sonnet-4-6",
             "report_path": str(state_root / "reports" / "run-invalid-work-order" / "review-external-review-report.json"),
             "policy_digest": "sha256:" + "1" * 64,
             "requester": {"frontdoor": "codex"},

@@ -134,6 +134,7 @@ def provider_report(adapter_request: dict, *, request_id: str, run_id: str) -> d
         "summary": "No findings.",
         "provider_evidence": {
             "provider": adapter["provider_target"],
+            "intended_model": adapter_request["intended_model"],
             "effective_model": adapter.get("default_model") or "claude-test",
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",

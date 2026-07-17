@@ -32,6 +32,7 @@ REQUIRED_WORK_ORDER_FIELDS = [
     "context_scope",
     "permission_mode",
     "external_provider_allowed",
+    "intended_model",
     "report_path",
     "policy_digest",
     "requester",
@@ -413,6 +414,7 @@ def build_work_order(
     policy_digest_value: str,
     signature: dict[str, Any] | None,
     report_path_value: str,
+    intended_model_value: str,
     worker_execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     step_id = str(step["id"])
@@ -438,6 +440,7 @@ def build_work_order(
         "context_scope": _context_scope_for_step(run=run, request_record=request_record, step=step),
         "permission_mode": str(step["permission_mode"]),
         "external_provider_allowed": external_provider_allowed,
+        "intended_model": intended_model_value,
         "report_path": report_path_value,
         "policy_digest": policy_digest_value,
         "requester": run.get("requester") or {"frontdoor": "manual"},

@@ -9,6 +9,7 @@
     "provider_adapter_id",
     "provider_target",
     "provider",
+    "intended_model",
     "effective_model",
     "request_id",
     "run_id",
@@ -42,6 +43,10 @@
       ]
     },
     "provider": {
+      "type": "string",
+      "minLength": 1
+    },
+    "intended_model": {
       "type": "string",
       "minLength": 1
     },
@@ -107,6 +112,7 @@
         "provider_nonzero_exit",
         "provider_malformed_output",
         "provider_unavailable",
+        "provider_model_mismatch",
         "report_not_written"
       ]
     },
