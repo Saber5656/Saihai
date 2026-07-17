@@ -246,6 +246,9 @@ def _validate_schema_fragment(
     if "minimum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool):
         if value < schema["minimum"]:
             errors.append(f"schema:{path}:minimum")
+    if "maximum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value > schema["maximum"]:
+            errors.append(f"schema:{path}:maximum")
 
     if isinstance(value, dict):
         required = schema.get("required")
@@ -298,17 +301,20 @@ def _validate_schema_fragment(
         if not isinstance(branch, dict):
             continue
         condition = branch.get("if")
-        applies = True
         if isinstance(condition, dict):
             applies = not _validate_schema_fragment(
                 value, condition, path, root_schema=root
             )
-        if applies and isinstance(branch.get("then"), dict):
-            errors.extend(
-                _validate_schema_fragment(
-                    value, branch["then"], path, root_schema=root
+            if applies and isinstance(branch.get("then"), dict):
+                errors.extend(
+                    _validate_schema_fragment(
+                        value, branch["then"], path, root_schema=root
+                    )
                 )
-            )
+            continue
+        errors.extend(
+            _validate_schema_fragment(value, branch, path, root_schema=root)
+        )
 
     return errors
 
