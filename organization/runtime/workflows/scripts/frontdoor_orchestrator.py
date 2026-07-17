@@ -38,6 +38,7 @@ import work_order_builder
 import workflow_selector
 import provider_runner
 import scoped_worker_executor
+import frontdoor_surface_registry
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 HOST_HOME = host_state_root.HOST_HOME
@@ -163,6 +164,8 @@ BRIDGE_FORBIDDEN_FIELDS = {
     "launch_session",
     "launch_session_identity",
     "launch_session_digest",
+    "surface_identity",
+    "assurance_state",
 }
 MAX_APPROVAL_FAILURES = 3
 MAX_CONTEXT_REF_COUNT = 50
@@ -282,6 +285,49 @@ def rotate_state_file(source: Path, target: Path) -> None:
 
 class FrontdoorError(RuntimeError):
     pass
+
+
+def load_surface_registry() -> frontdoor_surface_registry.SurfaceRegistry:
+    try:
+        return frontdoor_surface_registry.default_registry()
+    except frontdoor_surface_registry.SurfaceRegistryError as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
+def registered_surface_kinds() -> tuple[str, ...]:
+    return load_surface_registry().frontend_kinds
+
+
+def resolve_surface_identity(
+    frontend_kind: str,
+    *,
+    registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
+    expected_checkout: Path | None = None,
+    launch_session_present: bool | None = None,
+) -> dict[str, Any]:
+    active_registry = registry or load_surface_registry()
+    try:
+        identity = active_registry.identify(
+            frontend_kind,
+            expected_checkout=expected_checkout,
+            launch_session_present=launch_session_present,
+        )
+    except frontdoor_surface_registry.SurfaceRegistryError as exc:
+        raise FrontdoorError(str(exc)) from exc
+    return identity.as_dict()
+
+
+def surface_contract_binding(identity: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: identity.get(key)
+        for key in (
+            "identity_version",
+            "frontend_kind",
+            "target_assurance_state",
+            "assurance_profile_id",
+            "submit_contract_version",
+        )
+    }
 
 
 def canonical_json(payload: Any) -> bytes:
@@ -1583,10 +1629,16 @@ def proposed_request(
     frontdoor: str,
     chat_session_id: str,
     principal: dict[str, Any] | None = None,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> dict[str, Any]:
     validate_artifact_id(request_id, "request_id")
     validate_artifact_id(task_id, "task_id")
     actor = principal or default_manual_principal()
+    surface_identity = resolve_surface_identity(
+        frontdoor,
+        registry=surface_registry,
+        launch_session_present=False,
+    )
     bounded = bounded_context(refs, allowed_paths)
     path = request_path(state_root, request_id)
     existing_record = read_json(path) if state_file_exists(path) else None
@@ -1632,6 +1684,21 @@ def proposed_request(
             "allowed_paths": bounded["allowed_paths"],
             "expires_at": expires_at,
         }
+        existing_surface = existing_record.get("surface_identity")
+        if "surface_identity" in existing_record:
+            if not isinstance(existing_surface, dict) or surface_contract_binding(
+                existing_surface
+            ) != surface_contract_binding(surface_identity):
+                immutable_mismatches.append("surface_identity")
+        else:
+            legacy_requester = existing_record.get("requester")
+            legacy_frontend = (
+                str(legacy_requester.get("frontdoor") or "")
+                if isinstance(legacy_requester, dict)
+                else ""
+            )
+            if legacy_frontend != frontdoor:
+                immutable_mismatches.append("surface_identity")
         for key, value in expected.items():
             if existing_record.get(key) != value:
                 immutable_mismatches.append(key)
@@ -1657,6 +1724,7 @@ def proposed_request(
             "task_id": task_id,
             "request_id": request_id,
             "next_action": "ask_human",
+            "surface_identity": surface_identity,
         }
         record = {
             "request_version": "1",
@@ -1669,6 +1737,7 @@ def proposed_request(
             "expires_at": expires_at,
             "classification": None,
             "requester": requester(frontdoor, chat_session_id),
+            "surface_identity": surface_identity,
             "status": "waiting_human",
             "proposal": payload,
         }
@@ -1702,6 +1771,7 @@ def proposed_request(
             **bounded,
             "expires_at": expires_at,
             "requester": requester(frontdoor, chat_session_id),
+            "surface_identity": surface_identity,
         }
     else:
         record = dict(existing_record)
@@ -1735,6 +1805,7 @@ def proposed_request(
         "envelope_snapshot_path": str(snapshot_path),
         "activation": envelope,
         "approval": record.get("approval"),
+        "surface_identity": record.get("surface_identity", surface_identity),
     }
 
 
@@ -2569,7 +2640,19 @@ def request_digest(
     workspace_id: str = "",
     checkout_identity: dict[str, Any] | None = None,
     launch_session_identity: dict[str, Any] | None = None,
+    surface_identity: dict[str, Any] | None = None,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> str:
+    normalized_surface = surface_identity or resolve_surface_identity(
+        str(payload.get("frontdoor") or "codex"),
+        registry=surface_registry,
+        expected_checkout=(
+            Path(str(checkout_identity["checkout_realpath"]))
+            if isinstance(checkout_identity, dict)
+            and checkout_identity.get("checkout_realpath")
+            else None
+        ),
+    )
     material = {
         "task_id": payload.get("task_id"),
         "request_id": payload.get("request_id"),
@@ -2578,7 +2661,7 @@ def request_digest(
         "refs": list(payload.get("refs") or []),
         "allowed_paths": list(payload.get("allowed_paths") or []),
         "expires_at": payload.get("expires_at") or "run_terminal",
-        "frontdoor": payload.get("frontdoor") or "codex",
+        "frontdoor": normalized_surface["frontend_kind"],
         "workspace_id": workspace_id,
         "checkout_identity_digest": (
             str((checkout_identity or {}).get("identity_digest") or "")
@@ -2607,9 +2690,36 @@ def assert_bridge_request_owner(
         raise FrontdoorError("bridge request is not owned by the installed frontend principal")
 
 
+def bridge_request_surface_kind(
+    record: dict[str, Any],
+    *,
+    registry: frontdoor_surface_registry.SurfaceRegistry,
+) -> str:
+    if "surface_identity" in record:
+        stored = record.get("surface_identity")
+        if not isinstance(stored, dict):
+            raise FrontdoorError("bridge request surface identity is invalid")
+        frontend_kind = str(stored.get("frontend_kind") or "")
+    else:
+        requester_metadata = record.get("requester")
+        frontend_kind = str(
+            requester_metadata.get("frontdoor") or ""
+            if isinstance(requester_metadata, dict)
+            else ""
+        )
+    try:
+        registry.descriptor(frontend_kind)
+    except frontdoor_surface_registry.SurfaceRegistryError as exc:
+        raise FrontdoorError("bridge request surface identity is invalid") from exc
+    return frontend_kind
+
+
 def assert_bridge_launch_session(
     record: dict[str, Any],
     launch_session_identity: dict[str, Any] | None,
+    *,
+    frontend_kind: str,
+    registry: frontdoor_surface_registry.SurfaceRegistry,
 ) -> None:
     stored = record.get("launch_session_identity")
     stored_digest = str(record.get("launch_session_digest") or "")
@@ -2617,10 +2727,18 @@ def assert_bridge_launch_session(
         if stored is not None or stored_digest:
             raise FrontdoorError("bridge launch session is required")
         return
-    normalized = normalize_launch_session_identity(launch_session_identity)
+    try:
+        normalized = registry.normalize_launch_session(
+            frontend_kind,
+            launch_session_identity,
+        )
+    except frontdoor_surface_registry.SurfaceRegistryError as exc:
+        raise FrontdoorError(str(exc)) from exc
+    if normalized is None or "record_digest" not in normalized:
+        raise FrontdoorError("bridge launch session is invalid")
     if stored != normalized or not hmac.compare_digest(
         stored_digest,
-        launch_session_identity_digest(normalized),
+        str(normalized["record_digest"]),
     ):
         raise FrontdoorError("bridge launch session does not match request authority")
 
@@ -3043,6 +3161,7 @@ def bridge_submit_request(
     max_pending_bytes: int = DEFAULT_BRIDGE_MAX_PENDING_BYTES,
     max_durable_artifacts: int = DEFAULT_BRIDGE_MAX_DURABLE_ARTIFACTS,
     max_durable_bytes: int = DEFAULT_BRIDGE_MAX_DURABLE_BYTES,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> dict[str, Any]:
     errors = validate_bridge_submit_payload(payload)
     frontdoor_name = str(payload.get("frontdoor") or "codex")
@@ -3050,6 +3169,8 @@ def bridge_submit_request(
     principal = principal or bridge_principal(frontdoor_name, chat_session_id)
     normalized_checkout: dict[str, str] | None = None
     normalized_launch_session: dict[str, Any] | None = None
+    normalized_surface: dict[str, Any] | None = None
+    active_surface_registry = surface_registry or load_surface_registry()
     try:
         if checkout_identity is not None:
             normalized_checkout = validate_checkout_identity(checkout_identity)
@@ -3059,12 +3180,31 @@ def bridge_submit_request(
                 raise FrontdoorError("workspace_id does not match checkout_identity")
         elif workspace_id:
             raise FrontdoorError("checkout_identity is required with workspace_id")
+        try:
+            active_surface_registry.descriptor(frontdoor_name)
+        except frontdoor_surface_registry.SurfaceRegistryError as exc:
+            raise FrontdoorError(str(exc)) from exc
         if launch_session_identity is not None:
-            normalized_launch_session = normalize_launch_session_identity(
-                launch_session_identity
-            )
+            try:
+                normalized_launch_session = active_surface_registry.normalize_launch_session(
+                    frontdoor_name,
+                    launch_session_identity,
+                )
+            except frontdoor_surface_registry.SurfaceRegistryError as exc:
+                raise FrontdoorError(str(exc)) from exc
             if normalized_checkout is None:
                 raise FrontdoorError("checkout_identity is required with launch_session_identity")
+            required_launch_bindings = {
+                "principal_id",
+                "workspace_id",
+                "checkout_realpath",
+                "checkout_identity_digest",
+                "record_digest",
+            }
+            if normalized_launch_session is None or not required_launch_bindings.issubset(
+                normalized_launch_session
+            ):
+                raise FrontdoorError("launch_session_identity missing common host bindings")
             if (
                 normalized_launch_session["principal_id"] != principal.get("principal_id")
                 or normalized_launch_session["workspace_id"] != workspace_id
@@ -3074,6 +3214,16 @@ def bridge_submit_request(
                 != normalized_checkout["identity_digest"]
             ):
                 raise FrontdoorError("launch_session_identity does not match host bindings")
+        normalized_surface = resolve_surface_identity(
+            frontdoor_name,
+            registry=active_surface_registry,
+            expected_checkout=(
+                Path(normalized_checkout["checkout_realpath"])
+                if normalized_checkout is not None
+                else None
+            ),
+            launch_session_present=normalized_launch_session is not None,
+        )
         if (
             not isinstance(max_pending_requests, int)
             or isinstance(max_pending_requests, bool)
@@ -3116,6 +3266,8 @@ def bridge_submit_request(
         workspace_id=workspace_id,
         checkout_identity=normalized_checkout,
         launch_session_identity=normalized_launch_session,
+        surface_identity=normalized_surface,
+        surface_registry=active_surface_registry,
     )
     idempotency_key = str(payload["idempotency_key"])
     idempotency_digest = idempotency_key_digest(idempotency_key)
@@ -3172,6 +3324,7 @@ def bridge_submit_request(
                     launch_session_identity=normalized_launch_session,
                     enforce_rate_limit=False,
                     _lock_held=True,
+                    surface_registry=active_surface_registry,
                 )
                 projection["replayed"] = True
                 append_audit_event(
@@ -3227,6 +3380,7 @@ def bridge_submit_request(
                     launch_session_identity=normalized_launch_session,
                     enforce_rate_limit=False,
                     _lock_held=True,
+                    surface_registry=active_surface_registry,
                 )
                 projection["replayed"] = True
                 return projection
@@ -3271,6 +3425,7 @@ def bridge_submit_request(
                 ),
                 "classification": None,
                 "requester": requester(frontdoor_name, chat_session_id),
+                "surface_identity": normalized_surface,
                 "principal": owner_principal,
                 "owner_principal": owner_principal,
                 "status": "waiting_human",
@@ -3284,6 +3439,10 @@ def bridge_submit_request(
                     "next_action": "ask_human",
                 },
                 "bridge_contract": {
+                    "submit_contract_version": str(
+                        (normalized_surface or {}).get("submit_contract_version") or ""
+                    ),
+                    "surface_identity_required": True,
                     "allowed_actions": BRIDGE_ALLOWED_ACTIONS,
                     "forbidden_actions": [
                         "classify",
@@ -3385,6 +3544,7 @@ def bridge_submit_request(
                 launch_session_identity=normalized_launch_session,
                 enforce_rate_limit=False,
                 _lock_held=True,
+                surface_registry=active_surface_registry,
             )
     except run_lock.LockContentionError as exc:
         append_audit_event(
@@ -3462,9 +3622,31 @@ def build_bridge_projection(
     state_root: Path,
     request_id: str,
     principal: dict[str, Any],
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     record = read_json(request_path(state_root, request_id))
     assert_bridge_request_owner(record, principal)
+    active_surface_registry = surface_registry or load_surface_registry()
+    frontend_kind = bridge_request_surface_kind(
+        record,
+        registry=active_surface_registry,
+    )
+    projection_surface = resolve_surface_identity(
+        frontend_kind,
+        registry=active_surface_registry,
+        expected_checkout=(
+            Path(str(record["checkout_identity"]["checkout_realpath"]))
+            if isinstance(record.get("checkout_identity"), dict)
+            and record["checkout_identity"].get("checkout_realpath")
+            else None
+        ),
+        launch_session_present=record.get("launch_session_identity") is not None,
+    )
+    stored_surface = record.get("surface_identity")
+    if isinstance(stored_surface, dict) and surface_contract_binding(
+        stored_surface
+    ) != surface_contract_binding(projection_surface):
+        raise FrontdoorError("bridge request surface contract drifted")
     proposal = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
     try:
         projection_binding = work_order_builder.projection_binding_from_request_record(
@@ -3483,6 +3665,7 @@ def build_bridge_projection(
         "request_kind": record.get("request_kind"),
         "request_status": record.get("status"),
         "workspace_id": record.get("workspace_id"),
+        "surface_identity": projection_surface,
         "checkout_identity": redacted_checkout_identity(record.get("checkout_identity")),
         "checkout_identity_digest": record.get("checkout_identity_digest"),
         "orchestrator_decision": proposal.get("decision"),
@@ -3549,7 +3732,10 @@ def bridge_read_projection(
     max_durable_bytes: int = DEFAULT_BRIDGE_MAX_DURABLE_BYTES,
     enforce_rate_limit: bool = True,
     _lock_held: bool = False,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> dict[str, Any]:
+    active_surface_registry = surface_registry or load_surface_registry()
+    resolve_surface_identity(frontdoor, registry=active_surface_registry)
     principal = principal or bridge_principal(frontdoor, chat_session_id)
     if enforce_rate_limit and not _lock_held:
         try:
@@ -3584,6 +3770,7 @@ def bridge_read_projection(
                     max_durable_bytes=max_durable_bytes,
                     enforce_rate_limit=False,
                     _lock_held=True,
+                    surface_registry=active_surface_registry,
                 )
         except run_lock.LockContentionError as exc:
             raise FrontdoorError("bridge read_projection lock contention") from exc
@@ -3592,8 +3779,20 @@ def bridge_read_projection(
             state_root=state_root,
             request_id=request_id,
             principal=principal,
+            surface_registry=active_surface_registry,
         )
-        assert_bridge_launch_session(record, launch_session_identity)
+        stored_frontend_kind = bridge_request_surface_kind(
+            record,
+            registry=active_surface_registry,
+        )
+        if stored_frontend_kind != frontdoor:
+            raise FrontdoorError("bridge request surface identity mismatch")
+        assert_bridge_launch_session(
+            record,
+            launch_session_identity,
+            frontend_kind=stored_frontend_kind,
+            registry=active_surface_registry,
+        )
     except FrontdoorError:
         append_audit_event(
             state_root=state_root,
@@ -3642,7 +3841,10 @@ def bridge_ack_output(
     max_durable_bytes: int = DEFAULT_BRIDGE_MAX_DURABLE_BYTES,
     enforce_rate_limit: bool = True,
     _lock_held: bool = False,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> dict[str, Any]:
+    active_surface_registry = surface_registry or load_surface_registry()
+    resolve_surface_identity(frontdoor, registry=active_surface_registry)
     principal = principal or bridge_principal(frontdoor, chat_session_id)
     if enforce_rate_limit and not _lock_held:
         try:
@@ -3678,6 +3880,7 @@ def bridge_ack_output(
                     max_durable_bytes=max_durable_bytes,
                     enforce_rate_limit=False,
                     _lock_held=True,
+                    surface_registry=active_surface_registry,
                 )
         except run_lock.LockContentionError as exc:
             raise FrontdoorError("bridge ack_output lock contention") from exc
@@ -3686,8 +3889,20 @@ def bridge_ack_output(
             state_root=state_root,
             request_id=request_id,
             principal=principal,
+            surface_registry=active_surface_registry,
         )
-        assert_bridge_launch_session(before, launch_session_identity)
+        stored_frontend_kind = bridge_request_surface_kind(
+            before,
+            registry=active_surface_registry,
+        )
+        if stored_frontend_kind != frontdoor:
+            raise FrontdoorError("bridge request surface identity mismatch")
+        assert_bridge_launch_session(
+            before,
+            launch_session_identity,
+            frontend_kind=stored_frontend_kind,
+            registry=active_surface_registry,
+        )
     except FrontdoorError:
         append_audit_event(
             state_root=state_root,
@@ -5242,9 +5457,20 @@ def _require_scoped_worker_assurance(
     principal: dict[str, Any],
     subject: dict[str, Any],
     launch_session_verifier: Any | None = None,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> dict[str, Any]:
     try:
         record = read_json(request_path(state_root, request_id))
+        active_surface_registry = surface_registry or load_surface_registry()
+        frontend_kind = bridge_request_surface_kind(
+            record,
+            registry=active_surface_registry,
+        )
+        descriptor = active_surface_registry.descriptor(frontend_kind)
+        if descriptor.assurance_profile_id != frontend_profile_id:
+            raise FrontdoorError(
+                "frontend surface assurance profile does not match capability subject"
+            )
         expected_owner = {
             "principal_type": BRIDGE_PRINCIPAL_TYPE,
             "principal_id": frontend_profile_id,
@@ -5259,9 +5485,15 @@ def _require_scoped_worker_assurance(
             or identity.get("identity_digest") != checkout_identity_digest
         ):
             raise FrontdoorError("frontend checkout identity does not match capability subject")
-        launch_identity = normalize_launch_session_identity(
-            record.get("launch_session_identity")
-        )
+        try:
+            launch_identity = active_surface_registry.normalize_launch_session(
+                frontend_kind,
+                record.get("launch_session_identity"),
+            )
+        except frontdoor_surface_registry.SurfaceRegistryError as exc:
+            raise FrontdoorError(str(exc)) from exc
+        if launch_identity is None:
+            raise FrontdoorError("frontend launch-session request binding missing")
         if record.get("launch_session_digest") != launch_identity["record_digest"]:
             raise FrontdoorError("frontend launch-session request binding mismatch")
         current_checkout = resolve_checkout_identity(
@@ -5269,7 +5501,14 @@ def _require_scoped_worker_assurance(
             managed_primary=identity["managed_primary_realpath"],
             checkout_root=identity["checkout_realpath"],
         )
-        verifier = launch_session_verifier or HostLaunchSessionVerifier()
+        try:
+            verifier = launch_session_verifier or active_surface_registry.make_launch_session_verifier(
+                frontend_kind
+            )
+        except frontdoor_surface_registry.SurfaceRegistryError as exc:
+            raise FrontdoorError(str(exc)) from exc
+        if verifier is None:
+            raise FrontdoorError("frontend launch-session verifier required")
         revalidated_launch = verifier.revalidate(
             launch_identity,
             checkout_identity=current_checkout,
@@ -5542,6 +5781,7 @@ def build_work_order(
 
 def parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Host-owned P0 frontdoor orchestrator")
+    surface_choices = registered_surface_kinds()
     parser.add_argument("--state-root", default="")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -5555,7 +5795,7 @@ def parser() -> argparse.ArgumentParser:
     propose.add_argument("--expires-at", default="run_terminal")
     propose.add_argument(
         "--frontdoor",
-        choices=["codex", "claude", "cursor", "grok", "manual"],
+        choices=surface_choices,
         default="codex",
     )
     propose.add_argument("--chat-session-id", default="")
@@ -5671,7 +5911,7 @@ def parser() -> argparse.ArgumentParser:
     bridge_submit.add_argument("--expires-at", default="run_terminal")
     bridge_submit.add_argument(
         "--frontdoor",
-        choices=["codex", "claude", "cursor", "grok", "manual"],
+        choices=surface_choices,
         default="codex",
     )
     bridge_submit.add_argument("--chat-session-id", default="")
@@ -5681,7 +5921,7 @@ def parser() -> argparse.ArgumentParser:
     bridge_projection.add_argument("--request-id", required=True)
     bridge_projection.add_argument(
         "--frontdoor",
-        choices=["codex", "claude", "cursor", "grok", "manual"],
+        choices=surface_choices,
         default="codex",
     )
     bridge_projection.add_argument("--chat-session-id", default="")
@@ -5691,7 +5931,7 @@ def parser() -> argparse.ArgumentParser:
     bridge_ack.add_argument("--projection-digest", required=True)
     bridge_ack.add_argument(
         "--frontdoor",
-        choices=["codex", "claude", "cursor", "grok", "manual"],
+        choices=surface_choices,
         default="codex",
     )
     bridge_ack.add_argument("--chat-session-id", default="")

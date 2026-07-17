@@ -229,6 +229,7 @@ def write_approved_child_request(
         "workspace_id": "Saber5656/Saihai",
         "checkout_identity": checkout_identity,
         "checkout_identity_digest": checkout_identity["identity_digest"],
+        "requester": frontdoor.requester("codex", ""),
         "owner_principal": request_owner,
         "principal": request_owner,
         "status": "approved",

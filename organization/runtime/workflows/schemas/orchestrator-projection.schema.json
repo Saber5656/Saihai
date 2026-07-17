@@ -25,6 +25,83 @@
       },
       "additionalProperties": false
     },
+    "surface_identity": {
+      "type": "object",
+      "required": [
+        "identity_version",
+        "frontend_kind",
+        "assurance_state",
+        "target_assurance_state",
+        "assurance_profile_id",
+        "commissioned_claims",
+        "suppressed_claims",
+        "submit_contract_version"
+      ],
+      "properties": {
+        "identity_version": { "const": "1" },
+        "frontend_kind": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"
+        },
+        "assurance_state": {
+          "type": "string",
+          "enum": ["advisory", "ingress_enforced", "action_enforced"]
+        },
+        "target_assurance_state": {
+          "type": "string",
+          "enum": ["advisory", "ingress_enforced", "action_enforced"]
+        },
+        "assurance_profile_id": {
+          "type": ["string", "null"]
+        },
+        "commissioned_claims": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["ingress_enforced", "action_enforced"]
+          },
+          "uniqueItems": true
+        },
+        "suppressed_claims": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["ingress_enforced", "action_enforced"]
+          },
+          "uniqueItems": true
+        },
+        "submit_contract_version": { "const": "1" }
+      },
+      "additionalProperties": false
+    },
+    "checkout_identity": {
+      "type": ["object", "null"],
+      "required": [
+        "identity_version",
+        "workspace_id",
+        "checkout_kind",
+        "branch",
+        "head_sha",
+        "tree_sha",
+        "git_common_dir_digest",
+        "worktree_state_digest",
+        "identity_digest",
+        "paths_redacted"
+      ],
+      "properties": {
+        "identity_version": { "type": ["string", "null"] },
+        "workspace_id": { "type": ["string", "null"] },
+        "checkout_kind": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "head_sha": { "type": ["string", "null"] },
+        "tree_sha": { "type": ["string", "null"] },
+        "git_common_dir_digest": { "type": ["string", "null"] },
+        "worktree_state_digest": { "type": ["string", "null"] },
+        "identity_digest": { "type": ["string", "null"] },
+        "paths_redacted": { "const": true }
+      },
+      "additionalProperties": false
+    },
     "rate_limit": {
       "type": "object",
       "required": [
@@ -340,6 +417,7 @@
     "safe_for_principal",
     "request_id",
     "idempotency_key_digest",
+    "surface_identity",
     "request_status",
     "next_allowed_bridge_actions",
     "context",
@@ -376,6 +454,18 @@
         "string",
         "null"
       ]
+    },
+    "workspace_id": {
+      "type": ["string", "null"]
+    },
+    "surface_identity": {
+      "$ref": "#/$defs/surface_identity"
+    },
+    "checkout_identity": {
+      "$ref": "#/$defs/checkout_identity"
+    },
+    "checkout_identity_digest": {
+      "type": ["string", "null"]
     },
     "request_status": {
       "type": [

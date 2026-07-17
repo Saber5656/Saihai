@@ -242,6 +242,18 @@
   ],
   "run_id": "run-corrupt",
   "status": "approved",
+  "surface_identity": {
+    "assurance_profile_id": "codex-main-agent-a-prime",
+    "assurance_state": "advisory",
+    "commissioned_claims": [],
+    "frontend_kind": "codex",
+    "identity_version": "1",
+    "submit_contract_version": "1",
+    "suppressed_claims": [
+      "action_enforced"
+    ],
+    "target_assurance_state": "action_enforced"
+  },
   "task_id": "TSK-corrupt",
   "updated_at": "2026-01-01T00:00:00+0000",
   "user_prompt": "Run bounded offline external review."
