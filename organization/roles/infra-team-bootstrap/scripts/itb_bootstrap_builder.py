@@ -9798,10 +9798,26 @@ def parse_codex_json_output(stdout: str) -> dict[str, Any]:
         if not isinstance(event, dict):
             continue
         parsed_any = True
+        event_type = normalize_cell(event.get("type"))
+        if event_type == "thread.started":
+            thread_id = normalize_cell(event.get("thread_id") or event.get("threadId"))
+            if thread_id:
+                result["session_id"] = thread_id
+        elif event_type == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and normalize_cell(item.get("type")) == "agent_message":
+                item_text = codex_event_text(item)
+                if item_text:
+                    last_text = item_text
+        elif event_type == "turn.completed":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                result["usage"] = dict(usage)
+            result["num_turns"] = int(result.get("num_turns") or 0) + 1
         text = codex_event_text(event)
         if text:
             last_text = text
-        if event.get("type") == "result" or event.get("subtype") in {"success", "error"}:
+        if event_type == "result" or event.get("subtype") in {"success", "error"}:
             result.update(event)
     if not parsed_any:
         return {}
@@ -15790,6 +15806,55 @@ def role_queue_completion_wait_config(hook_input: dict[str, Any]) -> tuple[float
         default=bool(profile.get("event_driven", True)),
     )
     return timeout_seconds, poll_interval_seconds, event_driven
+
+
+def queue_watch_snapshot(queue_root: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        paths = sorted(queue_root.rglob("*"), key=lambda path: path.as_posix())
+    except OSError:
+        paths = []
+    for path in paths:
+        try:
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            relative_path = path.relative_to(queue_root).as_posix()
+        except (OSError, ValueError):
+            continue
+        digest.update(f"{relative_path}\0{stat.st_mtime_ns}\0{stat.st_size}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def queue_watch_wait_for_event(
+    *,
+    queue_root: Path,
+    timeout_seconds: float,
+    event_driven: bool,
+) -> dict[str, Any]:
+    bounded_timeout = max(0.0, float(timeout_seconds))
+    started = time.monotonic()
+    deadline = started + bounded_timeout
+    initial_snapshot = queue_watch_snapshot(queue_root) if event_driven else ""
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {
+                "result": "timeout" if event_driven else "poll_elapsed",
+                "wait_result": "timeout" if event_driven else "poll",
+                "event_driven": event_driven,
+                "timeout_seconds": bounded_timeout,
+                "duration_sec": round(max(0.0, time.monotonic() - started), 3),
+            }
+        time.sleep(min(0.05, remaining))
+        if event_driven and queue_watch_snapshot(queue_root) != initial_snapshot:
+            return {
+                "result": "queue_changed",
+                "wait_result": "event",
+                "event_driven": True,
+                "timeout_seconds": bounded_timeout,
+                "duration_sec": round(max(0.0, time.monotonic() - started), 3),
+            }
 
 
 def record_role_queue_completion_wait_event(
