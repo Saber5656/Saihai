@@ -9774,7 +9774,7 @@ def codex_event_text(event: dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value
     content = event.get("content")
-    if isinstance(content, str):
+    if isinstance(content, str) and content.strip():
         return content
     if isinstance(content, list):
         parts = []
@@ -9787,9 +9787,19 @@ def codex_event_text(event: dict[str, Any]) -> str:
     return ""
 
 
+def codex_event_string(event: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = event.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def parse_codex_json_output(stdout: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    last_text = ""
+    last_agent_text = ""
+    last_legacy_text = ""
+    legacy_terminal_status = ""
     parsed_any = False
     for line in stdout.splitlines():
         if not line.strip():
@@ -9808,21 +9818,70 @@ def parse_codex_json_output(stdout: str) -> dict[str, Any]:
             if isinstance(item, dict) and normalize_cell(item.get("type")) == "agent_message":
                 item_text = codex_event_text(item)
                 if item_text:
-                    last_text = item_text
+                    last_agent_text = item_text
         elif event_type == "turn.completed":
             usage = event.get("usage")
             if isinstance(usage, dict):
                 result["usage"] = dict(usage)
             result["num_turns"] = int(result.get("num_turns") or 0) + 1
-        text = codex_event_text(event)
-        if text:
-            last_text = text
-        if event_type == "result" or event.get("subtype") in {"success", "error"}:
-            result.update(event)
+        if event_type == "result":
+            subtype = normalize_cell(event.get("subtype"))
+            is_error = subtype == "error" or event.get("is_error") is True
+            if is_error or subtype not in {"", "success"}:
+                legacy_terminal_status = "error"
+                continue
+            legacy_terminal_status = "success"
+            legacy_text = codex_event_text(event)
+            if legacy_text:
+                last_legacy_text = legacy_text
+            session_id = codex_event_string(event, "session_id", "sessionId")
+            request_id = codex_event_string(event, "request_id", "requestId")
+            model = codex_event_string(event, "model", "effective_model", "effectiveModel")
+            if session_id:
+                result["session_id"] = session_id
+            if request_id:
+                result["request_id"] = request_id
+            if model:
+                result["model"] = model
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                typed_usage = {
+                    key: value
+                    for key, value in usage.items()
+                    if key
+                    in {
+                        "input_tokens",
+                        "inputTokens",
+                        "cached_input_tokens",
+                        "cachedInputTokens",
+                        "output_tokens",
+                        "outputTokens",
+                        "reasoning_output_tokens",
+                        "reasoningOutputTokens",
+                    }
+                    and isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value >= 0
+                }
+                if typed_usage:
+                    result["usage"] = typed_usage
+            for source_key, target_key in (
+                ("duration_api_ms", "duration_api_ms"),
+                ("durationApiMs", "duration_api_ms"),
+                ("num_turns", "num_turns"),
+                ("numTurns", "num_turns"),
+            ):
+                value = event.get(source_key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    result[target_key] = value
     if not parsed_any:
         return {}
-    if last_text and not result.get("result"):
-        result["result"] = last_text
+    if legacy_terminal_status == "error":
+        result.pop("result", None)
+    elif last_agent_text:
+        result["result"] = last_agent_text
+    elif last_legacy_text and not result.get("result"):
+        result["result"] = last_legacy_text
     return result
 
 
@@ -10474,18 +10533,12 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         )
         result_text = str(codex_result.get("result") or codex_result.get("message") or "")
         num_turns = int_from_nested(codex_result, [("num_turns",), ("numTurns",)])
-        has_inference_evidence = bool(
-            result_text.strip()
-            or (input_tokens is not None and input_tokens > 0)
-            or (output_tokens is not None and output_tokens > 0)
-            or (codex_duration_api_ms is not None and codex_duration_api_ms > 0)
-            or (num_turns is not None and num_turns > 0)
-        )
+        has_inference_evidence = bool(result_text.strip())
         if not has_inference_evidence:
             reset_response_evidence(
                 row,
                 now,
-                "Codex exec returned no inference evidence; previous response evidence, if any, was invalidated.",
+                "Codex exec returned no authoritative response text; previous response evidence, if any, was invalidated.",
                 usage_source="codex_exec_json_no_inference",
             )
             update_provider_response_state(state, roster)
@@ -10511,7 +10564,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     output_tokens=output_tokens,
                     duration_api_ms=duration_api_ms,
                     num_turns=num_turns,
-                    notes="Codex exec returned success but no result, tokens, turns, or API duration.",
+                    notes="Codex exec returned success but no authoritative response text.",
                     extra={
                         "provider_session_id": provider_session_id,
                         "stdout_result_present": bool(result_text),

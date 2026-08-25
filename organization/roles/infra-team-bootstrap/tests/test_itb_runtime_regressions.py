@@ -28,6 +28,7 @@ def current_codex_jsonl(*, include_message: bool = True) -> str:
     events: list[dict[str, object]] = [
         {"type": "thread.started", "thread_id": "provider-thread"},
         {"type": "turn.started"},
+        {"type": "error", "message": "top-level diagnostic only"},
         {
             "type": "item.completed",
             "item": {
@@ -85,6 +86,127 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
         self.assertEqual(parsed["usage"]["output_tokens"], 7)
         self.assertEqual(parsed["usage"]["reasoning_output_tokens"], 3)
         self.assertEqual(parsed["num_turns"], 1)
+
+    def test_parse_codex_whitespace_content_does_not_replace_last_nonempty_message(self) -> None:
+        builder = load_builder_module()
+        stdout = "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "final review result"},
+                },
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "content": "   "},
+                },
+            )
+        )
+
+        parsed = builder.parse_codex_json_output(stdout)
+
+        self.assertEqual(parsed["result"], "final review result")
+
+    def test_parse_codex_top_level_diagnostic_is_not_response_evidence(self) -> None:
+        builder = load_builder_module()
+
+        parsed = builder.parse_codex_json_output(current_codex_jsonl(include_message=False))
+
+        self.assertNotIn("result", parsed)
+        self.assertEqual(parsed["session_id"], "provider-thread")
+        self.assertEqual(parsed["usage"]["output_tokens"], 7)
+
+    def test_parse_codex_subtype_only_error_cannot_spoof_response_metadata(self) -> None:
+        builder = load_builder_module()
+        stdout = "\n".join(
+            json.dumps(event)
+            for event in (
+                {"type": "thread.started", "thread_id": "provider-thread"},
+                {
+                    "type": "error",
+                    "subtype": "error",
+                    "message": "diagnostic only",
+                    "session_id": "spoofed-session",
+                    "request_id": "spoofed-request",
+                    "model": "spoofed-model",
+                    "usage": {"input_tokens": 999, "output_tokens": 999},
+                },
+                {"type": "turn.completed", "usage": {"input_tokens": 11, "output_tokens": 7}},
+            )
+        )
+
+        parsed = builder.parse_codex_json_output(stdout)
+
+        self.assertNotIn("result", parsed)
+        self.assertEqual(parsed["session_id"], "provider-thread")
+        self.assertNotIn("request_id", parsed)
+        self.assertNotIn("model", parsed)
+        self.assertEqual(parsed["usage"], {"input_tokens": 11, "output_tokens": 7})
+
+    def test_parse_codex_legacy_error_terminal_remains_fail_closed(self) -> None:
+        builder = load_builder_module()
+        stdout = "\n".join(
+            json.dumps(event)
+            for event in (
+                {"type": "thread.started", "thread_id": "provider-thread"},
+                {
+                    "type": "result",
+                    "subtype": "error",
+                    "result": "diagnostic only",
+                    "session_id": "spoofed-session",
+                    "request_id": "spoofed-request",
+                    "model": "spoofed-model",
+                },
+            )
+        )
+
+        parsed = builder.parse_codex_json_output(stdout)
+
+        self.assertNotIn("result", parsed)
+        self.assertEqual(parsed["session_id"], "provider-thread")
+        self.assertNotIn("request_id", parsed)
+        self.assertNotIn("model", parsed)
+
+    def test_parse_codex_legacy_result_event_remains_supported(self) -> None:
+        builder = load_builder_module()
+        legacy_stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "legacy final response",
+                "session_id": "legacy-session",
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+                "unexpected": "ignored",
+            }
+        )
+
+        parsed = builder.parse_codex_json_output(legacy_stdout)
+
+        self.assertEqual(parsed["result"], "legacy final response")
+        self.assertEqual(parsed["session_id"], "legacy-session")
+        self.assertEqual(parsed["usage"]["output_tokens"], 2)
+        self.assertNotIn("unexpected", parsed)
+
+    def test_parse_codex_legacy_string_metadata_requires_nonempty_strings(self) -> None:
+        builder = load_builder_module()
+        legacy_stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "legacy final response",
+                "session_id": {"nested": "bad"},
+                "request_id": ["bad"],
+                "model": True,
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            }
+        )
+
+        parsed = builder.parse_codex_json_output(legacy_stdout)
+
+        self.assertEqual(parsed["result"], "legacy final response")
+        self.assertNotIn("session_id", parsed)
+        self.assertNotIn("request_id", parsed)
+        self.assertNotIn("model", parsed)
 
     def test_codex_dispatch_accepts_current_jsonl_as_response_evidence(self) -> None:
         builder = load_builder_module()
@@ -185,6 +307,43 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
 
         self.assertEqual(output["decision"], "block")
         self.assertEqual(output["agentDispatch"]["result"], "provider_response_no_inference")
+
+    def test_provider_activate_without_agent_message_remains_fail_closed(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            builder.session_start_metadata_output(
+                runtime="codex",
+                state_root=state_root,
+                hook_input={"session_id": "session", "cwd": "/tmp/project", "source": "startup"},
+            )
+            completed = subprocess.CompletedProcess(
+                args=["codex"],
+                returncode=0,
+                stdout=current_codex_jsonl(include_message=False),
+                stderr="",
+            )
+
+            with mock.patch.object(builder.shutil, "which", return_value="/usr/bin/codex"), mock.patch.object(
+                builder.subprocess,
+                "run",
+                return_value=completed,
+            ):
+                output = builder.provider_activate(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={
+                        "session_id": "session",
+                        "agent_id": "tech-backend",
+                        "cwd": "/tmp/project",
+                    },
+                )
+
+            state = json.loads((state_root / "session" / "bootstrap.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(output["decision"], "block")
+        self.assertEqual(output["reason"], "codex provider activation produced no inference evidence")
+        self.assertNotEqual(state["readiness_scope"], "response_evidence")
 
     def test_parse_codex_malformed_jsonl_remains_fail_closed(self) -> None:
         builder = load_builder_module()
