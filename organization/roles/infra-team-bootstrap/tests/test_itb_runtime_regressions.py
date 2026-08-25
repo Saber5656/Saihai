@@ -46,7 +46,7 @@ class ScandirStub:
 
 def current_codex_jsonl(*, include_message: bool = True) -> str:
     events: list[dict[str, object]] = [
-        {"type": "thread.started", "thread_id": "provider-thread"},
+        {"type": "thread.started", "thread_id": "provider-thread", "model": "gpt-5.6-sol"},
         {"type": "turn.started"},
         {"type": "error", "message": "top-level diagnostic only"},
         {
@@ -101,6 +101,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
 
         self.assertEqual(parsed["result"], "final review result")
         self.assertEqual(parsed["session_id"], "provider-thread")
+        self.assertEqual(parsed["model"], "gpt-5.6-sol")
         self.assertEqual(parsed["usage"]["input_tokens"], 11)
         self.assertEqual(parsed["usage"]["cached_input_tokens"], 5)
         self.assertEqual(parsed["usage"]["output_tokens"], 7)
@@ -168,7 +169,6 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
         stdout = "\n".join(
             json.dumps(event)
             for event in (
-                {"type": "thread.started", "thread_id": "provider-thread"},
                 {
                     "type": "result",
                     "subtype": "error",
@@ -183,9 +183,52 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
         parsed = builder.parse_codex_json_output(stdout)
 
         self.assertNotIn("result", parsed)
-        self.assertEqual(parsed["session_id"], "provider-thread")
+        self.assertNotIn("session_id", parsed)
         self.assertNotIn("request_id", parsed)
         self.assertNotIn("model", parsed)
+
+    def test_parse_codex_rejects_conflicting_thread_started_metadata(self) -> None:
+        builder = load_builder_module()
+        stdout = "\n".join(
+            json.dumps(event)
+            for event in (
+                {"type": "thread.started", "thread_id": "thread-one", "model": "gpt-5.6-sol"},
+                {"type": "thread.started", "thread_id": "thread-two", "model": "gpt-5.5"},
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "response"}},
+                {"type": "turn.completed", "usage": {"output_tokens": 1}},
+            )
+        )
+
+        self.assertEqual(builder.parse_codex_json_output(stdout), {})
+
+    def test_parse_codex_rejects_mixed_current_and_legacy_streams(self) -> None:
+        builder = load_builder_module()
+        stdout = "\n".join(
+            json.dumps(event)
+            for event in (
+                {"type": "thread.started", "thread_id": "provider-thread", "model": "gpt-5.6-sol"},
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "current response"}},
+                {"type": "turn.completed", "usage": {"output_tokens": 1}},
+                {"type": "result", "subtype": "success", "result": "legacy response", "model": "gpt-5.5"},
+            )
+        )
+
+        self.assertEqual(builder.parse_codex_json_output(stdout), {})
+
+    def test_parse_codex_rejects_unsafe_model_identifier(self) -> None:
+        builder = load_builder_module()
+        stdout = "\n".join(
+            json.dumps(event)
+            for event in (
+                {"type": "thread.started", "thread_id": "provider-thread", "model": "gpt model with spaces"},
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "response"}},
+                {"type": "turn.completed", "usage": {"output_tokens": 1}},
+            )
+        )
+
+        parsed = builder.parse_codex_json_output(stdout)
+
+        self.assertEqual(parsed, {})
 
     def test_parse_codex_legacy_result_event_remains_supported(self) -> None:
         builder = load_builder_module()
@@ -223,10 +266,101 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
 
         parsed = builder.parse_codex_json_output(legacy_stdout)
 
-        self.assertEqual(parsed["result"], "legacy final response")
-        self.assertNotIn("session_id", parsed)
-        self.assertNotIn("request_id", parsed)
-        self.assertNotIn("model", parsed)
+        self.assertEqual(parsed, {})
+
+    def test_parse_codex_legacy_model_requires_bounded_safe_identifier(self) -> None:
+        builder = load_builder_module()
+        for model in ("bad model", "m" * 129):
+            with self.subTest(model=model):
+                parsed = builder.parse_codex_json_output(
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "result": "legacy final response",
+                            "session_id": "legacy-session",
+                            "model": model,
+                        }
+                    )
+                )
+
+                self.assertEqual(parsed, {})
+
+    def test_parse_codex_rejects_duplicate_legacy_terminals(self) -> None:
+        builder = load_builder_module()
+        stdout = "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": "first response",
+                    "session_id": "legacy-session",
+                    "model": "gpt-5.6-sol",
+                },
+                {"type": "result", "subtype": "success", "result": "second response"},
+            )
+        )
+
+        self.assertEqual(builder.parse_codex_json_output(stdout), {})
+
+    def test_parse_codex_rejects_conflicting_thread_aliases(self) -> None:
+        builder = load_builder_module()
+        events = (
+            {
+                "type": "thread.started",
+                "thread_id": "thread-one",
+                "threadId": "thread-two",
+                "model": "gpt-5.6-sol",
+            },
+            {
+                "type": "thread.started",
+                "thread_id": "thread-one",
+                "model": "gpt-5.6-sol",
+                "effectiveModel": "gpt-5.5",
+            },
+        )
+        for event in events:
+            with self.subTest(event=event):
+                stdout = "\n".join(
+                    json.dumps(item)
+                    for item in (
+                        event,
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": "response"}},
+                        {"type": "turn.completed", "usage": {"output_tokens": 1}},
+                    )
+                )
+
+                self.assertEqual(builder.parse_codex_json_output(stdout), {})
+
+    def test_parse_codex_rejects_non_string_identity_aliases(self) -> None:
+        builder = load_builder_module()
+        current_stdout = "\n".join(
+            json.dumps(event)
+            for event in (
+                {
+                    "type": "thread.started",
+                    "thread_id": "provider-thread",
+                    "threadId": {},
+                    "model": "gpt-5.6-sol",
+                },
+                {"type": "item.completed", "item": {"type": "agent_message", "text": "response"}},
+                {"type": "turn.completed", "usage": {"output_tokens": 1}},
+            )
+        )
+        legacy_stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "legacy response",
+                "session_id": {},
+                "request_id": [],
+                "model": "gpt-5.6-sol",
+            }
+        )
+
+        self.assertEqual(builder.parse_codex_json_output(current_stdout), {})
+        self.assertEqual(builder.parse_codex_json_output(legacy_stdout), {})
 
     def test_codex_dispatch_accepts_current_jsonl_as_response_evidence(self) -> None:
         builder = load_builder_module()
@@ -277,8 +411,43 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
         self.assertEqual(dispatch["result"], "provider_response_ready")
         self.assertEqual(dispatch["response"], "final review result")
         self.assertEqual(dispatch["provider_session_id"], "provider-thread")
+        self.assertEqual(dispatch["effective_model"], "gpt-5.6-sol")
         self.assertEqual(dispatch["input_tokens"], 11)
         self.assertEqual(dispatch["output_tokens"], 7)
+
+    def test_provider_activate_uses_thread_started_effective_model(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            builder.session_start_metadata_output(
+                runtime="codex",
+                state_root=state_root,
+                hook_input={"session_id": "session", "cwd": "/tmp/project", "source": "startup"},
+            )
+            completed = subprocess.CompletedProcess(
+                args=["codex"],
+                returncode=0,
+                stdout=current_codex_jsonl(),
+                stderr="",
+            )
+
+            with mock.patch.object(builder.shutil, "which", return_value="/usr/bin/codex"), mock.patch.object(
+                builder.subprocess,
+                "run",
+                return_value=completed,
+            ):
+                output = builder.provider_activate(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={
+                        "session_id": "session",
+                        "agent_id": "tech-backend",
+                        "cwd": "/tmp/project",
+                    },
+                )
+
+        self.assertEqual(output["activation"]["effective_model"], "gpt-5.6-sol")
+        self.assertEqual(output["activation"]["session_id"], "provider-thread")
 
     def test_codex_dispatch_without_agent_message_remains_fail_closed(self) -> None:
         builder = load_builder_module()

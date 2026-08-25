@@ -9796,12 +9796,50 @@ def codex_event_string(event: dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def codex_event_consistent_string(event: dict[str, Any], *keys: str) -> tuple[str, bool]:
+    if any(
+        key in event and event.get(key) is not None and not isinstance(event.get(key), str)
+        for key in keys
+    ):
+        return "", False
+    values = [
+        value.strip()
+        for key in keys
+        if isinstance((value := event.get(key)), str) and value.strip()
+    ]
+    if len(set(values)) > 1:
+        return "", False
+    return (values[0] if values else ""), True
+
+
+def codex_event_model(event: dict[str, Any]) -> tuple[str, bool]:
+    model_keys = ("model", "effective_model", "effectiveModel")
+    if any(
+        key in event and event.get(key) is not None and not isinstance(event.get(key), str)
+        for key in model_keys
+    ):
+        return "", False
+    value, aliases_consistent = codex_event_consistent_string(event, *model_keys)
+    if not aliases_consistent:
+        return "", False
+    if not value:
+        return "", True
+    if len(value) > 128 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}", value):
+        return "", False
+    return value, True
+
+
 def parse_codex_json_output(stdout: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
     last_agent_text = ""
     last_legacy_text = ""
     legacy_terminal_status = ""
     parsed_any = False
+    current_stream_seen = False
+    legacy_stream_seen = False
+    legacy_terminal_count = 0
+    thread_identity: tuple[str, str] | None = None
+    stream_conflict = False
     for line in stdout.splitlines():
         if not line.strip():
             continue
@@ -9810,10 +9848,22 @@ def parse_codex_json_output(stdout: str) -> dict[str, Any]:
             continue
         parsed_any = True
         event_type = normalize_cell(event.get("type"))
+        if event_type in {"thread.started", "turn.started", "item.completed", "turn.completed"}:
+            current_stream_seen = True
         if event_type == "thread.started":
-            thread_id = normalize_cell(event.get("thread_id") or event.get("threadId"))
+            thread_id, thread_aliases_valid = codex_event_consistent_string(event, "thread_id", "threadId")
+            effective_model, model_valid = codex_event_model(event)
+            if not thread_aliases_valid or not model_valid:
+                stream_conflict = True
+            identity = (thread_id, effective_model)
+            if thread_identity is not None and identity != thread_identity:
+                stream_conflict = True
+            else:
+                thread_identity = identity
             if thread_id:
                 result["session_id"] = thread_id
+            if effective_model:
+                result["model"] = effective_model
         elif event_type == "item.completed":
             item = event.get("item")
             if isinstance(item, dict) and normalize_cell(item.get("type")) == "agent_message":
@@ -9826,6 +9876,10 @@ def parse_codex_json_output(stdout: str) -> dict[str, Any]:
                 result["usage"] = dict(usage)
             result["num_turns"] = int(result.get("num_turns") or 0) + 1
         if event_type == "result":
+            legacy_stream_seen = True
+            legacy_terminal_count += 1
+            if legacy_terminal_count > 1:
+                stream_conflict = True
             subtype = normalize_cell(event.get("subtype"))
             is_error = subtype == "error" or event.get("is_error") is True
             if is_error or subtype not in {"", "success"}:
@@ -9835,9 +9889,11 @@ def parse_codex_json_output(stdout: str) -> dict[str, Any]:
             legacy_text = codex_event_text(event)
             if legacy_text:
                 last_legacy_text = legacy_text
-            session_id = codex_event_string(event, "session_id", "sessionId")
-            request_id = codex_event_string(event, "request_id", "requestId")
-            model = codex_event_string(event, "model", "effective_model", "effectiveModel")
+            session_id, session_aliases_valid = codex_event_consistent_string(event, "session_id", "sessionId")
+            request_id, request_aliases_valid = codex_event_consistent_string(event, "request_id", "requestId")
+            model, model_valid = codex_event_model(event)
+            if not session_aliases_valid or not request_aliases_valid or not model_valid:
+                stream_conflict = True
             if session_id:
                 result["session_id"] = session_id
             if request_id:
@@ -9876,6 +9932,8 @@ def parse_codex_json_output(stdout: str) -> dict[str, Any]:
                 if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                     result[target_key] = value
     if not parsed_any:
+        return {}
+    if stream_conflict or (current_stream_seen and legacy_stream_seen):
         return {}
     if legacy_terminal_status == "error":
         result.pop("result", None)
