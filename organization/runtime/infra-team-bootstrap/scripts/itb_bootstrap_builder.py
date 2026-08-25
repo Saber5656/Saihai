@@ -14,6 +14,7 @@ import select as _select
 import shlex
 import shutil
 import signal
+import stat as stat_module
 import subprocess
 import sys
 import time
@@ -15861,22 +15862,76 @@ def role_queue_completion_wait_config(hook_input: dict[str, Any]) -> tuple[float
     return timeout_seconds, poll_interval_seconds, event_driven
 
 
-def queue_watch_snapshot(queue_root: Path) -> str:
-    digest = hashlib.sha256()
+def queue_watch_deadline_expired(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def queue_watch_snapshot(queue_root: Path, *, deadline: float | None = None) -> str | None:
+    aggregate = 0
+    file_count = 0
+    digest_modulus = 1 << 256
+    scanners: list[Any] = []
+    if queue_watch_deadline_expired(deadline):
+        return None
     try:
-        paths = sorted(queue_root.rglob("*"), key=lambda path: path.as_posix())
+        root_scanner = os.scandir(queue_root)
+    except FileNotFoundError:
+        if queue_watch_deadline_expired(deadline):
+            return None
+        return "missing"
     except OSError:
-        paths = []
-    for path in paths:
-        try:
-            if not path.is_file():
+        return None
+    scanners.append(root_scanner)
+    try:
+        if queue_watch_deadline_expired(deadline):
+            return None
+        while scanners:
+            if queue_watch_deadline_expired(deadline):
+                return None
+            scanner = scanners[-1]
+            try:
+                entry = next(scanner)
+            except StopIteration:
+                scanner.close()
+                scanners.pop()
                 continue
-            stat = path.stat()
-            relative_path = path.relative_to(queue_root).as_posix()
-        except (OSError, ValueError):
-            continue
-        digest.update(f"{relative_path}\0{stat.st_mtime_ns}\0{stat.st_size}\n".encode("utf-8"))
-    return digest.hexdigest()
+            except OSError:
+                return None
+            if queue_watch_deadline_expired(deadline):
+                return None
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                return None
+            if queue_watch_deadline_expired(deadline):
+                return None
+            if stat_module.S_ISDIR(entry_stat.st_mode):
+                try:
+                    child_scanner = os.scandir(entry.path)
+                except OSError:
+                    return None
+                if queue_watch_deadline_expired(deadline):
+                    child_scanner.close()
+                    return None
+                scanners.append(child_scanner)
+                continue
+            if not stat_module.S_ISREG(entry_stat.st_mode):
+                continue
+            try:
+                relative_path = Path(entry.path).relative_to(queue_root).as_posix()
+            except ValueError:
+                return None
+            entry_digest = hashlib.sha256(
+                f"{relative_path}\0{entry_stat.st_mtime_ns}\0{entry_stat.st_size}\n".encode("utf-8")
+            ).digest()
+            aggregate = (aggregate + int.from_bytes(entry_digest, "big")) % digest_modulus
+            file_count += 1
+        if queue_watch_deadline_expired(deadline):
+            return None
+        return f"{file_count}:{aggregate:064x}"
+    finally:
+        for scanner in reversed(scanners):
+            scanner.close()
 
 
 def queue_watch_wait_for_event(
@@ -15888,26 +15943,41 @@ def queue_watch_wait_for_event(
     bounded_timeout = max(0.0, float(timeout_seconds))
     started = time.monotonic()
     deadline = started + bounded_timeout
-    initial_snapshot = queue_watch_snapshot(queue_root) if event_driven else ""
+
+    def wait_result(result: str, wait_result_name: str) -> dict[str, Any]:
+        return {
+            "result": result,
+            "wait_result": wait_result_name,
+            "event_driven": event_driven,
+            "timeout_seconds": bounded_timeout,
+            "duration_sec": round(max(0.0, time.monotonic() - started), 3),
+        }
+
+    def incomplete_snapshot_timeout() -> dict[str, Any]:
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        return wait_result("timeout", "timeout")
+
+    initial_snapshot = queue_watch_snapshot(queue_root, deadline=deadline) if event_driven else ""
+    if initial_snapshot is None:
+        return incomplete_snapshot_timeout()
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return {
-                "result": "timeout" if event_driven else "poll_elapsed",
-                "wait_result": "timeout" if event_driven else "poll",
-                "event_driven": event_driven,
-                "timeout_seconds": bounded_timeout,
-                "duration_sec": round(max(0.0, time.monotonic() - started), 3),
-            }
+            return wait_result(
+                "timeout" if event_driven else "poll_elapsed",
+                "timeout" if event_driven else "poll",
+            )
         time.sleep(min(0.05, remaining))
-        if event_driven and queue_watch_snapshot(queue_root) != initial_snapshot:
-            return {
-                "result": "queue_changed",
-                "wait_result": "event",
-                "event_driven": True,
-                "timeout_seconds": bounded_timeout,
-                "duration_sec": round(max(0.0, time.monotonic() - started), 3),
-            }
+        if event_driven:
+            current_snapshot = queue_watch_snapshot(queue_root, deadline=deadline)
+            if current_snapshot is None:
+                return incomplete_snapshot_timeout()
+            if queue_watch_deadline_expired(deadline):
+                return wait_result("timeout", "timeout")
+            if current_snapshot != initial_snapshot:
+                return wait_result("queue_changed", "event")
 
 
 def record_role_queue_completion_wait_event(

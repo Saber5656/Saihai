@@ -24,6 +24,26 @@ def load_builder_module():
     return module
 
 
+class ScandirStub:
+    def __init__(self, entries=(), *, error: OSError | None = None):
+        self._entries = iter(entries)
+        self._error = error
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._error is not None:
+            error = self._error
+            self._error = None
+            raise error
+        return next(self._entries)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def current_codex_jsonl(*, include_message: bool = True) -> str:
     events: list[dict[str, object]] = [
         {"type": "thread.started", "thread_id": "provider-thread"},
@@ -448,6 +468,303 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
 
         self.assertEqual(output["result"], "queue_changed")
         self.assertEqual(output["wait_result"], "event")
+
+    def test_queue_snapshot_does_not_start_traversal_after_deadline(self) -> None:
+        builder = load_builder_module()
+        queue_root = Path("/tmp/queue")
+
+        with mock.patch.object(builder.time, "monotonic", return_value=1.0), mock.patch.object(
+            builder.os,
+            "scandir",
+        ) as scandir_mock:
+            snapshot = builder.queue_watch_snapshot(queue_root, deadline=0.5)
+
+        self.assertIsNone(snapshot)
+        scandir_mock.assert_not_called()
+
+    def test_queue_snapshot_stops_when_metadata_lookup_exhausts_deadline(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_root = Path(tmp) / "queue"
+            queue_root.mkdir()
+            marker = queue_root / "marker.json"
+            marker.write_text("{}", encoding="utf-8")
+
+            with mock.patch.object(
+                builder.time,
+                "monotonic",
+                side_effect=[0.0, 0.0, 0.0, 0.0, 1.0],
+            ):
+                snapshot = builder.queue_watch_snapshot(queue_root, deadline=0.5)
+
+        self.assertIsNone(snapshot)
+
+    def test_queue_snapshot_returns_incomplete_on_iteration_or_metadata_error(self) -> None:
+        builder = load_builder_module()
+        queue_root = Path("/tmp/queue")
+
+        class FailingEntry:
+            path = "/tmp/queue/failing"
+
+            def stat(self, *, follow_symlinks: bool = True):
+                raise OSError("metadata failed")
+
+        with self.subTest(error="scan-open"), mock.patch.object(
+            builder.os,
+            "scandir",
+            side_effect=OSError("scan failed"),
+        ):
+            self.assertIsNone(builder.queue_watch_snapshot(queue_root))
+
+        with self.subTest(error="iteration"), mock.patch.object(
+            builder.os,
+            "scandir",
+            return_value=ScandirStub(error=OSError("iteration failed")),
+        ):
+            self.assertIsNone(builder.queue_watch_snapshot(queue_root))
+
+        with self.subTest(error="metadata"), mock.patch.object(
+            builder.os,
+            "scandir",
+            return_value=ScandirStub([FailingEntry()]),
+        ):
+            self.assertIsNone(builder.queue_watch_snapshot(queue_root))
+
+    def test_queue_snapshot_returns_incomplete_when_missing_root_scan_exhausts_deadline(self) -> None:
+        builder = load_builder_module()
+        with mock.patch.object(
+            builder.time,
+            "monotonic",
+            side_effect=[0.0, 0.6],
+        ), mock.patch.object(
+            builder.os,
+            "scandir",
+            side_effect=FileNotFoundError("queue disappeared"),
+        ):
+            snapshot = builder.queue_watch_snapshot(Path("/tmp/queue"), deadline=0.5)
+
+        self.assertIsNone(snapshot)
+
+    def test_queue_snapshot_returns_incomplete_on_nested_scan_race(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_root = Path(tmp) / "queue"
+            nested = queue_root / "nested"
+            nested.mkdir(parents=True)
+            (nested / "marker.json").write_text("{}", encoding="utf-8")
+            real_scandir = builder.os.scandir
+
+            def flaky_scandir(path):
+                if Path(path) == nested:
+                    raise OSError("nested scan failed")
+                return real_scandir(path)
+
+            with mock.patch.object(builder.os, "scandir", side_effect=flaky_scandir):
+                snapshot = builder.queue_watch_snapshot(queue_root)
+
+        self.assertIsNone(snapshot)
+
+    def test_queue_snapshot_is_order_independent_and_skips_nonfiles(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_root = Path(tmp) / "queue"
+            queue_root.mkdir()
+            first = queue_root / "first.json"
+            second = queue_root / "second.json"
+            directory = queue_root / "directory"
+            symlink = queue_root / "external-link"
+            first.write_text("one", encoding="utf-8")
+            second.write_text("two", encoding="utf-8")
+            directory.mkdir()
+            symlink.symlink_to(Path(tmp) / "external-target")
+
+            with builder.os.scandir(queue_root) as scanner:
+                entries = {entry.name: entry for entry in scanner}
+            with mock.patch.object(
+                builder.os,
+                "scandir",
+                side_effect=[
+                    ScandirStub(
+                        [
+                            entries["first.json"],
+                            entries["directory"],
+                            entries["second.json"],
+                            entries["external-link"],
+                        ]
+                    ),
+                    ScandirStub(),
+                    ScandirStub(
+                        [
+                            entries["external-link"],
+                            entries["second.json"],
+                            entries["directory"],
+                            entries["first.json"],
+                        ]
+                    ),
+                    ScandirStub(),
+                    ScandirStub([entries["first.json"], entries["second.json"]]),
+                ],
+            ):
+                forward = builder.queue_watch_snapshot(queue_root)
+                reverse = builder.queue_watch_snapshot(queue_root)
+                files_only = builder.queue_watch_snapshot(queue_root)
+
+        self.assertEqual(forward, reverse)
+        self.assertEqual(forward, files_only)
+
+    def test_event_wait_returns_typed_timeout_when_initial_snapshot_exhausts_deadline(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            builder,
+            "queue_watch_snapshot",
+            return_value=None,
+        ) as snapshot_mock, mock.patch.object(
+            builder.time,
+            "monotonic",
+            side_effect=[0.0, 0.0, 0.5],
+        ), mock.patch.object(builder.time, "sleep") as sleep_mock:
+            output = builder.queue_watch_wait_for_event(
+                queue_root=Path(tmp) / "queue",
+                timeout_seconds=0.5,
+                event_driven=True,
+            )
+
+        self.assertEqual(output["result"], "timeout")
+        self.assertEqual(output["wait_result"], "timeout")
+        self.assertTrue(output["event_driven"])
+        self.assertIsNotNone(snapshot_mock.call_args.kwargs["deadline"])
+        sleep_mock.assert_called_once_with(0.5)
+
+    def test_event_wait_returns_typed_timeout_when_later_snapshot_is_incomplete(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            builder,
+            "queue_watch_snapshot",
+            side_effect=["initial", None],
+        ) as snapshot_mock, mock.patch.object(
+            builder.time,
+            "monotonic",
+            side_effect=[0.0, 0.0, 0.05, 0.5],
+        ), mock.patch.object(builder.time, "sleep") as sleep_mock:
+            output = builder.queue_watch_wait_for_event(
+                queue_root=Path(tmp) / "queue",
+                timeout_seconds=0.5,
+                event_driven=True,
+            )
+
+        self.assertEqual(output["result"], "timeout")
+        self.assertEqual(output["wait_result"], "timeout")
+        self.assertEqual(snapshot_mock.call_count, 2)
+        self.assertEqual(sleep_mock.call_count, 2)
+        self.assertAlmostEqual(sleep_mock.call_args_list[0].args[0], 0.05)
+        self.assertAlmostEqual(sleep_mock.call_args_list[1].args[0], 0.45)
+
+    def test_event_wait_nested_scan_race_times_out_without_false_change(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_root = Path(tmp) / "queue"
+            nested = queue_root / "nested"
+            nested.mkdir(parents=True)
+            (nested / "marker.json").write_text("{}", encoding="utf-8")
+            real_scandir = builder.os.scandir
+            root_scans = 0
+
+            def flaky_second_snapshot(path):
+                nonlocal root_scans
+                if Path(path) == queue_root:
+                    root_scans += 1
+                if Path(path) == nested and root_scans >= 2:
+                    raise OSError("nested scan failed")
+                return real_scandir(path)
+
+            with mock.patch.object(
+                builder.os,
+                "scandir",
+                side_effect=flaky_second_snapshot,
+            ), mock.patch.object(builder.time, "sleep"):
+                output = builder.queue_watch_wait_for_event(
+                    queue_root=queue_root,
+                    timeout_seconds=0.5,
+                    event_driven=True,
+                )
+
+        self.assertEqual(output["result"], "timeout")
+        self.assertEqual(output["wait_result"], "timeout")
+        self.assertGreaterEqual(root_scans, 2)
+
+    def test_event_wait_root_disappearance_after_deadline_is_typed_timeout(self) -> None:
+        builder = load_builder_module()
+        clock = {"now": 0.0}
+        scan_count = 0
+
+        def disappearing_root(path):
+            nonlocal scan_count
+            scan_count += 1
+            if scan_count == 1:
+                return ScandirStub()
+            clock["now"] = 0.6
+            raise FileNotFoundError(path)
+
+        with mock.patch.object(
+            builder.time,
+            "monotonic",
+            side_effect=lambda: clock["now"],
+        ), mock.patch.object(builder.time, "sleep"), mock.patch.object(
+            builder.os,
+            "scandir",
+            side_effect=disappearing_root,
+        ):
+            output = builder.queue_watch_wait_for_event(
+                queue_root=Path("/tmp/queue"),
+                timeout_seconds=0.5,
+                event_driven=True,
+            )
+
+        self.assertEqual(output["result"], "timeout")
+        self.assertEqual(output["wait_result"], "timeout")
+        self.assertEqual(scan_count, 2)
+
+    def test_event_wait_rechecks_deadline_before_snapshot_comparison(self) -> None:
+        builder = load_builder_module()
+        clock = {"now": 0.0}
+        snapshots = iter(["initial", "changed"])
+
+        def snapshot_after_deadline(*args, **kwargs):
+            snapshot = next(snapshots)
+            if snapshot == "changed":
+                clock["now"] = 0.6
+            return snapshot
+
+        with mock.patch.object(
+            builder.time,
+            "monotonic",
+            side_effect=lambda: clock["now"],
+        ), mock.patch.object(builder.time, "sleep"), mock.patch.object(
+            builder,
+            "queue_watch_snapshot",
+            side_effect=snapshot_after_deadline,
+        ):
+            output = builder.queue_watch_wait_for_event(
+                queue_root=Path("/tmp/queue"),
+                timeout_seconds=0.5,
+                event_driven=True,
+            )
+
+        self.assertEqual(output["result"], "timeout")
+        self.assertEqual(output["wait_result"], "timeout")
+
+    def test_zero_timeout_does_not_traverse_queue(self) -> None:
+        builder = load_builder_module()
+        with mock.patch.object(builder.os, "scandir") as scandir_mock:
+            output = builder.queue_watch_wait_for_event(
+                queue_root=Path("/tmp/queue"),
+                timeout_seconds=0.0,
+                event_driven=True,
+            )
+
+        self.assertEqual(output["result"], "timeout")
+        self.assertEqual(output["wait_result"], "timeout")
+        scandir_mock.assert_not_called()
 
 
 if __name__ == "__main__":
