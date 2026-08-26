@@ -10010,6 +10010,24 @@ def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
             pass
 
 
+def wait_for_provider_process(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float,
+) -> tuple[int, bool, bool]:
+    try:
+        return process.wait(timeout=max(0.0, timeout)), False, False
+    except subprocess.TimeoutExpired:
+        terminate_process_group(process)
+        try:
+            return process.wait(timeout=1.0), True, False
+        except subprocess.TimeoutExpired:
+            observed_returncode = process.poll()
+            if not isinstance(observed_returncode, int) or isinstance(observed_returncode, bool):
+                observed_returncode = -signal.SIGKILL
+            return observed_returncode, True, True
+
+
 def run_command_with_bounded_output(
     command: list[str],
     *,
@@ -10103,18 +10121,17 @@ def run_command_with_bounded_output(
     process.stderr.close()
     if process.poll() is None and not (exceeded or read_error or timed_out):
         remaining = max(0.0, deadline - time.monotonic())
-        try:
-            returncode = process.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            terminate_process_group(process)
-            returncode = process.wait(timeout=1.0)
+        returncode, wait_timed_out, _ = wait_for_provider_process(
+            process,
+            timeout=remaining,
+        )
+        timed_out = timed_out or wait_timed_out
     else:
-        try:
-            returncode = process.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            terminate_process_group(process)
-            returncode = process.wait(timeout=1.0)
+        returncode, _, final_reap_timed_out = wait_for_provider_process(
+            process,
+            timeout=1.0,
+        )
+        timed_out = timed_out or final_reap_timed_out
 
     stdout_bytes = bytes(buffers["stdout"])
     stderr_bytes = bytes(buffers["stderr"])
@@ -16564,6 +16581,10 @@ def queue_watch_snapshot(queue_root: Path, *, deadline: float | None = None) -> 
                 return None
             try:
                 entry_stat = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                if queue_watch_deadline_expired(deadline):
+                    return None
+                continue
             except OSError:
                 return None
             if queue_watch_deadline_expired(deadline):
@@ -16571,6 +16592,10 @@ def queue_watch_snapshot(queue_root: Path, *, deadline: float | None = None) -> 
             if stat_module.S_ISDIR(entry_stat.st_mode):
                 try:
                     child_scanner = os.scandir(entry.path)
+                except FileNotFoundError:
+                    if queue_watch_deadline_expired(deadline):
+                        return None
+                    continue
                 except OSError:
                     return None
                 if queue_watch_deadline_expired(deadline):

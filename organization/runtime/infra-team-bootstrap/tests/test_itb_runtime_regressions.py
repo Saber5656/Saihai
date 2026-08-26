@@ -552,6 +552,118 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
             exact_process_output.stdout,
         )
 
+    def test_bounded_output_runner_returns_typed_timeout_when_final_reap_times_out(self) -> None:
+        builder = load_builder_module()
+
+        class UnreapableProcess:
+            pid = 42424242
+            returncode = None
+
+            def __init__(self, stdout, stderr) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.wait_timeouts: list[float | None] = []
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                self.wait_timeouts.append(timeout)
+                raise subprocess.TimeoutExpired(cmd=["codex"], timeout=timeout)
+
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            process = UnreapableProcess(stdout, stderr)
+            with mock.patch.object(
+                builder.subprocess,
+                "Popen",
+                return_value=process,
+            ), mock.patch.object(builder, "terminate_process_group") as terminate_mock:
+                completed = builder.run_command_with_bounded_output(
+                    ["codex", "exec"],
+                    timeout=0.01,
+                    stdout_limit_bytes=16,
+                    stderr_limit_bytes=16,
+                )
+
+        rejection_type, rejection_reason = builder.codex_bounded_output_rejection(completed)
+        self.assertEqual(len(process.wait_timeouts), 2)
+        self.assertGreaterEqual(process.wait_timeouts[0], 0.0)
+        self.assertLessEqual(process.wait_timeouts[0], 0.01)
+        self.assertEqual(process.wait_timeouts[1], 1.0)
+        terminate_mock.assert_called_once_with(process)
+        self.assertEqual(completed.returncode, -builder.signal.SIGKILL)
+        self.assertTrue(completed.output_timed_out)
+        self.assertEqual(rejection_type, "provider_response_timeout")
+        self.assertIn("timeout", rejection_reason)
+
+    def test_bounded_output_runner_preserves_prior_rejection_when_reap_recovers(self) -> None:
+        builder = load_builder_module()
+
+        class ReapedAfterKillProcess:
+            pid = 42424242
+            returncode = None
+
+            def __init__(self, stdout, stderr) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.wait_timeouts: list[float | None] = []
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.wait_timeouts.append(timeout)
+                if len(self.wait_timeouts) == 1:
+                    raise subprocess.TimeoutExpired(cmd=["codex"], timeout=timeout)
+                self.returncode = -builder.signal.SIGKILL
+                return self.returncode
+
+        with self.subTest(rejection="output-limit"), tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            stdout.write(b"x" * 32)
+            stdout.seek(0)
+            process = ReapedAfterKillProcess(stdout, stderr)
+            with mock.patch.object(
+                builder.subprocess,
+                "Popen",
+                return_value=process,
+            ), mock.patch.object(builder, "terminate_process_group"):
+                completed = builder.run_command_with_bounded_output(
+                    ["codex", "exec"],
+                    timeout=1.0,
+                    stdout_limit_bytes=4,
+                    stderr_limit_bytes=4,
+                )
+
+            rejection_type, _ = builder.codex_bounded_output_rejection(completed)
+            self.assertEqual(rejection_type, "provider_output_limit_exceeded")
+            self.assertFalse(completed.output_timed_out)
+            self.assertEqual(len(process.wait_timeouts), 2)
+            self.assertEqual(process.wait_timeouts[1], 1.0)
+
+        with self.subTest(rejection="read-error"), tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            process = ReapedAfterKillProcess(stdout, stderr)
+            with mock.patch.object(
+                builder.subprocess,
+                "Popen",
+                return_value=process,
+            ), mock.patch.object(
+                builder._select,
+                "select",
+                side_effect=OSError("forced read failure"),
+            ), mock.patch.object(builder, "terminate_process_group"):
+                completed = builder.run_command_with_bounded_output(
+                    ["codex", "exec"],
+                    timeout=1.0,
+                    stdout_limit_bytes=4,
+                    stderr_limit_bytes=4,
+                )
+
+            rejection_type, _ = builder.codex_bounded_output_rejection(completed)
+            self.assertEqual(rejection_type, "provider_output_read_failed")
+            self.assertFalse(completed.output_timed_out)
+            self.assertEqual(len(process.wait_timeouts), 2)
+            self.assertEqual(process.wait_timeouts[1], 1.0)
+
     def test_parse_codex_top_level_diagnostic_is_not_response_evidence(self) -> None:
         builder = load_builder_module()
 
@@ -2325,6 +2437,42 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
             return_value=ScandirStub([FailingEntry()]),
         ):
             self.assertIsNone(builder.queue_watch_snapshot(queue_root))
+
+    def test_queue_snapshot_skips_entries_that_vanish_during_scan(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_root = Path(tmp) / "queue"
+            queue_root.mkdir()
+            stable = queue_root / "stable.json"
+            nested = queue_root / "nested"
+            stable.write_text("stable", encoding="utf-8")
+            nested.mkdir()
+            expected = builder.queue_watch_snapshot(queue_root)
+            with builder.os.scandir(queue_root) as scanner:
+                entries = {entry.name: entry for entry in scanner}
+
+            class VanishedEntry:
+                path = str(queue_root / "vanished.json")
+
+                def stat(self, *, follow_symlinks: bool = True):
+                    raise FileNotFoundError(self.path)
+
+            with self.subTest(race="metadata"), mock.patch.object(
+                builder.os,
+                "scandir",
+                return_value=ScandirStub([VanishedEntry(), entries["stable.json"]]),
+            ):
+                self.assertEqual(builder.queue_watch_snapshot(queue_root), expected)
+
+            with self.subTest(race="nested-scan"), mock.patch.object(
+                builder.os,
+                "scandir",
+                side_effect=[
+                    ScandirStub([entries["nested"], entries["stable.json"]]),
+                    FileNotFoundError(str(nested)),
+                ],
+            ):
+                self.assertEqual(builder.queue_watch_snapshot(queue_root), expected)
 
     def test_queue_snapshot_returns_incomplete_when_missing_root_scan_exhausts_deadline(self) -> None:
         builder = load_builder_module()
