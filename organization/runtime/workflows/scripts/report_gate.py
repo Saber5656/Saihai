@@ -552,6 +552,7 @@ def validate_effective_model_binding(
         "intended_model"
     ):
         errors.append(f"{label}.effective_model must match intended_model")
+        assurance_mismatch = True
     if assurance_mismatch:
         return [PROVIDER_MODEL_ASSURANCE_MISMATCH, *errors]
     return errors
