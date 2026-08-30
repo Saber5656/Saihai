@@ -101,6 +101,14 @@ _UTC_TIMESTAMP_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
 )
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:")
+WINDOWS_FORBIDDEN_COMPONENT_CHARACTERS = frozenset('<>:"/\\|?*')
+WINDOWS_RESERVED_DEVICE_BASENAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+    | {f"com{index}" for index in "¹²³"}
+    | {f"lpt{index}" for index in "¹²³"}
+)
 FORBIDDEN_LOCATION_KEYS = frozenset(
     {
         "file_path",
@@ -304,6 +312,16 @@ def _relative_changed_path(value: Any) -> bool:
                 "utf-8", errors="strict"
             )
             == part
+            for part in candidate.parts
+        )
+        and all(
+            not part.endswith((" ", "."))
+            and not any(
+                character in WINDOWS_FORBIDDEN_COMPONENT_CHARACTERS
+                for character in part
+            )
+            and part.split(".", 1)[0].casefold()
+            not in WINDOWS_RESERVED_DEVICE_BASENAMES
             for part in candidate.parts
         )
         and all(

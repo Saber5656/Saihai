@@ -619,15 +619,46 @@ def test_opaque_diff_and_non_regular_operations_are_unrepresentable() -> None:
         )
 
 
-def test_structured_quoted_path_is_unambiguous_and_binary_content_is_rejected() -> None:
-    quoted_path = 'docs/"quoted".md'
-    changed = result_envelope()
-    changed["worker_result"]["changed_paths"] = [quoted_path]
-    changed["patch"]["changes"] = [
-        regular_text_change(quoted_path, b"quoted path\n", "create")
-    ]
-    validated = transport.validate_result_envelope(changed)
-    assert validated["patch"]["changes"][0]["relative_path"] == quoted_path
+def test_result_paths_enforce_ntfs_safe_components() -> None:
+    for path in (
+        "CON",
+        "con.txt",
+        "docs/AUX.md",
+        "docs/COM1.log",
+        "docs/LPT9",
+        "COM¹.txt",
+        "docs/com²",
+        "docs/COM³.log",
+        "docs/LPT¹",
+        "docs/lpt².txt",
+        "docs/LPT³.bin",
+        "docs/name.",
+        "docs/name ",
+        'docs/"quoted".md',
+        "docs/bad?.md",
+        "docs/bad|name.md",
+    ):
+        changed = result_envelope()
+        changed["worker_result"]["changed_paths"] = [path]
+        changed["patch"]["changes"] = [
+            regular_text_change(path, b"portable path\n", "create")
+        ]
+        expect_reason(
+            "isolated_worker_result_invalid",
+            lambda changed=changed: transport.validate_result_envelope(changed),
+        )
+
+    for path in ("docs/console.md", "docs/com10.txt", "docs/name..txt"):
+        changed = result_envelope()
+        changed["worker_result"]["changed_paths"] = [path]
+        changed["patch"]["changes"] = [
+            regular_text_change(path, b"portable path\n", "create")
+        ]
+        validated = transport.validate_result_envelope(changed)
+        assert validated["patch"]["changes"][0]["relative_path"] == path
+
+
+def test_binary_content_is_rejected() -> None:
 
     binary = result_envelope()
     binary["patch"]["changes"] = [regular_text_change(content=b"\xff\x00")]
@@ -792,7 +823,8 @@ def main() -> None:
         test_result_receipt_uses_closed_open_trusted_clock_window,
         test_changed_paths_and_typed_change_paths_are_exact_unique_sets,
         test_opaque_diff_and_non_regular_operations_are_unrepresentable,
-        test_structured_quoted_path_is_unambiguous_and_binary_content_is_rejected,
+        test_result_paths_enforce_ntfs_safe_components,
+        test_binary_content_is_rejected,
         test_input_artifact_bytes_are_size_digest_and_limit_checked,
         test_result_raw_and_file_change_bytes_are_bounded_before_trust,
         test_result_raw_json_rejects_duplicate_members_at_every_depth,

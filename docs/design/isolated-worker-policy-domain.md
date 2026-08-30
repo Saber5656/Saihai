@@ -374,17 +374,19 @@ slash-separated components, regular files only, at most 255 UTF-8 bytes per
 component and 1024 UTF-8 bytes for the whole relative path. Every path and
 component must consist only of Unicode scalar values and round-trip exactly
 through strict UTF-8 encode/decode. Absolute forms, empty/dot/dot-dot
-components, non-canonical repeated separators, backslashes, colons (including
-NTFS alternate-data-stream syntax), C0/C1 controls, Unicode format/bidi control
-characters, and reserved VCS control components (`.git`, `.gitmodules`, `.hg`,
-`.svn`, `.bzr`, `_darcs`, `.pijul`, `.fossil-settings`, `.jj`, `.sl`, `CVS`,
-`RCS`, or `SCCS`, case-insensitive) are forbidden. Windows drive prefixes,
-surrogate code points, and non-NFC Unicode are therefore rejected. JSON escaping
-is resolved before this check, so a literal quote in a structured path is
-unambiguous; there is no diff-header quoting grammar. Both lists must themselves
-be unique without case-insensitive filesystem collisions, and their canonical
-path sets must match exactly in both directions. A non-empty `changed_paths`
-list requires a non-empty file-change payload, and an empty list forbids one.
+components, non-canonical repeated separators, Windows-forbidden component
+characters (`<`, `>`, `:`, `"`, `/`, `\\`, `|`, `?`, `*`), components ending in
+a space or period, C0/C1 controls, Unicode format/bidi control characters, and
+reserved VCS control components (`.git`, `.gitmodules`, `.hg`, `.svn`, `.bzr`,
+`_darcs`, `.pijul`, `.fossil-settings`, `.jj`, `.sl`, `CVS`, `RCS`, or `SCCS`,
+case-insensitive) are forbidden. NTFS device basenames (`CON`, `PRN`, `AUX`,
+`NUL`, `COM1` through `COM9`, and `LPT1` through `LPT9`) are forbidden
+case-insensitively even when followed by an extension. Windows drive prefixes,
+NTFS alternate-data-stream syntax, surrogate code points, and non-NFC Unicode
+are therefore rejected. Both lists must themselves be unique without
+case-insensitive filesystem collisions, and their canonical path sets must
+match exactly in both directions. A non-empty `changed_paths` list requires a
+non-empty file-change payload, and an empty list forbids one.
 
 Before any task-worktree mutation, the future host controller must interpret
 the typed operation only in a disposable staging copy of the exact
@@ -468,7 +470,8 @@ overlong, ADS-like, and VCS paths, duplicate JSON members and path declarations,
 path-set mismatches in both directions, old opaque/quoted/rename/copy diff
 payloads, symlink/submodule/mode objects, binary content, and tampered file
 content. It also covers exact path, operation-count, aggregate-path-byte, and
-expiry boundaries, an unambiguous structured quoted path, input and result
+expiry boundaries, Windows-forbidden characters, device basenames (including
+the Win32 superscript variants), trailing periods/spaces, input and result
 bounds, cross-transfer binding changes, and inert self-reports. This is
 contract-level evidence only. The runtime no-mount,
 safe-staging, broker-channel, atomic-consumption, and replay properties must be
