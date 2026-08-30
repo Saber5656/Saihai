@@ -140,6 +140,6 @@ If the catalog is invalid, correct it manually and run:
 python3 scripts/setup_directory_paths.py --check
 ```
 
-To recover from an invalid explicit selector, unset
-`SAIHAI_DIRECTORY_PATH_ENV` so normal primary-checkout discovery can resume.
-Compatibility selector names are listed only in the table above.
+To recover from an invalid explicit selector, unset both
+`SAIHAI_DIRECTORY_PATH_ENV` and the compatibility selector
+`SAHAI_DIRECTORY_PATH_ENV` so normal primary-checkout discovery can resume.
