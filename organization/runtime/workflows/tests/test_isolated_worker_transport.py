@@ -202,6 +202,24 @@ def test_valid_typed_exchange_is_bound_and_path_free() -> None:
     assert outgoing["worker_result"]["changed_paths"] == ["README.md"]
 
 
+def test_input_execution_count_requires_integer_one() -> None:
+    boolean_count = input_envelope()
+    boolean_count["authority"]["max_execution_count"] = True
+    exc = expect_reason(
+        "isolated_worker_input_invalid",
+        lambda: transport.validate_input_envelope(boolean_count),
+    )
+    assert "schema:$.authority.max_execution_count:type" in exc.errors
+
+    repeated_count = input_envelope()
+    repeated_count["authority"]["max_execution_count"] = 2
+    exc = expect_reason(
+        "isolated_worker_input_invalid",
+        lambda: transport.validate_input_envelope(repeated_count),
+    )
+    assert "schema:$.authority.max_execution_count:const" in exc.errors
+
+
 def test_regular_all_of_and_unknown_schema_keywords_fail_closed() -> None:
     changed = input_envelope()
     changed["approved_work_order"]["artifact_id"] = "worker-chosen-order"
@@ -762,6 +780,7 @@ def test_contract_schemas_are_strict_at_boundary_objects() -> None:
 def main() -> None:
     tests = [
         test_valid_typed_exchange_is_bound_and_path_free,
+        test_input_execution_count_requires_integer_one,
         test_regular_all_of_and_unknown_schema_keywords_fail_closed,
         test_input_rejects_host_and_vault_location_fields,
         test_worker_result_cannot_name_host_writeback_targets,

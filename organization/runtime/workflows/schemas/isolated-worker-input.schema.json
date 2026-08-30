@@ -58,7 +58,7 @@
         "approval_state": { "const": "approved" },
         "capability_digest": { "$ref": "#/$defs/sha256" },
         "assurance_binding_digest": { "$ref": "#/$defs/sha256" },
-        "max_execution_count": { "const": 1 }
+        "max_execution_count": { "type": "integer", "const": 1 }
       },
       "additionalProperties": false
     },
