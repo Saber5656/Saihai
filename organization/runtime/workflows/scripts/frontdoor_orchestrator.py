@@ -2702,6 +2702,35 @@ def request_digest(
     return "sha256:" + stable_digest(material)
 
 
+def legacy_bridge_request_digest(
+    payload: dict[str, Any],
+    *,
+    workspace_id: str = "",
+    checkout_identity: dict[str, Any] | None = None,
+    launch_session_identity: dict[str, Any] | None = None,
+) -> str:
+    """Reproduce the pre-surface bridge digest for upgrade-only replay."""
+
+    material = {
+        "task_id": payload.get("task_id"),
+        "request_id": payload.get("request_id"),
+        "request_kind": payload.get("request_kind"),
+        "prompt": payload.get("prompt") or "",
+        "refs": list(payload.get("refs") or []),
+        "allowed_paths": list(payload.get("allowed_paths") or []),
+        "expires_at": payload.get("expires_at") or "run_terminal",
+        "frontdoor": payload.get("frontdoor") or "codex",
+        "workspace_id": workspace_id,
+        "checkout_identity_digest": str(
+            (checkout_identity or {}).get("identity_digest") or ""
+        ),
+        "launch_session_digest": str(
+            (launch_session_identity or {}).get("record_digest") or ""
+        ),
+    }
+    return "sha256:" + stable_digest(material)
+
+
 def bridge_owner_principal(record: dict[str, Any]) -> dict[str, str]:
     owner = record.get("owner_principal")
     if not isinstance(owner, dict):
@@ -3342,21 +3371,40 @@ def bridge_submit_request(
             )
             if state_file_exists(idempotency_file):
                 existing = read_json(idempotency_file)
-                existing_key_digest = existing.get("key_digest")
-                if existing_key_digest is None:
-                    existing_key_digest = existing.get("idempotency_key_digest")
-                if existing_key_digest not in {None, idempotency_digest}:
-                    block("idempotency key surface descriptor drifted")
                 existing_request_id = validate_artifact_id(
                     str(existing.get("request_id") or ""),
                     "request_id",
                 )
                 existing_record = read_json(request_path(state_root, existing_request_id))
+                legacy_record = "surface_identity" not in existing_record
+                existing_key_digest = existing.get("key_digest")
+                if existing_key_digest is None:
+                    existing_key_digest = existing.get("idempotency_key_digest")
+                allowed_key_digests = {None, idempotency_digest}
+                if legacy_record:
+                    allowed_key_digests.add(idempotency_path_digest)
+                if existing_key_digest not in allowed_key_digests:
+                    block("idempotency key surface descriptor drifted")
                 try:
                     assert_bridge_request_owner(existing_record, principal)
                 except FrontdoorError:
                     block("idempotency key is owned by another installed frontend principal")
-                if existing.get("request_digest") != digest:
+                allowed_request_digests = {digest}
+                if legacy_record:
+                    allowed_request_digests.add(
+                        legacy_bridge_request_digest(
+                            payload,
+                            workspace_id=workspace_id,
+                            checkout_identity=normalized_checkout,
+                            launch_session_identity=normalized_launch_session,
+                        )
+                    )
+                existing_request_digest = existing.get("request_digest")
+                if (
+                    existing_request_digest not in allowed_request_digests
+                    or existing_record.get("request_digest")
+                    != existing_request_digest
+                ):
                     block("idempotency conflict for bridge submit_request")
                 projection = bridge_read_projection(
                     state_root=state_root,
