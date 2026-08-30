@@ -4522,17 +4522,6 @@ def drain_run(
         ):
             run = run_store.load_run(state_root, run_id)
             subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
-            request_record = read_json(
-                request_path(state_root, str(run.get("request_id") or ""))
-            )
-            approved_provider_binding = verify_approved_provider_binding(
-                state_root=state_root,
-                record=request_record,
-            )
-            if run.get("approved_provider_binding") != approved_provider_binding:
-                raise FrontdoorError(
-                    provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH
-                )
             signature = assert_execution_principal(
                 state_root=state_root,
                 principal=actor,
@@ -4560,6 +4549,18 @@ def drain_run(
                     "reason": "run_state_not_queueable",
                     "workflow_run": run,
                 }
+
+            request_record = read_json(
+                request_path(state_root, str(run.get("request_id") or ""))
+            )
+            approved_provider_binding = verify_approved_provider_binding(
+                state_root=state_root,
+                record=request_record,
+            )
+            if run.get("approved_provider_binding") != approved_provider_binding:
+                raise FrontdoorError(
+                    provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH
+                )
 
             run_lock.assert_p0_concurrency(state_root, target_run_id=run_id)
             workflow_id = str(run.get("workflow_id") or "")

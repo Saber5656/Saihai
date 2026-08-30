@@ -1995,7 +1995,6 @@ def test_terminal_run_synchronizes_request_and_releases_pending_quota() -> None:
             "aborted",
             "abort synchronizes request",
         )
-
         stale = frontdoor_module.read_json(request_file)
         stale["status"] = "approved"
         frontdoor_module.write_json(request_file, stale)
@@ -2055,6 +2054,34 @@ def test_terminal_run_synchronizes_request_and_releases_pending_quota() -> None:
         )
         assert_equal(pending_count, 1, "approved request without run stays pending")
         assert pending_bytes > 0, "approved request without run must consume pending bytes"
+
+
+def test_terminal_drain_replay_does_not_depend_on_request_record() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-terminal-drain-replay"
+        run_id = "run-terminal-drain-replay"
+        create_approved_run(state_root, request_id=request_id, run_id=run_id)
+        frontdoor_module.abort_run(
+            state_root=state_root,
+            run_id=run_id,
+            reason="terminal drain replay fixture",
+        )
+        frontdoor_module.request_path(state_root, request_id).unlink()
+
+        replayed = frontdoor_module.drain_run(state_root=state_root, run_id=run_id)
+        assert_equal(replayed["drained"], False, "terminal drain replay drained")
+        assert_equal(
+            replayed["reason"],
+            "run_state_not_queueable",
+            "terminal drain replay reason",
+        )
+        assert_equal(
+            replayed["workflow_run"]["run_state"],
+            "aborted",
+            "terminal drain replay state",
+        )
 
 
 def test_approval_uses_requested_ref_forms_without_leaking_original_paths() -> None:
@@ -4746,6 +4773,7 @@ def main() -> None:
         test_propose_updates_waiting_request_and_blocks_duplicate_overwrite,
         test_create_run_validates_resume_policy_and_binds_request,
         test_terminal_run_synchronizes_request_and_releases_pending_quota,
+        test_terminal_drain_replay_does_not_depend_on_request_record,
         test_approval_uses_requested_ref_forms_without_leaking_original_paths,
         test_frontdoor_blocks_unapproved_and_unbounded_requests,
         test_http_frontdoor_api_flow,
