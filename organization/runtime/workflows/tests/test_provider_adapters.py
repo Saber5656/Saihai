@@ -185,12 +185,15 @@ def test_claude_fixture_fixed_command_and_minimal_env() -> None:
         )
     assert result["status"] == "ok"
     assert result["report"]["run_id"] == "run-live"
+    assert result["evidence_fields"]["effective_model"] == request()["intended_model"]
     assert result["evidence_fields"]["usage"] == {"input_tokens": 12, "output_tokens": 34}
     command = calls[0]["command"]
     assert command[0] == binding["SAIHAI_CLAUDE_EXECUTABLE_PATH"]
     assert command[command.index("--tools") + 1] == ""
     assert command[command.index("--permission-mode") + 1] == "plan"
     assert command[command.index("--model") + 1] == request()["intended_model"]
+    assert command[command.index("--output-format") + 1] == "stream-json"
+    assert "--verbose" in command
     assert calls[0]["shell"] is False
     assert calls[0]["start_new_session"] is True
     assert calls[0]["cwd"] != str(provider_adapters.REPO_ROOT)
@@ -213,6 +216,38 @@ def test_claude_fixture_fixed_command_and_minimal_env() -> None:
     assert blocked["status"] == "unavailable"
     assert blocked["reason"] == "claude_argv_template_mismatch"
     assert blocked_calls == []
+
+
+def test_claude_stream_is_strictly_bound_to_one_init_and_result() -> None:
+    fixture_lines = (FIXTURE_DIR / "claude_print_result.json").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(fixture_lines) == 2
+    init_event = json.loads(fixture_lines[0])
+    result_event = json.loads(fixture_lines[1])
+    cases = (
+        ["not-json", *fixture_lines],
+        [fixture_lines[0], "[]", fixture_lines[1]],
+        [*fixture_lines, "not-json"],
+        [fixture_lines[0], fixture_lines[0], fixture_lines[1]],
+        [fixture_lines[0], fixture_lines[1], fixture_lines[1]],
+        [fixture_lines[1], fixture_lines[0]],
+        [fixture_lines[1]],
+        [fixture_lines[0]],
+        [
+            json.dumps(init_event),
+            json.dumps({**result_event, "session_id": "different-session"}),
+        ],
+        [
+            json.dumps({**init_event, "model": ""}),
+            json.dumps(result_event),
+        ],
+    )
+    for lines in cases:
+        assert provider_adapters.extract_claude_result("\n".join(lines)) == (
+            None,
+            {},
+        )
 
 
 def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
@@ -406,6 +441,7 @@ if __name__ == "__main__":
     tests = (
         test_extract_json_and_digest_verified_prompt,
         test_claude_fixture_fixed_command_and_minimal_env,
+        test_claude_stream_is_strictly_bound_to_one_init_and_result,
         test_codex_requires_pinned_confinement_and_uses_wrapper,
         test_host_binding_rejects_missing_digest_symlink_mode_and_digest_mismatch,
         test_structured_stdout_auth_quota_and_nonzero_classes,
