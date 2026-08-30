@@ -2858,10 +2858,16 @@ def recover_bridge_submit_transactions(state_root: Path) -> int:
             transaction.get("idempotency_key_digest"),
             "idempotency_key_digest",
         )
-        idempotency_path_digest = normalize_sha256_digest(
-            transaction.get("idempotency_path_digest"),
-            "idempotency_path_digest",
-        )
+        raw_path_digest = transaction.get("idempotency_path_digest")
+        if raw_path_digest is None:
+            if "surface_identity" in request_record:
+                raise FrontdoorError("invalid bridge transaction journal")
+            idempotency_path_digest = idempotency_digest
+        else:
+            idempotency_path_digest = normalize_sha256_digest(
+                raw_path_digest,
+                "idempotency_path_digest",
+            )
         expected_transaction_path = bridge_transaction_path(
             state_root,
             request_id,

@@ -2610,6 +2610,141 @@ def test_bridge_replays_pre_surface_idempotency_record() -> None:
             raise AssertionError("legacy replay must reject owner mismatch")
 
 
+def test_bridge_recovers_pre_surface_transaction_journal() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-legacy-transaction"
+        raw_key_digest = frontdoor_module.idempotency_key_digest(
+            "legacy-transaction-key"
+        )
+        request_digest = "sha256:" + "a" * 64
+        request_record = {
+            "request_id": request_id,
+            "request_digest": request_digest,
+            "idempotency_key_digest": raw_key_digest,
+        }
+        idempotency_record = {
+            "request_id": request_id,
+            "request_digest": request_digest,
+            "key_digest": raw_key_digest,
+        }
+        transaction_path = frontdoor_module.bridge_transaction_path(
+            state_root, request_id, raw_key_digest
+        )
+        frontdoor_module.write_json(
+            transaction_path,
+            {
+                "transaction_version": "1",
+                "request_id": request_id,
+                "request_digest": request_digest,
+                "idempotency_key_digest": raw_key_digest,
+                "request_record": request_record,
+                "idempotency_record": idempotency_record,
+            },
+        )
+
+        repaired = frontdoor_module.recover_bridge_submit_transactions(state_root)
+        assert_equal(repaired, 2, "legacy transaction repair count")
+        assert_equal(
+            frontdoor_module.read_json(
+                frontdoor_module.request_path(state_root, request_id)
+            ),
+            request_record,
+            "legacy request restored",
+        )
+        assert_equal(
+            frontdoor_module.read_json(
+                frontdoor_module.idempotency_path_from_digest(
+                    state_root, raw_key_digest
+                )
+            ),
+            idempotency_record,
+            "legacy idempotency restored",
+        )
+        assert not transaction_path.exists(), "legacy transaction must be removed"
+
+
+def test_bridge_recovery_rejects_invalid_legacy_downgrades() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    digest = "sha256:" + "a" * 64
+    key_digest = "sha256:" + "b" * 64
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-modern-missing-path-digest"
+        request_record = {
+            "request_id": request_id,
+            "request_digest": digest,
+            "idempotency_key_digest": key_digest,
+            "surface_identity": {},
+        }
+        transaction_path = frontdoor_module.bridge_transaction_path(
+            state_root, request_id, key_digest
+        )
+        frontdoor_module.write_json(
+            transaction_path,
+            {
+                "transaction_version": "1",
+                "request_id": request_id,
+                "request_digest": digest,
+                "idempotency_key_digest": key_digest,
+                "request_record": request_record,
+                "idempotency_record": {
+                    "request_id": request_id,
+                    "request_digest": digest,
+                    "key_digest": key_digest,
+                },
+            },
+        )
+        try:
+            frontdoor_module.recover_bridge_submit_transactions(state_root)
+        except frontdoor_module.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "invalid bridge transaction journal",
+                "modern transaction missing path digest",
+            )
+        else:
+            raise AssertionError("modern transaction must not use legacy path fallback")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-legacy-digest-mismatch"
+        transaction_path = frontdoor_module.bridge_transaction_path(
+            state_root, request_id, key_digest
+        )
+        frontdoor_module.write_json(
+            transaction_path,
+            {
+                "transaction_version": "1",
+                "request_id": request_id,
+                "request_digest": digest,
+                "idempotency_key_digest": key_digest,
+                "request_record": {
+                    "request_id": request_id,
+                    "request_digest": "sha256:" + "0" * 64,
+                    "idempotency_key_digest": key_digest,
+                },
+                "idempotency_record": {
+                    "request_id": request_id,
+                    "request_digest": digest,
+                    "key_digest": key_digest,
+                },
+            },
+        )
+        try:
+            frontdoor_module.recover_bridge_submit_transactions(state_root)
+        except frontdoor_module.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "bridge transaction binding mismatch",
+                "legacy transaction digest mismatch",
+            )
+        else:
+            raise AssertionError("legacy transaction must reject digest mismatch")
+
+
 def test_bridge_rejects_smuggled_authority_fields_over_http() -> None:
     server_module = load_server_module()
     with tempfile.TemporaryDirectory() as raw_tmp:
@@ -4747,6 +4882,8 @@ def main() -> None:
         test_bridge_idempotent_replay_does_not_reresolve_refs,
         test_bridge_idempotency_uses_raw_key_digest_paths,
         test_bridge_replays_pre_surface_idempotency_record,
+        test_bridge_recovers_pre_surface_transaction_journal,
+        test_bridge_recovery_rejects_invalid_legacy_downgrades,
         test_bridge_rejects_smuggled_authority_fields_over_http,
         test_http_bridge_uses_authenticated_principal_and_verified_ack,
         test_context_ref_boundary_blocks_exfiltration_paths,
