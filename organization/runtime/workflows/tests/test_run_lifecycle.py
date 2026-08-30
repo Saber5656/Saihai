@@ -50,6 +50,11 @@ def valid_run(**overrides) -> dict:
         "task_id": "TSK-run-lifecycle",
         "request_id": "req-run-lifecycle",
         "workflow_id": "single_step_external_review",
+        "approved_provider_binding": {
+            "provider_adapter_id": "claude_headless_p0",
+            "default_model": "claude-sonnet-4-6",
+            "effective_model_policy": "required_exact_match",
+        },
         "goal_state": "approved",
         "run_state": "created",
         "current_step": "review",
