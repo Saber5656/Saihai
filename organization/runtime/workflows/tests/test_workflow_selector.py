@@ -127,6 +127,7 @@ def test_contract_validation() -> None:
         "code-change-report.schema.json",
         "codex-main-agent-deployment.schema.json",
         "external-review-report.schema.json",
+        "frontdoor-surface-registry.schema.json",
         "isolated-worker-input.schema.json",
         "isolated-worker-result.schema.json",
         "main-agent-bridge-request.schema.json",

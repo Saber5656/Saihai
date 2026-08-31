@@ -229,6 +229,7 @@ def write_approved_child_request(
         "workspace_id": "Saber5656/Saihai",
         "checkout_identity": checkout_identity,
         "checkout_identity_digest": checkout_identity["identity_digest"],
+        "requester": frontdoor.requester("codex", ""),
         "owner_principal": request_owner,
         "principal": request_owner,
         "status": "approved",
@@ -2589,7 +2590,11 @@ def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
             "chat_session_id": "thread-replay",
             "idempotency_key": "replay-key",
         }
-        digest = frontdoor_module.request_digest(payload)
+        surface_identity = frontdoor_module.resolve_surface_identity("codex")
+        digest = frontdoor_module.request_digest(
+            payload,
+            surface_identity=surface_identity,
+        )
         now = frontdoor_module.now_iso()
         frontdoor_module.write_json(
             frontdoor_module.request_path(state_root, "req-replay"),
@@ -2633,7 +2638,11 @@ def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
             },
         )
 
-        replayed = frontdoor_module.bridge_submit_request(state_root=state_root, payload=payload)
+        replayed = frontdoor_module.bridge_submit_request(
+            state_root=state_root,
+            payload=payload,
+            frontend_kind="codex",
+        )
         assert_equal(replayed["replayed"], True, "idempotent replay")
         assert_equal(replayed["request_status"], "waiting_human", "replayed request status")
 
@@ -2648,6 +2657,267 @@ def test_bridge_idempotency_uses_raw_key_digest_paths() -> None:
         assert first.name.startswith("key-"), "idempotency path should use digest prefix"
         assert first != second, "distinct raw idempotency keys must not collide"
         assert punctuation_only.name != "anonymous.json", "punctuation-only keys must not normalize to anonymous"
+
+
+def test_bridge_replays_pre_surface_idempotency_record() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        payload = {
+            "task_id": "TSK-legacy-replay",
+            "request_id": "req-legacy-replay",
+            "request_kind": "external_review_request",
+            "prompt": "Replay a pre-surface request",
+            "refs": ["organization/runtime/workflows/README.md"],
+            "allowed_paths": [],
+            "frontdoor": "codex",
+            "chat_session_id": "thread-legacy-replay",
+            "idempotency_key": "legacy-replay-key",
+        }
+        principal = frontdoor_module.bridge_principal(
+            "codex", "thread-legacy-replay"
+        )
+        now = frontdoor_module.now_iso()
+        legacy_digest = frontdoor_module.legacy_bridge_request_digest(payload)
+        raw_key_digest = frontdoor_module.idempotency_key_digest(
+            payload["idempotency_key"]
+        )
+        request_record = {
+            "request_version": "1",
+            "task_id": payload["task_id"],
+            "request_id": payload["request_id"],
+            "request_kind": payload["request_kind"],
+            "created_at": now,
+            "updated_at": now,
+            "user_prompt": payload["prompt"],
+            "request_digest": legacy_digest,
+            "idempotency_key_digest": raw_key_digest,
+            "context_refs": payload["refs"],
+            "allowed_paths": [],
+            "expires_at": "run_terminal",
+            "classification": None,
+            "requester": {
+                "frontdoor": "codex",
+                "chat_session_id": "thread-legacy-replay",
+            },
+            "principal": frontdoor_module.redacted_principal(principal),
+            "owner_principal": frontdoor_module.redacted_principal(principal),
+            "status": "waiting_human",
+            "proposal": {
+                "schema_version": 1,
+                "decision": "waiting_human",
+                "request_status": "waiting_human",
+                "reason": "typed_classification_required_from_non_bridge_principal",
+                "task_id": payload["task_id"],
+                "request_id": payload["request_id"],
+                "next_action": "ask_human",
+            },
+        }
+        frontdoor_module.write_json(
+            frontdoor_module.request_path(state_root, payload["request_id"]),
+            request_record,
+        )
+        frontdoor_module.write_json(
+            frontdoor_module.idempotency_path(
+                state_root, payload["idempotency_key"]
+            ),
+            {
+                "idempotency_version": "1",
+                "key_digest": raw_key_digest,
+                "request_id": payload["request_id"],
+                "request_digest": legacy_digest,
+                "owner_principal": frontdoor_module.redacted_principal(principal),
+                "created_at": now,
+            },
+        )
+
+        replayed = frontdoor_module.bridge_submit_request(
+            state_root=state_root,
+            payload=payload,
+            frontend_kind="codex",
+        )
+        assert_equal(replayed["replayed"], True, "legacy idempotent replay")
+
+        idempotency_file = frontdoor_module.idempotency_path(
+            state_root, payload["idempotency_key"]
+        )
+        mismatched = frontdoor_module.read_json(idempotency_file)
+        mismatched["request_digest"] = "sha256:" + "0" * 64
+        frontdoor_module.write_json(idempotency_file, mismatched)
+        try:
+            frontdoor_module.bridge_submit_request(
+                state_root=state_root,
+                payload=payload,
+                frontend_kind="codex",
+            )
+        except frontdoor_module.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "idempotency conflict for bridge submit_request",
+                "legacy digest mismatch",
+            )
+        else:
+            raise AssertionError("legacy replay must reject digest mismatch")
+
+        mismatched["request_digest"] = legacy_digest
+        frontdoor_module.write_json(idempotency_file, mismatched)
+        request_file = frontdoor_module.request_path(
+            state_root, payload["request_id"]
+        )
+        wrong_owner = frontdoor_module.read_json(request_file)
+        wrong_owner["owner_principal"] = frontdoor_module.redacted_principal(
+            frontdoor_module.bridge_principal("claude")
+        )
+        frontdoor_module.write_json(request_file, wrong_owner)
+        try:
+            frontdoor_module.bridge_submit_request(
+                state_root=state_root,
+                payload=payload,
+                frontend_kind="codex",
+            )
+        except frontdoor_module.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "idempotency key is owned by another installed frontend principal",
+                "legacy owner mismatch",
+            )
+        else:
+            raise AssertionError("legacy replay must reject owner mismatch")
+
+
+def test_bridge_recovers_pre_surface_transaction_journal() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-legacy-transaction"
+        raw_key_digest = frontdoor_module.idempotency_key_digest(
+            "legacy-transaction-key"
+        )
+        request_digest = "sha256:" + "a" * 64
+        request_record = {
+            "request_id": request_id,
+            "request_digest": request_digest,
+            "idempotency_key_digest": raw_key_digest,
+        }
+        idempotency_record = {
+            "request_id": request_id,
+            "request_digest": request_digest,
+            "key_digest": raw_key_digest,
+        }
+        transaction_path = frontdoor_module.bridge_transaction_path(
+            state_root, request_id, raw_key_digest
+        )
+        frontdoor_module.write_json(
+            transaction_path,
+            {
+                "transaction_version": "1",
+                "request_id": request_id,
+                "request_digest": request_digest,
+                "idempotency_key_digest": raw_key_digest,
+                "request_record": request_record,
+                "idempotency_record": idempotency_record,
+            },
+        )
+
+        repaired = frontdoor_module.recover_bridge_submit_transactions(state_root)
+        assert_equal(repaired, 2, "legacy transaction repair count")
+        assert_equal(
+            frontdoor_module.read_json(
+                frontdoor_module.request_path(state_root, request_id)
+            ),
+            request_record,
+            "legacy request restored",
+        )
+        assert_equal(
+            frontdoor_module.read_json(
+                frontdoor_module.idempotency_path_from_digest(
+                    state_root, raw_key_digest
+                )
+            ),
+            idempotency_record,
+            "legacy idempotency restored",
+        )
+        assert not transaction_path.exists(), "legacy transaction must be removed"
+
+
+def test_bridge_recovery_rejects_invalid_legacy_downgrades() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    digest = "sha256:" + "a" * 64
+    key_digest = "sha256:" + "b" * 64
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-modern-missing-path-digest"
+        request_record = {
+            "request_id": request_id,
+            "request_digest": digest,
+            "idempotency_key_digest": key_digest,
+            "surface_identity": {},
+        }
+        transaction_path = frontdoor_module.bridge_transaction_path(
+            state_root, request_id, key_digest
+        )
+        frontdoor_module.write_json(
+            transaction_path,
+            {
+                "transaction_version": "1",
+                "request_id": request_id,
+                "request_digest": digest,
+                "idempotency_key_digest": key_digest,
+                "request_record": request_record,
+                "idempotency_record": {
+                    "request_id": request_id,
+                    "request_digest": digest,
+                    "key_digest": key_digest,
+                },
+            },
+        )
+        try:
+            frontdoor_module.recover_bridge_submit_transactions(state_root)
+        except frontdoor_module.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "invalid bridge transaction journal",
+                "modern transaction missing path digest",
+            )
+        else:
+            raise AssertionError("modern transaction must not use legacy path fallback")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-legacy-digest-mismatch"
+        transaction_path = frontdoor_module.bridge_transaction_path(
+            state_root, request_id, key_digest
+        )
+        frontdoor_module.write_json(
+            transaction_path,
+            {
+                "transaction_version": "1",
+                "request_id": request_id,
+                "request_digest": digest,
+                "idempotency_key_digest": key_digest,
+                "request_record": {
+                    "request_id": request_id,
+                    "request_digest": "sha256:" + "0" * 64,
+                    "idempotency_key_digest": key_digest,
+                },
+                "idempotency_record": {
+                    "request_id": request_id,
+                    "request_digest": digest,
+                    "key_digest": key_digest,
+                },
+            },
+        )
+        try:
+            frontdoor_module.recover_bridge_submit_transactions(state_root)
+        except frontdoor_module.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "bridge transaction binding mismatch",
+                "legacy transaction digest mismatch",
+            )
+        else:
+            raise AssertionError("legacy transaction must reject digest mismatch")
 
 
 def test_bridge_rejects_smuggled_authority_fields_over_http() -> None:
@@ -4476,6 +4746,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
         first = frontdoor.bridge_submit_request(
             state_root=state_root,
             payload=first_payload,
+            frontend_kind="codex",
             max_pending_requests=1,
         )
         assert_equal(first["request_status"], "waiting_human", "quota first request")
@@ -4489,6 +4760,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
             frontdoor.bridge_submit_request(
                 state_root=state_root,
                 payload=second_payload,
+                frontend_kind="codex",
                 max_pending_requests=1,
             )
         except frontdoor.FrontdoorError as exc:
@@ -4543,6 +4815,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
         try:
             frontdoor.bridge_submit_request(
                 state_root=state_root,
+                frontend_kind="codex",
                 payload={
                     "task_id": "TSK-durable-quota",
                     "request_id": "req-durable-quota",
@@ -4740,7 +5013,11 @@ def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
             "git_command": "git switch main",
         }
         try:
-            frontdoor_module.bridge_submit_request(state_root=state_root, payload=payload)
+            frontdoor_module.bridge_submit_request(
+                state_root=state_root,
+                payload=payload,
+                frontend_kind="codex",
+            )
         except frontdoor_module.FrontdoorError as exc:
             reason = str(exc)
             assert "forbidden_fields:" in reason, reason
@@ -4784,6 +5061,9 @@ def main() -> None:
         test_main_agent_bridge_is_output_confirmation_only,
         test_bridge_idempotent_replay_does_not_reresolve_refs,
         test_bridge_idempotency_uses_raw_key_digest_paths,
+        test_bridge_replays_pre_surface_idempotency_record,
+        test_bridge_recovers_pre_surface_transaction_journal,
+        test_bridge_recovery_rejects_invalid_legacy_downgrades,
         test_bridge_rejects_smuggled_authority_fields_over_http,
         test_http_bridge_uses_authenticated_principal_and_verified_ack,
         test_context_ref_boundary_blocks_exfiltration_paths,

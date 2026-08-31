@@ -35,7 +35,10 @@ MANAGED_PRIMARY_ROOT = frontdoor.MANAGED_PRIMARY_CHECKOUT_ROOT
 CHECKOUT_ROOT = frontdoor.REPO_ROOT
 STATE_ROOT: Path | None = None
 LAUNCH_SESSION_VERIFIER: Any | None = None
-FRONTDOOR_CHOICES = ("codex", "claude", "cursor", "grok")
+SURFACE_REGISTRY = frontdoor.load_surface_registry()
+FRONTDOOR_CHOICES = tuple(
+    kind for kind in SURFACE_REGISTRY.frontend_kinds if kind != "manual"
+)
 
 ARTIFACT_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$"
 MAX_PROMPT_CHARS = 100_000
@@ -231,7 +234,10 @@ def _host_principal() -> dict[str, str]:
     )
 
 
-def _host_launch_session_identity() -> dict[str, Any]:
+def _host_launch_session_identity() -> dict[str, Any] | None:
+    descriptor = SURFACE_REGISTRY.descriptor(FRONTDOOR_ID)
+    if not descriptor.launch_session_required:
+        return None
     if LAUNCH_SESSION_VERIFIER is None:
         raise frontdoor.FrontdoorError("host launch-session verifier is not configured")
     checkout_identity = _host_checkout_identity()
@@ -338,12 +344,14 @@ def _submit(arguments: dict[str, Any]) -> dict[str, Any]:
     launch_session_identity = _host_launch_session_identity()
     return frontdoor.bridge_submit_request(
         state_root=_canonical_state_root(),
+        frontend_kind=FRONTDOOR_ID,
         principal=_host_principal(),
         workspace_id=WORKSPACE_ID,
         checkout_identity=checkout_identity,
         launch_session_identity=launch_session_identity,
         max_pending_requests=MAX_PENDING_REQUESTS_PER_PRINCIPAL,
         max_pending_bytes=MAX_PENDING_BYTES_PER_PRINCIPAL,
+        surface_registry=SURFACE_REGISTRY,
         payload={
             "task_id": task_id,
             "request_id": request_id,
@@ -376,6 +384,7 @@ def _read_projection(arguments: dict[str, Any]) -> dict[str, Any]:
         chat_session_id=chat_session_id,
         principal=_host_principal(),
         launch_session_identity=_host_launch_session_identity(),
+        surface_registry=SURFACE_REGISTRY,
     )
 
 
@@ -404,6 +413,7 @@ def _ack_output(arguments: dict[str, Any]) -> dict[str, Any]:
         chat_session_id=chat_session_id,
         principal=_host_principal(),
         launch_session_identity=_host_launch_session_identity(),
+        surface_registry=SURFACE_REGISTRY,
     )
     # The frontdoor records the host path for operators.  A main agent only
     # receives the receipt facts, never the host-owned state path.
@@ -619,7 +629,12 @@ def main(argv: list[str] | None = None) -> None:
     # Fail before exposing the MCP inventory if host launch identity is not a
     # managed primary or a currently registered linked worktree.
     _host_checkout_identity()
-    LAUNCH_SESSION_VERIFIER = frontdoor.HostLaunchSessionVerifier()
+    try:
+        LAUNCH_SESSION_VERIFIER = SURFACE_REGISTRY.make_launch_session_verifier(
+            FRONTDOOR_ID
+        )
+    except frontdoor.frontdoor_surface_registry.SurfaceRegistryError as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
     _host_launch_session_identity()
     serve(sys.stdin, sys.stdout)
 
