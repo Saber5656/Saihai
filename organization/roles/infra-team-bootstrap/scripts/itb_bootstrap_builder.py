@@ -118,8 +118,8 @@ DEFAULT_PROVIDER_PERMISSION_MODE = "auto"
 DEFAULT_CODEX_APPROVAL_POLICY = "never"
 DEFAULT_CLAUDE_HAIKU_SONNET_EFFORT = "medium"
 DEFAULT_CLAUDE_OPUS_EFFORT = "max"
-DEFAULT_CODEX_MODEL = "gpt-5.5"
-DEFAULT_CODEX_REASONING_EFFORT = "xhigh"
+DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
+DEFAULT_CODEX_REASONING_EFFORT = "max"
 DEFAULT_CODEX_SERVICE_TIER = "fast"
 ALLOWED_QUEUE_FINALIZERS = {"role-report"}
 ALLOWED_REPORT_WRITE_MODES = {"builder_atomic"}
@@ -9633,11 +9633,11 @@ def claude_effort_for_model(model: Any) -> str:
 
 
 def codex_model_for_agent(row: dict[str, Any]) -> str:
-    return normalize_cell(os.environ.get("ITB_CODEX_MODEL") or DEFAULT_CODEX_MODEL or row.get("intended_model", ""))
+    return normalize_cell(row.get("intended_model", "") or DEFAULT_CODEX_MODEL)
 
 
 def codex_reasoning_effort() -> str:
-    return normalize_cell(os.environ.get("ITB_CODEX_REASONING_EFFORT") or DEFAULT_CODEX_REASONING_EFFORT)
+    return DEFAULT_CODEX_REASONING_EFFORT
 
 
 def codex_service_tier() -> str:
@@ -9747,7 +9747,7 @@ def claude_activation_command(row: dict[str, Any], prompt: str, max_budget_usd: 
 
 def codex_activation_command(row: dict[str, Any], prompt: str, cwd: str) -> list[str]:
     model = row.get("intended_model", "") or DEFAULT_CODEX_MODEL
-    effort = os.environ.get("ITB_CODEX_REASONING_EFFORT") or DEFAULT_CODEX_REASONING_EFFORT
+    effort = DEFAULT_CODEX_REASONING_EFFORT
     tier = os.environ.get("ITB_CODEX_SERVICE_TIER") or DEFAULT_CODEX_SERVICE_TIER
     return [
         "codex",

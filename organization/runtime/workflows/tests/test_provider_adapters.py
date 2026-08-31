@@ -209,6 +209,8 @@ def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
     assert command[4] == binding["SAIHAI_CODEX_EXECUTABLE_PATH"]
     assert command[command.index("--sandbox") + 1] == "read-only"
     assert "--ignore-user-config" in command and "--ignore-rules" in command
+    assert command[command.index("--model") + 1] == provider_adapters.DEFAULT_CODEX_MODEL
+    assert 'model_reasoning_effort="max"' in command
 
 
 def test_host_binding_rejects_missing_digest_symlink_mode_and_digest_mismatch() -> None:

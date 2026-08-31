@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
+DEFAULT_CODEX_REASONING_EFFORT = "max"
 DEFAULT_TIMEOUT_SECONDS = 1_800
 MAX_TIMEOUT_SECONDS = 86_400
 MAX_CONTEXT_BYTES = 1_048_576
@@ -663,6 +665,8 @@ def invoke_codex_exec(
         "exec",
         "--ephemeral",
         "--json",
+        "--model",
+        DEFAULT_CODEX_MODEL,
         "--sandbox",
         "read-only",
         "--ignore-user-config",
@@ -671,6 +675,8 @@ def invoke_codex_exec(
         'approval_policy="never"',
         "--config",
         'shell_environment_policy.inherit="none"',
+        "--config",
+        f'model_reasoning_effort="{DEFAULT_CODEX_REASONING_EFFORT}"',
         "--skip-git-repo-check",
         "-C",
         ".",

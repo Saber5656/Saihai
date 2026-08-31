@@ -294,6 +294,28 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             rows = builder.parse_model_registry_file(registry)
             self.assertEqual(rows[0]["agent_id"], "tech-backend")
 
+    def test_codex_activation_defaults_to_luna_max(self) -> None:
+        builder = load_builder_module()
+        command = builder.codex_activation_command(
+            {"agent_id": "tech-backend"},
+            "hello",
+            "/tmp/project",
+        )
+
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
+        self.assertIn('model_reasoning_effort="max"', command)
+
+    def test_codex_activation_respects_sol_role_model(self) -> None:
+        builder = load_builder_module()
+        command = builder.codex_activation_command(
+            {"agent_id": "tech-reviewer", "intended_model": "gpt-5.6-sol"},
+            "review",
+            "/tmp/project",
+        )
+
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
+        self.assertIn('model_reasoning_effort="max"', command)
+
     def test_retired_hook_wrappers_are_not_shipped(self) -> None:
         shipped = {path.name for path in HOOK_ROOT.glob("*.sh")}
         self.assertEqual(shipped, {"itb-hook-common.sh", "itb-session-start.sh", "itb-final-response-guard.sh"})
