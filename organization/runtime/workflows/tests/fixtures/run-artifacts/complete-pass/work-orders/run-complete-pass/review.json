@@ -23,12 +23,15 @@
     "mode": "refs_only",
     "raw_transcript_sharing": "forbidden"
   },
+  "effective_model_policy": "required_exact_match",
   "expected_output": "external_review_report",
   "external_provider_allowed": true,
   "from_role": "frontdoor",
   "instruction": "Send one bounded readonly review or consultation work order to an external provider adapter and require an authoritative typed report/evidence file. Step 'review' (reviewer): follow the input work order contract and produce external_review_report.",
+  "intended_model": "claude-sonnet-4-6",
   "permission_mode": "readonly",
   "policy_digest": "sha256:d028f5cefac398298296c14d33ff8f0402e1ae4ac57b265bdc7bd8bcf8729c45",
+  "provider_adapter_id": "claude_headless_p0",
   "report_path": "__STATE_ROOT__/reports/run-complete-pass/review-external-review-report.json",
   "request_id": "req-complete-pass",
   "requester": {

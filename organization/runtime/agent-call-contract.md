@@ -3,7 +3,7 @@ type: runtime-contract
 status: active
 owner: infra-team-bootstrap
 source_task: TSK-1314
-last_updated: 2026-06-23
+last_updated: 2026-08-26
 ---
 
 # Agent Call Runtime Contract
@@ -53,6 +53,11 @@ caller manifest
 ```
 
 Report terminal status is authoritative.
+
+When `wait` is explicit, inbox status `done` or `failed` returns the typed
+`wait_result: completed`. Exhausting the bounded wait returns
+`wait_result: timeout`; a queue filesystem change only wakes the next status
+check and is not itself completion evidence.
 
 ## Manifest
 
@@ -114,3 +119,9 @@ It does not change provider transport or allow hook-side orchestration.
 
 Provider evidence must include request id, provider session id, effective model,
 usage, duration, response/result, and report path when available.
+
+For current Codex JSONL, `thread.started.thread_id` is the provider session,
+the last completed `agent_message` is the response, and `turn.completed.usage`
+is usage evidence. Malformed JSONL, a non-zero provider exit, or a stream with
+no completed agent message blocks dispatch; diagnostic items and usage alone
+must not be promoted to a successful response.

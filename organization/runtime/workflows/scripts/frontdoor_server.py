@@ -627,6 +627,7 @@ class Handler(BaseHTTPRequestHandler):
                     frontdoor=str(body.get("frontdoor") or "codex"),
                     chat_session_id=str(body.get("chat_session_id") or ""),
                     principal=self._channel_principal(body, allowed_channels={"operator"}),
+                    provider_adapter_id=str(body.get("provider_adapter_id") or ""),
                 )
                 status = 400 if payload.get("decision") == "blocked" else 200
                 self._send_json(payload, status)

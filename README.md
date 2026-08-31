@@ -1,8 +1,8 @@
-# Sahai
+# Saihai
 
 [English](README.md) | [Japanese](README.ja.md)
 
-Sahai is a local orchestrator and organization-runtime repository for running
+Saihai is a local orchestrator and organization-runtime repository for running
 AI-agent work through typed artifacts, explicit approval, durable state, and
 auditable evidence instead of treating a prompt as execution authority.
 
@@ -12,7 +12,7 @@ deterministic frontdoor, durable workflow runs, the constrained main-agent
 bridge, and typed report and evidence gates. Pre-release records may still use
 the ATV name for historical artifacts and compatibility aliases.
 
-Sahai uses only the Python 3.10+ standard library for normal operation. No
+Saihai uses only the Python 3.10+ standard library for normal operation. No
 `pip install` step is required.
 
 ## Release
@@ -85,7 +85,8 @@ Linked worktrees reuse the primary checkout's catalog.
 
 ```sh
 python3 scripts/setup_directory_paths.py --help
-# Supply all nine required directory options, then validate the catalog.
+# Supply the eight directory options shown in the configuration guide, then
+# validate the catalog. SAIHAI_ROOT defaults to the primary checkout.
 python3 scripts/setup_directory_paths.py --check
 ```
 
@@ -115,7 +116,7 @@ for the complete path audit.
 
 | Capability | Current behavior |
 |---|---|
-| Prompt classification | `scripts/configure_organization.py classify` and `/api/decide` classify work as `fast`, `strict`, or `maintenance`. Every mode still requires the applicable task and Vault records. |
+| Prompt classification | `scripts/configure_organization.py classify` and `/api/decide` report a `fast` or `strict` execution mode separately from the `enabled`, `disabled`, or `maintenance` organization state. Every mode and state still requires the applicable task and Vault records. |
 | Workflow selection | `workflow_selector.py` deterministically maps a typed classification to an active workflow template. A raw prompt is never selection authority. |
 | Frontdoor proposal | Prompt-originated requests stop at `proposed` or `waiting_human`, or fail closed as `blocked`. `propose` cannot produce an approved activation or create a workflow run. |
 | Approval | `approve` verifies a challenge derived from the proposal digest. Accepted activation sources are `human_ui`, `manual_cli`, and `orchestrator-start`, with trusted execution principals `human_operator`, `manual_operator`, and `orchestrator_start`. The narrow CLI defaults to `human_operator` / `human-ui` / `local_ui`. |
@@ -284,8 +285,8 @@ skills, automation, and the existing runtime.
 ```sh
 python3 scripts/configure_organization.py status
 python3 scripts/configure_organization.py runtime-paths
-python3 scripts/configure_organization.py classify --prompt "Review the latest forecast"
-AGENT_ORG_MAINTENANCE=1 python3 scripts/configure_organization.py classify --prompt "Repair a hook"
+python3 scripts/configure_organization.py classify --prompt "Review the latest forecast" --mode strict --organization-state enabled
+python3 scripts/configure_organization.py classify --prompt "Repair a hook" --organization-state maintenance
 python3 scripts/configure_organization.py validate-all
 python3 scripts/configure_organization.py workflow-selector validate-contracts
 python3 scripts/configure_organization.py workflow-frontdoor --help
@@ -295,7 +296,7 @@ python3 scripts/configure_organization.py workflow-frontdoor --help
 |---|---|
 | `status` | Print organization settings, role and policy counts, and repository root as JSON. |
 | `runtime-paths` | Verify the ITB runtime, workflow selector/frontdoor/server, operator CLI, and registry mirrors. |
-| `classify` | Classify a prompt as `fast`, `strict`, or `maintenance`. |
+| `classify` | Classify a prompt with optional `--mode {fast,strict}` and the separate `--organization-state {enabled,disabled,maintenance}` control. |
 | `validate-all` | Run the offline suites, contract validation, and Python compile check. |
 | `workflow-selector` | Validate workflow contracts and perform deterministic selection and activation-envelope operations. |
 | `workflow-frontdoor` | Provide the complete host-owned frontdoor and recovery surface. |
@@ -386,7 +387,7 @@ is added and attested.
 ### Scoped worker backend
 
 The live scoped-worker backend fails closed until a host operator manually
-configures the following assets. Sahai never generates keys or credentials.
+configures the following assets. Saihai never generates keys or credentials.
 
 The executor implementation is shipped, but the live `managed_worker` claim is
 suppressed. Codex 0.144.1 cannot prove absolute denial of a same-rootfs local
@@ -407,7 +408,7 @@ worker system.
 |---|---|
 | `SAIHAI_SCOPED_EXECUTOR_KEY_FILE` | Capability HMAC key in a regular, non-symlink, `0600` file containing at least 32 bytes. |
 | `SAIHAI_SCOPED_WORKTREE_ROOT` | Canonical root from which the host derives the task/run-bound worktree path. |
-| `SAIHAI_SCOPED_REPO_ROOT` | Host-owned absolute repository path. Defaults to the Sahai repository root. |
+| `SAIHAI_SCOPED_REPO_ROOT` | Host-owned absolute repository path. Defaults to the Saihai repository root. |
 | `SAIHAI_SCOPED_CODEX_EXECUTABLE` | Absolute pinned Codex CLI path whose digest is bound into the work order and capability. Group/world-writable binaries are rejected. |
 | `SAIHAI_SCOPED_CODEX_HOME` | Dedicated worker runtime/auth root; the main-agent profile is not inherited. |
 | `SAIHAI_ENABLE_SCOPED_WORKER_LIVE=1` | Explicit live-execution gate. Without it, only the deterministic fake harness is available. |
@@ -524,7 +525,7 @@ canonical root loaded from the primary checkout catalog.
 | `GET /api/org?session=<id>` | Team role state, active task, and busy count. |
 | `GET /api/role?session=<id>&role=<role_id>` | Role metadata, inbox, latest report, and provider evidence. |
 | `GET /api/config` | Organization settings and role/policy indexes. |
-| `GET /api/decide?prompt=<text>` | `fast`, `strict`, or `maintenance` classification. |
+| `GET /api/decide?prompt=<text>` | Decision with a `fast` or `strict` mode and a separate `enabled`, `disabled`, or `maintenance` organization state. |
 | `GET /api/workflow-runs?session=<id>&task=<id>&state=<state>` | Thin read-only workflow-run summaries. |
 | `GET /api/workflow-run?session=<id>&run=<id>` | Work order, report, provider evidence, and transition metadata. |
 | `GET /api/workflow-lock` | Global workflow-lock status for each configured orchestrator root. |

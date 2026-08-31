@@ -921,7 +921,11 @@ function renderRunDetail(payload) {
   const provider = evidence || (report && report.provider_evidence) || null;
   const evidenceBody = provider ? definitionList([
     ["Provider", provider.provider],
+    ["Provider adapter", provider.provider_adapter_id],
+    ["Intended model", provider.intended_model],
     ["Effective model", provider.effective_model],
+    ["Effective model policy", provider.effective_model_policy],
+    ["Model assurance", provider.model_assurance],
     ["Session id", provider.provider_session_id],
     ["Request id", provider.request_id || provider.provider_request_id],
     ["Duration", provider.duration_seconds],

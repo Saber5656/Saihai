@@ -161,7 +161,8 @@ def prepare_terminal_run(
     evidence = {
         **fixed_fields,
         "provider": "claude_headless",
-        "effective_model": "claude-sonnet-test",
+        "intended_model": fixed_fields["intended_model"],
+        "effective_model": fixed_fields["intended_model"],
         "provider_request_id": f"provider-{request_id}",
         "provider_session_id": f"session-{run_id}",
         "duration_ms": 12,
@@ -184,7 +185,11 @@ def prepare_terminal_run(
         "summary": "Review completed.",
         "provider_evidence": {
             "provider": "claude_headless",
-            "effective_model": "claude-sonnet-test",
+            "provider_adapter_id": fixed_fields["provider_adapter_id"],
+            "intended_model": fixed_fields["intended_model"],
+            "effective_model": fixed_fields["intended_model"],
+            "effective_model_policy": fixed_fields["effective_model_policy"],
+            "model_assurance": fixed_fields["model_assurance"],
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",
             "transcript_path": str(transcript_path),
@@ -335,7 +340,8 @@ def test_incomplete_provider_evidence_metadata_blocks() -> None:
         }
         artifacts["evidence_path"].write_text(json.dumps(truncated, ensure_ascii=False) + "\n", encoding="utf-8")
         blocked = verify(state_root, check=False)
-        assert "invalid_provider_evidence" in reason_classes(blocked)
+        assert "provider_model_assurance_mismatch" in reason_classes(blocked)
+        assert blocked["reason"] == "provider_model_assurance_mismatch"
 
 
 def test_deprecated_provider_evidence_version_alias_blocks() -> None:

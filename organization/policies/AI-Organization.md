@@ -230,8 +230,11 @@ Task Detail または Project note には、少なくとも次を記録する。
 | `response_status` | `not_invoked` / `invoked` |
 | `always_active` | Gate core / Infra core の運行責務。provider response ready を意味しない |
 | `provider` | `anthropic` / `openai` |
+| `provider_adapter_id` | runner が固定した provider adapter descriptor ID |
 | `intended_model` | `infra-team-bootstrap/references/model-registry.md` の `primary_model` |
 | `effective_model` | provider output / session log で確認した実モデル |
+| `effective_model_policy` | adapter 宣言の model verification policy snapshot |
+| `model_assurance` | runner-owned の verification strength marker |
 | `execution_mode` | `agent` / `codex` / `chat` / `long-run` |
 | `session_id` | Claude output sessionId、Codex session id など |
 | `last_request_id` | 最後に確認した requestId |
