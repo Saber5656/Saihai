@@ -71,6 +71,26 @@ Codex is the first concrete frontend target.  Other products reuse the same
 bridge and assurance contract; they are not claimed as enforced merely because
 their names appear in a registry.
 
+## Operational Caveat: Use the Pinned Launcher
+
+Day-to-day operation of the enforced main-agent frontend **must** start through
+the root-owned, release-pinned `saihai-codex-main-agent` launcher. Codex App,
+IDE integrations, app-server sessions, `codex` invoked directly, and the legacy
+compatibility wrapper remain outside this launcher-bound enforcement scope. The
+pinned CLI generation must not be reused as evidence for those launch paths,
+and no `ingress_enforced` claim is made for them.
+
+The currently implemented enforcement ingress is Codex-only. The ingress
+contract itself remains launch-source-agnostic so that another reviewed
+frontend can implement the same frontdoor surface without changing the
+orchestrator contract; see the
+[`frontdoor-orchestrator-protocol.md`](../../organization/runtime/workflows/frontdoor-orchestrator-protocol.md)
+surface abstraction and [Issue #119](https://github.com/Saber5656/Saihai/issues/119).
+Neither that abstraction nor an installed configuration activates a claim.
+Until administrator-owned commissioning selects a current sealed generation,
+`action_enforced` stays suppressed and the launcher must not be described as
+enforced.
+
 ## Codex Files
 
 | File | Purpose |
@@ -201,6 +221,42 @@ the claim as `claim_live_argv_platform_unsupported`.
 Commissioning instead uses a fixed 15-minute supervisor probe. It accepts no
 caller prompt, argv, or path, and its `commissioning-launches` record cannot be
 substituted for a standard launch record.
+
+## Post-Commissioning Evidence Checklist
+
+After the human administrator completes frontend commissioning and sealing:
+
+1. Run the installed `agent_integration_assurance.py report` for profile
+   `codex-main-agent-a-prime` and preserve its complete output. For example,
+   with `RUNTIME_ROOT` bound to the installed release directory:
+
+   ```sh
+   /usr/bin/python3 -I -B \
+     "$RUNTIME_ROOT/organization/runtime/workflows/scripts/agent_integration_assurance.py" \
+     report --profile codex-main-agent-a-prime
+   ```
+
+2. Confirm that the report resolves the selected sealed generation with
+   top-level `decision = allow`,
+   `profiles[0].claim_results.action_enforced = pass`, `action_enforced` in
+   `profiles[0].effective_claims`, and a non-null
+   `profiles[0].attestation_digest`. A missing, stale, drifted, or unselected
+   generation is a suppressed claim, not an acceptable result.
+3. Record the exact report output; `commissioning.commissioning_id` and
+   `commissioning.generation_id` from the `commission-seal` output, checked
+   against `commissioning_id` and `generation_id` in
+   `generations/<profile_id>/<generation_id>/manifest.json`; and the selected
+   `generation_id` and `activation_id` from `active/<profile_id>.json` in the
+   Agents-Vault task record. The sealed and selected generation ids must match
+   across these sources.
+4. Complete the deployment and runtime acceptance checks in
+   [`verify_enforcement.md`](../../organization/runtime/workflows/profiles/verify_enforcement.md),
+   including its final simple research check, and attach the command outputs
+   and observed artifact identifiers to the same task record.
+
+Evidence recording does not promote a claim. Only the verified, immutable
+active generation does so; any failed or incomplete check leaves the claim
+suppressed.
 
 ## Required Direct-Action Coverage
 
