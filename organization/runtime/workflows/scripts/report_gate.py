@@ -812,6 +812,14 @@ def validate_normalized_provider_evidence_file(
     except ReportGateError:
         return []
     try:
+        run_id = run_store.validate_artifact_id(str(run.get("run_id") or ""), "run_id")
+        step_id = run_store.validate_artifact_id(str(work_order.get("step_id") or ""), "step_id")
+    except run_store.RunStoreError:
+        return ["normalized_evidence run or step identity is not artifact-safe"]
+    expected_path = provider_evidence_path(state_root, run_id, step_id)
+    if path != expected_path:
+        return ["normalized_evidence path must match current run evidence path"]
+    try:
         if not run_store.private_artifact_exists(path):
             return []
     except run_store.RunStoreError:

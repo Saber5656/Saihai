@@ -3066,7 +3066,10 @@ def test_validate_report_rejects_noncanonical_report_and_stale_evidence() -> Non
         payload = load_payload(stale)
         assert_equal(stale.returncode, 2, "stale evidence report exit")
         assert_equal(payload["reason"], "invalid_report", "stale evidence reason")
-        assert any("must match current run evidence path" in item for item in payload["errors"])
+        assert_equal(payload["outcome"], "report_invalid", "stale evidence outcome")
+        assert "provider_evidence.evidence_path must match current run evidence path" in payload["errors"]
+        assert "normalized_evidence path must match current run evidence path" in payload["errors"]
+        assert "provider_model_assurance_mismatch" not in payload["errors"]
 
 
 def test_validate_report_missing_report_waits_for_human() -> None:
