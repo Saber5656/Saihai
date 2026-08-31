@@ -48,14 +48,19 @@ class ScandirStub:
 def current_codex_jsonl(
     *,
     include_message: bool = True,
+    include_model: bool = True,
     include_thread_started: bool = True,
     include_turn_completed: bool = True,
 ) -> str:
     events: list[dict[str, object]] = []
     if include_thread_started:
-        events.append(
-            {"type": "thread.started", "thread_id": "provider-thread", "model": "gpt-5.6-sol"}
-        )
+        thread_started: dict[str, object] = {
+            "type": "thread.started",
+            "thread_id": "provider-thread",
+        }
+        if include_model:
+            thread_started["model"] = "gpt-5.6-sol"
+        events.append(thread_started)
     events.extend(
         [
             {"type": "turn.started"},
@@ -1355,6 +1360,100 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
 
         self.assertEqual(output["activation"]["effective_model"], "gpt-5.6-sol")
         self.assertEqual(output["activation"]["session_id"], "provider-thread")
+
+    def test_codex_consumers_do_not_synthesize_missing_effective_model(self) -> None:
+        """Keep provider-omitted model evidence unknown instead of using intended_model."""
+        builder = load_builder_module()
+        completed = subprocess.CompletedProcess(
+            args=["codex"],
+            returncode=0,
+            stdout=current_codex_jsonl(include_model=False),
+            stderr="",
+        )
+
+        with self.subTest(consumer="agent_dispatch"), tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = state_root / "session"
+            session_dir.mkdir(parents=True)
+            (session_dir / "roster.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "agent_id": "tech-backend",
+                            "provider": "openai",
+                            "execution_mode": "codex_exec",
+                            "intended_model": "gpt-5.6-luna",
+                            "allowed_tools": ["Read", "Grep", "Glob"],
+                            "git_operations_allowed": False,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(builder.shutil, "which", return_value="/usr/bin/codex"), mock.patch.object(
+                builder,
+                "run_command_with_bounded_output",
+                return_value=completed,
+            ):
+                output = builder.codex_exec_agent_dispatch(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={
+                        "session_id": "session",
+                        "agent_id": "tech-backend",
+                        "request_id": "req-missing-model",
+                        "cwd": "/tmp/project",
+                        "prompt": "Review only.",
+                    },
+                )
+
+            state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+            roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+            evidence = json.loads(
+                (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+            )
+            row = next(item for item in roster if item["agent_id"] == "tech-backend")
+            self.assertEqual(output["agentDispatch"]["result"], "provider_response_ready")
+            self.assertEqual(output["agentDispatch"]["intended_model"], "gpt-5.6-luna")
+            self.assertEqual(output["agentDispatch"]["effective_model"], "")
+            self.assertEqual(row["effective_model"], "")
+            self.assertEqual(evidence["effective_model"], "")
+            self.assertEqual(state["readiness_scope"], "response_evidence")
+
+        with self.subTest(consumer="provider_activate"), tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            builder.session_start_metadata_output(
+                runtime="codex",
+                state_root=state_root,
+                hook_input={"session_id": "session", "cwd": "/tmp/project", "source": "startup"},
+            )
+            with mock.patch.object(builder.shutil, "which", return_value="/usr/bin/codex"), mock.patch.object(
+                builder,
+                "run_command_with_bounded_output",
+                return_value=completed,
+            ):
+                output = builder.provider_activate(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={
+                        "session_id": "session",
+                        "agent_id": "tech-backend",
+                        "cwd": "/tmp/project",
+                    },
+                )
+
+            session_dir = state_root / "session"
+            state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+            roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+            evidence = json.loads(
+                (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+            )
+            row = next(item for item in roster if item["agent_id"] == "tech-backend")
+            self.assertNotIn("decision", output)
+            self.assertEqual(output["activation"]["effective_model"], "")
+            self.assertEqual(row["effective_model"], "")
+            self.assertEqual(evidence["effective_model"], "")
+            self.assertEqual(state["readiness_scope"], "response_evidence")
 
     def test_codex_consumers_require_current_terminal_metadata(self) -> None:
         builder = load_builder_module()

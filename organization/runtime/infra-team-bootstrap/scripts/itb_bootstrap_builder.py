@@ -10661,9 +10661,9 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     duration_api_ms = codex_duration_api_ms if codex_duration_api_ms is not None else elapsed_ms
     provider_session_id = str_from_nested(codex_result, [("session_id",), ("sessionId",)])
     output_request_id = str_from_nested(codex_result, [("request_id",), ("requestId",)]) or request_id
-    effective_model = (
-        str_from_nested(codex_result, [("model",), ("effective_model",), ("effectiveModel",)])
-        or row.get("intended_model", "")
+    effective_model = str_from_nested(
+        codex_result,
+        [("model",), ("effective_model",), ("effectiveModel",)],
     )
     result_text = str(codex_result.get("result") or codex_result.get("message") or "").strip()
     num_turns = int_from_nested(codex_result, [("num_turns",), ("numTurns",)])
@@ -11231,9 +11231,9 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         duration_api_ms = codex_duration_api_ms if codex_duration_api_ms is not None else elapsed_ms
         provider_session_id = str_from_nested(codex_result, [("session_id",), ("sessionId",)])
         request_id = str_from_nested(codex_result, [("request_id",), ("requestId",)])
-        effective_model = (
-            str_from_nested(codex_result, [("model",), ("effective_model",), ("effectiveModel",)])
-            or row.get("intended_model", "")
+        effective_model = str_from_nested(
+            codex_result,
+            [("model",), ("effective_model",), ("effectiveModel",)],
         )
         result_text = str(codex_result.get("result") or codex_result.get("message") or "")
         num_turns = int_from_nested(codex_result, [("num_turns",), ("numTurns",)])
