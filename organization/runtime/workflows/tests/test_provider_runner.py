@@ -941,6 +941,7 @@ def test_patched_live_missing_parsed_model_rejects_report_self_claim() -> None:
 
 
 def test_live_codex_uses_declared_non_equality_model_semantics() -> None:
+    """Preserve runtime-reported identity while declaring Luna in work evidence."""
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         run_id = "run-live-codex"

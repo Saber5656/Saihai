@@ -9633,14 +9633,17 @@ def claude_effort_for_model(model: Any) -> str:
 
 
 def codex_model_for_agent(row: dict[str, Any]) -> str:
+    """Return the registry-selected Codex model or the Luna default."""
     return normalize_cell(row.get("intended_model", "") or DEFAULT_CODEX_MODEL)
 
 
 def codex_reasoning_effort() -> str:
+    """Return the pinned reasoning effort for Codex role execution."""
     return DEFAULT_CODEX_REASONING_EFFORT
 
 
 def codex_service_tier() -> str:
+    """Return the configured Codex service tier."""
     return normalize_cell(os.environ.get("ITB_CODEX_SERVICE_TIER") or DEFAULT_CODEX_SERVICE_TIER)
 
 
@@ -9746,6 +9749,7 @@ def claude_activation_command(row: dict[str, Any], prompt: str, max_budget_usd: 
 
 
 def codex_activation_command(row: dict[str, Any], prompt: str, cwd: str) -> list[str]:
+    """Build a Codex activation command pinned to the selected model and max effort."""
     model = row.get("intended_model", "") or DEFAULT_CODEX_MODEL
     effort = DEFAULT_CODEX_REASONING_EFFORT
     tier = os.environ.get("ITB_CODEX_SERVICE_TIER") or DEFAULT_CODEX_SERVICE_TIER

@@ -296,6 +296,7 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             self.assertEqual(rows[0]["agent_id"], "tech-backend")
 
     def test_codex_activation_defaults_to_luna_max(self) -> None:
+        """Pin default Codex activations to Luna at maximum reasoning effort."""
         builder = load_builder_module()
         command = builder.codex_activation_command(
             {"agent_id": "tech-backend"},
@@ -307,6 +308,7 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
         self.assertIn('model_reasoning_effort="max"', command)
 
     def test_active_registry_routes_every_role_through_luna_max(self) -> None:
+        """Require every active registry role to remain on the Luna-only route."""
         builder = load_builder_module()
         active_rows = [
             row

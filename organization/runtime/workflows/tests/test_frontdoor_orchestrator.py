@@ -1323,6 +1323,7 @@ def test_concurrent_manual_prepare_writes_canonical_artifacts_once() -> None:
 
 
 def test_drain_allows_edit_capable_code_change_gate() -> None:
+    """Route an edit-capable code-change work order through Luna."""
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         classification = external_review_classification(

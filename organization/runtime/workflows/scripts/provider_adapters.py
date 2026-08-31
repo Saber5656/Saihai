@@ -696,6 +696,7 @@ def invoke_codex_exec(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     heartbeat: Callable[[], bool | None] | None = None,
 ) -> dict[str, Any]:
+    """Invoke the confined Codex adapter with the Luna model and max effort pinned."""
     if not _valid_timeout(timeout_seconds):
         return _configuration_failure("invalid_timeout")
     try:

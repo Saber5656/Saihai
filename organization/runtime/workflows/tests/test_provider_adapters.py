@@ -251,6 +251,7 @@ def test_claude_stream_is_strictly_bound_to_one_init_and_result() -> None:
 
 
 def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
+    """Require the confined Codex wrapper to pin Luna and max effort."""
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         binary, digest = secure_file(root, "codex")
