@@ -13,6 +13,7 @@ from pathlib import Path
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 BUILDER = SKILL_ROOT / "scripts" / "itb_bootstrap_builder.py"
 HOOK_ROOT = SKILL_ROOT / "hooks"
+MODEL_REGISTRY = SKILL_ROOT / "references" / "model-registry.md"
 
 
 def load_builder_module():
@@ -305,16 +306,28 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
         self.assertIn('model_reasoning_effort="max"', command)
 
-    def test_codex_activation_respects_sol_role_model(self) -> None:
+    def test_active_registry_routes_every_role_through_luna_max(self) -> None:
         builder = load_builder_module()
-        command = builder.codex_activation_command(
-            {"agent_id": "tech-reviewer", "intended_model": "gpt-5.6-sol"},
-            "review",
-            "/tmp/project",
-        )
+        active_rows = [
+            row
+            for row in builder.parse_model_registry_file(MODEL_REGISTRY)
+            if row["status"] == "active"
+        ]
 
-        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
-        self.assertIn('model_reasoning_effort="max"', command)
+        self.assertEqual(len(active_rows), 35)
+        self.assertTrue(active_rows)
+        for row in active_rows:
+            with self.subTest(agent_id=row["agent_id"]):
+                self.assertEqual(row["provider"], "openai")
+                self.assertEqual(row["primary_model"], "gpt-5.6-luna")
+                self.assertEqual(row["execution_mode"], "codex")
+                command = builder.codex_activation_command(
+                    {"agent_id": row["agent_id"], "intended_model": row["primary_model"]},
+                    "review",
+                    "/tmp/project",
+                )
+                self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
+                self.assertIn('model_reasoning_effort="max"', command)
 
     def test_retired_hook_wrappers_are_not_shipped(self) -> None:
         shipped = {path.name for path in HOOK_ROOT.glob("*.sh")}
