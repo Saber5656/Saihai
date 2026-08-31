@@ -678,6 +678,7 @@ def validate_run_record(run: Any) -> list[str]:
         "task_id",
         "request_id",
         "workflow_id",
+        "approved_provider_binding",
         "goal_state",
         "run_state",
         "current_step",
@@ -705,6 +706,32 @@ def validate_run_record(run: Any) -> list[str]:
         errors.append("workflow_id must be a non-empty string")
     if not _non_empty_string(run.get("current_step")):
         errors.append("current_step must be a non-empty string")
+    approved_provider_binding = run.get("approved_provider_binding")
+    if not isinstance(approved_provider_binding, dict):
+        errors.append("approved_provider_binding must be a json object")
+    else:
+        required_binding_fields = {
+            "provider_adapter_id",
+            "default_model",
+            "effective_model_policy",
+        }
+        errors.extend(
+            f"approved_provider_binding.{field} is required"
+            for field in sorted(required_binding_fields - set(approved_provider_binding))
+        )
+        extra_binding_fields = sorted(set(approved_provider_binding) - required_binding_fields)
+        errors.extend(
+            f"approved_provider_binding.{field} is not allowed"
+            for field in extra_binding_fields
+        )
+        for field in ("provider_adapter_id", "default_model"):
+            if not _non_empty_string(approved_provider_binding.get(field)):
+                errors.append(f"approved_provider_binding.{field} must be a non-empty string")
+        if approved_provider_binding.get("effective_model_policy") not in {
+            "required_exact_match",
+            "record_without_equality",
+        }:
+            errors.append("approved_provider_binding.effective_model_policy must be known")
     if run.get("run_state") not in RUN_STATES:
         errors.append("run_state must be a known workflow run state")
     if run.get("goal_state") not in GOAL_STATES:

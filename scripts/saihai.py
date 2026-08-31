@@ -132,6 +132,15 @@ def handle_frontdoor_propose(frontdoor: Any, args: argparse.Namespace) -> dict[s
         expires_at=str(request_value(request, args, "expires_at", arg_name="expires_at", default="run_terminal")),
         frontdoor=str(request_value(request, args, "frontdoor", arg_name="frontdoor", default="codex")),
         chat_session_id=str(request_value(request, args, "chat_session_id", arg_name="chat_session_id", default="")),
+        provider_adapter_id=str(
+            request_value(
+                request,
+                args,
+                "provider_adapter_id",
+                arg_name="provider_adapter_id",
+                default="",
+            )
+        ),
     )
     status = str(
         payload.get("request_status")
@@ -239,6 +248,7 @@ def build_frontdoor_parser(sub: argparse._SubParsersAction[argparse.ArgumentPars
     propose.add_argument("--expires-at", default="")
     propose.add_argument("--frontdoor", choices=["codex", "claude", "manual"], default="")
     propose.add_argument("--chat-session-id", default="")
+    propose.add_argument("--provider-adapter-id", default="")
     propose.set_defaults(handler=handle_frontdoor_propose)
 
     approve = frontdoor_sub.add_parser("approve", help="approve a proposed activation artifact")

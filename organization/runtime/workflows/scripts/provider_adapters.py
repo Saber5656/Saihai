@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import pwd
@@ -49,6 +50,28 @@ _popen = subprocess.Popen
 
 class AdapterConfigurationError(ValueError):
     """A fail-closed adapter configuration or request error."""
+
+
+def claude_argv_template(intended_model: str) -> list[str]:
+    return [
+        "{executable}",
+        "--print",
+        "--model",
+        intended_model,
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--permission-mode",
+        "plan",
+        "--tools",
+        "",
+        "--disable-slash-commands",
+        "--safe-mode",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+    ]
 
 
 def extract_json_object(text: str) -> dict[str, Any] | None:
@@ -200,23 +223,56 @@ def _structured_provider_unavailable(stdout: bytes, stderr: bytes) -> bool:
 
 
 def extract_claude_result(stdout_text: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    try:
-        payload = json.loads(stdout_text)
-    except json.JSONDecodeError:
+    events: list[dict[str, Any]] = []
+    for line in stdout_text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return None, {}
+        if not isinstance(event, dict):
+            return None, {}
+        events.append(event)
+    if not events:
         return None, {}
-    if not isinstance(payload, dict):
+    init_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("type") == "system" and event.get("subtype") == "init"
+    ]
+    result_events = [
+        (index, event)
+        for index, event in enumerate(events)
+        if event.get("type") == "result"
+    ]
+    if len(init_events) != 1 or len(result_events) != 1:
         return None, {}
-    report = extract_json_object(str(payload.get("result") or ""))
-    model_usage = payload.get("modelUsage")
-    effective_model = str(payload.get("model") or "")
-    if not effective_model and isinstance(model_usage, dict) and model_usage:
-        effective_model = str(next(iter(model_usage)))
+    init_index, init_event = init_events[0]
+    result_index, result_event = result_events[0]
+    if init_index >= result_index or result_index != len(events) - 1:
+        return None, {}
+    init_session_id = init_event.get("session_id")
+    result_session_id = result_event.get("session_id")
+    effective_model = init_event.get("model")
+    if (
+        not isinstance(init_session_id, str)
+        or not init_session_id
+        or not isinstance(result_session_id, str)
+        or not hmac.compare_digest(init_session_id, result_session_id)
+        or not isinstance(effective_model, str)
+        or not effective_model
+    ):
+        return None, {}
+    report = extract_json_object(str(result_event.get("result") or ""))
     evidence = {
         "provider": "anthropic",
         "effective_model": effective_model,
-        "provider_session_id": str(payload.get("session_id") or ""),
-        "provider_request_id": str(payload.get("uuid") or payload.get("request_id") or ""),
-        "usage": _usage(payload.get("usage")),
+        "provider_session_id": result_session_id,
+        "provider_request_id": str(
+            result_event.get("uuid") or result_event.get("request_id") or ""
+        ),
+        "usage": _usage(result_event.get("usage")),
     }
     return report, evidence
 
@@ -616,22 +672,15 @@ def invoke_claude_cli(
         binary = Path(binding["binary"]["path"])
     except AdapterConfigurationError as exc:
         return _configuration_failure(str(exc))
-    command = [
-        str(binary),
-        "--print",
-        "--output-format",
-        "json",
-        "--permission-mode",
-        "plan",
-        "--tools",
-        "",
-        "--disable-slash-commands",
-        "--safe-mode",
-        "--no-session-persistence",
-        "--strict-mcp-config",
-        "--mcp-config",
-        '{"mcpServers":{}}',
-    ]
+    intended_model = request.get("intended_model")
+    if not isinstance(intended_model, str) or not intended_model:
+        return _configuration_failure("intended_model_missing")
+    adapter = request.get("adapter")
+    template = adapter.get("command_argv") if isinstance(adapter, dict) else None
+    expected_template = claude_argv_template(intended_model)
+    if template != expected_template:
+        return _configuration_failure("claude_argv_template_mismatch")
+    command = [str(binary) if item == "{executable}" else item for item in template]
     return _invoke(
         command=command,
         request=request,

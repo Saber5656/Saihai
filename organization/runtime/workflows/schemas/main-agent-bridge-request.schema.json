@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sahai.local/schemas/workflows/main-agent-bridge-request.schema.json",
   "title": "Main Agent Bridge Request",
-  "description": "Restricted submit_request payload accepted from the main-agent confirmation surface. Workspace, installed-frontend principal, and checkout identity are bound by the host launcher and cannot be supplied here.",
+  "description": "Restricted submit_request payload accepted from a registered main-agent surface. Workspace, installed-frontend principal, checkout identity, and surface assurance state are host-derived and cannot be supplied here.",
   "type": "object",
   "required": [
     "task_id",
@@ -60,13 +60,7 @@
     },
     "frontdoor": {
       "type": "string",
-      "enum": [
-        "codex",
-        "claude",
-        "cursor",
-        "grok",
-        "manual"
-      ]
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,95}$"
     },
     "chat_session_id": {
       "type": "string",
@@ -148,6 +142,16 @@
       {
         "required": [
           "launch_session_digest"
+        ]
+      },
+      {
+        "required": [
+          "surface_identity"
+        ]
+      },
+      {
+        "required": [
+          "assurance_state"
         ]
       }
     ]

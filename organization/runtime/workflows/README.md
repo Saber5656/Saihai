@@ -22,6 +22,7 @@ It does not manage provider credentials, run tmux workers, or start a daemon.
 | `schemas/main-agent-bridge-request.schema.json` | Restricted submit request accepted from the main-agent confirmation surface |
 | `schemas/orchestrator-projection.schema.json` | Redacted output projection safe for main-agent rendering |
 | `schemas/agent-integration-assurance.schema.json` | Platform-neutral frontend/worker target registry and fail-closed claim-suppression policy |
+| `schemas/frontdoor-surface-registry.schema.json` | Closed frontend-kind registration contract for submit, launcher, requirements, and assurance descriptors |
 | `schemas/agent-integration-evidence.schema.json` | Digest-bound configuration, external host-observation, gateway, and worker evidence contract |
 | `schemas/agent-integration-attestation.schema.json` | Short-lived administrator-sealed evidence index whose claims are recomputed by consumers |
 | `schemas/codex-main-agent-deployment.schema.json` | Root-owned Codex deployment, policy-domain, release, wrapper, and runtime binding |
@@ -35,6 +36,7 @@ It does not manage provider credentials, run tmux workers, or start a daemon.
 | `schemas/security-review-report.schema.json` | Security-sensitive review evidence schema |
 | `scripts/workflow_selector.py` | Deterministic selector and activation-envelope helper |
 | `scripts/frontdoor_orchestrator.py` | Host-owned frontdoor and invocation-drain P0 harness |
+| `scripts/frontdoor_surface_registry.py` | Typed surface registration and fail-closed informational identity derivation |
 | `scripts/main_agent_bridge_mcp.py` | Bridge-only MCP transport exposing submit/read/ack and no action authority |
 | `scripts/agent_integration_assurance.py` | Validate, report, and require current agent-surface claims; failed targets are suppressed |
 | `scripts/agent_integration_attester.py` | Freeze an exact generation manifest, seal its immutable attestation, and support active-generation validation |
@@ -50,10 +52,12 @@ It does not manage provider credentials, run tmux workers, or start a daemon.
 | `tests/test_workflow_selector.py` | Unit/static contract tests |
 | `tests/test_task_state_bridge.py` | Task/session bridge and queue-shaped derived view regression tests |
 | `profiles/agent-integration-assurance.registry.json` | Target claims and integration states for Codex, Claude, Cursor, Grok, and the scoped worker |
+| `profiles/frontdoor-surface-registry.json` | Registered frontend kinds and their submit, launcher, requirements, and assurance bindings |
 | `profiles/codex-main-agent.deployment.example.json` | Canonical production deployment path and artifact example |
 | `profiles/verify_enforcement.md` | Two-phase administrator deployment, root commissioning, generation renewal, rollback, and final routing procedure |
 | `profiles/agent-integration-canary.md` | Lower-level generation-bound evidence contract and the final simple-research routing check |
 | `frontdoor-orchestrator-protocol.md` | Implementation boundary for Agent UI, host frontdoor, harness, and Claude adapter control |
+| `frontdoor-surface-contract.md` | Per-surface enforcement ladder and new frontend registration procedure |
 | `operator-runbook.md` | Day-1 operator workflow, legacy queue/tmux migration notes, stuck-run recovery, rollback, artifact, and validation guidance |
 
 The `.yaml` files in this directory are JSON-compatible by design, matching the
@@ -68,6 +72,7 @@ existing runtime config convention in `organization/runtime/infra-team-bootstrap
 | Workflow selection is deterministic | The selector consumes typed classification; it does not read free-form prompt text. |
 | Classification has provenance | A classification must include source, confidence, and evidence. `frontdoor_llm_proposal` is not an authority source. |
 | Main agent is a confirmation bridge | The main-agent bridge can submit a typed request, read a redacted projection, and ack output only. |
+| Frontend registration is data-driven | Ingress derives a typed surface identity from the closed registry; unknown surfaces fail before request creation and uncommissioned targets remain advisory with claims suppressed. |
 | Projection correlation is digest-only | Redacted projections expose `idempotency_key_digest`, never the raw key; child-thread and worker summaries require exact request/task/owner/checkout bindings. |
 | Frontend launch is adapter-specific | Portable A′ does not require one launch mechanism for every product. Each target must bind the launch surface it can prove; the first target is only the root-launcher Codex CLI process. |
 | Assurance claims require evidence | Pending, missing, failed, or drifted attestation suppresses the requested level and never falls back to unrestricted execution. |
@@ -170,6 +175,10 @@ the actual work-order repository and worktree. Current same-rootfs worker
 commissioning may record probe evidence, but `commission-seal` fails closed with
 `worker_denial_facts_not_promotable`. Only stronger denial evidence from a
 separately isolated worker policy domain may activate `managed_worker`.
+The selected VM boundary and path-free input/result contract are documented in
+[`docs/design/isolated-worker-policy-domain.md`](../../../docs/design/isolated-worker-policy-domain.md).
+This is a design and validation contract only; no automatic cross-domain
+transport or promotable isolated-domain observer is shipped yet.
 
 ## Provider Runner
 
@@ -178,6 +187,14 @@ adapter descriptor from `registry.yaml`. The runner dispatches through adapter
 metadata rather than hard-coded provider names, writes a normalized evidence
 artifact under `provider-evidence/`, writes a typed report under `reports/`,
 and then hands the report to the report gate.
+
+The Claude descriptor pins `default_model` and the complete `command_argv`
+template in the registry. Work orders and digest-bound adapter requests carry
+that value as `intended_model`; the live adapter renders the registry template
+with `--model <intended_model>`. The runner accepts a report only when the
+parsed `effective_model` is present and exactly equal. A different or missing
+value produces the typed `provider_model_mismatch` outcome and moves the run
+directly to `waiting_human` without writing a canonical report.
 
 The active descriptor set covers these provider targets:
 
@@ -340,7 +357,8 @@ unregistered, or identity-mismatched requests fail closed. The `usage` and
 `surface_metadata` objects also use closed typed property allowlists.
 
 The canonical version field is `evidence_version: "1"`. Required traceability
-includes provider adapter/target, provider/model, request/run/workflow/step,
+includes provider adapter/target, provider, intended/effective model,
+request/run/workflow/step,
 provider request/session, transcript/evidence paths, duration/usage, outcome,
 and `raw_transcript_policy: "signal_only_not_shared"`. The deprecated
 `provider_evidence_version` alias, unknown fields, and raw transcript,

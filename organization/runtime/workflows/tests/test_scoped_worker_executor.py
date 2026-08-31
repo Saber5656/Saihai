@@ -439,6 +439,7 @@ def create_approved_code_change(state_root: Path, *, user_prompt: str, worker_re
     )
     frontdoor.bridge_submit_request(
         state_root=state_root,
+        frontend_kind="codex",
         payload={
             "task_id": "TSK-scoped-e2e",
             "request_id": "req-scoped-e2e",

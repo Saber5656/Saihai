@@ -308,7 +308,10 @@ def test_real_frontdoor_submit_projection_ack_and_idempotency() -> None:
         assert_equal(submitted["transition_effect"], "none", "submit transition")
         assert_equal(
             submitted["idempotency_key_digest"],
-            mcp.frontdoor.idempotency_key_digest(arguments["idempotency_key"]),
+            mcp.frontdoor.bridge_idempotency_key_digest(
+                arguments["idempotency_key"],
+                submitted["surface_identity"],
+            ),
             "projection idempotency digest",
         )
         assert arguments["idempotency_key"] not in json.dumps(submitted_result)
@@ -589,6 +592,9 @@ def test_concurrent_idempotency_and_crash_journal_repair_are_atomic() -> None:
                 "request_id": request_record["request_id"],
                 "request_digest": request_record["request_digest"],
                 "idempotency_key_digest": request_record["idempotency_key_digest"],
+                "idempotency_path_digest": mcp.frontdoor.idempotency_key_digest(
+                    arguments["idempotency_key"]
+                ),
                 "owner_principal": request_record["owner_principal"],
                 "request_record": request_record,
                 "idempotency_record": idempotency_record,

@@ -40,7 +40,7 @@ Team Role `SKILL.md` files define role identity, Flow Contract, and behavior. Th
 | git-publisher | dev | active | false | openai | gpt-5.6-luna |  | codex | medium | medium |  | GTE の `quality_ok` + Git Publication Manifest から queue activation され、commit / push / PR tool flow の順序制御と Publication Result 記録を行う(2026-08-31: Luna Max routing policy.) |
 | infra-director | infra | active | true | openai | gpt-5.6-luna |  | codex | medium | medium |  | Vault 運用、タスク同期、Obsidian 関連作業の責務分解とレビュー線調整を安定して扱うため(2026-08-31: Luna Max routing policy.) |
 | infra-local-qa | infra | active | false | openai | gpt-5.6-luna |  | codex | medium | medium |  | Infra Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
-| infra-task-dispatcher | infra | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.2 | Infra Director または定期実行側が必要時に起動する運行メンバー(2026-08-31: Luna Max routing policy.) |
+| infra-task-dispatcher | infra | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.6-luna | Infra Director または定期実行側が必要時に起動する運行メンバー(2026-08-31: Luna Max routing policy.) |
 | infra-team-bootstrap | infra | active | true | openai | gpt-5.6-luna |  | codex | medium | medium |  | CLI surface確認、active set 照合、証跡記録、軽量な運行判断が中心のため(2026-08-31: Luna Max routing policy.) |
 | teams-coordination | tech | deprecated | false | anthropic | claude-sonnet-4-6 | claude-haiku-4-5, gpt-5.5 | agent | medium | medium |  | 旧 Claude Teams 実験用。現行 runtime 対象外 |
 | teams-developer | tech | deprecated | false | openai | gpt-5.5 | claude-sonnet-4-6, gpt-5.2 | codex | medium | medium | gpt-5.2 | 旧 Claude Teams 実験用。現行 runtime 対象外 |
@@ -50,18 +50,18 @@ Team Role `SKILL.md` files define role identity, Flow Contract, and behavior. Th
 | teams-tech-leader | tech | deprecated | false | anthropic | claude-opus-4-8 | claude-sonnet-4-6, gpt-5.5 | agent | high | high | gpt-5.2 | 旧 Claude Teams 実験用。現行 runtime 対象外。Claude Opus 4.8 release 後の参照整合のため 4.7 から更新 |
 | teams-ux-designer | tech | deprecated | false | anthropic | claude-sonnet-4-6 | claude-haiku-4-5, gpt-5.5 | agent | medium | medium |  | 旧 Claude Teams 実験用。現行 runtime 対象外 |
 | tech-architect | tech | active | false | openai | gpt-5.6-luna |  | codex | high | high |  | システム境界、責務分割、長期構造判断の0→1設計を強化するため Luna Max を使用（2026-08-31: Luna Max routing policy） |
-| tech-backend | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.2 | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
-| tech-data-structure | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.2 | Tech Director が必要時に起動する専門メンバー（2026-08-31: Luna Max routing policy） |
-| tech-debugger | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.2 | Tech Director が必要時に起動する専門メンバー（2026-08-31: Luna Max routing policy） |
+| tech-backend | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.6-luna | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
+| tech-data-structure | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.6-luna | Tech Director が必要時に起動する専門メンバー（2026-08-31: Luna Max routing policy） |
+| tech-debugger | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.6-luna | Tech Director が必要時に起動する専門メンバー（2026-08-31: Luna Max routing policy） |
 | tech-designer | tech | active | false | openai | gpt-5.6-luna |  | codex | high | high |  | UI/UX、情報設計、体験骨格の0→1設計を強化するため(2026-08-31: Luna Max routing policy.) |
-| tech-devopssec | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.2 | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
+| tech-devopssec | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.6-luna | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
 | tech-director | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium |  | 技術判断、依存関係整理、レビュー線設計、チーム内調整を安定して扱うため(2026-08-31: Luna Max routing policy.) |
 | tech-docs | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium |  | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
-| tech-frontend | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.2 | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
-| tech-infrastructure | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.2 | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
-| tech-lead | tech | active | false | openai | gpt-5.6-luna |  | codex | high | high | gpt-5.2 | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
-| tech-mobile | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.2 | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
-| tech-performance | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.2 | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
+| tech-frontend | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.6-luna | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
+| tech-infrastructure | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.6-luna | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
+| tech-lead | tech | active | false | openai | gpt-5.6-luna |  | codex | high | high | gpt-5.6-luna | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
+| tech-mobile | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.6-luna | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
+| tech-performance | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium | gpt-5.6-luna | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
 | tech-qa | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium |  | Tech Director が必要時に起動する専門メンバー(2026-08-31: Luna Max routing policy.) |
 | tech-reviewer | tech | active | false | openai | gpt-5.6-luna |  | codex | medium | medium |  | Tech Director が必要時に起動する専門メンバー（2026-08-31: Luna Max routing policy） |
 | tech-security | tech | active | false | openai | gpt-5.6-luna |  | codex | high | high |  | 認可境界、脅威モデル、重大設計リスクの0→1整理を強化するため Luna Max を使用（2026-08-31: Luna Max routing policy） |

@@ -229,6 +229,7 @@ def write_approved_child_request(
         "workspace_id": "Saber5656/Saihai",
         "checkout_identity": checkout_identity,
         "checkout_identity_digest": checkout_identity["identity_digest"],
+        "requester": frontdoor.requester("codex", ""),
         "owner_principal": request_owner,
         "principal": request_owner,
         "status": "approved",
@@ -265,6 +266,7 @@ def write_normalized_provider_evidence(
     evidence = {
         **fixed_fields,
         "provider": adapter["provider_target"],
+        "intended_model": fixed_fields["intended_model"],
         "effective_model": adapter.get("default_model") or "claude-sonnet-test",
         "provider_request_id": f"provider-{request_id}",
         "provider_session_id": provider_session_id or f"session-{run_id}",
@@ -350,7 +352,13 @@ def external_review_report(
         "summary": "Review completed.",
         "provider_evidence": {
             "provider": adapter["provider_target"],
+            "provider_adapter_id": adapter["provider_adapter_id"],
+            "intended_model": adapter_request["evidence_contract"]["fixed_fields"]["intended_model"],
             "effective_model": adapter.get("default_model") or "claude-sonnet-test",
+            "effective_model_policy": adapter["effective_model_policy"],
+            "model_assurance": adapter_request["evidence_contract"]["fixed_fields"][
+                "model_assurance"
+            ],
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",
             "transcript_path": adapter_request["transcript_path"],
@@ -1031,7 +1039,13 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "summary": "No findings.",
             "provider_evidence": {
                 "provider": adapter["provider_target"],
+                "provider_adapter_id": adapter["provider_adapter_id"],
+                "intended_model": adapter_request["evidence_contract"]["fixed_fields"]["intended_model"],
                 "effective_model": adapter.get("default_model") or "claude-sonnet-test",
+                "effective_model_policy": adapter["effective_model_policy"],
+                "model_assurance": adapter_request["evidence_contract"]["fixed_fields"][
+                    "model_assurance"
+                ],
                 "request_id": "req-frontdoor",
                 "provider_session_id": "claude-session-test",
                 "transcript_path": str(transcript_path),
@@ -1087,6 +1101,101 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(terminal_payload["reason"], "run_not_preparable", "terminal prepare reason")
         assert_equal(terminal_payload["run_state"], "complete", "terminal prepare state")
         assert_equal(transcript_path.read_bytes(), transcript_before, "terminal prepare transcript")
+
+
+def test_approved_provider_binding_blocks_request_adapter_and_model_mutation() -> None:
+    def approve_cursor(state_root: Path, request_id: str) -> None:
+        proposed = load_payload(
+            run_frontdoor(
+                state_root,
+                "propose",
+                "--task-id",
+                f"TSK-{request_id}",
+                "--request-id",
+                request_id,
+                "--prompt",
+                "Run bounded external review",
+                "--classification",
+                json.dumps(external_review_classification()),
+                "--ref",
+                "organization/runtime/workflows/README.md",
+                "--provider-adapter-id",
+                "cursor_cli_p0",
+            )
+        )
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "approve",
+                "--request-id",
+                request_id,
+                "--human-action-id",
+                proposed["approval"]["human_action_id"],
+            )
+        )
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-approved-adapter-mutation"
+        approve_cursor(state_root, request_id)
+        request_file = state_root / "requests" / f"{request_id}.json"
+        request_record = json.loads(request_file.read_text(encoding="utf-8"))
+        request_record["requested_provider_adapter_id"] = "hermes_agent_oneshot_p0"
+        request_file.write_text(json.dumps(request_record) + "\n", encoding="utf-8")
+        request_file.chmod(0o600)
+
+        blocked = run_frontdoor(
+            state_root,
+            "create-run",
+            "--request-id",
+            request_id,
+            "--run-id",
+            "run-approved-adapter-mutation",
+            check=False,
+        )
+        assert_equal(blocked.returncode, 2, "adapter mutation exit")
+        assert_equal(
+            load_payload(blocked)["reason"],
+            "provider_adapter_model_binding_mismatch",
+            "adapter mutation typed reason",
+        )
+        assert not (state_root / "work-orders").exists()
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-approved-model-mutation"
+        run_id = "run-approved-model-mutation"
+        approve_cursor(state_root, request_id)
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "create-run",
+                "--request-id",
+                request_id,
+                "--run-id",
+                run_id,
+            )
+        )
+        request_file = state_root / "requests" / f"{request_id}.json"
+        request_record = json.loads(request_file.read_text(encoding="utf-8"))
+        request_record["approval_record"]["provider_binding"]["default_model"] = "tampered-model"
+        request_file.write_text(json.dumps(request_record) + "\n", encoding="utf-8")
+        request_file.chmod(0o600)
+
+        blocked = run_frontdoor(
+            state_root,
+            "drain",
+            "--run-id",
+            run_id,
+            check=False,
+        )
+        assert_equal(blocked.returncode, 2, "model mutation exit")
+        assert_equal(
+            load_payload(blocked)["reason"],
+            "provider_adapter_model_binding_mismatch",
+            "model mutation typed reason",
+        )
+        assert not (state_root / "work-orders" / run_id).exists()
 
 
 def test_manual_prepare_evidence_contract_validates_report() -> None:
@@ -1275,7 +1384,44 @@ def test_drain_allows_edit_capable_code_change_gate() -> None:
         assert_equal(drained["workflow_run"]["run_state"], "step_queued", "code change drain run state")
         assert_equal(work_order["step_id"], "implement", "code change step")
         assert_equal(work_order["permission_mode"], "edit", "code change permission")
+        assert_equal(
+            work_order["provider_adapter_id"],
+            "codex_cli_openai_p0",
+            "code change provider adapter",
+        )
+        assert_equal(
+            work_order["intended_model"],
+            "gpt-5.6-luna",
+            "code change intended model",
+        )
+        assert work_order["intended_model"] != "claude-sonnet-4-6"
         assert_equal(work_order["activation_scope"]["allowed_ops"]["edit"], True, "later edit allowance preserved")
+
+        mismatched = run_frontdoor(
+            state_root,
+            "propose",
+            "--task-id",
+            "TSK-code-change-wrong-adapter",
+            "--request-id",
+            "req-code-change-wrong-adapter",
+            "--prompt",
+            "Implement bounded code change with a mismatched backend",
+            "--classification",
+            json.dumps(classification),
+            "--ref",
+            "organization/runtime/workflows/README.md",
+            "--allowed-path",
+            "organization/runtime/workflows",
+            "--provider-adapter-id",
+            "claude_headless_p0",
+            check=False,
+        )
+        mismatch_payload = load_payload(mismatched)
+        assert_equal(mismatched.returncode, 2, "route mismatch exit")
+        assert "provider_adapter_route_mismatch" in mismatch_payload["reason"]
+        assert not (
+            state_root / "requests" / "req-code-change-wrong-adapter.json"
+        ).exists()
 
 
 def test_drain_blocks_invalid_existing_work_order() -> None:
@@ -1338,6 +1484,9 @@ def test_drain_blocks_invalid_existing_work_order() -> None:
             "context_scope": {"mode": "refs_only", "raw_transcript_sharing": "forbidden"},
             "permission_mode": "readonly",
             "external_provider_allowed": True,
+            "provider_adapter_id": "claude_headless_p0",
+            "intended_model": "claude-sonnet-4-6",
+            "effective_model_policy": "required_exact_match",
             "report_path": str(state_root / "reports" / "run-invalid-work-order" / "review-external-review-report.json"),
             "policy_digest": "sha256:" + "1" * 64,
             "requester": {"frontdoor": "codex"},
@@ -1847,7 +1996,6 @@ def test_terminal_run_synchronizes_request_and_releases_pending_quota() -> None:
             "aborted",
             "abort synchronizes request",
         )
-
         stale = frontdoor_module.read_json(request_file)
         stale["status"] = "approved"
         frontdoor_module.write_json(request_file, stale)
@@ -1907,6 +2055,34 @@ def test_terminal_run_synchronizes_request_and_releases_pending_quota() -> None:
         )
         assert_equal(pending_count, 1, "approved request without run stays pending")
         assert pending_bytes > 0, "approved request without run must consume pending bytes"
+
+
+def test_terminal_drain_replay_does_not_depend_on_request_record() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-terminal-drain-replay"
+        run_id = "run-terminal-drain-replay"
+        create_approved_run(state_root, request_id=request_id, run_id=run_id)
+        frontdoor_module.abort_run(
+            state_root=state_root,
+            run_id=run_id,
+            reason="terminal drain replay fixture",
+        )
+        frontdoor_module.request_path(state_root, request_id).unlink()
+
+        replayed = frontdoor_module.drain_run(state_root=state_root, run_id=run_id)
+        assert_equal(replayed["drained"], False, "terminal drain replay drained")
+        assert_equal(
+            replayed["reason"],
+            "run_state_not_queueable",
+            "terminal drain replay reason",
+        )
+        assert_equal(
+            replayed["workflow_run"]["run_state"],
+            "aborted",
+            "terminal drain replay state",
+        )
 
 
 def test_approval_uses_requested_ref_forms_without_leaking_original_paths() -> None:
@@ -2414,7 +2590,11 @@ def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
             "chat_session_id": "thread-replay",
             "idempotency_key": "replay-key",
         }
-        digest = frontdoor_module.request_digest(payload)
+        surface_identity = frontdoor_module.resolve_surface_identity("codex")
+        digest = frontdoor_module.request_digest(
+            payload,
+            surface_identity=surface_identity,
+        )
         now = frontdoor_module.now_iso()
         frontdoor_module.write_json(
             frontdoor_module.request_path(state_root, "req-replay"),
@@ -2458,7 +2638,11 @@ def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
             },
         )
 
-        replayed = frontdoor_module.bridge_submit_request(state_root=state_root, payload=payload)
+        replayed = frontdoor_module.bridge_submit_request(
+            state_root=state_root,
+            payload=payload,
+            frontend_kind="codex",
+        )
         assert_equal(replayed["replayed"], True, "idempotent replay")
         assert_equal(replayed["request_status"], "waiting_human", "replayed request status")
 
@@ -2473,6 +2657,267 @@ def test_bridge_idempotency_uses_raw_key_digest_paths() -> None:
         assert first.name.startswith("key-"), "idempotency path should use digest prefix"
         assert first != second, "distinct raw idempotency keys must not collide"
         assert punctuation_only.name != "anonymous.json", "punctuation-only keys must not normalize to anonymous"
+
+
+def test_bridge_replays_pre_surface_idempotency_record() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        payload = {
+            "task_id": "TSK-legacy-replay",
+            "request_id": "req-legacy-replay",
+            "request_kind": "external_review_request",
+            "prompt": "Replay a pre-surface request",
+            "refs": ["organization/runtime/workflows/README.md"],
+            "allowed_paths": [],
+            "frontdoor": "codex",
+            "chat_session_id": "thread-legacy-replay",
+            "idempotency_key": "legacy-replay-key",
+        }
+        principal = frontdoor_module.bridge_principal(
+            "codex", "thread-legacy-replay"
+        )
+        now = frontdoor_module.now_iso()
+        legacy_digest = frontdoor_module.legacy_bridge_request_digest(payload)
+        raw_key_digest = frontdoor_module.idempotency_key_digest(
+            payload["idempotency_key"]
+        )
+        request_record = {
+            "request_version": "1",
+            "task_id": payload["task_id"],
+            "request_id": payload["request_id"],
+            "request_kind": payload["request_kind"],
+            "created_at": now,
+            "updated_at": now,
+            "user_prompt": payload["prompt"],
+            "request_digest": legacy_digest,
+            "idempotency_key_digest": raw_key_digest,
+            "context_refs": payload["refs"],
+            "allowed_paths": [],
+            "expires_at": "run_terminal",
+            "classification": None,
+            "requester": {
+                "frontdoor": "codex",
+                "chat_session_id": "thread-legacy-replay",
+            },
+            "principal": frontdoor_module.redacted_principal(principal),
+            "owner_principal": frontdoor_module.redacted_principal(principal),
+            "status": "waiting_human",
+            "proposal": {
+                "schema_version": 1,
+                "decision": "waiting_human",
+                "request_status": "waiting_human",
+                "reason": "typed_classification_required_from_non_bridge_principal",
+                "task_id": payload["task_id"],
+                "request_id": payload["request_id"],
+                "next_action": "ask_human",
+            },
+        }
+        frontdoor_module.write_json(
+            frontdoor_module.request_path(state_root, payload["request_id"]),
+            request_record,
+        )
+        frontdoor_module.write_json(
+            frontdoor_module.idempotency_path(
+                state_root, payload["idempotency_key"]
+            ),
+            {
+                "idempotency_version": "1",
+                "key_digest": raw_key_digest,
+                "request_id": payload["request_id"],
+                "request_digest": legacy_digest,
+                "owner_principal": frontdoor_module.redacted_principal(principal),
+                "created_at": now,
+            },
+        )
+
+        replayed = frontdoor_module.bridge_submit_request(
+            state_root=state_root,
+            payload=payload,
+            frontend_kind="codex",
+        )
+        assert_equal(replayed["replayed"], True, "legacy idempotent replay")
+
+        idempotency_file = frontdoor_module.idempotency_path(
+            state_root, payload["idempotency_key"]
+        )
+        mismatched = frontdoor_module.read_json(idempotency_file)
+        mismatched["request_digest"] = "sha256:" + "0" * 64
+        frontdoor_module.write_json(idempotency_file, mismatched)
+        try:
+            frontdoor_module.bridge_submit_request(
+                state_root=state_root,
+                payload=payload,
+                frontend_kind="codex",
+            )
+        except frontdoor_module.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "idempotency conflict for bridge submit_request",
+                "legacy digest mismatch",
+            )
+        else:
+            raise AssertionError("legacy replay must reject digest mismatch")
+
+        mismatched["request_digest"] = legacy_digest
+        frontdoor_module.write_json(idempotency_file, mismatched)
+        request_file = frontdoor_module.request_path(
+            state_root, payload["request_id"]
+        )
+        wrong_owner = frontdoor_module.read_json(request_file)
+        wrong_owner["owner_principal"] = frontdoor_module.redacted_principal(
+            frontdoor_module.bridge_principal("claude")
+        )
+        frontdoor_module.write_json(request_file, wrong_owner)
+        try:
+            frontdoor_module.bridge_submit_request(
+                state_root=state_root,
+                payload=payload,
+                frontend_kind="codex",
+            )
+        except frontdoor_module.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "idempotency key is owned by another installed frontend principal",
+                "legacy owner mismatch",
+            )
+        else:
+            raise AssertionError("legacy replay must reject owner mismatch")
+
+
+def test_bridge_recovers_pre_surface_transaction_journal() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-legacy-transaction"
+        raw_key_digest = frontdoor_module.idempotency_key_digest(
+            "legacy-transaction-key"
+        )
+        request_digest = "sha256:" + "a" * 64
+        request_record = {
+            "request_id": request_id,
+            "request_digest": request_digest,
+            "idempotency_key_digest": raw_key_digest,
+        }
+        idempotency_record = {
+            "request_id": request_id,
+            "request_digest": request_digest,
+            "key_digest": raw_key_digest,
+        }
+        transaction_path = frontdoor_module.bridge_transaction_path(
+            state_root, request_id, raw_key_digest
+        )
+        frontdoor_module.write_json(
+            transaction_path,
+            {
+                "transaction_version": "1",
+                "request_id": request_id,
+                "request_digest": request_digest,
+                "idempotency_key_digest": raw_key_digest,
+                "request_record": request_record,
+                "idempotency_record": idempotency_record,
+            },
+        )
+
+        repaired = frontdoor_module.recover_bridge_submit_transactions(state_root)
+        assert_equal(repaired, 2, "legacy transaction repair count")
+        assert_equal(
+            frontdoor_module.read_json(
+                frontdoor_module.request_path(state_root, request_id)
+            ),
+            request_record,
+            "legacy request restored",
+        )
+        assert_equal(
+            frontdoor_module.read_json(
+                frontdoor_module.idempotency_path_from_digest(
+                    state_root, raw_key_digest
+                )
+            ),
+            idempotency_record,
+            "legacy idempotency restored",
+        )
+        assert not transaction_path.exists(), "legacy transaction must be removed"
+
+
+def test_bridge_recovery_rejects_invalid_legacy_downgrades() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    digest = "sha256:" + "a" * 64
+    key_digest = "sha256:" + "b" * 64
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-modern-missing-path-digest"
+        request_record = {
+            "request_id": request_id,
+            "request_digest": digest,
+            "idempotency_key_digest": key_digest,
+            "surface_identity": {},
+        }
+        transaction_path = frontdoor_module.bridge_transaction_path(
+            state_root, request_id, key_digest
+        )
+        frontdoor_module.write_json(
+            transaction_path,
+            {
+                "transaction_version": "1",
+                "request_id": request_id,
+                "request_digest": digest,
+                "idempotency_key_digest": key_digest,
+                "request_record": request_record,
+                "idempotency_record": {
+                    "request_id": request_id,
+                    "request_digest": digest,
+                    "key_digest": key_digest,
+                },
+            },
+        )
+        try:
+            frontdoor_module.recover_bridge_submit_transactions(state_root)
+        except frontdoor_module.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "invalid bridge transaction journal",
+                "modern transaction missing path digest",
+            )
+        else:
+            raise AssertionError("modern transaction must not use legacy path fallback")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-legacy-digest-mismatch"
+        transaction_path = frontdoor_module.bridge_transaction_path(
+            state_root, request_id, key_digest
+        )
+        frontdoor_module.write_json(
+            transaction_path,
+            {
+                "transaction_version": "1",
+                "request_id": request_id,
+                "request_digest": digest,
+                "idempotency_key_digest": key_digest,
+                "request_record": {
+                    "request_id": request_id,
+                    "request_digest": "sha256:" + "0" * 64,
+                    "idempotency_key_digest": key_digest,
+                },
+                "idempotency_record": {
+                    "request_id": request_id,
+                    "request_digest": digest,
+                    "key_digest": key_digest,
+                },
+            },
+        )
+        try:
+            frontdoor_module.recover_bridge_submit_transactions(state_root)
+        except frontdoor_module.FrontdoorError as exc:
+            assert_equal(
+                str(exc),
+                "bridge transaction binding mismatch",
+                "legacy transaction digest mismatch",
+            )
+        else:
+            raise AssertionError("legacy transaction must reject digest mismatch")
 
 
 def test_bridge_rejects_smuggled_authority_fields_over_http() -> None:
@@ -2891,7 +3336,10 @@ def test_validate_report_rejects_noncanonical_report_and_stale_evidence() -> Non
         payload = load_payload(stale)
         assert_equal(stale.returncode, 2, "stale evidence report exit")
         assert_equal(payload["reason"], "invalid_report", "stale evidence reason")
-        assert any("must match current run evidence path" in item for item in payload["errors"])
+        assert_equal(payload["outcome"], "report_invalid", "stale evidence outcome")
+        assert "provider_evidence.evidence_path must match current run evidence path" in payload["errors"]
+        assert "normalized_evidence path must match current run evidence path" in payload["errors"]
+        assert "provider_model_assurance_mismatch" not in payload["errors"]
 
 
 def test_validate_report_missing_report_waits_for_human() -> None:
@@ -4298,6 +4746,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
         first = frontdoor.bridge_submit_request(
             state_root=state_root,
             payload=first_payload,
+            frontend_kind="codex",
             max_pending_requests=1,
         )
         assert_equal(first["request_status"], "waiting_human", "quota first request")
@@ -4311,6 +4760,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
             frontdoor.bridge_submit_request(
                 state_root=state_root,
                 payload=second_payload,
+                frontend_kind="codex",
                 max_pending_requests=1,
             )
         except frontdoor.FrontdoorError as exc:
@@ -4365,6 +4815,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
         try:
             frontdoor.bridge_submit_request(
                 state_root=state_root,
+                frontend_kind="codex",
                 payload={
                     "task_id": "TSK-durable-quota",
                     "request_id": "req-durable-quota",
@@ -4562,7 +5013,11 @@ def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
             "git_command": "git switch main",
         }
         try:
-            frontdoor_module.bridge_submit_request(state_root=state_root, payload=payload)
+            frontdoor_module.bridge_submit_request(
+                state_root=state_root,
+                payload=payload,
+                frontend_kind="codex",
+            )
         except frontdoor_module.FrontdoorError as exc:
             reason = str(exc)
             assert "forbidden_fields:" in reason, reason
@@ -4585,6 +5040,7 @@ def main() -> None:
         test_state_cleanup_and_audit_rotation_reject_category_symlinks,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
+        test_approved_provider_binding_blocks_request_adapter_and_model_mutation,
         test_manual_prepare_evidence_contract_validates_report,
         test_concurrent_manual_prepare_writes_canonical_artifacts_once,
         test_drain_allows_edit_capable_code_change_gate,
@@ -4597,6 +5053,7 @@ def main() -> None:
         test_propose_updates_waiting_request_and_blocks_duplicate_overwrite,
         test_create_run_validates_resume_policy_and_binds_request,
         test_terminal_run_synchronizes_request_and_releases_pending_quota,
+        test_terminal_drain_replay_does_not_depend_on_request_record,
         test_approval_uses_requested_ref_forms_without_leaking_original_paths,
         test_frontdoor_blocks_unapproved_and_unbounded_requests,
         test_http_frontdoor_api_flow,
@@ -4604,6 +5061,9 @@ def main() -> None:
         test_main_agent_bridge_is_output_confirmation_only,
         test_bridge_idempotent_replay_does_not_reresolve_refs,
         test_bridge_idempotency_uses_raw_key_digest_paths,
+        test_bridge_replays_pre_surface_idempotency_record,
+        test_bridge_recovers_pre_surface_transaction_journal,
+        test_bridge_recovery_rejects_invalid_legacy_downgrades,
         test_bridge_rejects_smuggled_authority_fields_over_http,
         test_http_bridge_uses_authenticated_principal_and_verified_ack,
         test_context_ref_boundary_blocks_exfiltration_paths,

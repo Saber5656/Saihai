@@ -320,7 +320,9 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             with self.subTest(agent_id=row["agent_id"]):
                 self.assertEqual(row["provider"], "openai")
                 self.assertEqual(row["primary_model"], "gpt-5.6-luna")
+                self.assertEqual(row["fallback_models"], "")
                 self.assertEqual(row["execution_mode"], "codex")
+                self.assertIn(row["long_run_preferred"], {"", "gpt-5.6-luna"})
                 command = builder.codex_activation_command(
                     {"agent_id": row["agent_id"], "intended_model": row["primary_model"]},
                     "review",

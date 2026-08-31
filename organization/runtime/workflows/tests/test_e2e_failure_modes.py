@@ -127,7 +127,7 @@ def write_review_artifacts(
     evidence = {
         **fixed_fields,
         "provider": "claude_headless",
-        "effective_model": "offline-failure-fixture",
+        "effective_model": fixed_fields["intended_model"],
         "provider_request_id": f"provider-{run_id}",
         "provider_session_id": f"session-{run_id}",
         "duration_ms": 1,
@@ -147,7 +147,11 @@ def write_review_artifacts(
         "summary": "Offline failure-matrix fixture.",
         "provider_evidence": {
             "provider": "claude_headless",
-            "effective_model": "offline-failure-fixture",
+            "provider_adapter_id": fixed_fields["provider_adapter_id"],
+            "intended_model": fixed_fields["intended_model"],
+            "effective_model": fixed_fields["intended_model"],
+            "effective_model_policy": fixed_fields["effective_model_policy"],
+            "model_assurance": fixed_fields["model_assurance"],
             "request_id": request["request_id"],
             "provider_session_id": f"session-{run_id}",
             "transcript_path": str(transcript_path),
@@ -291,7 +295,13 @@ def scenario_bridge_smuggled_authority(harness: OrchestratorHarness) -> dict[str
         "classification": harness.classification(),
         "run_id": "run-attacker-selected",
     }
-    blocked = capture_blocked(lambda: harness.frontdoor.bridge_submit_request(state_root=harness.state_root, payload=payload))
+    blocked = capture_blocked(
+        lambda: harness.frontdoor.bridge_submit_request(
+            state_root=harness.state_root,
+            payload=payload,
+            frontend_kind="codex",
+        )
+    )
     require_equal(
         blocked["reason"],
         "invalid bridge submit_request: unexpected_fields:classification,run_id; forbidden_fields:classification,run_id; request_kind unsupported:'external_review'",
@@ -496,6 +506,11 @@ def scenario_resume_after_interrupt(harness: OrchestratorHarness) -> dict[str, A
         "execution_version": "1",
         "step_id": str(run["current_step"]),
         "adapter_id": "claude_headless_p0",
+        "provider_binding": {
+            "provider_adapter_id": "claude_headless_p0",
+            "intended_model": "claude-sonnet-4-6",
+            "effective_model_policy": "required_exact_match",
+        },
         "work_order_digest": "sha256:" + "1" * 64,
         "adapter_request_digest": "sha256:" + "2" * 64,
         "context_snapshot_digest": "sha256:" + "3" * 64,

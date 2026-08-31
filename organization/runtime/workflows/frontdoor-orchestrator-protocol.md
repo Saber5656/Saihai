@@ -19,6 +19,7 @@ suppressed.
 | Provider execution | The deterministic fake provider and pinned live Claude/Codex `headless_cli` runners are implemented; live use requires the explicit environment gate and host-owned bindings. |
 | Claude role | Bounded provider adapter / reviewer, not controller |
 | Main-agent protocol | Submit typed request, read redacted projection, and acknowledge output only. This protocol alone is not an active assurance claim. |
+| Surface registration | Frontend kinds are loaded from `profiles/frontdoor-surface-registry.json`; see `frontdoor-surface-contract.md` for the ladder and extension procedure. Unknown kinds fail closed. |
 | Codex frontend claim | Only a release-pinned Codex CLI 0.144.1 process started by the root-owned Saihai launcher targets `action_enforced`; it remains suppressed until current administrator-owned evidence verifies. Codex App/IDE and `ingress_enforced` are not claimed. |
 | Scoped worker | Capability/executor contracts and commissioning scaffolding are implemented, but live `managed_worker` is suppressed. Same-rootfs Codex 0.144.1 external-mutation/git/credential facts are non-promotable; an isolated worker domain with stronger evidence is required, and v0.1.0 ships no automatic cross-domain transport to it. |
 | Human UI role | Structured approval surface and state renderer |
@@ -40,8 +41,9 @@ suppressed.
 
 ## Deterministic Flow
 
-1. Main-agent bridge submits `submit_request` with request kind, prompt, refs,
-   and idempotency key.
+1. Main-agent bridge submits `submit_request` with its host-pinned registered
+   frontend kind, request kind, prompt, refs, and idempotency key. The host
+   derives the surface assurance state; the client cannot claim it.
 2. Bridge rejects classification, workflow, approval, run, adapter, report, and
    workflow-definition fields.
 3. Orchestrator stores the request and returns a redacted projection. The main
@@ -96,6 +98,7 @@ the two domains.
 | Invariant | Enforcement Point |
 |---|---|
 | Prompt cannot start orchestration | `frontdoor_prompt` maps to `proposed` / `keep_draft` |
+| Surface must be registered | Ingress rejects unknown frontend kinds before request creation; stored requests and projections carry the host-derived `surface_identity` |
 | Main-agent bridge cannot classify | `main-agent-bridge-request` forbids `classification` and unknown authority fields |
 | Approval requires human action | Approved sources are only `orchestrator-start`, `human_ui`, `manual_cli` |
 | Approval is challenge-based | `human_action_id` is derived from proposal/request/ref digests and rate-limited |
@@ -128,6 +131,9 @@ the two domains.
 The main-agent UI should call only the bridge APIs. Bridge/operator/human/harness
 APIs derive principal from authenticated channel headers. Requester fields such
 as `frontdoor` and `chat_session_id` are retained as metadata, not authority.
+The host pins `frontdoor` to a registered surface. The static descriptor
+binding in `surface_identity` is immutable request metadata, while its effective
+assurance state is re-evaluated for each projection; neither is authority.
 The current P0 implementation exposes both a JSON CLI
 (`scripts/configure_organization.py workflow-frontdoor ...`) and a local HTTP
 wrapper (`scripts/configure_organization.py workflow-frontdoor-server ...`).

@@ -38,6 +38,7 @@ import work_order_builder
 import workflow_selector
 import provider_runner
 import scoped_worker_executor
+import frontdoor_surface_registry
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 HOST_HOME = host_state_root.HOST_HOME
@@ -163,6 +164,8 @@ BRIDGE_FORBIDDEN_FIELDS = {
     "launch_session",
     "launch_session_identity",
     "launch_session_digest",
+    "surface_identity",
+    "assurance_state",
 }
 MAX_APPROVAL_FAILURES = 3
 MAX_CONTEXT_REF_COUNT = 50
@@ -282,6 +285,50 @@ def rotate_state_file(source: Path, target: Path) -> None:
 
 class FrontdoorError(RuntimeError):
     pass
+
+
+def load_surface_registry() -> frontdoor_surface_registry.SurfaceRegistry:
+    try:
+        return frontdoor_surface_registry.default_registry()
+    except frontdoor_surface_registry.SurfaceRegistryError as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
+def registered_surface_kinds() -> tuple[str, ...]:
+    return load_surface_registry().frontend_kinds
+
+
+def resolve_surface_identity(
+    frontend_kind: str,
+    *,
+    registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
+    expected_checkout: Path | None = None,
+    launch_session_present: bool | None = None,
+) -> dict[str, Any]:
+    active_registry = registry or load_surface_registry()
+    try:
+        identity = active_registry.identify(
+            frontend_kind,
+            expected_checkout=expected_checkout,
+            launch_session_present=launch_session_present,
+        )
+    except frontdoor_surface_registry.SurfaceRegistryError as exc:
+        raise FrontdoorError(str(exc)) from exc
+    return identity.as_dict()
+
+
+def surface_contract_binding(identity: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: identity.get(key)
+        for key in (
+            "identity_version",
+            "frontend_kind",
+            "descriptor_digest",
+            "target_assurance_state",
+            "assurance_profile_id",
+            "submit_contract_version",
+        )
+    }
 
 
 def canonical_json(payload: Any) -> bytes:
@@ -1583,10 +1630,17 @@ def proposed_request(
     frontdoor: str,
     chat_session_id: str,
     principal: dict[str, Any] | None = None,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
+    provider_adapter_id: str = "",
 ) -> dict[str, Any]:
     validate_artifact_id(request_id, "request_id")
     validate_artifact_id(task_id, "task_id")
     actor = principal or default_manual_principal()
+    surface_identity = resolve_surface_identity(
+        frontdoor,
+        registry=surface_registry,
+        launch_session_present=False,
+    )
     bounded = bounded_context(refs, allowed_paths)
     path = request_path(state_root, request_id)
     existing_record = read_json(path) if state_file_exists(path) else None
@@ -1631,9 +1685,28 @@ def proposed_request(
             "context_refs": bounded["context_refs"],
             "allowed_paths": bounded["allowed_paths"],
             "expires_at": expires_at,
+            "requested_provider_adapter_id": provider_adapter_id,
         }
+        existing_surface = existing_record.get("surface_identity")
+        if "surface_identity" in existing_record:
+            if not isinstance(existing_surface, dict) or surface_contract_binding(
+                existing_surface
+            ) != surface_contract_binding(surface_identity):
+                immutable_mismatches.append("surface_identity")
+        else:
+            legacy_requester = existing_record.get("requester")
+            legacy_frontend = (
+                str(legacy_requester.get("frontdoor") or "")
+                if isinstance(legacy_requester, dict)
+                else ""
+            )
+            if legacy_frontend != frontdoor:
+                immutable_mismatches.append("surface_identity")
         for key, value in expected.items():
-            if existing_record.get(key) != value:
+            existing_value = existing_record.get(key)
+            if key == "requested_provider_adapter_id":
+                existing_value = str(existing_value or "")
+            if existing_value != value:
                 immutable_mismatches.append(key)
         if immutable_mismatches:
             append_audit_event(
@@ -1657,6 +1730,7 @@ def proposed_request(
             "task_id": task_id,
             "request_id": request_id,
             "next_action": "ask_human",
+            "surface_identity": surface_identity,
         }
         record = {
             "request_version": "1",
@@ -1669,6 +1743,8 @@ def proposed_request(
             "expires_at": expires_at,
             "classification": None,
             "requester": requester(frontdoor, chat_session_id),
+            "surface_identity": surface_identity,
+            "requested_provider_adapter_id": provider_adapter_id,
             "status": "waiting_human",
             "proposal": payload,
         }
@@ -1702,6 +1778,8 @@ def proposed_request(
             **bounded,
             "expires_at": expires_at,
             "requester": requester(frontdoor, chat_session_id),
+            "surface_identity": surface_identity,
+            "requested_provider_adapter_id": provider_adapter_id,
         }
     else:
         record = dict(existing_record)
@@ -1711,6 +1789,7 @@ def proposed_request(
             "classification": classification,
             "status": envelope["activation_status"],
             "proposal": envelope,
+            "requested_provider_adapter_id": provider_adapter_id,
         }
     )
     attach_approval_summary(record)
@@ -1735,6 +1814,7 @@ def proposed_request(
         "envelope_snapshot_path": str(snapshot_path),
         "activation": envelope,
         "approval": record.get("approval"),
+        "surface_identity": record.get("surface_identity", surface_identity),
     }
 
 
@@ -1747,6 +1827,7 @@ def requester(frontdoor: str, chat_session_id: str = "") -> dict[str, str]:
 
 def approval_action_id(record: dict[str, Any]) -> str:
     proposal = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
+    provider_binding = approval_provider_binding(record)
     material = {
         "task_id": record.get("task_id"),
         "request_id": record.get("request_id"),
@@ -1756,8 +1837,47 @@ def approval_action_id(record: dict[str, Any]) -> str:
         "resolved_context_refs": record.get("resolved_context_refs") or [],
         "allowed_paths": record.get("allowed_paths") or [],
         "expires_at": record.get("expires_at"),
+        "provider_binding": provider_binding,
     }
     return "approve-" + stable_digest(material)[:20]
+
+
+def approval_provider_binding(record: dict[str, Any]) -> dict[str, str]:
+    """Resolve the provider descriptor material that the human is approving."""
+
+    proposal = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
+    workflow_selection = (
+        proposal.get("workflow_selection")
+        if isinstance(proposal.get("workflow_selection"), dict)
+        else {}
+    )
+    workflow_id = str(workflow_selection.get("workflow_id") or "")
+    initial_step = str(workflow_selection.get("initial_step") or "")
+    template = load_template(workflow_id)
+    step = next(
+        (
+            item
+            for item in template.get("steps", [])
+            if isinstance(item, dict) and item.get("id") == initial_step
+        ),
+        None,
+    )
+    if not isinstance(step, dict):
+        raise FrontdoorError("provider_adapter_selection_step_missing")
+    descriptor = provider_capability_for_step(
+        template=template,
+        step=step,
+        worker_execution_plan=None,
+        requested_adapter_id=str(record.get("requested_provider_adapter_id") or ""),
+    )
+    binding = {
+        "provider_adapter_id": str(descriptor.get("provider_adapter_id") or ""),
+        "default_model": str(descriptor.get("default_model") or ""),
+        "effective_model_policy": str(descriptor.get("effective_model_policy") or ""),
+    }
+    if not all(binding.values()):
+        raise FrontdoorError("provider_adapter_model_binding_missing")
+    return binding
 
 
 def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
@@ -1772,6 +1892,7 @@ def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
         if isinstance(checkout_identity, dict) and checkout_identity.get("checkout_realpath")
         else str(REPO_ROOT)
     )
+    provider_binding = approval_provider_binding(record)
     return {
         "approval_view_version": "1",
         "source": "orchestrator_structured_state",
@@ -1793,7 +1914,9 @@ def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
                 list(record.get("resolved_allowed_paths") or [])
             ),
             "denied_ops": denied_ops,
-            "provider_adapter": "claude_headless_p0",
+            "provider_adapter": provider_binding["provider_adapter_id"],
+            "intended_model": provider_binding["default_model"],
+            "effective_model_policy": provider_binding["effective_model_policy"],
             "ref_boundary": {
                 "workspace_root": approval_workspace_root,
                 "max_ref_count": MAX_CONTEXT_REF_COUNT,
@@ -1814,7 +1937,38 @@ def attach_approval_summary(record: dict[str, Any]) -> None:
 
 
 def idempotency_path(state_root: Path, key: str) -> Path:
-    return state_paths(state_root)["idempotency"] / f"key-{idempotency_key_digest(key).removeprefix('sha256:')}.json"
+    return idempotency_path_from_digest(state_root, idempotency_key_digest(key))
+
+
+def idempotency_path_from_digest(state_root: Path, path_digest: str) -> Path:
+    """Resolve the durable idempotency index from a raw-key digest."""
+
+    normalized_digest = normalize_sha256_digest(
+        path_digest,
+        "idempotency_path_digest",
+    )
+    return (
+        state_paths(state_root)["idempotency"]
+        / f"key-{normalized_digest.removeprefix('sha256:')}.json"
+    )
+
+
+def bridge_idempotency_key_digest(
+    key: str,
+    surface_identity: dict[str, Any],
+) -> str:
+    """Bind a bridge idempotency key digest to the static surface descriptor."""
+
+    descriptor_digest = normalize_sha256_digest(
+        surface_identity.get("descriptor_digest"),
+        "surface_identity.descriptor_digest",
+    )
+    return "sha256:" + stable_digest(
+        {
+            "key_digest": idempotency_key_digest(key),
+            "surface_descriptor_digest": descriptor_digest,
+        }
+    )
 
 
 def child_thread_idempotency_path(state_root: Path, key: str) -> Path:
@@ -2566,10 +2720,48 @@ def child_thread_create_action(
 def request_digest(
     payload: dict[str, Any],
     *,
+    surface_identity: dict[str, Any],
     workspace_id: str = "",
     checkout_identity: dict[str, Any] | None = None,
     launch_session_identity: dict[str, Any] | None = None,
 ) -> str:
+    frontend_kind = str(surface_identity.get("frontend_kind") or "")
+    if not frontend_kind:
+        raise FrontdoorError("surface_identity frontend_kind is required")
+    descriptor_digest = normalize_sha256_digest(
+        surface_identity.get("descriptor_digest"),
+        "surface_identity.descriptor_digest",
+    )
+    material = {
+        "task_id": payload.get("task_id"),
+        "request_id": payload.get("request_id"),
+        "request_kind": payload.get("request_kind"),
+        "prompt": payload.get("prompt") or "",
+        "refs": list(payload.get("refs") or []),
+        "allowed_paths": list(payload.get("allowed_paths") or []),
+        "expires_at": payload.get("expires_at") or "run_terminal",
+        "frontdoor": frontend_kind,
+        "surface_descriptor_digest": descriptor_digest,
+        "workspace_id": workspace_id,
+        "checkout_identity_digest": (
+            str((checkout_identity or {}).get("identity_digest") or "")
+        ),
+        "launch_session_digest": (
+            str((launch_session_identity or {}).get("record_digest") or "")
+        ),
+    }
+    return "sha256:" + stable_digest(material)
+
+
+def legacy_bridge_request_digest(
+    payload: dict[str, Any],
+    *,
+    workspace_id: str = "",
+    checkout_identity: dict[str, Any] | None = None,
+    launch_session_identity: dict[str, Any] | None = None,
+) -> str:
+    """Reproduce the pre-surface bridge digest for upgrade-only replay."""
+
     material = {
         "task_id": payload.get("task_id"),
         "request_id": payload.get("request_id"),
@@ -2580,11 +2772,11 @@ def request_digest(
         "expires_at": payload.get("expires_at") or "run_terminal",
         "frontdoor": payload.get("frontdoor") or "codex",
         "workspace_id": workspace_id,
-        "checkout_identity_digest": (
-            str((checkout_identity or {}).get("identity_digest") or "")
+        "checkout_identity_digest": str(
+            (checkout_identity or {}).get("identity_digest") or ""
         ),
-        "launch_session_digest": (
-            str((launch_session_identity or {}).get("record_digest") or "")
+        "launch_session_digest": str(
+            (launch_session_identity or {}).get("record_digest") or ""
         ),
     }
     return "sha256:" + stable_digest(material)
@@ -2607,9 +2799,36 @@ def assert_bridge_request_owner(
         raise FrontdoorError("bridge request is not owned by the installed frontend principal")
 
 
+def bridge_request_surface_kind(
+    record: dict[str, Any],
+    *,
+    registry: frontdoor_surface_registry.SurfaceRegistry,
+) -> str:
+    if "surface_identity" in record:
+        stored = record.get("surface_identity")
+        if not isinstance(stored, dict):
+            raise FrontdoorError("bridge request surface identity is invalid")
+        frontend_kind = str(stored.get("frontend_kind") or "")
+    else:
+        requester_metadata = record.get("requester")
+        frontend_kind = str(
+            requester_metadata.get("frontdoor") or ""
+            if isinstance(requester_metadata, dict)
+            else ""
+        )
+    try:
+        registry.descriptor(frontend_kind)
+    except frontdoor_surface_registry.SurfaceRegistryError as exc:
+        raise FrontdoorError("bridge request surface identity is invalid") from exc
+    return frontend_kind
+
+
 def assert_bridge_launch_session(
     record: dict[str, Any],
     launch_session_identity: dict[str, Any] | None,
+    *,
+    frontend_kind: str,
+    registry: frontdoor_surface_registry.SurfaceRegistry,
 ) -> None:
     stored = record.get("launch_session_identity")
     stored_digest = str(record.get("launch_session_digest") or "")
@@ -2617,10 +2836,18 @@ def assert_bridge_launch_session(
         if stored is not None or stored_digest:
             raise FrontdoorError("bridge launch session is required")
         return
-    normalized = normalize_launch_session_identity(launch_session_identity)
+    try:
+        normalized = registry.normalize_launch_session(
+            frontend_kind,
+            launch_session_identity,
+        )
+    except frontdoor_surface_registry.SurfaceRegistryError as exc:
+        raise FrontdoorError(str(exc)) from exc
+    if normalized is None or "record_digest" not in normalized:
+        raise FrontdoorError("bridge launch session is invalid")
     if stored != normalized or not hmac.compare_digest(
         stored_digest,
-        launch_session_identity_digest(normalized),
+        str(normalized["record_digest"]),
     ):
         raise FrontdoorError("bridge launch session does not match request authority")
 
@@ -2682,6 +2909,16 @@ def recover_bridge_submit_transactions(state_root: Path) -> int:
             transaction.get("idempotency_key_digest"),
             "idempotency_key_digest",
         )
+        raw_path_digest = transaction.get("idempotency_path_digest")
+        if raw_path_digest is None:
+            if "surface_identity" in request_record:
+                raise FrontdoorError("invalid bridge transaction journal")
+            idempotency_path_digest = idempotency_digest
+        else:
+            idempotency_path_digest = normalize_sha256_digest(
+                raw_path_digest,
+                "idempotency_path_digest",
+            )
         expected_transaction_path = bridge_transaction_path(
             state_root,
             request_id,
@@ -2700,9 +2937,9 @@ def recover_bridge_submit_transactions(state_root: Path) -> int:
             raise FrontdoorError("bridge transaction binding mismatch")
 
         durable_request_path = request_path(state_root, request_id)
-        durable_idempotency_path = (
-            state_paths(state_root)["idempotency"]
-            / f"key-{idempotency_digest.removeprefix('sha256:')}.json"
+        durable_idempotency_path = idempotency_path_from_digest(
+            state_root,
+            idempotency_path_digest,
         )
         if state_file_exists(durable_request_path):
             if read_json(durable_request_path) != request_record:
@@ -3034,6 +3271,7 @@ def bridge_submit_request(
     *,
     state_root: Path,
     payload: dict[str, Any],
+    frontend_kind: str,
     principal: dict[str, Any] | None = None,
     peer: dict[str, Any] | None = None,
     workspace_id: str = "",
@@ -3043,13 +3281,20 @@ def bridge_submit_request(
     max_pending_bytes: int = DEFAULT_BRIDGE_MAX_PENDING_BYTES,
     max_durable_artifacts: int = DEFAULT_BRIDGE_MAX_DURABLE_ARTIFACTS,
     max_durable_bytes: int = DEFAULT_BRIDGE_MAX_DURABLE_BYTES,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> dict[str, Any]:
     errors = validate_bridge_submit_payload(payload)
-    frontdoor_name = str(payload.get("frontdoor") or "codex")
+    frontdoor_name = str(frontend_kind or "")
+    if not frontdoor_name:
+        errors.append("host frontend_kind must be non-empty string")
+    if "frontdoor" in payload and payload.get("frontdoor") != frontdoor_name:
+        errors.append("payload frontdoor conflicts with host frontend_kind")
     chat_session_id = str(payload.get("chat_session_id") or "")
     principal = principal or bridge_principal(frontdoor_name, chat_session_id)
     normalized_checkout: dict[str, str] | None = None
     normalized_launch_session: dict[str, Any] | None = None
+    normalized_surface: dict[str, Any] | None = None
+    active_surface_registry = surface_registry or load_surface_registry()
     try:
         if checkout_identity is not None:
             normalized_checkout = validate_checkout_identity(checkout_identity)
@@ -3059,12 +3304,31 @@ def bridge_submit_request(
                 raise FrontdoorError("workspace_id does not match checkout_identity")
         elif workspace_id:
             raise FrontdoorError("checkout_identity is required with workspace_id")
+        try:
+            active_surface_registry.descriptor(frontdoor_name)
+        except frontdoor_surface_registry.SurfaceRegistryError as exc:
+            raise FrontdoorError(str(exc)) from exc
         if launch_session_identity is not None:
-            normalized_launch_session = normalize_launch_session_identity(
-                launch_session_identity
-            )
+            try:
+                normalized_launch_session = active_surface_registry.normalize_launch_session(
+                    frontdoor_name,
+                    launch_session_identity,
+                )
+            except frontdoor_surface_registry.SurfaceRegistryError as exc:
+                raise FrontdoorError(str(exc)) from exc
             if normalized_checkout is None:
                 raise FrontdoorError("checkout_identity is required with launch_session_identity")
+            required_launch_bindings = {
+                "principal_id",
+                "workspace_id",
+                "checkout_realpath",
+                "checkout_identity_digest",
+                "record_digest",
+            }
+            if normalized_launch_session is None or not required_launch_bindings.issubset(
+                normalized_launch_session
+            ):
+                raise FrontdoorError("launch_session_identity missing common host bindings")
             if (
                 normalized_launch_session["principal_id"] != principal.get("principal_id")
                 or normalized_launch_session["workspace_id"] != workspace_id
@@ -3074,6 +3338,16 @@ def bridge_submit_request(
                 != normalized_checkout["identity_digest"]
             ):
                 raise FrontdoorError("launch_session_identity does not match host bindings")
+        normalized_surface = resolve_surface_identity(
+            frontdoor_name,
+            registry=active_surface_registry,
+            expected_checkout=(
+                Path(normalized_checkout["checkout_realpath"])
+                if normalized_checkout is not None
+                else None
+            ),
+            launch_session_present=normalized_launch_session is not None,
+        )
         if (
             not isinstance(max_pending_requests, int)
             or isinstance(max_pending_requests, bool)
@@ -3116,9 +3390,14 @@ def bridge_submit_request(
         workspace_id=workspace_id,
         checkout_identity=normalized_checkout,
         launch_session_identity=normalized_launch_session,
+        surface_identity=normalized_surface,
     )
     idempotency_key = str(payload["idempotency_key"])
-    idempotency_digest = idempotency_key_digest(idempotency_key)
+    idempotency_path_digest = idempotency_key_digest(idempotency_key)
+    idempotency_digest = bridge_idempotency_key_digest(
+        idempotency_key,
+        normalized_surface,
+    )
 
     def block(reason: str) -> None:
         append_audit_event(
@@ -3143,24 +3422,46 @@ def bridge_submit_request(
             principal=principal,
         ):
             repaired = recover_bridge_submit_transactions(state_root)
-            idempotency_file = idempotency_path(state_root, idempotency_key)
+            idempotency_file = idempotency_path_from_digest(
+                state_root,
+                idempotency_path_digest,
+            )
             if state_file_exists(idempotency_file):
                 existing = read_json(idempotency_file)
-                existing_key_digest = existing.get("key_digest")
-                if existing_key_digest is None:
-                    existing_key_digest = existing.get("idempotency_key_digest")
-                if existing_key_digest not in {None, idempotency_digest}:
-                    block("idempotency key digest conflict for bridge submit_request")
                 existing_request_id = validate_artifact_id(
                     str(existing.get("request_id") or ""),
                     "request_id",
                 )
                 existing_record = read_json(request_path(state_root, existing_request_id))
+                legacy_record = "surface_identity" not in existing_record
+                existing_key_digest = existing.get("key_digest")
+                if existing_key_digest is None:
+                    existing_key_digest = existing.get("idempotency_key_digest")
+                allowed_key_digests = {None, idempotency_digest}
+                if legacy_record:
+                    allowed_key_digests.add(idempotency_path_digest)
+                if existing_key_digest not in allowed_key_digests:
+                    block("idempotency key surface descriptor drifted")
                 try:
                     assert_bridge_request_owner(existing_record, principal)
                 except FrontdoorError:
                     block("idempotency key is owned by another installed frontend principal")
-                if existing.get("request_digest") != digest:
+                allowed_request_digests = {digest}
+                if legacy_record:
+                    allowed_request_digests.add(
+                        legacy_bridge_request_digest(
+                            payload,
+                            workspace_id=workspace_id,
+                            checkout_identity=normalized_checkout,
+                            launch_session_identity=normalized_launch_session,
+                        )
+                    )
+                existing_request_digest = existing.get("request_digest")
+                if (
+                    existing_request_digest not in allowed_request_digests
+                    or existing_record.get("request_digest")
+                    != existing_request_digest
+                ):
                     block("idempotency conflict for bridge submit_request")
                 projection = bridge_read_projection(
                     state_root=state_root,
@@ -3172,6 +3473,7 @@ def bridge_submit_request(
                     launch_session_identity=normalized_launch_session,
                     enforce_rate_limit=False,
                     _lock_held=True,
+                    surface_registry=active_surface_registry,
                 )
                 projection["replayed"] = True
                 append_audit_event(
@@ -3199,6 +3501,13 @@ def bridge_submit_request(
                     assert_bridge_request_owner(existing_record, principal)
                 except FrontdoorError:
                     block("request_id is owned by another installed frontend principal")
+                existing_surface = existing_record.get("surface_identity")
+                if "surface_identity" in existing_record and (
+                    not isinstance(existing_surface, dict)
+                    or surface_contract_binding(existing_surface)
+                    != surface_contract_binding(normalized_surface)
+                ):
+                    block("bridge request surface contract drifted")
                 if existing_record.get("request_digest") != digest:
                     block("request_id conflict for bridge submit_request")
                 existing_idempotency_digest = existing_record.get("idempotency_key_digest")
@@ -3227,6 +3536,7 @@ def bridge_submit_request(
                     launch_session_identity=normalized_launch_session,
                     enforce_rate_limit=False,
                     _lock_held=True,
+                    surface_registry=active_surface_registry,
                 )
                 projection["replayed"] = True
                 return projection
@@ -3271,6 +3581,7 @@ def bridge_submit_request(
                 ),
                 "classification": None,
                 "requester": requester(frontdoor_name, chat_session_id),
+                "surface_identity": normalized_surface,
                 "principal": owner_principal,
                 "owner_principal": owner_principal,
                 "status": "waiting_human",
@@ -3284,6 +3595,10 @@ def bridge_submit_request(
                     "next_action": "ask_human",
                 },
                 "bridge_contract": {
+                    "submit_contract_version": str(
+                        (normalized_surface or {}).get("submit_contract_version") or ""
+                    ),
+                    "surface_identity_required": True,
                     "allowed_actions": BRIDGE_ALLOWED_ACTIONS,
                     "forbidden_actions": [
                         "classify",
@@ -3331,6 +3646,7 @@ def bridge_submit_request(
                 "request_id": str(payload["request_id"]),
                 "request_digest": digest,
                 "idempotency_key_digest": idempotency_digest,
+                "idempotency_path_digest": idempotency_path_digest,
                 "owner_principal": owner_principal,
                 "request_record": record,
                 "idempotency_record": idempotency_record,
@@ -3385,6 +3701,7 @@ def bridge_submit_request(
                 launch_session_identity=normalized_launch_session,
                 enforce_rate_limit=False,
                 _lock_held=True,
+                surface_registry=active_surface_registry,
             )
     except run_lock.LockContentionError as exc:
         append_audit_event(
@@ -3462,9 +3779,31 @@ def build_bridge_projection(
     state_root: Path,
     request_id: str,
     principal: dict[str, Any],
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     record = read_json(request_path(state_root, request_id))
     assert_bridge_request_owner(record, principal)
+    active_surface_registry = surface_registry or load_surface_registry()
+    frontend_kind = bridge_request_surface_kind(
+        record,
+        registry=active_surface_registry,
+    )
+    projection_surface = resolve_surface_identity(
+        frontend_kind,
+        registry=active_surface_registry,
+        expected_checkout=(
+            Path(str(record["checkout_identity"]["checkout_realpath"]))
+            if isinstance(record.get("checkout_identity"), dict)
+            and record["checkout_identity"].get("checkout_realpath")
+            else None
+        ),
+        launch_session_present=record.get("launch_session_identity") is not None,
+    )
+    stored_surface = record.get("surface_identity")
+    if isinstance(stored_surface, dict) and surface_contract_binding(
+        stored_surface
+    ) != surface_contract_binding(projection_surface):
+        raise FrontdoorError("bridge request surface contract drifted")
     proposal = record.get("proposal") if isinstance(record.get("proposal"), dict) else {}
     try:
         projection_binding = work_order_builder.projection_binding_from_request_record(
@@ -3483,6 +3822,7 @@ def build_bridge_projection(
         "request_kind": record.get("request_kind"),
         "request_status": record.get("status"),
         "workspace_id": record.get("workspace_id"),
+        "surface_identity": projection_surface,
         "checkout_identity": redacted_checkout_identity(record.get("checkout_identity")),
         "checkout_identity_digest": record.get("checkout_identity_digest"),
         "orchestrator_decision": proposal.get("decision"),
@@ -3549,7 +3889,10 @@ def bridge_read_projection(
     max_durable_bytes: int = DEFAULT_BRIDGE_MAX_DURABLE_BYTES,
     enforce_rate_limit: bool = True,
     _lock_held: bool = False,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> dict[str, Any]:
+    active_surface_registry = surface_registry or load_surface_registry()
+    resolve_surface_identity(frontdoor, registry=active_surface_registry)
     principal = principal or bridge_principal(frontdoor, chat_session_id)
     if enforce_rate_limit and not _lock_held:
         try:
@@ -3584,6 +3927,7 @@ def bridge_read_projection(
                     max_durable_bytes=max_durable_bytes,
                     enforce_rate_limit=False,
                     _lock_held=True,
+                    surface_registry=active_surface_registry,
                 )
         except run_lock.LockContentionError as exc:
             raise FrontdoorError("bridge read_projection lock contention") from exc
@@ -3592,8 +3936,20 @@ def bridge_read_projection(
             state_root=state_root,
             request_id=request_id,
             principal=principal,
+            surface_registry=active_surface_registry,
         )
-        assert_bridge_launch_session(record, launch_session_identity)
+        stored_frontend_kind = bridge_request_surface_kind(
+            record,
+            registry=active_surface_registry,
+        )
+        if stored_frontend_kind != frontdoor:
+            raise FrontdoorError("bridge request surface identity mismatch")
+        assert_bridge_launch_session(
+            record,
+            launch_session_identity,
+            frontend_kind=stored_frontend_kind,
+            registry=active_surface_registry,
+        )
     except FrontdoorError:
         append_audit_event(
             state_root=state_root,
@@ -3642,7 +3998,10 @@ def bridge_ack_output(
     max_durable_bytes: int = DEFAULT_BRIDGE_MAX_DURABLE_BYTES,
     enforce_rate_limit: bool = True,
     _lock_held: bool = False,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> dict[str, Any]:
+    active_surface_registry = surface_registry or load_surface_registry()
+    resolve_surface_identity(frontdoor, registry=active_surface_registry)
     principal = principal or bridge_principal(frontdoor, chat_session_id)
     if enforce_rate_limit and not _lock_held:
         try:
@@ -3678,6 +4037,7 @@ def bridge_ack_output(
                     max_durable_bytes=max_durable_bytes,
                     enforce_rate_limit=False,
                     _lock_held=True,
+                    surface_registry=active_surface_registry,
                 )
         except run_lock.LockContentionError as exc:
             raise FrontdoorError("bridge ack_output lock contention") from exc
@@ -3686,8 +4046,20 @@ def bridge_ack_output(
             state_root=state_root,
             request_id=request_id,
             principal=principal,
+            surface_registry=active_surface_registry,
         )
-        assert_bridge_launch_session(before, launch_session_identity)
+        stored_frontend_kind = bridge_request_surface_kind(
+            before,
+            registry=active_surface_registry,
+        )
+        if stored_frontend_kind != frontdoor:
+            raise FrontdoorError("bridge request surface identity mismatch")
+        assert_bridge_launch_session(
+            before,
+            launch_session_identity,
+            frontend_kind=stored_frontend_kind,
+            registry=active_surface_registry,
+        )
     except FrontdoorError:
         append_audit_event(
             state_root=state_root,
@@ -3841,6 +4213,9 @@ def approval_record_for(
     principal: dict[str, Any],
     signature: dict[str, Any],
     activation_source: str,
+    provider_binding: dict[str, str],
+    signed_subject: dict[str, Any],
+    signature_transition: str,
 ) -> dict[str, Any]:
     return {
         "approval_record_version": "1",
@@ -3861,8 +4236,85 @@ def approval_record_for(
         ),
         "refs_digest": "sha256:" + stable_digest(record.get("resolved_context_refs") or record.get("context_refs") or []),
         "display_digest": "sha256:" + stable_digest(record.get("approval") or {}),
+        "provider_binding": provider_binding,
+        "provider_binding_digest": "sha256:" + stable_digest(provider_binding),
+        "signed_subject": signed_subject,
+        "signature_transition": signature_transition,
         "signature": signature,
     }
+
+
+def verify_transition_signature(
+    *,
+    state_root: Path,
+    principal: dict[str, Any],
+    transition: str,
+    subject: dict[str, Any],
+    signature: Any,
+) -> bool:
+    if not isinstance(signature, dict) or signature.get("algorithm") != TRANSITION_SIGNATURE_ALGORITHM:
+        return False
+    material = {
+        "principal": redacted_principal(principal),
+        "transition": transition,
+        "subject": subject,
+    }
+    signature_material = {
+        "algorithm": TRANSITION_SIGNATURE_ALGORITHM,
+        "material": material,
+    }
+    keyed_digest = hmac.new(
+        principal_key(state_root, principal),
+        canonical_json(signature_material),
+        hashlib.sha256,
+    ).digest()
+    expected = "sha256:" + hashlib.new("sha256", keyed_digest).hexdigest()
+    return hmac.compare_digest(str(signature.get("signature") or ""), expected)
+
+
+def verify_approved_provider_binding(
+    *,
+    state_root: Path,
+    record: dict[str, Any],
+) -> dict[str, str]:
+    """Fail closed if mutable request or registry state diverges from human approval."""
+
+    approval_record = record.get("approval_record")
+    if not isinstance(approval_record, dict):
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
+    stored_binding = approval_record.get("provider_binding")
+    signed_subject = approval_record.get("signed_subject")
+    principal = approval_record.get("approved_by_principal")
+    if not all(isinstance(value, dict) for value in (stored_binding, signed_subject, principal)):
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
+    try:
+        current_binding = approval_provider_binding(record)
+        expected_action_id = approval_action_id(record)
+    except FrontdoorError as exc:
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH) from exc
+    binding_digest = "sha256:" + stable_digest(stored_binding)
+    expected_subject = {
+        "request_id": str(record.get("request_id") or ""),
+        "task_id": str(record.get("task_id") or ""),
+        "human_action_id": str(record.get("human_action_id") or ""),
+        "provider_binding_digest": binding_digest,
+    }
+    if (
+        stored_binding != current_binding
+        or approval_record.get("provider_binding_digest") != binding_digest
+        or signed_subject != expected_subject
+        or approval_record.get("human_action_id") != record.get("human_action_id")
+        or expected_action_id != record.get("human_action_id")
+        or not verify_transition_signature(
+            state_root=state_root,
+            principal=principal,
+            transition=str(approval_record.get("signature_transition") or ""),
+            subject=expected_subject,
+            signature=approval_record.get("signature"),
+        )
+    ):
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
+    return current_binding
 
 
 def enforce_frontdoor_approval_gate(envelope: dict[str, Any], classification: dict[str, Any]) -> dict[str, Any]:
@@ -3902,14 +4354,15 @@ def _approve_core(
     actor = principal
     path = request_path(state_root, request_id)
     record = read_json(path)
-    signature = assert_allowed_principal(
-        state_root=state_root,
-        principal=actor,
-        allowed_types=allowed_principal_types,
-        transition=audit_event_type,
-        subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
-        blocked_reason="unsupported approval principal",
-    )
+    if str(actor.get("principal_type") or "") not in allowed_principal_types:
+        assert_allowed_principal(
+            state_root=state_root,
+            principal=actor,
+            allowed_types=allowed_principal_types,
+            transition=audit_event_type,
+            subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
+            blocked_reason="unsupported approval principal",
+        )
     classification = record.get("classification")
     if not isinstance(classification, dict):
         raise FrontdoorError("typed classification is required before approval")
@@ -3953,6 +4406,21 @@ def _approve_core(
             details={"reason": "approval_rate_limited", "failed_attempts": failed_attempts},
         )
         raise FrontdoorError("approval challenge rate limit exceeded")
+    provider_binding = approval_provider_binding(record)
+    signed_subject = {
+        "request_id": request_id,
+        "task_id": str(record.get("task_id") or ""),
+        "human_action_id": human_action_id,
+        "provider_binding_digest": "sha256:" + stable_digest(provider_binding),
+    }
+    signature = assert_allowed_principal(
+        state_root=state_root,
+        principal=actor,
+        allowed_types=allowed_principal_types,
+        transition=audit_event_type,
+        subject=signed_subject,
+        blocked_reason="unsupported approval principal",
+    )
     envelope = workflow_selector.activation_envelope(
         classification,
         activation_source=activation_source,
@@ -3980,6 +4448,9 @@ def _approve_core(
         principal=actor,
         signature=signature,
         activation_source=activation_source,
+        provider_binding=provider_binding,
+        signed_subject=signed_subject,
+        signature_transition=audit_event_type,
     )
     write_json(path, record)
     snapshot_path = snapshot_envelope(state_root, request_id, envelope)
@@ -4209,6 +4680,10 @@ def create_run(
     envelope = record.get("approved_activation")
     if not isinstance(envelope, dict) or envelope.get("activation_status") != "approved":
         raise FrontdoorError("approved activation envelope required")
+    approved_provider_binding = verify_approved_provider_binding(
+        state_root=state_root,
+        record=record,
+    )
     selection = envelope.get("workflow_selection") or {}
     workflow_id = selection.get("workflow_id")
     initial_step = selection.get("initial_step")
@@ -4232,6 +4707,10 @@ def create_run(
             principal=actor,
         ):
             record = read_json(request_path(state_root, request_id))
+            approved_provider_binding = verify_approved_provider_binding(
+                state_root=state_root,
+                record=record,
+            )
             bound_run_id = str(record.get("run_id") or "")
             if bound_run_id and bound_run_id != effective_run_id:
                 raise FrontdoorError("request_id is already bound to a different run_id")
@@ -4293,6 +4772,7 @@ def create_run(
                     "step_local_snapshot": "immutable_step_attempt_snapshot",
                     "provider_transcript": "confined_evidence_path_only",
                 },
+                "approved_provider_binding": approved_provider_binding,
                 "transitions": [],
                 "transition_provenance": [
                     {
@@ -4391,6 +4871,18 @@ def drain_run(
                     "workflow_run": run,
                 }
 
+            request_record = read_json(
+                request_path(state_root, str(run.get("request_id") or ""))
+            )
+            approved_provider_binding = verify_approved_provider_binding(
+                state_root=state_root,
+                record=request_record,
+            )
+            if run.get("approved_provider_binding") != approved_provider_binding:
+                raise FrontdoorError(
+                    provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH
+                )
+
             run_lock.assert_p0_concurrency(state_root, target_run_id=run_id)
             workflow_id = str(run.get("workflow_id") or "")
             current_step_id = str(run.get("current_step") or "")
@@ -4418,7 +4910,6 @@ def drain_run(
                 if order_exists:
                     work_order = read_json(order_path)
                 else:
-                    request_record = read_json(request_path(state_root, str(run["request_id"])))
                     try:
                         work_order = build_work_order(
                             state_root=state_root,
@@ -4687,22 +5178,58 @@ def abort_run(
 def claude_headless_capability() -> dict[str, Any]:
     adapters = provider_runner.load_provider_adapters()
     adapter = adapters.get("claude_headless_p0")
-    if adapter:
-        return adapter
-    return {
-        "adapter_contract_version": "1",
-        "provider_adapter_id": "claude_headless_p0",
-        "provider_target": "claude_headless",
-        "transport": "headless_cli",
-        "sync_mode": "sync",
-        "context_freshness": "fresh_process",
-        "concurrency_unit": "process",
-        "permission_enforcement": "harness",
-        "supports_structured_output": True,
-        "requires_marker": False,
-        "reset_strategy": "new_session",
-        "report_authority": "typed_report_and_evidence_file",
-    }
+    if adapter is None or provider_runner.validate_adapter_descriptor(adapter):
+        raise FrontdoorError("provider_adapter_descriptor_invalid")
+    return adapter
+
+
+def provider_capability_for_step(
+    *,
+    template: dict[str, Any],
+    step: dict[str, Any],
+    worker_execution_plan: dict[str, Any] | None,
+    requested_adapter_id: str = "",
+) -> dict[str, Any]:
+    provider_route = (
+        step.get("provider_route")
+        if isinstance(step.get("provider_route"), dict)
+        else {}
+    )
+    template_adapter = (
+        template.get("provider_adapter")
+        if isinstance(template.get("provider_adapter"), dict)
+        else {}
+    )
+    default_provider = str(provider_route.get("default_provider") or "")
+    default_transport = str(
+        provider_route.get("default_transport")
+        or template_adapter.get("default_transport")
+        or ""
+    )
+    if worker_execution_plan is not None or default_transport == "codex_exec":
+        default_adapter_id = "codex_cli_openai_p0"
+    elif default_provider in {"", "claude_cli"} and default_transport in {
+        "",
+        "headless_cli",
+        "tmux_interactive",
+    }:
+        default_adapter_id = "claude_headless_p0"
+    else:
+        raise FrontdoorError("provider_adapter_selection_unsupported")
+    if requested_adapter_id:
+        if (
+            provider_route.get("adapter_kind") != "external_provider"
+            and requested_adapter_id != default_adapter_id
+        ):
+            raise FrontdoorError("provider_adapter_route_mismatch")
+        adapter_id = requested_adapter_id
+    else:
+        adapter_id = default_adapter_id
+
+    adapter = provider_runner.load_provider_adapters().get(adapter_id)
+    if adapter is None or provider_runner.validate_adapter_descriptor(adapter):
+        raise FrontdoorError("provider_adapter_descriptor_invalid")
+    return adapter
 
 
 def manual_provider_evidence_contract(
@@ -4718,6 +5245,11 @@ def manual_provider_evidence_contract(
         "evidence_version": "1",
         "provider_adapter_id": capability["provider_adapter_id"],
         "provider_target": capability["provider_target"],
+        "intended_model": capability["default_model"],
+        "effective_model_policy": capability["effective_model_policy"],
+        "model_assurance": provider_runner.MODEL_ASSURANCE_FOR_POLICY[
+            capability["effective_model_policy"]
+        ],
         "request_id": run["request_id"],
         "run_id": run["run_id"],
         "workflow_id": run["workflow_id"],
@@ -4838,6 +5370,14 @@ def _prepare_claude_adapter_locked(
         }
 
     capability = claude_headless_capability()
+    if not provider_runner.provider_adapter_model_binding_matches(
+        work_order, capability
+    ):
+        return {
+            "schema_version": 1,
+            "decision": "blocked",
+            "reason": provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH,
+        }
     evidence_path = provider_evidence_path(state_root, run_id, step_id)
     transcript_path = provider_transcript_path(state_root, run_id, step_id)
     request_path = adapter_request_path(
@@ -4892,6 +5432,7 @@ def _prepare_claude_adapter_locked(
         "request_id": run["request_id"],
         "workflow_id": run["workflow_id"],
         "step_id": step_id,
+        "intended_model": work_order["intended_model"],
         "work_order_path": str(order_path),
         "report_path": work_order["report_path"],
         "evidence_path": str(evidence_path),
@@ -5242,9 +5783,20 @@ def _require_scoped_worker_assurance(
     principal: dict[str, Any],
     subject: dict[str, Any],
     launch_session_verifier: Any | None = None,
+    surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
 ) -> dict[str, Any]:
     try:
         record = read_json(request_path(state_root, request_id))
+        active_surface_registry = surface_registry or load_surface_registry()
+        frontend_kind = bridge_request_surface_kind(
+            record,
+            registry=active_surface_registry,
+        )
+        descriptor = active_surface_registry.descriptor(frontend_kind)
+        if descriptor.assurance_profile_id != frontend_profile_id:
+            raise FrontdoorError(
+                "frontend surface assurance profile does not match capability subject"
+            )
         expected_owner = {
             "principal_type": BRIDGE_PRINCIPAL_TYPE,
             "principal_id": frontend_profile_id,
@@ -5259,9 +5811,15 @@ def _require_scoped_worker_assurance(
             or identity.get("identity_digest") != checkout_identity_digest
         ):
             raise FrontdoorError("frontend checkout identity does not match capability subject")
-        launch_identity = normalize_launch_session_identity(
-            record.get("launch_session_identity")
-        )
+        try:
+            launch_identity = active_surface_registry.normalize_launch_session(
+                frontend_kind,
+                record.get("launch_session_identity"),
+            )
+        except frontdoor_surface_registry.SurfaceRegistryError as exc:
+            raise FrontdoorError(str(exc)) from exc
+        if launch_identity is None:
+            raise FrontdoorError("frontend launch-session request binding missing")
         if record.get("launch_session_digest") != launch_identity["record_digest"]:
             raise FrontdoorError("frontend launch-session request binding mismatch")
         current_checkout = resolve_checkout_identity(
@@ -5269,7 +5827,14 @@ def _require_scoped_worker_assurance(
             managed_primary=identity["managed_primary_realpath"],
             checkout_root=identity["checkout_realpath"],
         )
-        verifier = launch_session_verifier or HostLaunchSessionVerifier()
+        try:
+            verifier = launch_session_verifier or active_surface_registry.make_launch_session_verifier(
+                frontend_kind
+            )
+        except frontdoor_surface_registry.SurfaceRegistryError as exc:
+            raise FrontdoorError(str(exc)) from exc
+        if verifier is None:
+            raise FrontdoorError("frontend launch-session verifier required")
         revalidated_launch = verifier.revalidate(
             launch_identity,
             checkout_identity=current_checkout,
@@ -5518,6 +6083,31 @@ def build_work_order(
             )
         except scoped_worker_executor.ScopedWorkerError as exc:
             raise FrontdoorError(exc.reason_class) from exc
+    approved_provider_binding = verify_approved_provider_binding(
+        state_root=state_root,
+        record=request_record,
+    )
+    if run.get("approved_provider_binding") != approved_provider_binding:
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
+    capability = provider_capability_for_step(
+        template=template,
+        step=step,
+        worker_execution_plan=worker_execution_plan,
+        requested_adapter_id=str(
+            request_record.get("requested_provider_adapter_id") or ""
+        ),
+    )
+    provider_adapter_id = str(capability.get("provider_adapter_id") or "")
+    intended_model = str(capability.get("default_model") or "")
+    if not provider_adapter_id or not intended_model:
+        raise FrontdoorError("provider_adapter_model_binding_missing")
+    current_binding = {
+        "provider_adapter_id": provider_adapter_id,
+        "default_model": intended_model,
+        "effective_model_policy": str(capability.get("effective_model_policy") or ""),
+    }
+    if current_binding != approved_provider_binding:
+        raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
     work_order = work_order_builder.build_work_order(
         run=run,
         request_record=request_record,
@@ -5528,6 +6118,9 @@ def build_work_order(
         policy_digest_value=policy_digest(request_record["approved_activation"]),
         signature=None,
         report_path_value=str(report_path(state_root, str(run["run_id"]), step_id)),
+        provider_adapter_id_value=provider_adapter_id,
+        intended_model_value=intended_model,
+        effective_model_policy_value=current_binding["effective_model_policy"],
         worker_execution_plan=worker_execution_plan,
     )
     unsigned_digest = stable_digest(work_order)
@@ -5542,6 +6135,7 @@ def build_work_order(
 
 def parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Host-owned P0 frontdoor orchestrator")
+    surface_choices = registered_surface_kinds()
     parser.add_argument("--state-root", default="")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -5555,10 +6149,11 @@ def parser() -> argparse.ArgumentParser:
     propose.add_argument("--expires-at", default="run_terminal")
     propose.add_argument(
         "--frontdoor",
-        choices=["codex", "claude", "cursor", "grok", "manual"],
+        choices=surface_choices,
         default="codex",
     )
     propose.add_argument("--chat-session-id", default="")
+    propose.add_argument("--provider-adapter-id", default="")
     propose.add_argument("--principal-type", default="manual_operator")
     propose.add_argument("--principal-id", default="manual-cli")
     propose.add_argument("--authn-method", default="local_cli")
@@ -5638,7 +6233,18 @@ def parser() -> argparse.ArgumentParser:
     run_provider_parser.add_argument("--live", action="store_true")
     run_provider_parser.add_argument(
         "--fake-provider-mode",
-        choices=["", "success", "findings", "blocked", "timeout", "nonzero", "malformed", "unavailable"],
+        choices=[
+            "",
+            "success",
+            "findings",
+            "blocked",
+            "timeout",
+            "nonzero",
+            "malformed",
+            "unavailable",
+            "model_mismatch",
+            "missing_effective_model",
+        ],
         default="",
     )
     run_provider_parser.add_argument("--principal-type", default="harness_runner")
@@ -5671,7 +6277,7 @@ def parser() -> argparse.ArgumentParser:
     bridge_submit.add_argument("--expires-at", default="run_terminal")
     bridge_submit.add_argument(
         "--frontdoor",
-        choices=["codex", "claude", "cursor", "grok", "manual"],
+        choices=surface_choices,
         default="codex",
     )
     bridge_submit.add_argument("--chat-session-id", default="")
@@ -5681,7 +6287,7 @@ def parser() -> argparse.ArgumentParser:
     bridge_projection.add_argument("--request-id", required=True)
     bridge_projection.add_argument(
         "--frontdoor",
-        choices=["codex", "claude", "cursor", "grok", "manual"],
+        choices=surface_choices,
         default="codex",
     )
     bridge_projection.add_argument("--chat-session-id", default="")
@@ -5691,7 +6297,7 @@ def parser() -> argparse.ArgumentParser:
     bridge_ack.add_argument("--projection-digest", required=True)
     bridge_ack.add_argument(
         "--frontdoor",
-        choices=["codex", "claude", "cursor", "grok", "manual"],
+        choices=surface_choices,
         default="codex",
     )
     bridge_ack.add_argument("--chat-session-id", default="")
@@ -5750,6 +6356,7 @@ def main() -> None:
                 frontdoor=args.frontdoor,
                 chat_session_id=args.chat_session_id,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
+                provider_adapter_id=args.provider_adapter_id,
             )
         elif args.command == "approve":
             payload = approve_request(
@@ -5854,6 +6461,7 @@ def main() -> None:
         elif args.command == "bridge-submit-request":
             payload = bridge_submit_request(
                 state_root=state_root,
+                frontend_kind=args.frontdoor,
                 payload={
                     "task_id": args.task_id,
                     "request_id": args.request_id,

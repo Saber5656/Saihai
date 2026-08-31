@@ -1,0 +1,110 @@
+{
+  "registry_version": "1",
+  "surfaces": [
+    {
+      "descriptor_version": "1",
+      "frontend_kind": "codex",
+      "submit_contract": {
+        "contract_id": "main-agent-bridge-submit",
+        "contract_version": "1"
+      },
+      "launcher": {
+        "launcher_id": "codex-root-supervisor",
+        "launch_session_required": true,
+        "verifier_module": "frontdoor_orchestrator",
+        "verifier_class": "HostLaunchSessionVerifier"
+      },
+      "requirements": {
+        "requirements_id": "codex-main-agent-a-prime"
+      },
+      "assurance": {
+        "profile_id": "codex-main-agent-a-prime",
+        "target_state": "action_enforced"
+      }
+    },
+    {
+      "descriptor_version": "1",
+      "frontend_kind": "claude",
+      "submit_contract": {
+        "contract_id": "main-agent-bridge-submit",
+        "contract_version": "1"
+      },
+      "launcher": {
+        "launcher_id": "claude-launcher-uncommissioned",
+        "launch_session_required": false,
+        "verifier_module": null,
+        "verifier_class": null
+      },
+      "requirements": {
+        "requirements_id": "claude-main-agent-advisory"
+      },
+      "assurance": {
+        "profile_id": "claude-main-agent-advisory",
+        "target_state": "advisory"
+      }
+    },
+    {
+      "descriptor_version": "1",
+      "frontend_kind": "cursor",
+      "submit_contract": {
+        "contract_id": "main-agent-bridge-submit",
+        "contract_version": "1"
+      },
+      "launcher": {
+        "launcher_id": "cursor-launcher-uncommissioned",
+        "launch_session_required": false,
+        "verifier_module": null,
+        "verifier_class": null
+      },
+      "requirements": {
+        "requirements_id": "cursor-main-agent-candidate"
+      },
+      "assurance": {
+        "profile_id": "cursor-main-agent-candidate",
+        "target_state": "action_enforced"
+      }
+    },
+    {
+      "descriptor_version": "1",
+      "frontend_kind": "grok",
+      "submit_contract": {
+        "contract_id": "main-agent-bridge-submit",
+        "contract_version": "1"
+      },
+      "launcher": {
+        "launcher_id": "grok-launcher-unavailable",
+        "launch_session_required": false,
+        "verifier_module": null,
+        "verifier_class": null
+      },
+      "requirements": {
+        "requirements_id": "grok-main-agent-unavailable"
+      },
+      "assurance": {
+        "profile_id": "grok-main-agent-unavailable",
+        "target_state": "action_enforced"
+      }
+    },
+    {
+      "descriptor_version": "1",
+      "frontend_kind": "manual",
+      "submit_contract": {
+        "contract_id": "main-agent-bridge-submit",
+        "contract_version": "1"
+      },
+      "launcher": {
+        "launcher_id": "manual-operator",
+        "launch_session_required": false,
+        "verifier_module": null,
+        "verifier_class": null
+      },
+      "requirements": {
+        "requirements_id": "manual-operator-advisory"
+      },
+      "assurance": {
+        "profile_id": null,
+        "target_state": "advisory"
+      }
+    }
+  ]
+}
