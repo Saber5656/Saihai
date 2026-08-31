@@ -34,7 +34,7 @@ ordinary shell locals were excluded after manual review.
 | `AGENT_ORG_ENABLED`, `AGENT_ORG_MAINTENANCE` | 7. documentation examples only | code uses CLI flags / `AGENT_ORG_STATE` | README | excluded; migrate examples |
 | `CODEX_HOME`, `HOME`, `PATH` | 4. host/session environment | external runtime contract | profiles and subprocess lookup | excluded |
 | `SAIHAI_ENV_FILE` | loader bootstrap selector | process-only; forbidden inside `.env` | common loader | excluded |
-| `ITB_GATE_ENTRY_*`, provider/model/effort, timeout/poll/wait, transcript, queue, notification, and remaining `ITB_*` tuning keys | 3. advanced runtime tuning | canonical where implemented | ITB builder | excluded; see configuration guide |
+| `ITB_GATE_ENTRY_*`, provider timeout/service-tier, Claude model/effort, poll/wait, transcript, queue, notification, and remaining `ITB_*` tuning keys | 3. advanced runtime tuning | canonical where implemented; deprecated Codex model/effort inputs are listed separately below | ITB builder | excluded; see configuration guide |
 
 ## Duplicated tree result
 
@@ -69,8 +69,8 @@ for every remaining runtime, hook, host, test, and documentation reference.
 | `ITB_CLAUDE_TRANSCRIPT_STALE_TOLERANCE_SECONDS` | 3 | advanced integer; transcript freshness |
 | `ITB_CODEX_APPROVAL_POLICY` | 3 | advanced enum; Codex provider |
 | `ITB_CODEX_EXEC_DISPATCH_TIMEOUT_SECONDS` | 3 | advanced timeout; Codex provider |
-| `ITB_CODEX_MODEL` | 3 | advanced string; Codex provider |
-| `ITB_CODEX_REASONING_EFFORT` | 3 | advanced enum; Codex provider |
+| `ITB_CODEX_MODEL` | 6 | deprecated compatibility input; accepted by the loader but ignored by role dispatch, which uses the registry-pinned `gpt-5.6-luna` model |
+| `ITB_CODEX_REASONING_EFFORT` | 6 | deprecated compatibility input; accepted by the loader but ignored by role dispatch, which fixes reasoning effort to `max` |
 | `ITB_CODEX_SERVICE_TIER` | 3 | advanced enum; Codex provider |
 | `ITB_FINAL_GATE_HARD_BLOCK` | 3 | advanced bool; final-response guard |
 | `ITB_GATE_ENTRY_AUTO_GTC` | 3 | advanced bool; gate entry |
