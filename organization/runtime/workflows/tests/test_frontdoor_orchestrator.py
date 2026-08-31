@@ -265,6 +265,7 @@ def write_normalized_provider_evidence(
     evidence = {
         **fixed_fields,
         "provider": adapter["provider_target"],
+        "intended_model": fixed_fields["intended_model"],
         "effective_model": adapter.get("default_model") or "claude-sonnet-test",
         "provider_request_id": f"provider-{request_id}",
         "provider_session_id": provider_session_id or f"session-{run_id}",
@@ -350,7 +351,13 @@ def external_review_report(
         "summary": "Review completed.",
         "provider_evidence": {
             "provider": adapter["provider_target"],
+            "provider_adapter_id": adapter["provider_adapter_id"],
+            "intended_model": adapter_request["evidence_contract"]["fixed_fields"]["intended_model"],
             "effective_model": adapter.get("default_model") or "claude-sonnet-test",
+            "effective_model_policy": adapter["effective_model_policy"],
+            "model_assurance": adapter_request["evidence_contract"]["fixed_fields"][
+                "model_assurance"
+            ],
             "request_id": request_id,
             "provider_session_id": f"session-{run_id}",
             "transcript_path": adapter_request["transcript_path"],
@@ -1031,7 +1038,13 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
             "summary": "No findings.",
             "provider_evidence": {
                 "provider": adapter["provider_target"],
+                "provider_adapter_id": adapter["provider_adapter_id"],
+                "intended_model": adapter_request["evidence_contract"]["fixed_fields"]["intended_model"],
                 "effective_model": adapter.get("default_model") or "claude-sonnet-test",
+                "effective_model_policy": adapter["effective_model_policy"],
+                "model_assurance": adapter_request["evidence_contract"]["fixed_fields"][
+                    "model_assurance"
+                ],
                 "request_id": "req-frontdoor",
                 "provider_session_id": "claude-session-test",
                 "transcript_path": str(transcript_path),
@@ -1087,6 +1100,101 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
         assert_equal(terminal_payload["reason"], "run_not_preparable", "terminal prepare reason")
         assert_equal(terminal_payload["run_state"], "complete", "terminal prepare state")
         assert_equal(transcript_path.read_bytes(), transcript_before, "terminal prepare transcript")
+
+
+def test_approved_provider_binding_blocks_request_adapter_and_model_mutation() -> None:
+    def approve_cursor(state_root: Path, request_id: str) -> None:
+        proposed = load_payload(
+            run_frontdoor(
+                state_root,
+                "propose",
+                "--task-id",
+                f"TSK-{request_id}",
+                "--request-id",
+                request_id,
+                "--prompt",
+                "Run bounded external review",
+                "--classification",
+                json.dumps(external_review_classification()),
+                "--ref",
+                "organization/runtime/workflows/README.md",
+                "--provider-adapter-id",
+                "cursor_cli_p0",
+            )
+        )
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "approve",
+                "--request-id",
+                request_id,
+                "--human-action-id",
+                proposed["approval"]["human_action_id"],
+            )
+        )
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-approved-adapter-mutation"
+        approve_cursor(state_root, request_id)
+        request_file = state_root / "requests" / f"{request_id}.json"
+        request_record = json.loads(request_file.read_text(encoding="utf-8"))
+        request_record["requested_provider_adapter_id"] = "hermes_agent_oneshot_p0"
+        request_file.write_text(json.dumps(request_record) + "\n", encoding="utf-8")
+        request_file.chmod(0o600)
+
+        blocked = run_frontdoor(
+            state_root,
+            "create-run",
+            "--request-id",
+            request_id,
+            "--run-id",
+            "run-approved-adapter-mutation",
+            check=False,
+        )
+        assert_equal(blocked.returncode, 2, "adapter mutation exit")
+        assert_equal(
+            load_payload(blocked)["reason"],
+            "provider_adapter_model_binding_mismatch",
+            "adapter mutation typed reason",
+        )
+        assert not (state_root / "work-orders").exists()
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-approved-model-mutation"
+        run_id = "run-approved-model-mutation"
+        approve_cursor(state_root, request_id)
+        load_payload(
+            run_frontdoor(
+                state_root,
+                "create-run",
+                "--request-id",
+                request_id,
+                "--run-id",
+                run_id,
+            )
+        )
+        request_file = state_root / "requests" / f"{request_id}.json"
+        request_record = json.loads(request_file.read_text(encoding="utf-8"))
+        request_record["approval_record"]["provider_binding"]["default_model"] = "tampered-model"
+        request_file.write_text(json.dumps(request_record) + "\n", encoding="utf-8")
+        request_file.chmod(0o600)
+
+        blocked = run_frontdoor(
+            state_root,
+            "drain",
+            "--run-id",
+            run_id,
+            check=False,
+        )
+        assert_equal(blocked.returncode, 2, "model mutation exit")
+        assert_equal(
+            load_payload(blocked)["reason"],
+            "provider_adapter_model_binding_mismatch",
+            "model mutation typed reason",
+        )
+        assert not (state_root / "work-orders" / run_id).exists()
 
 
 def test_manual_prepare_evidence_contract_validates_report() -> None:
@@ -1275,7 +1383,44 @@ def test_drain_allows_edit_capable_code_change_gate() -> None:
         assert_equal(drained["workflow_run"]["run_state"], "step_queued", "code change drain run state")
         assert_equal(work_order["step_id"], "implement", "code change step")
         assert_equal(work_order["permission_mode"], "edit", "code change permission")
+        assert_equal(
+            work_order["provider_adapter_id"],
+            "codex_cli_openai_p0",
+            "code change provider adapter",
+        )
+        assert_equal(
+            work_order["intended_model"],
+            "operator-selected-openai",
+            "code change intended model",
+        )
+        assert work_order["intended_model"] != "claude-sonnet-4-6"
         assert_equal(work_order["activation_scope"]["allowed_ops"]["edit"], True, "later edit allowance preserved")
+
+        mismatched = run_frontdoor(
+            state_root,
+            "propose",
+            "--task-id",
+            "TSK-code-change-wrong-adapter",
+            "--request-id",
+            "req-code-change-wrong-adapter",
+            "--prompt",
+            "Implement bounded code change with a mismatched backend",
+            "--classification",
+            json.dumps(classification),
+            "--ref",
+            "organization/runtime/workflows/README.md",
+            "--allowed-path",
+            "organization/runtime/workflows",
+            "--provider-adapter-id",
+            "claude_headless_p0",
+            check=False,
+        )
+        mismatch_payload = load_payload(mismatched)
+        assert_equal(mismatched.returncode, 2, "route mismatch exit")
+        assert "provider_adapter_route_mismatch" in mismatch_payload["reason"]
+        assert not (
+            state_root / "requests" / "req-code-change-wrong-adapter.json"
+        ).exists()
 
 
 def test_drain_blocks_invalid_existing_work_order() -> None:
@@ -1338,6 +1483,9 @@ def test_drain_blocks_invalid_existing_work_order() -> None:
             "context_scope": {"mode": "refs_only", "raw_transcript_sharing": "forbidden"},
             "permission_mode": "readonly",
             "external_provider_allowed": True,
+            "provider_adapter_id": "claude_headless_p0",
+            "intended_model": "claude-sonnet-4-6",
+            "effective_model_policy": "required_exact_match",
             "report_path": str(state_root / "reports" / "run-invalid-work-order" / "review-external-review-report.json"),
             "policy_digest": "sha256:" + "1" * 64,
             "requester": {"frontdoor": "codex"},
@@ -1847,7 +1995,6 @@ def test_terminal_run_synchronizes_request_and_releases_pending_quota() -> None:
             "aborted",
             "abort synchronizes request",
         )
-
         stale = frontdoor_module.read_json(request_file)
         stale["status"] = "approved"
         frontdoor_module.write_json(request_file, stale)
@@ -1907,6 +2054,34 @@ def test_terminal_run_synchronizes_request_and_releases_pending_quota() -> None:
         )
         assert_equal(pending_count, 1, "approved request without run stays pending")
         assert pending_bytes > 0, "approved request without run must consume pending bytes"
+
+
+def test_terminal_drain_replay_does_not_depend_on_request_record() -> None:
+    frontdoor_module = load_server_module().frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        request_id = "req-terminal-drain-replay"
+        run_id = "run-terminal-drain-replay"
+        create_approved_run(state_root, request_id=request_id, run_id=run_id)
+        frontdoor_module.abort_run(
+            state_root=state_root,
+            run_id=run_id,
+            reason="terminal drain replay fixture",
+        )
+        frontdoor_module.request_path(state_root, request_id).unlink()
+
+        replayed = frontdoor_module.drain_run(state_root=state_root, run_id=run_id)
+        assert_equal(replayed["drained"], False, "terminal drain replay drained")
+        assert_equal(
+            replayed["reason"],
+            "run_state_not_queueable",
+            "terminal drain replay reason",
+        )
+        assert_equal(
+            replayed["workflow_run"]["run_state"],
+            "aborted",
+            "terminal drain replay state",
+        )
 
 
 def test_approval_uses_requested_ref_forms_without_leaking_original_paths() -> None:
@@ -2891,7 +3066,10 @@ def test_validate_report_rejects_noncanonical_report_and_stale_evidence() -> Non
         payload = load_payload(stale)
         assert_equal(stale.returncode, 2, "stale evidence report exit")
         assert_equal(payload["reason"], "invalid_report", "stale evidence reason")
-        assert any("must match current run evidence path" in item for item in payload["errors"])
+        assert_equal(payload["outcome"], "report_invalid", "stale evidence outcome")
+        assert "provider_evidence.evidence_path must match current run evidence path" in payload["errors"]
+        assert "normalized_evidence path must match current run evidence path" in payload["errors"]
+        assert "provider_model_assurance_mismatch" not in payload["errors"]
 
 
 def test_validate_report_missing_report_waits_for_human() -> None:
@@ -4585,6 +4763,7 @@ def main() -> None:
         test_state_cleanup_and_audit_rotation_reject_category_symlinks,
         test_principal_key_permissions_are_private,
         test_frontdoor_propose_approve_create_run_and_drain,
+        test_approved_provider_binding_blocks_request_adapter_and_model_mutation,
         test_manual_prepare_evidence_contract_validates_report,
         test_concurrent_manual_prepare_writes_canonical_artifacts_once,
         test_drain_allows_edit_capable_code_change_gate,
@@ -4597,6 +4776,7 @@ def main() -> None:
         test_propose_updates_waiting_request_and_blocks_duplicate_overwrite,
         test_create_run_validates_resume_policy_and_binds_request,
         test_terminal_run_synchronizes_request_and_releases_pending_quota,
+        test_terminal_drain_replay_does_not_depend_on_request_record,
         test_approval_uses_requested_ref_forms_without_leaking_original_paths,
         test_frontdoor_blocks_unapproved_and_unbounded_requests,
         test_http_frontdoor_api_flow,

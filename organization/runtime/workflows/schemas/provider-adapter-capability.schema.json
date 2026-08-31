@@ -16,7 +16,9 @@
     "supports_structured_output",
     "requires_marker",
     "reset_strategy",
-    "report_authority"
+    "report_authority",
+    "default_model",
+    "effective_model_policy"
   ],
   "properties": {
     "adapter_contract_version": {
@@ -36,7 +38,15 @@
       ]
     },
     "default_model": {
-      "type": "string"
+      "type": "string",
+      "minLength": 1
+    },
+    "effective_model_policy": {
+      "type": "string",
+      "enum": [
+        "required_exact_match",
+        "record_without_equality"
+      ]
     },
     "transport": {
       "type": "string",

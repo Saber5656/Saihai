@@ -263,7 +263,19 @@ def vault_evidence(state_root: Path, run: dict[str, Any], report: dict[str, Any]
         "result": report.get("result"),
         "finding_count": len(report.get("findings") or []) if isinstance(report.get("findings"), list) else 0,
         "provider": evidence.get("provider") if isinstance(evidence, dict) else provider_evidence.get("provider"),
+        "provider_adapter_id": evidence.get("provider_adapter_id")
+        if isinstance(evidence, dict)
+        else provider_evidence.get("provider_adapter_id"),
+        "intended_model": evidence.get("intended_model")
+        if isinstance(evidence, dict)
+        else provider_evidence.get("intended_model"),
         "effective_model": evidence.get("effective_model") if isinstance(evidence, dict) else provider_evidence.get("effective_model"),
+        "effective_model_policy": evidence.get("effective_model_policy")
+        if isinstance(evidence, dict)
+        else provider_evidence.get("effective_model_policy"),
+        "model_assurance": evidence.get("model_assurance")
+        if isinstance(evidence, dict)
+        else provider_evidence.get("model_assurance"),
         "provider_session_id": evidence.get("provider_session_id")
         if isinstance(evidence, dict)
         else provider_evidence.get("provider_session_id"),
@@ -285,7 +297,11 @@ def render_vault_evidence_markdown(block: dict[str, Any]) -> str:
         ("Result", block.get("result")),
         ("Terminal", f"{block.get('terminal_status')} / {block.get('terminal_reason')}"),
         ("Provider", block.get("provider")),
+        ("Provider Adapter", block.get("provider_adapter_id")),
+        ("Intended Model", block.get("intended_model")),
         ("Effective Model", block.get("effective_model")),
+        ("Effective Model Policy", block.get("effective_model_policy")),
+        ("Model Assurance", block.get("model_assurance")),
         ("Provider Session", block.get("provider_session_id")),
         ("Report", f"{block.get('report_path')} ({block.get('report_sha256')})"),
         ("Provider Evidence", f"{block.get('evidence_path')} ({block.get('evidence_sha256')})"),
@@ -311,6 +327,10 @@ def annotate_completion(
         "decision": "complete",
         "report_sha256": block["report_sha256"],
         "evidence_sha256": block["evidence_sha256"],
+        "provider_adapter_id": block["provider_adapter_id"],
+        "intended_model": block["intended_model"],
+        "effective_model_policy": block["effective_model_policy"],
+        "model_assurance": block["model_assurance"],
         "verifier": run_lifecycle.redacted_principal(principal),
     }
     run_store.store_run(state_root, run, expected_current_state="complete")
@@ -406,7 +426,14 @@ def verify_completion(
                     state_root=state_root,
                 )
                 if outcome != "report_valid":
-                    reasons.append(reason("invalid_typed_report", f"{outcome}: {'; '.join(errors)}"))
+                    report_reason_class = (
+                        report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
+                        if outcome == report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
+                        else "invalid_typed_report"
+                    )
+                    reasons.append(
+                        reason(report_reason_class, f"{outcome}: {'; '.join(errors)}")
+                    )
                 for field in ("run_id", "request_id", "workflow_id"):
                     if str(report.get(field) or "") != str(run.get(field) or ""):
                         reasons.append(reason("report_identity_mismatch", f"{field} mismatch"))
@@ -426,15 +453,22 @@ def verify_completion(
                 else:
                     evidence = _load_optional_json(evidence_path, reasons, "missing_provider_evidence")
                     if evidence is not None:
-                        for item in report_gate.validate_normalized_provider_evidence(
+                        evidence_errors = report_gate.validate_normalized_provider_evidence(
                             evidence,
                             run=run,
                             work_order=work_order,
                             state_root=state_root,
                             evidence_path=evidence_path,
                             report_provider_evidence=provider,
-                        ):
-                            reasons.append(reason("invalid_provider_evidence", item))
+                        )
+                        evidence_reason_class = (
+                            report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
+                            if report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
+                            in evidence_errors
+                            else "invalid_provider_evidence"
+                        )
+                        for item in evidence_errors:
+                            reasons.append(reason(evidence_reason_class, item))
                     _verify_evidence_digest(
                         state_root=state_root,
                         evidence=evidence,
@@ -453,9 +487,20 @@ def verify_completion(
                 )
 
             if reasons:
+                reason_classes = {
+                    str(item.get("reason_class") or "")
+                    for item in reasons
+                    if isinstance(item, dict)
+                }
+                top_level_reason = (
+                    report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
+                    if report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH in reason_classes
+                    else "completion_verification_failed"
+                )
                 return {
                     "schema_version": 1,
                     "decision": "blocked",
+                    "reason": top_level_reason,
                     "run_id": run_id,
                     "task_id": str(run.get("task_id") or ""),
                     "workflow_id": str(run.get("workflow_id") or ""),

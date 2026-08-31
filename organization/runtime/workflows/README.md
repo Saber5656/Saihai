@@ -179,6 +179,14 @@ metadata rather than hard-coded provider names, writes a normalized evidence
 artifact under `provider-evidence/`, writes a typed report under `reports/`,
 and then hands the report to the report gate.
 
+The Claude descriptor pins `default_model` and the complete `command_argv`
+template in the registry. Work orders and digest-bound adapter requests carry
+that value as `intended_model`; the live adapter renders the registry template
+with `--model <intended_model>`. The runner accepts a report only when the
+parsed `effective_model` is present and exactly equal. A different or missing
+value produces the typed `provider_model_mismatch` outcome and moves the run
+directly to `waiting_human` without writing a canonical report.
+
 The active descriptor set covers these provider targets:
 
 | Adapter | Provider target | Bridge pattern |
@@ -340,7 +348,8 @@ unregistered, or identity-mismatched requests fail closed. The `usage` and
 `surface_metadata` objects also use closed typed property allowlists.
 
 The canonical version field is `evidence_version: "1"`. Required traceability
-includes provider adapter/target, provider/model, request/run/workflow/step,
+includes provider adapter/target, provider, intended/effective model,
+request/run/workflow/step,
 provider request/session, transcript/evidence paths, duration/usage, outcome,
 and `raw_transcript_policy: "signal_only_not_shared"`. The deprecated
 `provider_evidence_version` alias, unknown fields, and raw transcript,
