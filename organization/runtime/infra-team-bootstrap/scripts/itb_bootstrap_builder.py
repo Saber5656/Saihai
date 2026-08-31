@@ -121,6 +121,7 @@ DEFAULT_CLAUDE_OPUS_EFFORT = "max"
 DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
 DEFAULT_CODEX_REASONING_EFFORT = "max"
 DEFAULT_CODEX_SERVICE_TIER = "fast"
+CODEX_WORKSPACE_WRITE_TOOLS = {"Bash", "Write", "Edit", "Agent"}
 ALLOWED_QUEUE_FINALIZERS = {"role-report"}
 ALLOWED_REPORT_WRITE_MODES = {"builder_atomic"}
 STATIC_ROLE_LAYERS = frozenset({"gate", "tpm", "director", "worker"})
@@ -9647,6 +9648,28 @@ def codex_service_tier() -> str:
     return normalize_cell(os.environ.get("ITB_CODEX_SERVICE_TIER") or DEFAULT_CODEX_SERVICE_TIER)
 
 
+def codex_sandbox_for_tools(tools: list[str]) -> str:
+    """Map canonical tool capabilities to the narrowest supported Codex sandbox."""
+    capabilities = {tool.split("(", 1)[0] for tool in normalize_allowed_tools(tools)}
+    if capabilities.intersection(CODEX_WORKSPACE_WRITE_TOOLS):
+        return "workspace-write"
+    return "read-only"
+
+
+def codex_sandbox_for_role(row: dict[str, Any]) -> str:
+    """Resolve a canonical role before granting its Codex sandbox capability."""
+    agent_id = normalize_cell(row.get("agent_id") or row.get("role_id"))
+    if not agent_id:
+        return "read-only"
+    registry_row = role_agent_row_for(agent_id)
+    if not registry_row:
+        return "read-only"
+    tools = normalize_allowed_tools(registry_row.get("allowed_tools", []))
+    if not tools:
+        tools = skill_allowed_tools(agent_id)
+    return codex_sandbox_for_tools(tools)
+
+
 
 
 
@@ -9765,7 +9788,7 @@ def codex_activation_command(row: dict[str, Any], prompt: str, cwd: str) -> list
         "--cd",
         cwd,
         "--sandbox",
-        "workspace-write",
+        codex_sandbox_for_role(row),
         "-c",
         f'model_reasoning_effort="{effort}"',
         "-c",

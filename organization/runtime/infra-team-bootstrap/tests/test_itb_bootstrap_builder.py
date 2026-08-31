@@ -307,6 +307,44 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
         self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
         self.assertIn('model_reasoning_effort="max"', command)
 
+    def test_codex_activation_preserves_declared_role_sandbox_scope(self) -> None:
+        """Keep read-only roles confined while retaining declared write capability."""
+        builder = load_builder_module()
+        read_only_command = builder.codex_activation_command(
+            builder.role_agent_row_for("gate-task-evaluator"),
+            "evaluate",
+            "/tmp/project",
+        )
+        write_command = builder.codex_activation_command(
+            builder.role_agent_row_for("teams-project-manager"),
+            "coordinate",
+            "/tmp/project",
+        )
+        tampered_command = builder.codex_activation_command(
+            {"agent_id": "gate-task-evaluator", "allowed_tools": ["Bash"]},
+            "evaluate",
+            "/tmp/project",
+        )
+
+        self.assertEqual(read_only_command[read_only_command.index("--sandbox") + 1], "read-only")
+        self.assertEqual(write_command[write_command.index("--sandbox") + 1], "workspace-write")
+        self.assertEqual(
+            tampered_command[tampered_command.index("--sandbox") + 1],
+            "read-only",
+        )
+        self.assertEqual(builder.codex_sandbox_for_role({}), "read-only")
+        self.assertEqual(
+            builder.codex_sandbox_for_role(
+                {"agent_id": "unknown-role", "allowed_tools": ["Bash", "Write"]}
+            ),
+            "read-only",
+        )
+        for tool in sorted(builder.CODEX_WORKSPACE_WRITE_TOOLS):
+            with self.subTest(tool=tool):
+                self.assertEqual(builder.codex_sandbox_for_tools([tool]), "workspace-write")
+        self.assertEqual(builder.codex_sandbox_for_tools([]), "read-only")
+        self.assertEqual(builder.codex_sandbox_for_tools(["Read", "Grep", "Glob"]), "read-only")
+
     def test_active_registry_routes_every_role_through_luna_max(self) -> None:
         """Require every active registry role to remain on the Luna-only route."""
         builder = load_builder_module()
