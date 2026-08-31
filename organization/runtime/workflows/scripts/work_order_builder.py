@@ -32,6 +32,9 @@ REQUIRED_WORK_ORDER_FIELDS = [
     "context_scope",
     "permission_mode",
     "external_provider_allowed",
+    "provider_adapter_id",
+    "intended_model",
+    "effective_model_policy",
     "report_path",
     "policy_digest",
     "requester",
@@ -246,6 +249,9 @@ def _validate_schema_fragment(
     if "minimum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool):
         if value < schema["minimum"]:
             errors.append(f"schema:{path}:minimum")
+    if "maximum" in schema and isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value > schema["maximum"]:
+            errors.append(f"schema:{path}:maximum")
 
     if isinstance(value, dict):
         required = schema.get("required")
@@ -273,6 +279,9 @@ def _validate_schema_fragment(
         min_items = schema.get("minItems")
         if isinstance(min_items, int) and len(value) < min_items:
             errors.append(f"schema:{path}:min_items")
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and len(value) > max_items:
+            errors.append(f"schema:{path}:max_items")
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
@@ -298,17 +307,20 @@ def _validate_schema_fragment(
         if not isinstance(branch, dict):
             continue
         condition = branch.get("if")
-        applies = True
         if isinstance(condition, dict):
             applies = not _validate_schema_fragment(
                 value, condition, path, root_schema=root
             )
-        if applies and isinstance(branch.get("then"), dict):
-            errors.extend(
-                _validate_schema_fragment(
-                    value, branch["then"], path, root_schema=root
+            if applies and isinstance(branch.get("then"), dict):
+                errors.extend(
+                    _validate_schema_fragment(
+                        value, branch["then"], path, root_schema=root
+                    )
                 )
-            )
+            continue
+        errors.extend(
+            _validate_schema_fragment(value, branch, path, root_schema=root)
+        )
 
     return errors
 
@@ -413,6 +425,9 @@ def build_work_order(
     policy_digest_value: str,
     signature: dict[str, Any] | None,
     report_path_value: str,
+    provider_adapter_id_value: str,
+    intended_model_value: str,
+    effective_model_policy_value: str,
     worker_execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     step_id = str(step["id"])
@@ -438,6 +453,9 @@ def build_work_order(
         "context_scope": _context_scope_for_step(run=run, request_record=request_record, step=step),
         "permission_mode": str(step["permission_mode"]),
         "external_provider_allowed": external_provider_allowed,
+        "provider_adapter_id": provider_adapter_id_value,
+        "intended_model": intended_model_value,
+        "effective_model_policy": effective_model_policy_value,
         "report_path": report_path_value,
         "policy_digest": policy_digest_value,
         "requester": run.get("requester") or {"frontdoor": "manual"},

@@ -536,6 +536,34 @@ def test_missing_identity_is_invalid_report() -> None:
         assert "report" not in payload
 
 
+def test_exact_model_mismatch_is_classified_as_assurance_mismatch() -> None:
+    errors = report_gate.validate_effective_model_binding(
+        {
+            "provider_adapter_id": "claude_headless_p0",
+            "intended_model": "claude-sonnet-4-6",
+            "effective_model": "claude-opus-4-1",
+            "effective_model_policy": "required_exact_match",
+            "model_assurance": "provider_reported_exact",
+        },
+        work_order={
+            "provider_adapter_id": "claude_headless_p0",
+            "intended_model": "claude-sonnet-4-6",
+        },
+        adapter_identity={
+            "provider_adapter_id": "claude_headless_p0",
+            "default_model": "claude-sonnet-4-6",
+            "effective_model_policy": "required_exact_match",
+        },
+        label="provider_evidence",
+    )
+    assert_equal(
+        errors[0],
+        report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH,
+        "exact model mismatch classification",
+    )
+    assert "provider_evidence.effective_model must match intended_model" in errors
+
+
 def test_provider_blocked_waits_human() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
@@ -730,6 +758,7 @@ def main() -> None:
         test_legacy_claude_transcript_path_is_accepted_for_inflight_requests,
         test_identity_mismatch_is_scope_violation,
         test_missing_identity_is_invalid_report,
+        test_exact_model_mismatch_is_classified_as_assurance_mismatch,
         test_provider_blocked_waits_human,
         test_result_invalid_fails,
         test_malformed_report_json_fails_closed,

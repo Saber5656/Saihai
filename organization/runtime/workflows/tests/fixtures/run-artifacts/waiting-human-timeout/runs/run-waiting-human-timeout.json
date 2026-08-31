@@ -48,6 +48,11 @@
       "workflow_id": "single_step_external_review"
     }
   },
+  "approved_provider_binding": {
+    "default_model": "claude-sonnet-4-6",
+    "effective_model_policy": "required_exact_match",
+    "provider_adapter_id": "claude_headless_p0"
+  },
   "context_sharing": {
     "provider_transcript": "confined_evidence_path_only",
     "shared_run_state": "typed_durable_state",
@@ -83,6 +88,11 @@
       "lease_id": "provider-lease-fixture"
     },
     "phase": "human_gate",
+    "provider_binding": {
+      "effective_model_policy": "required_exact_match",
+      "intended_model": "claude-sonnet-4-6",
+      "provider_adapter_id": "claude_headless_p0"
+    },
     "retry": {
       "auto_retries_used": 5,
       "consecutive_failures": 6,

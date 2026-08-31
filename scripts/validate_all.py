@@ -28,6 +28,7 @@ SUITE_GLOBS = [
 ]
 CONTRACT_CMDS = [
     [sys.executable, "organization/runtime/workflows/scripts/workflow_selector.py", "validate-contracts"],
+    [sys.executable, "organization/runtime/workflows/scripts/template_role_validator.py"],
 ]
 COMPILE_GLOBS = [
     "organization/runtime/workflows/scripts/*.py",

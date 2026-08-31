@@ -36,6 +36,11 @@ def valid_run(**overrides) -> dict:
         "task_id": "TSK-run-store",
         "request_id": "req-run-store",
         "workflow_id": "single_step_external_review",
+        "approved_provider_binding": {
+            "provider_adapter_id": "claude_headless_p0",
+            "default_model": "claude-sonnet-4-6",
+            "effective_model_policy": "required_exact_match",
+        },
         "goal_state": "approved",
         "run_state": "created",
         "current_step": "review",
@@ -137,6 +142,49 @@ def test_store_rejects_schema_invalid() -> None:
         error_payload = json.loads(error_artifact.read_text(encoding="utf-8"))
         assert_equal(error_payload["operation"], "store", "error artifact operation")
         assert "missing_required_field:activation" in error_payload["errors"]
+
+
+def test_approved_provider_binding_is_required_and_schema_bounded() -> None:
+    missing = valid_run()
+    missing.pop("approved_provider_binding")
+    assert_equal(
+        run_store.validate_run_record(missing),
+        ["missing_required_field:approved_provider_binding"],
+        "missing approved provider binding",
+    )
+
+    cases = (
+        ({}, "approved_provider_binding.default_model is required"),
+        (
+            {
+                "provider_adapter_id": "claude_headless_p0",
+                "default_model": "",
+                "effective_model_policy": "required_exact_match",
+            },
+            "approved_provider_binding.default_model must be a non-empty string",
+        ),
+        (
+            {
+                "provider_adapter_id": "claude_headless_p0",
+                "default_model": "claude-sonnet-4-6",
+                "effective_model_policy": "best_effort",
+            },
+            "approved_provider_binding.effective_model_policy must be known",
+        ),
+        (
+            {
+                "provider_adapter_id": "claude_headless_p0",
+                "default_model": "claude-sonnet-4-6",
+                "effective_model_policy": "required_exact_match",
+                "unexpected": True,
+            },
+            "approved_provider_binding.unexpected is not allowed",
+        ),
+    )
+    for binding, expected_error in cases:
+        assert expected_error in run_store.validate_run_record(
+            valid_run(approved_provider_binding=binding)
+        )
 
 
 def test_rejects_reserved_artifact_suffix_ids() -> None:
@@ -677,6 +725,7 @@ def main() -> None:
     tests = [
         test_store_and_reload_roundtrip,
         test_store_rejects_schema_invalid,
+        test_approved_provider_binding_is_required_and_schema_bounded,
         test_rejects_reserved_artifact_suffix_ids,
         test_store_wraps_json_serialization_failures,
         test_load_missing_run,

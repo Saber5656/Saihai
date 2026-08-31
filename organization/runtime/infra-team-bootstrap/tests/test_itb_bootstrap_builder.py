@@ -135,8 +135,8 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             completed = subprocess.CompletedProcess(args=["codex"], returncode=0, stdout=stdout, stderr="")
 
             with mock.patch.object(builder.shutil, "which", return_value="/usr/bin/codex"), mock.patch.object(
-                builder.subprocess,
-                "run",
+                builder,
+                "run_command_with_bounded_output",
                 return_value=completed,
             ) as run_mock:
                 output = builder.provider_activate(
@@ -167,7 +167,11 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             )
             (session_dir / "roster.json").write_text(json.dumps({"agent_id": "tech-backend"}), encoding="utf-8")
 
-            with mock.patch.object(builder.subprocess, "run", side_effect=AssertionError("provider must not run")):
+            with mock.patch.object(
+                builder,
+                "run_command_with_bounded_output",
+                side_effect=AssertionError("provider must not run"),
+            ):
                 output = builder.provider_activate(
                     runtime="codex",
                     state_root=state_root,
@@ -339,7 +343,11 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            with mock.patch.object(builder.subprocess, "run", side_effect=AssertionError("provider must not run")):
+            with mock.patch.object(
+                builder,
+                "run_command_with_bounded_output",
+                side_effect=AssertionError("provider must not run"),
+            ):
                 output = builder.codex_exec_agent_dispatch(
                     runtime="codex",
                     state_root=state_root,

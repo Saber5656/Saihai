@@ -8,12 +8,14 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import select as _select
 import shlex
 import shutil
 import signal
+import stat as stat_module
 import subprocess
 import sys
 import time
@@ -9768,45 +9770,680 @@ def codex_activation_command(row: dict[str, Any], prompt: str, cwd: str) -> list
     ]
 
 
-def codex_event_text(event: dict[str, Any]) -> str:
+CODEX_JSONL_MAX_CHARS = 8 * 1024 * 1024
+CODEX_JSONL_MAX_LINE_CHARS = 1024 * 1024
+CODEX_JSONL_MAX_EVENTS = 10_000
+CODEX_STDERR_MAX_BYTES = 1024 * 1024
+CODEX_EVIDENCE_NOTE_MAX_CHARS = 4096
+CODEX_JSON_MAX_DEPTH = 128
+CODEX_JSON_MAX_NODES = 100_000
+CODEX_EVIDENCE_METRIC_MAX_VALUE = (1 << 63) - 1
+CODEX_CURRENT_EVENT_TYPES = {
+    "thread.started",
+    "turn.started",
+    "item.started",
+    "item.updated",
+    "item.completed",
+    "turn.completed",
+    "turn.failed",
+    "error",
+}
+CODEX_CURRENT_BODY_EVENT_TYPES = CODEX_CURRENT_EVENT_TYPES - {"thread.started"}
+CODEX_CURRENT_ITEM_EVENT_TYPES = {"item.started", "item.updated", "item.completed"}
+# Keep this fail-closed allowlist aligned with codex-rs exec's ThreadItemDetails wire enum.
+CODEX_CURRENT_ITEM_TYPES = {
+    "agent_message",
+    "reasoning",
+    "command_execution",
+    "file_change",
+    "mcp_tool_call",
+    "collab_tool_call",
+    "web_search",
+    "todo_list",
+    "error",
+}
+# Keep lifecycle phases aligned with codex-rs exec's JSONL event processor.
+# Agent messages and reasoning are completed-only, while todo_list is the only
+# item whose current wire format emits item.updated.
+CODEX_CURRENT_STARTED_ITEM_TYPES = {
+    "command_execution",
+    "mcp_tool_call",
+    "collab_tool_call",
+    "web_search",
+    "todo_list",
+}
+CODEX_CURRENT_UPDATED_ITEM_TYPES = {"todo_list"}
+
+
+def codex_event_text(event: dict[str, Any]) -> tuple[str, bool]:
+    values: list[str] = []
     for key in ("result", "message", "text"):
+        if key not in event:
+            continue
+        value = event.get(key)
+        if not isinstance(value, str):
+            return "", False
+        values.append(value if value.strip() else "")
+    if "content" in event:
+        content = event.get("content")
+        if isinstance(content, str):
+            values.append(content if content.strip() else "")
+        elif isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                else:
+                    return "", False
+            combined = "\n".join(part for part in parts if part.strip())
+            values.append(combined)
+        else:
+            return "", False
+    if len(set(values)) > 1:
+        return "", False
+    value = values[0] if values else ""
+    return (value if value.strip() else ""), True
+
+
+def codex_event_string(event: dict[str, Any], *keys: str) -> str:
+    for key in keys:
         value = event.get(key)
         if isinstance(value, str) and value.strip():
-            return value
-    content = event.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-            elif isinstance(item, str):
-                parts.append(item)
-        return "\n".join(part for part in parts if part.strip())
+            return value.strip()
     return ""
 
 
-def parse_codex_json_output(stdout: str) -> dict[str, Any]:
+def codex_event_consistent_string(event: dict[str, Any], *keys: str) -> tuple[str, bool]:
+    values: list[str] = []
+    for key in keys:
+        if key not in event:
+            continue
+        value = event.get(key)
+        if not isinstance(value, str) or not value or value != value.strip():
+            return "", False
+        values.append(value)
+    if len(set(values)) > 1:
+        return "", False
+    return (values[0] if values else ""), True
+
+
+def codex_event_model(event: dict[str, Any]) -> tuple[str, bool]:
+    model_keys = ("model", "effective_model", "effectiveModel")
+    if any(
+        key in event and event.get(key) is not None and not isinstance(event.get(key), str)
+        for key in model_keys
+    ):
+        return "", False
+    value, aliases_consistent = codex_event_consistent_string(event, *model_keys)
+    if not aliases_consistent:
+        return "", False
+    if not value:
+        return "", True
+    if len(value) > 128 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}", value):
+        return "", False
+    return value, True
+
+
+def codex_event_usage(event: dict[str, Any]) -> tuple[dict[str, int], bool]:
+    usage = event.get("usage")
+    if not isinstance(usage, dict):
+        return {}, False
+    typed_usage: dict[str, int] = {}
+    for canonical_key, aliases in (
+        ("input_tokens", ("input_tokens", "inputTokens")),
+        ("cached_input_tokens", ("cached_input_tokens", "cachedInputTokens")),
+        ("cache_write_input_tokens", ("cache_write_input_tokens", "cacheWriteInputTokens")),
+        ("output_tokens", ("output_tokens", "outputTokens")),
+        ("reasoning_output_tokens", ("reasoning_output_tokens", "reasoningOutputTokens")),
+        ("total_tokens", ("total_tokens", "totalTokens")),
+    ):
+        values: list[int] = []
+        for key in aliases:
+            if key not in usage:
+                continue
+            value = usage.get(key)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                or value > CODEX_EVIDENCE_METRIC_MAX_VALUE
+            ):
+                return {}, False
+            values.append(value)
+        if len(set(values)) > 1:
+            return {}, False
+        if values:
+            typed_usage[canonical_key] = values[0]
+    input_tokens = typed_usage.get("input_tokens")
+    cached_input_tokens = typed_usage.get("cached_input_tokens")
+    cache_write_input_tokens = typed_usage.get("cache_write_input_tokens")
+    output_tokens = typed_usage.get("output_tokens")
+    reasoning_output_tokens = typed_usage.get("reasoning_output_tokens")
+    total_tokens = typed_usage.get("total_tokens")
+    if cached_input_tokens is not None and (
+        input_tokens is None or cached_input_tokens > input_tokens
+    ):
+        return {}, False
+    if cache_write_input_tokens is not None and (
+        input_tokens is None or cache_write_input_tokens > input_tokens
+    ):
+        return {}, False
+    if (
+        input_tokens is not None
+        and (cached_input_tokens or 0) + (cache_write_input_tokens or 0) > input_tokens
+    ):
+        return {}, False
+    if reasoning_output_tokens is not None and (
+        output_tokens is None or reasoning_output_tokens > output_tokens
+    ):
+        return {}, False
+    if total_tokens is not None:
+        if (input_tokens is None) != (output_tokens is None):
+            return {}, False
+        if (
+            input_tokens is not None
+            and output_tokens is not None
+            and total_tokens != input_tokens + output_tokens
+        ):
+            return {}, False
+    return typed_usage, bool(typed_usage)
+
+
+def codex_event_consistent_metric(event: dict[str, Any], *keys: str) -> tuple[int | None, bool]:
+    values: list[int] = []
+    for key in keys:
+        if key not in event:
+            continue
+        value = event.get(key)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > CODEX_EVIDENCE_METRIC_MAX_VALUE
+        ):
+            return None, False
+        values.append(value)
+    if len(set(values)) > 1:
+        return None, False
+    return (values[0] if values else None), True
+
+
+def codex_json_object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    last_text = ""
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def codex_json_reject_nonstandard_constant(value: str) -> Any:
+    raise ValueError(f"nonstandard JSON numeric constant: {value}")
+
+
+def codex_json_structure_is_safe(value: Any) -> bool:
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    node_count = 0
+    while stack:
+        node, depth = stack.pop()
+        node_count += 1
+        if node_count > CODEX_JSON_MAX_NODES or depth > CODEX_JSON_MAX_DEPTH:
+            return False
+        if isinstance(node, float) and not math.isfinite(node):
+            return False
+        if isinstance(node, dict):
+            stack.extend((item, depth + 1) for item in node.values())
+        elif isinstance(node, list):
+            stack.extend((item, depth + 1) for item in node)
+    return True
+
+
+def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
+
+def wait_for_provider_process(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float,
+) -> tuple[int, bool, bool]:
+    try:
+        return process.wait(timeout=max(0.0, timeout)), False, False
+    except subprocess.TimeoutExpired:
+        terminate_process_group(process)
+        try:
+            return process.wait(timeout=1.0), True, False
+        except subprocess.TimeoutExpired:
+            observed_returncode = process.poll()
+            if not isinstance(observed_returncode, int) or isinstance(observed_returncode, bool):
+                observed_returncode = -signal.SIGKILL
+            return observed_returncode, True, True
+
+
+def run_command_with_bounded_output(
+    command: list[str],
+    *,
+    timeout: float,
+    stdout_limit_bytes: int = CODEX_JSONL_MAX_CHARS,
+    stderr_limit_bytes: int = CODEX_STDERR_MAX_BYTES,
+) -> subprocess.CompletedProcess[str]:
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
+    if stdout_limit_bytes < 0 or stderr_limit_bytes < 0:
+        raise ValueError("output limits must be non-negative")
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+        start_new_session=True,
+    )
+    if process.stdout is None or process.stderr is None:  # pragma: no cover - PIPE contract.
+        terminate_process_group(process)
+        raise RuntimeError("failed to capture provider process output")
+
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    streams: dict[int, tuple[str, Any, int]] = {
+        process.stdout.fileno(): ("stdout", process.stdout, stdout_limit_bytes),
+        process.stderr.fileno(): ("stderr", process.stderr, stderr_limit_bytes),
+    }
+    exceeded: set[str] = set()
+    read_error = ""
+    deadline = time.monotonic() + timeout
+    drain_deadline: float | None = None
+    timed_out = False
+
+    while streams:
+        now = time.monotonic()
+        if drain_deadline is None and now >= deadline:
+            timed_out = True
+            terminate_process_group(process)
+            drain_deadline = now + 1.0
+        if drain_deadline is not None and now >= drain_deadline:
+            break
+        wait_seconds = 0.05
+        if drain_deadline is None:
+            wait_seconds = min(wait_seconds, max(0.0, deadline - now))
+        else:
+            wait_seconds = min(wait_seconds, max(0.0, drain_deadline - now))
+        try:
+            ready, _, _ = _select.select(
+                [entry[1] for entry in streams.values()],
+                [],
+                [],
+                wait_seconds,
+            )
+        except InterruptedError:
+            continue
+        except (OSError, ValueError) as exc:
+            read_error = f"multiplexer: {type(exc).__name__}"
+            terminate_process_group(process)
+            break
+        for stream in ready:
+            fd = stream.fileno()
+            entry = streams.get(fd)
+            if entry is None:
+                continue
+            name, _, limit = entry
+            buffer = buffers[name]
+            try:
+                chunk = os.read(fd, 64 * 1024)
+            except OSError as exc:
+                read_error = f"{name}: {type(exc).__name__}"
+                terminate_process_group(process)
+                drain_deadline = time.monotonic() + 1.0
+                streams.pop(fd, None)
+                continue
+            if not chunk:
+                streams.pop(fd, None)
+                continue
+            remaining = max(0, limit - len(buffer))
+            if remaining:
+                buffer.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                exceeded.add(name)
+                terminate_process_group(process)
+                if drain_deadline is None:
+                    drain_deadline = time.monotonic() + 1.0
+
+    for _, stream, _ in streams.values():
+        stream.close()
+    process.stdout.close()
+    process.stderr.close()
+    if process.poll() is None and not (exceeded or read_error or timed_out):
+        remaining = max(0.0, deadline - time.monotonic())
+        returncode, wait_timed_out, _ = wait_for_provider_process(
+            process,
+            timeout=remaining,
+        )
+        timed_out = timed_out or wait_timed_out
+    else:
+        returncode, _, final_reap_timed_out = wait_for_provider_process(
+            process,
+            timeout=1.0,
+        )
+        timed_out = timed_out or final_reap_timed_out
+
+    stdout_bytes = bytes(buffers["stdout"])
+    stderr_bytes = bytes(buffers["stderr"])
+    decode_error = False
+    try:
+        stdout_text = stdout_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        decode_error = True
+        stdout_text = stdout_bytes.decode("utf-8", errors="ignore")
+    try:
+        stderr_text = stderr_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        decode_error = True
+        stderr_text = stderr_bytes.decode("utf-8", errors="ignore")
+
+    completed = subprocess.CompletedProcess(
+        args=command,
+        returncode=returncode,
+        stdout=stdout_text,
+        stderr=stderr_text,
+    )
+    setattr(completed, "output_limit_exceeded", ",".join(sorted(exceeded)))
+    setattr(completed, "output_decode_error", decode_error)
+    setattr(completed, "output_read_error", read_error)
+    setattr(completed, "output_timed_out", timed_out)
+    return completed
+
+
+def codex_bounded_output_rejection(
+    completed: subprocess.CompletedProcess[str],
+) -> tuple[str, str]:
+    if bool(getattr(completed, "output_timed_out", False)):
+        return (
+            "provider_response_timeout",
+            "codex provider process exceeded its execution timeout",
+        )
+    exceeded = str(getattr(completed, "output_limit_exceeded", "") or "")
+    if exceeded:
+        return (
+            "provider_output_limit_exceeded",
+            f"codex provider output exceeded the bounded byte limit: {exceeded}",
+        )
+    read_error = str(getattr(completed, "output_read_error", "") or "")
+    if read_error:
+        return (
+            "provider_output_read_failed",
+            f"codex provider output could not be read safely: {read_error}",
+        )
+    if bool(getattr(completed, "output_decode_error", False)):
+        return (
+            "provider_output_decode_failed",
+            "codex provider output was not valid UTF-8",
+        )
+    return "", ""
+
+
+def bounded_provider_process_note(completed: subprocess.CompletedProcess[str]) -> str:
+    value = completed.stderr.strip() or completed.stdout.strip()
+    if len(value) <= CODEX_EVIDENCE_NOTE_MAX_CHARS:
+        return value
+    suffix = "... [truncated]"
+    content_limit = max(0, CODEX_EVIDENCE_NOTE_MAX_CHARS - len(suffix))
+    return (value[:content_limit] + suffix)[:CODEX_EVIDENCE_NOTE_MAX_CHARS]
+
+
+def parse_codex_json_output(stdout: str) -> dict[str, Any]:
+    if len(stdout) > CODEX_JSONL_MAX_CHARS:
+        return {}
+    result: dict[str, Any] = {}
+    last_agent_text = ""
+    current_turn_agent_text = ""
+    last_legacy_text = ""
+    legacy_terminal_status = ""
     parsed_any = False
+    current_stream_seen = False
+    current_thread_started = False
+    current_body_seen = False
+    current_terminal_complete = False
+    legacy_stream_seen = False
+    legacy_terminal_count = 0
+    thread_identity: tuple[str, str] | None = None
+    active_current_items: dict[str, str] = {}
+    completed_current_item_ids: set[str] = set()
+    stream_conflict = False
+    event_count = 0
     for line in stdout.splitlines():
         if not line.strip():
             continue
-        event = json.loads(line)
+        event_count += 1
+        if event_count > CODEX_JSONL_MAX_EVENTS or len(line) > CODEX_JSONL_MAX_LINE_CHARS:
+            return {}
+        try:
+            event = json.loads(
+                line,
+                object_pairs_hook=codex_json_object_without_duplicates,
+                parse_constant=codex_json_reject_nonstandard_constant,
+            )
+        except json.JSONDecodeError:
+            raise
+        except (ValueError, RecursionError):
+            return {}
+        if not codex_json_structure_is_safe(event):
+            return {}
         if not isinstance(event, dict):
+            stream_conflict = True
             continue
         parsed_any = True
-        text = codex_event_text(event)
-        if text:
-            last_text = text
-        if event.get("type") == "result" or event.get("subtype") in {"success", "error"}:
-            result.update(event)
+        if current_terminal_complete:
+            stream_conflict = True
+        event_type_value = event.get("type")
+        if not isinstance(event_type_value, str) or not event_type_value:
+            stream_conflict = True
+            event_type = ""
+        else:
+            event_type = event_type_value
+        if event_type not in CODEX_CURRENT_EVENT_TYPES and event_type != "result":
+            stream_conflict = True
+        if event_type == "error":
+            stream_conflict = True
+        if event_type in CODEX_CURRENT_EVENT_TYPES:
+            current_stream_seen = True
+        current_item: dict[str, Any] | None = None
+        if event_type in CODEX_CURRENT_ITEM_EVENT_TYPES:
+            item = event.get("item")
+            if not isinstance(item, dict):
+                stream_conflict = True
+            else:
+                item_type = item.get("type")
+                if not isinstance(item_type, str) or item_type not in CODEX_CURRENT_ITEM_TYPES:
+                    stream_conflict = True
+                elif (
+                    not isinstance(item.get("id"), str)
+                    or not item.get("id", "")
+                    or item.get("id") != item.get("id", "").strip()
+                ):
+                    stream_conflict = True
+                else:
+                    current_item = item
+        if current_item is not None:
+            current_item_id = current_item["id"]
+            current_item_type = current_item["type"]
+            if event_type == "item.started":
+                if (
+                    current_item_type not in CODEX_CURRENT_STARTED_ITEM_TYPES
+                    or current_item_id in active_current_items
+                    or current_item_id in completed_current_item_ids
+                ):
+                    stream_conflict = True
+                else:
+                    active_current_items[current_item_id] = current_item_type
+            elif event_type == "item.updated":
+                if (
+                    current_item_type not in CODEX_CURRENT_UPDATED_ITEM_TYPES
+                    or active_current_items.get(current_item_id) != current_item_type
+                    or current_item_id in completed_current_item_ids
+                ):
+                    stream_conflict = True
+            elif event_type == "item.completed":
+                active_item_type = active_current_items.get(current_item_id)
+                if (
+                    current_item_id in completed_current_item_ids
+                    or (active_item_type is not None and active_item_type != current_item_type)
+                ):
+                    stream_conflict = True
+                else:
+                    active_current_items.pop(current_item_id, None)
+                    completed_current_item_ids.add(current_item_id)
+        if event_type in CODEX_CURRENT_BODY_EVENT_TYPES:
+            current_body_seen = True
+            if not current_thread_started:
+                stream_conflict = True
+            event_thread_id, event_thread_aliases_valid = codex_event_consistent_string(
+                event,
+                "thread_id",
+                "threadId",
+            )
+            event_model, event_model_valid = codex_event_model(event)
+            if not event_thread_aliases_valid or not event_model_valid:
+                stream_conflict = True
+            if any(key in event for key in ("thread_id", "threadId")) and not event_thread_id:
+                stream_conflict = True
+            if event_thread_id and (
+                thread_identity is None or event_thread_id != thread_identity[0]
+            ):
+                stream_conflict = True
+            if event_model and (
+                thread_identity is None or event_model != thread_identity[1]
+            ):
+                stream_conflict = True
+            if event_type != "turn.completed":
+                current_terminal_complete = False
+        if event_type == "thread.started":
+            if current_body_seen or current_thread_started:
+                stream_conflict = True
+            thread_id, thread_aliases_valid = codex_event_consistent_string(event, "thread_id", "threadId")
+            effective_model, model_valid = codex_event_model(event)
+            if not thread_aliases_valid or not model_valid or not thread_id:
+                stream_conflict = True
+            identity = (thread_id, effective_model)
+            if thread_identity is not None and identity != thread_identity:
+                stream_conflict = True
+            else:
+                thread_identity = identity
+            if thread_id:
+                current_thread_started = True
+                result["session_id"] = thread_id
+            if effective_model:
+                result["model"] = effective_model
+            current_terminal_complete = False
+        elif event_type == "turn.started":
+            current_turn_agent_text = ""
+        elif event_type == "item.completed":
+            if current_item is not None and current_item.get("type") == "agent_message":
+                if not any(key in current_item for key in ("result", "message", "text", "content")):
+                    stream_conflict = True
+                else:
+                    item_text, item_text_valid = codex_event_text(current_item)
+                    if not item_text_valid:
+                        stream_conflict = True
+                    else:
+                        # The last completed agent message is authoritative for the turn,
+                        # including an explicitly empty message that clears prior text.
+                        current_turn_agent_text = item_text
+        elif event_type == "turn.completed":
+            if active_current_items:
+                stream_conflict = True
+            usage, usage_valid = codex_event_usage(event)
+            if not usage_valid:
+                stream_conflict = True
+                current_terminal_complete = False
+            else:
+                result["usage"] = usage
+                result["num_turns"] = int(result.get("num_turns") or 0) + 1
+                last_agent_text = current_turn_agent_text
+                current_turn_agent_text = ""
+                current_terminal_complete = True
+        elif event_type == "turn.failed":
+            stream_conflict = True
+            current_terminal_complete = False
+        if event_type == "result":
+            legacy_stream_seen = True
+            legacy_terminal_count += 1
+            if legacy_terminal_count > 1:
+                stream_conflict = True
+            if "subtype" not in event:
+                subtype = ""
+            else:
+                subtype_value = event.get("subtype")
+                if not isinstance(subtype_value, str) or subtype_value not in {"success", "error"}:
+                    stream_conflict = True
+                    continue
+                subtype = subtype_value
+            is_error_present = "is_error" in event
+            is_error_value = event.get("is_error")
+            if is_error_present and not isinstance(is_error_value, bool):
+                stream_conflict = True
+                continue
+            if (
+                subtype in {"success", "error"}
+                and is_error_present
+                and (subtype == "error") != is_error_value
+            ):
+                stream_conflict = True
+                continue
+            is_error = subtype == "error" or is_error_value is True
+            if is_error or subtype not in {"", "success"}:
+                legacy_terminal_status = "error"
+                continue
+            legacy_terminal_status = "success"
+            legacy_text, legacy_text_valid = codex_event_text(event)
+            if not legacy_text_valid:
+                stream_conflict = True
+            elif legacy_text:
+                last_legacy_text = legacy_text
+            session_id, session_aliases_valid = codex_event_consistent_string(event, "session_id", "sessionId")
+            request_id, request_aliases_valid = codex_event_consistent_string(event, "request_id", "requestId")
+            model, model_valid = codex_event_model(event)
+            if not session_aliases_valid or not request_aliases_valid or not model_valid:
+                stream_conflict = True
+            if session_id:
+                result["session_id"] = session_id
+            if request_id:
+                result["request_id"] = request_id
+            if model:
+                result["model"] = model
+            if "usage" in event:
+                typed_usage, usage_valid = codex_event_usage(event)
+                if not usage_valid:
+                    stream_conflict = True
+                else:
+                    result["usage"] = typed_usage
+            for source_keys, target_key in (
+                (("duration_api_ms", "durationApiMs"), "duration_api_ms"),
+                (("num_turns", "numTurns"), "num_turns"),
+            ):
+                value, metric_valid = codex_event_consistent_metric(event, *source_keys)
+                if not metric_valid:
+                    stream_conflict = True
+                elif value is not None:
+                    result[target_key] = value
     if not parsed_any:
         return {}
-    if last_text and not result.get("result"):
-        result["result"] = last_text
+    if legacy_stream_seen and event_count != 1:
+        return {}
+    if stream_conflict or (current_stream_seen and legacy_stream_seen):
+        return {}
+    if legacy_terminal_status == "error":
+        result.pop("result", None)
+    elif last_agent_text and current_thread_started and current_terminal_complete:
+        result["result"] = last_agent_text
+    elif last_legacy_text and not result.get("result"):
+        result["result"] = last_legacy_text
     return result
 
 
@@ -9885,18 +10522,76 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     transcript_path = transcript_dir / f"{safe_id(request_id)}.jsonl"
     command = codex_activation_command(row, codex_exec_role_prompt(row, prompt), cwd)
     started = time.monotonic()
-    completed = subprocess.run(
+    completed = run_command_with_bounded_output(
         command,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
         timeout=env_int("ITB_CODEX_EXEC_DISPATCH_TIMEOUT_SECONDS") or env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
-        check=False,
+        stdout_limit_bytes=CODEX_JSONL_MAX_CHARS,
+        stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
     )
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
     transcript_path.write_text(completed.stdout, encoding="utf-8")
+    output_rejection_type, output_rejection_reason = codex_bounded_output_rejection(completed)
+    if output_rejection_type:
+        reset_response_evidence(
+            row,
+            now,
+            output_rejection_reason,
+            usage_source="codex_exec_json_output_rejected",
+        )
+        update_provider_response_state(state, roster)
+        state["last_agent_dispatch_agent"] = agent_id
+        state["last_agent_dispatch_at"] = now
+        state["last_agent_dispatch_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
+        append_jsonl_atomic(
+            session_dir / "invocation-evidence.jsonl",
+            invocation_evidence_entry(
+                ts=now,
+                runtime=runtime,
+                event_type="agent_dispatch",
+                session_id=session_id,
+                organization_instance_id=organization_instance_id,
+                agent_id=agent_id,
+                result=output_rejection_type,
+                usage_source=row["usage_source"],
+                effective_model=row.get("intended_model", ""),
+                request_id=request_id,
+                duration_api_ms=elapsed_ms,
+                notes=output_rejection_reason,
+                extra={
+                    "transcript_path": str(transcript_path),
+                    "cwd": cwd,
+                    "output_rejection_type": output_rejection_type,
+                },
+            ),
+        )
+        return {
+            "decision": "block",
+            "reason": output_rejection_reason,
+            "agentDispatch": {
+                "agent_id": agent_id,
+                "request_id": request_id,
+                "result": output_rejection_type,
+                "usage_source": row["usage_source"],
+                "transcript_path": str(transcript_path),
+            },
+        }
     if completed.returncode != 0:
+        process_note = bounded_provider_process_note(completed) or "codex provider process failed"
+        reset_response_evidence(
+            row,
+            now,
+            process_note,
+            usage_source="codex_exec_json_process_failed",
+        )
+        update_provider_response_state(state, roster)
+        state["last_agent_dispatch_agent"] = agent_id
+        state["last_agent_dispatch_at"] = now
+        state["last_agent_dispatch_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
         append_jsonl(
             session_dir / "invocation-evidence.jsonl",
             invocation_evidence_entry(
@@ -9911,16 +10606,18 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
                 effective_model=row.get("intended_model", ""),
                 request_id=request_id,
                 duration_api_ms=elapsed_ms,
-                notes=completed.stderr.strip() or completed.stdout.strip(),
+                notes=process_note,
                 extra={"transcript_path": str(transcript_path), "cwd": cwd},
             ),
         )
-        return {"decision": "block", "reason": completed.stderr.strip() or completed.stdout.strip()}
+        return {"decision": "block", "reason": process_note}
 
+    codex_parse_error = ""
     try:
         codex_result = parse_codex_json_output(completed.stdout)
-    except json.JSONDecodeError as exc:
-        return {"decision": "block", "reason": f"codex json output unreadable: {exc}"}
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+        codex_result = {}
+        codex_parse_error = f"codex json output unreadable: {exc}"
 
     input_tokens = int_from_nested(
         codex_result,
@@ -9962,8 +10659,14 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         row["response_status"] = "invoked"
         row["notes"] = "Codex exec one-shot agent-dispatch completed with response evidence."
     else:
-        row["response_status"] = "not_invoked"
-        row["notes"] = "Codex exec one-shot agent-dispatch produced no response text or inference evidence."
+        reset_response_evidence(
+            row,
+            now,
+            codex_parse_error or "Codex exec one-shot agent-dispatch produced no response evidence.",
+            usage_source="codex_exec_json_no_inference",
+        )
+        row["provider_status"] = result_name
+        row["last_request_id"] = output_request_id
 
     update_provider_response_state(state, roster)
     state["last_agent_dispatch_agent"] = agent_id
@@ -9991,7 +10694,11 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             output_tokens=output_tokens,
             duration_api_ms=duration_api_ms,
             num_turns=num_turns,
-            notes="Codex exec one-shot agent-dispatch completed." if result_name == "provider_response_ready" else "Codex exec one-shot produced no inference evidence.",
+            notes=(
+                "Codex exec one-shot agent-dispatch completed."
+                if result_name == "provider_response_ready"
+                else codex_parse_error or "Codex exec one-shot produced no inference evidence."
+            ),
             extra={
                 "provider_session_id": provider_session_id,
                 "transcript_path": str(transcript_path),
@@ -10003,7 +10710,7 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     if result_name != "provider_response_ready":
         return {
             "decision": "block",
-            "reason": "codex exec provider adapter produced no response evidence",
+            "reason": codex_parse_error or "codex exec provider adapter produced no response evidence",
             "agentDispatch": {
                 "agent_id": agent_id,
                 "request_id": output_request_id,
@@ -10404,16 +11111,59 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         cwd = str(hook_input.get("cwd") or state.get("cwd") or os.getcwd())
         command = codex_activation_command(row, prompt, cwd)
         started = time.monotonic()
-        completed = subprocess.run(
+        completed = run_command_with_bounded_output(
             command,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
             timeout=env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
-            check=False,
+            stdout_limit_bytes=CODEX_JSONL_MAX_CHARS,
+            stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
         )
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        output_rejection_type, output_rejection_reason = codex_bounded_output_rejection(completed)
+        if output_rejection_type:
+            reset_response_evidence(
+                row,
+                now,
+                output_rejection_reason,
+                usage_source="codex_exec_json_output_rejected",
+            )
+            update_provider_response_state(state, roster)
+            state["last_provider_activation_agent"] = agent_id
+            state["last_provider_activation_at"] = now
+            state["last_provider_activation_usage_source"] = row["usage_source"]
+            write_json_yaml(roster_path, roster)
+            write_json_yaml(state_path, state)
+            append_jsonl_atomic(
+                session_dir / "invocation-evidence.jsonl",
+                invocation_evidence_entry(
+                    ts=now,
+                    runtime=runtime,
+                    event_type="provider_activation",
+                    session_id=str(session_id),
+                    organization_instance_id=state.get("organization_instance_id", organization_id(str(session_id))),
+                    agent_id=agent_id,
+                    result=output_rejection_type,
+                    usage_source=row["usage_source"],
+                    effective_model=row.get("intended_model", ""),
+                    duration_api_ms=elapsed_ms,
+                    notes=output_rejection_reason,
+                    extra={"output_rejection_type": output_rejection_type},
+                ),
+            )
+            return {"decision": "block", "reason": output_rejection_reason}
         if completed.returncode != 0:
+            process_note = bounded_provider_process_note(completed) or "codex provider process failed"
+            reset_response_evidence(
+                row,
+                now,
+                process_note,
+                usage_source="codex_exec_json_process_failed",
+            )
+            update_provider_response_state(state, roster)
+            state["last_provider_activation_agent"] = agent_id
+            state["last_provider_activation_at"] = now
+            state["last_provider_activation_usage_source"] = row["usage_source"]
+            write_json_yaml(roster_path, roster)
+            write_json_yaml(state_path, state)
             append_jsonl_atomic(
                 session_dir / "invocation-evidence.jsonl",
                 invocation_evidence_entry(
@@ -10426,16 +11176,18 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     result="provider_activation_failed",
                     usage_source="codex_exec_json",
                     effective_model=row.get("intended_model", ""),
-                    notes=completed.stderr.strip() or completed.stdout.strip(),
+                    notes=process_note,
                     duration_api_ms=elapsed_ms,
                 ),
             )
-            return {"decision": "block", "reason": completed.stderr.strip() or completed.stdout.strip()}
+            return {"decision": "block", "reason": process_note}
 
+        codex_parse_error = ""
         try:
             codex_result = parse_codex_json_output(completed.stdout)
-        except json.JSONDecodeError as exc:
-            return {"decision": "block", "reason": f"codex json output unreadable: {exc}"}
+        except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+            codex_result = {}
+            codex_parse_error = f"codex json output unreadable: {exc}"
 
         input_tokens = int_from_nested(
             codex_result,
@@ -10458,18 +11210,13 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         )
         result_text = str(codex_result.get("result") or codex_result.get("message") or "")
         num_turns = int_from_nested(codex_result, [("num_turns",), ("numTurns",)])
-        has_inference_evidence = bool(
-            result_text.strip()
-            or (input_tokens is not None and input_tokens > 0)
-            or (output_tokens is not None and output_tokens > 0)
-            or (codex_duration_api_ms is not None and codex_duration_api_ms > 0)
-            or (num_turns is not None and num_turns > 0)
-        )
+        has_inference_evidence = bool(result_text.strip())
         if not has_inference_evidence:
             reset_response_evidence(
                 row,
                 now,
-                "Codex exec returned no inference evidence; previous response evidence, if any, was invalidated.",
+                codex_parse_error
+                or "Codex exec returned no authoritative response text; previous response evidence, if any, was invalidated.",
                 usage_source="codex_exec_json_no_inference",
             )
             update_provider_response_state(state, roster)
@@ -10495,7 +11242,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     output_tokens=output_tokens,
                     duration_api_ms=duration_api_ms,
                     num_turns=num_turns,
-                    notes="Codex exec returned success but no result, tokens, turns, or API duration.",
+                    notes=codex_parse_error or "Codex exec returned success but no authoritative response text.",
                     extra={
                         "provider_session_id": provider_session_id,
                         "stdout_result_present": bool(result_text),
@@ -10504,7 +11251,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             )
             return {
                 "decision": "block",
-                "reason": "codex provider activation produced no inference evidence",
+                "reason": codex_parse_error or "codex provider activation produced no inference evidence",
             }
 
         row["activation_status"] = "response_active"
@@ -11031,6 +11778,9 @@ def validate_gate_role_transport_evidence(
         "provider_response_timeout",
         "provider_activation_failed",
         "provider_process_failed",
+        "provider_output_limit_exceeded",
+        "provider_output_decode_failed",
+        "provider_output_read_failed",
         "provider_activation_no_inference",
         "provider_request_sent",
         "launch_failed",
@@ -15790,6 +16540,132 @@ def role_queue_completion_wait_config(hook_input: dict[str, Any]) -> tuple[float
         default=bool(profile.get("event_driven", True)),
     )
     return timeout_seconds, poll_interval_seconds, event_driven
+
+
+def queue_watch_deadline_expired(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def queue_watch_snapshot(queue_root: Path, *, deadline: float | None = None) -> str | None:
+    aggregate = 0
+    file_count = 0
+    digest_modulus = 1 << 256
+    scanners: list[Any] = []
+    if queue_watch_deadline_expired(deadline):
+        return None
+    try:
+        root_scanner = os.scandir(queue_root)
+    except FileNotFoundError:
+        if queue_watch_deadline_expired(deadline):
+            return None
+        return "missing"
+    except OSError:
+        return None
+    scanners.append(root_scanner)
+    try:
+        if queue_watch_deadline_expired(deadline):
+            return None
+        while scanners:
+            if queue_watch_deadline_expired(deadline):
+                return None
+            scanner = scanners[-1]
+            try:
+                entry = next(scanner)
+            except StopIteration:
+                scanner.close()
+                scanners.pop()
+                continue
+            except OSError:
+                return None
+            if queue_watch_deadline_expired(deadline):
+                return None
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                if queue_watch_deadline_expired(deadline):
+                    return None
+                continue
+            except OSError:
+                return None
+            if queue_watch_deadline_expired(deadline):
+                return None
+            if stat_module.S_ISDIR(entry_stat.st_mode):
+                try:
+                    child_scanner = os.scandir(entry.path)
+                except FileNotFoundError:
+                    if queue_watch_deadline_expired(deadline):
+                        return None
+                    continue
+                except OSError:
+                    return None
+                if queue_watch_deadline_expired(deadline):
+                    child_scanner.close()
+                    return None
+                scanners.append(child_scanner)
+                continue
+            if not stat_module.S_ISREG(entry_stat.st_mode):
+                continue
+            try:
+                relative_path = Path(entry.path).relative_to(queue_root).as_posix()
+            except ValueError:
+                return None
+            entry_digest = hashlib.sha256(
+                f"{relative_path}\0{entry_stat.st_mtime_ns}\0{entry_stat.st_size}\n".encode("utf-8")
+            ).digest()
+            aggregate = (aggregate + int.from_bytes(entry_digest, "big")) % digest_modulus
+            file_count += 1
+        if queue_watch_deadline_expired(deadline):
+            return None
+        return f"{file_count}:{aggregate:064x}"
+    finally:
+        for scanner in reversed(scanners):
+            scanner.close()
+
+
+def queue_watch_wait_for_event(
+    *,
+    queue_root: Path,
+    timeout_seconds: float,
+    event_driven: bool,
+) -> dict[str, Any]:
+    bounded_timeout = max(0.0, float(timeout_seconds))
+    started = time.monotonic()
+    deadline = started + bounded_timeout
+
+    def wait_result(result: str, wait_result_name: str) -> dict[str, Any]:
+        return {
+            "result": result,
+            "wait_result": wait_result_name,
+            "event_driven": event_driven,
+            "timeout_seconds": bounded_timeout,
+            "duration_sec": round(max(0.0, time.monotonic() - started), 3),
+        }
+
+    def incomplete_snapshot_timeout() -> dict[str, Any]:
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        return wait_result("timeout", "timeout")
+
+    initial_snapshot = queue_watch_snapshot(queue_root, deadline=deadline) if event_driven else ""
+    if initial_snapshot is None:
+        return incomplete_snapshot_timeout()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return wait_result(
+                "timeout" if event_driven else "poll_elapsed",
+                "timeout" if event_driven else "poll",
+            )
+        time.sleep(min(0.05, remaining))
+        if event_driven:
+            current_snapshot = queue_watch_snapshot(queue_root, deadline=deadline)
+            if current_snapshot is None:
+                return incomplete_snapshot_timeout()
+            if queue_watch_deadline_expired(deadline):
+                return wait_result("timeout", "timeout")
+            if current_snapshot != initial_snapshot:
+                return wait_result("queue_changed", "event")
 
 
 def record_role_queue_completion_wait_event(
