@@ -170,6 +170,10 @@ the actual work-order repository and worktree. Current same-rootfs worker
 commissioning may record probe evidence, but `commission-seal` fails closed with
 `worker_denial_facts_not_promotable`. Only stronger denial evidence from a
 separately isolated worker policy domain may activate `managed_worker`.
+The selected VM boundary and path-free input/result contract are documented in
+[`docs/design/isolated-worker-policy-domain.md`](../../../docs/design/isolated-worker-policy-domain.md).
+This is a design and validation contract only; no automatic cross-domain
+transport or promotable isolated-domain observer is shipped yet.
 
 ## Provider Runner
 
