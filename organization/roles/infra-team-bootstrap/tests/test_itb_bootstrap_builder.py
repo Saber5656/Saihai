@@ -143,12 +143,22 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
                 output = builder.provider_activate(
                     runtime="codex",
                     state_root=state_root,
-                    hook_input={"session_id": "headless-session", "agent_id": "tech-backend", "cwd": "/tmp/project"},
+                    hook_input={
+                        "session_id": "headless-session",
+                        "agent_id": "tech-backend",
+                        "cwd": "/tmp/project",
+                        "prompt": "Review provider contract",
+                    },
                 )
 
             self.assertNotIn("decision", output)
             self.assertEqual(output["activation"]["provider"], "openai")
             self.assertTrue(run_mock.called)
+            activation_prompt = run_mock.call_args.args[0][-1]
+            self.assertIn("You are `tech-backend`", activation_prompt)
+            self.assertIn("SKILL.md:", activation_prompt)
+            self.assertIn("follow its Flow Contract", activation_prompt)
+            self.assertIn("Provider request:\nReview provider contract", activation_prompt)
             state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
             roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
             self.assertEqual(state["bootstrap_status"], "headless_metadata")

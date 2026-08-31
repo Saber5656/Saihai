@@ -11136,7 +11136,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         if shutil.which("codex") is None:
             return {"decision": "block", "reason": "codex command not found"}
         cwd = str(hook_input.get("cwd") or state.get("cwd") or os.getcwd())
-        command = codex_activation_command(row, prompt, cwd)
+        command = codex_activation_command(row, codex_exec_role_prompt(row, prompt), cwd)
         started = time.monotonic()
         completed = run_command_with_bounded_output(
             command,
