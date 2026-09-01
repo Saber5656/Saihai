@@ -118,6 +118,8 @@ DEFAULT_CODEX_APPROVAL_POLICY = "never"
 DEFAULT_CLAUDE_HAIKU_SONNET_EFFORT = "medium"
 DEFAULT_CLAUDE_OPUS_EFFORT = "max"
 DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
+PROVIDER_POLICY_LAUNCH_LOCK_ROOT = Path("/tmp").resolve(strict=False) / f"saihai-provider-policy-{os.getuid()}"
+PROVIDER_POLICY_LAUNCH_LOCK_TIMEOUT_SECONDS = 5.0
 DEFAULT_CODEX_REASONING_EFFORT = "max"
 DEFAULT_CODEX_SERVICE_TIER = "fast"
 CODEX_WORKSPACE_WRITE_TOOLS = {"Bash", "Write", "Edit", "Agent"}
@@ -10968,6 +10970,48 @@ CANONICAL_PROVIDER_EXECUTION_FIELDS = (
     "queue_finalizer",
 )
 
+CANONICAL_PROVIDER_ROUTING_FIELDS = (
+    "provider",
+    "execution_mode",
+    "intended_model",
+    "fallback_models",
+)
+
+
+def canonical_provider_routing_candidate(
+    row: dict[str, Any],
+    canonical_row: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Return a canonical routing candidate and normalized changed fields."""
+    candidate = dict(row)
+    changed_fields: list[str] = []
+    for field in CANONICAL_PROVIDER_ROUTING_FIELDS:
+        canonical_value = normalize_cell(canonical_row.get(field))
+        persisted_value = normalize_cell(row.get(field))
+        if field in {"provider", "execution_mode"}:
+            canonical_value = canonical_value.lower()
+            persisted_value = persisted_value.lower()
+        candidate[field] = canonical_value
+        if persisted_value != canonical_value:
+            changed_fields.append(field)
+    return candidate, changed_fields
+
+
+def canonical_execution_policy_digest(execution_row: dict[str, Any]) -> str:
+    """Digest every field that can change provider launch authorization."""
+    digest_payload = {
+        field: execution_row.get(field)
+        for field in CANONICAL_PROVIDER_EXECUTION_FIELDS
+    }
+    return hashlib.sha256(
+        json.dumps(
+            digest_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
 
 def bind_canonical_provider_execution(
     row: dict[str, Any],
@@ -11032,18 +11076,9 @@ def bind_canonical_provider_execution(
     execution_row["intended_model"] = canonical_model
     execution_row["fallback_models"] = ",".join(fallback_models)
     execution_row["allowed_tools"] = canonical_tools
-    digest_payload = {
-        field: execution_row.get(field)
-        for field in CANONICAL_PROVIDER_EXECUTION_FIELDS
-    }
-    execution_row["canonical_execution_policy_digest"] = hashlib.sha256(
-        json.dumps(
-            digest_payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    execution_row["canonical_execution_policy_digest"] = canonical_execution_policy_digest(
+        execution_row
+    )
     return execution_row, ""
 
 
@@ -11061,7 +11096,7 @@ def canonical_codex_execution_policy(
             agent_id,
             organization_instance_id=organization_instance_id,
         )
-    except (OSError, ValueError):
+    except (OSError, ValueError, UnicodeDecodeError):
         return {}, "canonical codex role policy is unavailable"
     if not canonical_row:
         return {}, "canonical codex role policy is unavailable"
@@ -11089,7 +11124,7 @@ def canonical_claude_execution_policy(
             agent_id,
             organization_instance_id=organization_instance_id,
         )
-    except (OSError, ValueError):
+    except (OSError, ValueError, UnicodeDecodeError):
         return {}, "canonical claude role policy is unavailable"
     if not canonical_row:
         return {}, "canonical claude role policy is unavailable"
@@ -11113,6 +11148,99 @@ def canonical_execution_evidence(execution_row: dict[str, Any]) -> dict[str, Any
         "canonical_execution_mode": normalize_cell(execution_row.get("execution_mode")).lower(),
         "intended_model": normalize_cell(execution_row.get("intended_model")),
     }
+
+
+def provider_policy_launch_lock_name() -> str:
+    """Return one stable lock name for the canonical provider-policy namespace."""
+    policy_namespace = [
+        str(SAIHAI_CHECKOUT_ROOT.expanduser().resolve(strict=False)),
+        "infra-team-bootstrap:model-registry",
+        "infra-team-bootstrap:role-agent-registry",
+    ]
+    namespace_digest = hashlib.sha256(
+        json.dumps(policy_namespace, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"{namespace_digest}.flock"
+
+
+def acquire_provider_policy_launch_lease(
+    *,
+    timeout_seconds: float = PROVIDER_POLICY_LAUNCH_LOCK_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Acquire the descriptor lease shared by launches and trusted registry writers."""
+    if timeout_seconds <= 0:
+        raise ValueError("provider policy launch lease timeout must be positive")
+    root = PROVIDER_POLICY_LAUNCH_LOCK_ROOT
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    root_stat = root.lstat()
+    if (
+        not stat_module.S_ISDIR(root_stat.st_mode)
+        or root_stat.st_uid != os.getuid()
+        or stat_module.S_IMODE(root_stat.st_mode) & 0o077
+    ):
+        raise OSError("provider policy launch lock root is unsafe")
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    root_fd = os.open(root, directory_flags)
+    file_fd = -1
+    try:
+        file_fd = os.open(
+            provider_policy_launch_lock_name(),
+            file_flags,
+            0o600,
+            dir_fd=root_fd,
+        )
+        lock_stat = os.fstat(file_fd)
+        if (
+            not stat_module.S_ISREG(lock_stat.st_mode)
+            or lock_stat.st_uid != os.getuid()
+            or stat_module.S_IMODE(lock_stat.st_mode) & 0o077
+        ):
+            raise OSError("provider policy launch lock file is unsafe")
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                fcntl.flock(file_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("provider policy launch lease timed out")
+                time.sleep(0.05)
+        return {
+            "root_fd": root_fd,
+            "file_fd": file_fd,
+            "lease_id": uuid.uuid4().hex,
+            "released": False,
+        }
+    except Exception:
+        if file_fd >= 0:
+            os.close(file_fd)
+        os.close(root_fd)
+        raise
+
+
+def release_provider_policy_launch_lease(
+    lease: dict[str, Any],
+    *,
+    lease_id: str,
+) -> None:
+    """Release only the matching descriptor lease; repeated owner release is safe."""
+    if normalize_cell(lease.get("lease_id")) != normalize_cell(lease_id):
+        raise ValueError("provider policy launch lease identity mismatch")
+    if lease.get("released") is True:
+        return
+    lease["released"] = True
+    file_fd = lease.get("file_fd")
+    root_fd = lease.get("root_fd")
+    try:
+        if isinstance(file_fd, int) and file_fd >= 0:
+            fcntl.flock(file_fd, fcntl.LOCK_UN)
+    finally:
+        if isinstance(file_fd, int) and file_fd >= 0:
+            os.close(file_fd)
+        if isinstance(root_fd, int) and root_fd >= 0:
+            os.close(root_fd)
 
 
 def bind_response_policy_identity(row: dict[str, Any], execution_row: dict[str, Any]) -> None:
@@ -11150,12 +11278,117 @@ def response_policy_identity_is_current(row: dict[str, Any]) -> bool:
     ) == expected_digest
 
 
+def revalidate_canonical_provider_execution(
+    bound_execution_row: dict[str, Any],
+    *,
+    organization_instance_id: str,
+) -> tuple[dict[str, Any], str, str, str]:
+    """Re-read every canonical execution field and compare the launch digest."""
+    initial_digest = normalize_cell(bound_execution_row.get("canonical_execution_policy_digest"))
+    provider = normalize_cell(bound_execution_row.get("provider")).lower()
+    execution_mode = normalize_cell(bound_execution_row.get("execution_mode")).lower()
+    if provider == "openai" and execution_mode == "codex":
+        final_execution_row, policy_error = canonical_codex_execution_policy(
+            bound_execution_row,
+            organization_instance_id=organization_instance_id,
+        )
+    elif provider == "anthropic" and execution_mode == "claude":
+        final_execution_row, policy_error = canonical_claude_execution_policy(
+            bound_execution_row,
+            organization_instance_id=organization_instance_id,
+        )
+    else:
+        final_execution_row = {}
+        policy_error = "bound canonical provider policy is unsupported"
+    final_digest = normalize_cell(final_execution_row.get("canonical_execution_policy_digest"))
+    if policy_error or not initial_digest or final_digest != initial_digest:
+        return {}, PROVIDER_POLICY_DRIFT_NOTE, initial_digest, final_digest
+    return final_execution_row, "", initial_digest, final_digest
+
+
+def launch_provider_with_canonical_policy(
+    *,
+    bound_execution_row: dict[str, Any],
+    organization_instance_id: str,
+    executable_name: str,
+    command_builder: Callable[[dict[str, Any]], list[str]],
+    runner: Callable[..., subprocess.CompletedProcess[str]],
+    timeout: float,
+) -> dict[str, Any]:
+    """Linearize final policy validation and process start under one lease."""
+    initial_digest = normalize_cell(bound_execution_row.get("canonical_execution_policy_digest"))
+    try:
+        lease = acquire_provider_policy_launch_lease()
+    except TimeoutError:
+        return {
+            "status": "lock_timeout",
+            "initial_policy_digest": initial_digest,
+            "launch_policy_digest": "",
+            "launch_lock": "timeout",
+        }
+    except (OSError, ValueError):
+        return {
+            "status": "lock_unavailable",
+            "initial_policy_digest": initial_digest,
+            "launch_policy_digest": "",
+            "launch_lock": "unavailable",
+        }
+
+    lease_id = normalize_cell(lease.get("lease_id"))
+    try:
+        final_execution_row, policy_error, initial_digest, final_digest = (
+            revalidate_canonical_provider_execution(
+                bound_execution_row,
+                organization_instance_id=organization_instance_id,
+            )
+        )
+        if policy_error:
+            return {
+                "status": "policy_drift",
+                "initial_policy_digest": initial_digest,
+                "launch_policy_digest": final_digest,
+                "launch_lock": "acquired",
+            }
+        executable_path = shutil.which(executable_name)
+        if not executable_path:
+            return {
+                "status": "command_unavailable",
+                "execution_row": final_execution_row,
+                "initial_policy_digest": initial_digest,
+                "launch_policy_digest": final_digest,
+                "launch_lock": "acquired",
+            }
+        command = list(command_builder(final_execution_row))
+        if not command:
+            raise ValueError("provider launch command is empty")
+        command[0] = str(Path(executable_path).expanduser().resolve(strict=False))
+
+        def process_started(_process: subprocess.Popen[bytes]) -> None:
+            release_provider_policy_launch_lease(lease, lease_id=lease_id)
+
+        completed = runner(
+            command,
+            timeout=timeout,
+            process_started=process_started,
+        )
+        return {
+            "status": "started",
+            "completed": completed,
+            "execution_row": final_execution_row,
+            "initial_policy_digest": initial_digest,
+            "launch_policy_digest": final_digest,
+            "launch_lock": "released_after_process_start",
+        }
+    finally:
+        release_provider_policy_launch_lease(lease, lease_id=lease_id)
+
+
 def reject_provider_identity_policy(
     *,
     runtime: str,
     state: dict[str, Any],
     roster: list[Any],
-    row: dict[str, Any],
+    row: dict[str, Any] | None,
     session_dir: Path,
     state_path: Path,
     roster_path: Path,
@@ -11165,21 +11398,25 @@ def reject_provider_identity_policy(
     event_type: str,
     reason: str,
     now: str,
+    persist_roster: bool = True,
 ) -> dict[str, Any]:
     """Persist a non-invoking, fail-closed canonical identity rejection."""
-    reset_response_evidence(
-        row,
-        now,
-        reason,
-        usage_source="provider_identity_policy_preflight",
-    )
-    row["provider_status"] = "provider_model_policy_invalid"
+    usage_source = "provider_identity_policy_preflight"
+    if row is not None:
+        reset_response_evidence(
+            row,
+            now,
+            reason,
+            usage_source=usage_source,
+        )
+        row["provider_status"] = "provider_model_policy_invalid"
     update_provider_response_state(state, roster)
     state_prefix = "last_agent_dispatch" if event_type == "agent_dispatch" else "last_provider_activation"
     state[f"{state_prefix}_agent"] = agent_id
     state[f"{state_prefix}_at"] = now
-    state[f"{state_prefix}_usage_source"] = row["usage_source"]
-    write_json_yaml(roster_path, roster)
+    state[f"{state_prefix}_usage_source"] = usage_source
+    if persist_roster:
+        write_json_yaml(roster_path, roster)
     write_json_yaml(state_path, state)
     append_jsonl_atomic(
         session_dir / "invocation-evidence.jsonl",
@@ -11191,7 +11428,7 @@ def reject_provider_identity_policy(
             organization_instance_id=state.get("organization_instance_id", organization_id(session_id)),
             agent_id=agent_id,
             result="provider_model_policy_invalid",
-            usage_source=row["usage_source"],
+            usage_source=usage_source,
             effective_model="",
             request_id=request_id,
             notes=reason,
@@ -11204,10 +11441,92 @@ def reject_provider_identity_policy(
             "agent_id": agent_id,
             "request_id": request_id,
             "result": "provider_model_policy_invalid",
-            "usage_source": row["usage_source"],
+            "usage_source": usage_source,
             "effective_model": "",
         }
     return result
+
+
+def reject_provider_prelaunch_policy(
+    *,
+    runtime: str,
+    state: dict[str, Any],
+    roster: list[Any],
+    row: dict[str, Any],
+    session_dir: Path,
+    state_path: Path,
+    roster_path: Path,
+    session_id: str,
+    agent_id: str,
+    request_id: str,
+    event_type: str,
+    gate_status: str,
+    initial_policy_digest: str,
+    launch_policy_digest: str,
+    launch_lock: str,
+    policy_evidence: dict[str, Any],
+    now: str,
+) -> dict[str, Any]:
+    """Persist a bounded non-invoking launch-policy or lease rejection."""
+    if gate_status == "policy_drift":
+        result_name = "provider_policy_drift"
+        usage_source = "provider_policy_drift_prelaunch"
+        reason = PROVIDER_POLICY_DRIFT_NOTE
+    elif gate_status == "lock_timeout":
+        result_name = "provider_launch_lock_timeout"
+        usage_source = "provider_policy_launch_lock_timeout"
+        reason = "provider policy launch lease timed out"
+    else:
+        result_name = "provider_launch_lock_unavailable"
+        usage_source = "provider_policy_launch_lock_unavailable"
+        reason = "provider policy launch lease is unavailable"
+    reset_response_evidence(row, now, reason, usage_source=usage_source)
+    row["provider_status"] = result_name
+    update_provider_response_state(state, roster)
+    state_prefix = "last_agent_dispatch" if event_type == "agent_dispatch" else "last_provider_activation"
+    state[f"{state_prefix}_agent"] = agent_id
+    state[f"{state_prefix}_at"] = now
+    state[f"{state_prefix}_usage_source"] = usage_source
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
+    append_jsonl_atomic(
+        session_dir / "invocation-evidence.jsonl",
+        invocation_evidence_entry(
+            ts=now,
+            runtime=runtime,
+            event_type=event_type,
+            session_id=session_id,
+            organization_instance_id=state.get(
+                "organization_instance_id",
+                organization_id(session_id),
+            ),
+            agent_id=agent_id,
+            result=result_name,
+            usage_source=usage_source,
+            effective_model="",
+            request_id=request_id,
+            notes=reason,
+            extra={
+                **policy_evidence,
+                "provider_invoked": False,
+                "policy_check_phase": "prelaunch",
+                "policy_drift_detected": gate_status == "policy_drift",
+                "initial_canonical_execution_policy_digest": initial_policy_digest,
+                "launch_policy_digest": launch_policy_digest,
+                "launch_lock": launch_lock,
+            },
+        ),
+    )
+    output: dict[str, Any] = {"decision": "block", "reason": reason}
+    if event_type == "agent_dispatch":
+        output["agentDispatch"] = {
+            "agent_id": agent_id,
+            "request_id": request_id,
+            "result": result_name,
+            "usage_source": usage_source,
+            "effective_model": "",
+        }
+    return output
 
 
 def reject_provider_prompt_policy(
@@ -12247,6 +12566,7 @@ def run_command_with_bounded_output(
     timeout: float,
     stdout_limit_bytes: int = CODEX_JSONL_MAX_CHARS,
     stderr_limit_bytes: int = CODEX_STDERR_MAX_BYTES,
+    process_started: Callable[[subprocess.Popen[bytes]], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if timeout <= 0:
         raise ValueError("timeout must be positive")
@@ -12260,6 +12580,17 @@ def run_command_with_bounded_output(
         text=False,
         start_new_session=True,
     )
+    if process_started is not None:
+        try:
+            process_started(process)
+        except Exception:
+            terminate_process_group(process)
+            wait_for_provider_process(process, timeout=1.0)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            raise
     if process.stdout is None or process.stderr is None:  # pragma: no cover - PIPE contract.
         terminate_process_group(process)
         raise RuntimeError("failed to capture provider process output")
@@ -12377,6 +12708,7 @@ def run_claude_command_with_bounded_output(
     command: list[str],
     *,
     timeout: float,
+    process_started: Callable[[subprocess.Popen[bytes]], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run Claude with byte limits enforced before any transcript persistence."""
     return run_command_with_bounded_output(
@@ -12384,6 +12716,7 @@ def run_claude_command_with_bounded_output(
         timeout=timeout,
         stdout_limit_bytes=CODEX_JSONL_MAX_CHARS,
         stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
+        process_started=process_started,
     )
 
 
@@ -12804,11 +13137,6 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     state.setdefault("cwd", str(hook_input.get("cwd") or os.getcwd()))
     state.setdefault("bootstrap_status", "headless_metadata")
     state.setdefault("readiness_scope", "metadata_only")
-    roster = read_json(roster_path) if roster_path.exists() else role_agent_rows(
-        organization_instance_id=organization_instance_id,
-    )
-    if not isinstance(roster, list):
-        return {"decision": "block", "reason": "roster.json is not a list"}
     agent_id = normalize_cell(hook_input.get("agent_id") or hook_input.get("agentId"))
     prompt = str(hook_input.get("prompt") or "")
     if not agent_id:
@@ -12816,10 +13144,66 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     if not prompt.strip():
         return {"decision": "block", "reason": "codex exec provider adapter requires prompt"}
     request_id = exact_hook_request_id(hook_input)
+    try:
+        roster = read_json(roster_path) if roster_path.exists() else role_agent_rows(
+            organization_instance_id=organization_instance_id,
+        )
+    except (OSError, ValueError, UnicodeDecodeError):
+        return reject_provider_identity_policy(
+            runtime=runtime,
+            state=state,
+            roster=[],
+            row=None,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            reason="canonical codex role policy is unavailable",
+            now=now,
+            persist_roster=False,
+        )
+    if not isinstance(roster, list):
+        return reject_provider_identity_policy(
+            runtime=runtime,
+            state=state,
+            roster=[],
+            row=None,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            reason="roster.json is not a list",
+            now=now,
+            persist_roster=False,
+        )
 
     row = next((item for item in roster if isinstance(item, dict) and item.get("agent_id") == agent_id), None)
     if row is None:
-        row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+        try:
+            row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+        except (OSError, ValueError, UnicodeDecodeError):
+            return reject_provider_identity_policy(
+                runtime=runtime,
+                state=state,
+                roster=roster,
+                row=None,
+                session_dir=session_dir,
+                state_path=state_path,
+                roster_path=roster_path,
+                session_id=session_id,
+                agent_id=agent_id,
+                request_id=request_id,
+                event_type="agent_dispatch",
+                reason="canonical codex role policy is unavailable",
+                now=now,
+                persist_roster=False,
+            )
         if not row:
             return {"decision": "block", "reason": f"agent not found in registry: {agent_id}"}
         roster.append(row)
@@ -12864,25 +13248,6 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             policy_evidence=policy_evidence,
             now=now,
         )
-    if shutil.which("codex") is None:
-        return reject_provider_command_unavailable(
-            runtime=runtime,
-            state=state,
-            roster=roster,
-            row=row,
-            session_dir=session_dir,
-            state_path=state_path,
-            roster_path=roster_path,
-            session_id=session_id,
-            agent_id=agent_id,
-            request_id=request_id,
-            event_type="agent_dispatch",
-            provider_label="codex",
-            usage_source="codex_exec_json_command_unavailable",
-            policy_evidence=policy_evidence,
-            now=now,
-        )
-
     cwd = str(hook_input.get("cwd") or state.get("cwd") or os.getcwd())
     transcript_path = planned_provider_transcript_path(
         session_dir,
@@ -12890,14 +13255,19 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         request_id=request_id,
         suffix=".jsonl",
     )
-    command = codex_activation_command(execution_row, codex_exec_role_prompt(execution_row, prompt), cwd)
     started = time.monotonic()
     try:
-        completed = run_command_with_bounded_output(
-            command,
+        launch = launch_provider_with_canonical_policy(
+            bound_execution_row=execution_row,
+            organization_instance_id=organization_instance_id,
+            executable_name="codex",
+            command_builder=lambda final_row: codex_activation_command(
+                final_row,
+                codex_exec_role_prompt(final_row, prompt),
+                cwd,
+            ),
+            runner=run_command_with_bounded_output,
             timeout=env_int("ITB_CODEX_EXEC_DISPATCH_TIMEOUT_SECONDS") or env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
-            stdout_limit_bytes=CODEX_JSONL_MAX_CHARS,
-            stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
         )
     except OSError as exc:
         elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -12932,11 +13302,68 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
                 notes=process_note,
                 extra={
                     **policy_evidence,
+                    "provider_invoked": False,
+                    "policy_check_phase": "launch",
+                    "initial_canonical_execution_policy_digest": normalize_cell(
+                        execution_row.get("canonical_execution_policy_digest")
+                    ),
+                    "launch_policy_digest": normalize_cell(
+                        execution_row.get("canonical_execution_policy_digest")
+                    ),
                     **provider_oserror_evidence(exc),
                 },
             ),
         )
         return {"decision": "block", "reason": process_note}
+    if launch["status"] in {"policy_drift", "lock_timeout", "lock_unavailable"}:
+        return reject_provider_prelaunch_policy(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            gate_status=launch["status"],
+            initial_policy_digest=launch["initial_policy_digest"],
+            launch_policy_digest=launch["launch_policy_digest"],
+            launch_lock=launch["launch_lock"],
+            policy_evidence=policy_evidence,
+            now=now,
+        )
+    execution_row = launch["execution_row"]
+    canonical_intended_model = normalize_cell(execution_row.get("intended_model"))
+    policy_evidence = {
+        **canonical_execution_evidence(execution_row),
+        "initial_canonical_execution_policy_digest": launch["initial_policy_digest"],
+        "launch_policy_digest": launch["launch_policy_digest"],
+        "launch_lock": launch["launch_lock"],
+        "policy_check_phase": "postlaunch" if launch["status"] == "started" else "prelaunch",
+        "provider_invoked": launch["status"] == "started",
+    }
+    if launch["status"] == "command_unavailable":
+        return reject_provider_command_unavailable(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            provider_label="codex",
+            usage_source="codex_exec_json_command_unavailable",
+            policy_evidence=policy_evidence,
+            now=now,
+        )
+    completed = launch["completed"]
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
     output_rejection_type, output_rejection_reason = codex_bounded_output_rejection(completed)
@@ -13279,26 +13706,76 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     state.setdefault("cwd", str(hook_input.get("cwd") or os.getcwd()))
     state.setdefault("bootstrap_status", "headless_metadata")
     state.setdefault("readiness_scope", "metadata_only")
-    roster = read_json(roster_path) if not roster_missing else role_agent_rows(
-        organization_instance_id=organization_instance_id,
-    )
-    if not isinstance(roster, list):
-        return {"decision": "block", "reason": "roster.json is not a list"}
-
     agent_id = normalize_cell(hook_input.get("agent_id") or hook_input.get("agentId"))
     prompt = str(hook_input.get("prompt") or "")
     if not agent_id:
         return {"decision": "block", "reason": "claude CLI provider adapter requires agent_id"}
     if not prompt.strip():
         return {"decision": "block", "reason": "claude CLI provider adapter requires prompt"}
+    request_id = exact_hook_request_id(hook_input)
+    try:
+        roster = read_json(roster_path) if not roster_missing else role_agent_rows(
+            organization_instance_id=organization_instance_id,
+        )
+    except (OSError, ValueError, UnicodeDecodeError):
+        return reject_provider_identity_policy(
+            runtime=runtime,
+            state=state,
+            roster=[],
+            row=None,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            reason="canonical claude role policy is unavailable",
+            now=now,
+            persist_roster=False,
+        )
+    if not isinstance(roster, list):
+        return reject_provider_identity_policy(
+            runtime=runtime,
+            state=state,
+            roster=[],
+            row=None,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            reason="roster.json is not a list",
+            now=now,
+            persist_roster=False,
+        )
 
     row = next((item for item in roster if isinstance(item, dict) and item.get("agent_id") == agent_id), None)
     if row is None:
-        row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+        try:
+            row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+        except (OSError, ValueError, UnicodeDecodeError):
+            return reject_provider_identity_policy(
+                runtime=runtime,
+                state=state,
+                roster=roster,
+                row=None,
+                session_dir=session_dir,
+                state_path=state_path,
+                roster_path=roster_path,
+                session_id=session_id,
+                agent_id=agent_id,
+                request_id=request_id,
+                event_type="agent_dispatch",
+                reason="canonical claude role policy is unavailable",
+                now=now,
+                persist_roster=False,
+            )
         if not row:
             return {"decision": "block", "reason": f"agent not found in registry: {agent_id}"}
         roster.append(row)
-    request_id = exact_hook_request_id(hook_input)
     execution_row, model_policy_error = canonical_claude_execution_policy(
         row,
         organization_instance_id=organization_instance_id,
@@ -13340,37 +13817,32 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             policy_evidence=policy_evidence,
             now=now,
         )
-    if shutil.which("claude") is None:
-        return reject_provider_command_unavailable(
-            runtime=runtime,
-            state=state,
-            roster=roster,
-            row=row,
-            session_dir=session_dir,
-            state_path=state_path,
-            roster_path=roster_path,
-            session_id=session_id,
-            agent_id=agent_id,
-            request_id=request_id,
-            event_type="agent_dispatch",
-            provider_label="claude",
-            usage_source="claude_print_json_command_unavailable",
-            policy_evidence=policy_evidence,
-            now=now,
-        )
-
     transcript_path = planned_provider_transcript_path(
         session_dir,
         agent_id=agent_id,
         request_id=request_id,
         suffix=".json",
     )
-    max_budget_usd, budget_source = claude_activation_budget(execution_row, hook_input)
-    command = claude_activation_command(execution_row, claude_cli_role_prompt(execution_row, prompt), max_budget_usd)
+    max_budget_usd = 0.0
+    budget_source = "unavailable"
+
+    def build_claude_dispatch_command(final_row: dict[str, Any]) -> list[str]:
+        nonlocal max_budget_usd, budget_source
+        max_budget_usd, budget_source = claude_activation_budget(final_row, hook_input)
+        return claude_activation_command(
+            final_row,
+            claude_cli_role_prompt(final_row, prompt),
+            max_budget_usd,
+        )
+
     started = time.monotonic()
     try:
-        completed = run_claude_command_with_bounded_output(
-            command,
+        launch = launch_provider_with_canonical_policy(
+            bound_execution_row=execution_row,
+            organization_instance_id=organization_instance_id,
+            executable_name="claude",
+            command_builder=build_claude_dispatch_command,
+            runner=run_claude_command_with_bounded_output,
             timeout=env_int("ITB_CLAUDE_CLI_DISPATCH_TIMEOUT_SECONDS") or env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
@@ -13406,6 +13878,14 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
                 notes=process_note,
                 extra={
                     **policy_evidence,
+                    "provider_invoked": False,
+                    "policy_check_phase": "launch",
+                    "initial_canonical_execution_policy_digest": normalize_cell(
+                        execution_row.get("canonical_execution_policy_digest")
+                    ),
+                    "launch_policy_digest": normalize_cell(
+                        execution_row.get("canonical_execution_policy_digest")
+                    ),
                     **exception_evidence,
                     "transcript_path": str(transcript_path),
                     "transcript_written": False,
@@ -13415,6 +13895,55 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             ),
         )
         return {"decision": "block", "reason": process_note}
+    if launch["status"] in {"policy_drift", "lock_timeout", "lock_unavailable"}:
+        return reject_provider_prelaunch_policy(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            gate_status=launch["status"],
+            initial_policy_digest=launch["initial_policy_digest"],
+            launch_policy_digest=launch["launch_policy_digest"],
+            launch_lock=launch["launch_lock"],
+            policy_evidence=policy_evidence,
+            now=now,
+        )
+    execution_row = launch["execution_row"]
+    canonical_intended_model = normalize_cell(execution_row.get("intended_model"))
+    policy_evidence = {
+        **canonical_execution_evidence(execution_row),
+        "initial_canonical_execution_policy_digest": launch["initial_policy_digest"],
+        "launch_policy_digest": launch["launch_policy_digest"],
+        "launch_lock": launch["launch_lock"],
+        "policy_check_phase": "postlaunch" if launch["status"] == "started" else "prelaunch",
+        "provider_invoked": launch["status"] == "started",
+    }
+    if launch["status"] == "command_unavailable":
+        return reject_provider_command_unavailable(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            provider_label="claude",
+            usage_source="claude_print_json_command_unavailable",
+            policy_evidence=policy_evidence,
+            now=now,
+        )
+    completed = launch["completed"]
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
     output_rejection_type, output_rejection_reason = claude_bounded_output_rejection(
@@ -13789,7 +14318,7 @@ def agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]
             agent_id,
             organization_instance_id=organization_instance_id,
         )
-    except (OSError, ValueError):
+    except (OSError, ValueError, UnicodeDecodeError):
         row = {}
     if not row:
         return {"decision": "block", "reason": "canonical role policy is unavailable"}
@@ -13904,30 +14433,85 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     state.setdefault("readiness_scope", "metadata_only")
     state.setdefault("outputs", {"state_dir": str(session_dir)})
 
-    roster = read_json(roster_path) if not roster_missing else role_agent_rows(
-        organization_instance_id=organization_instance_id,
-    )
+    try:
+        roster = read_json(roster_path) if not roster_missing else role_agent_rows(
+            organization_instance_id=organization_instance_id,
+        )
+    except (OSError, ValueError, UnicodeDecodeError):
+        return reject_provider_identity_policy(
+            runtime=runtime,
+            state=state,
+            roster=[],
+            row=None,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=exact_hook_request_id(hook_input, prefix="policy"),
+            event_type="provider_activation",
+            reason="canonical provider role policy is unavailable",
+            now=now,
+            persist_roster=False,
+        )
     if not isinstance(roster, list):
-        return {"decision": "block", "reason": "roster.json is not a list"}
+        return reject_provider_identity_policy(
+            runtime=runtime,
+            state=state,
+            roster=[],
+            row=None,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=exact_hook_request_id(hook_input, prefix="policy"),
+            event_type="provider_activation",
+            reason="roster.json is not a list",
+            now=now,
+            persist_roster=False,
+        )
 
-    row = next((item for item in roster if item.get("agent_id") == agent_id), None)
+    row = next(
+        (
+            item
+            for item in roster
+            if isinstance(item, dict) and item.get("agent_id") == agent_id
+        ),
+        None,
+    )
     if row is None:
         if roster_missing:
-            row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+            try:
+                row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+            except (OSError, ValueError, UnicodeDecodeError):
+                return reject_provider_identity_policy(
+                    runtime=runtime,
+                    state=state,
+                    roster=roster,
+                    row=None,
+                    session_dir=session_dir,
+                    state_path=state_path,
+                    roster_path=roster_path,
+                    session_id=str(session_id),
+                    agent_id=agent_id,
+                    request_id=exact_hook_request_id(hook_input, prefix="policy"),
+                    event_type="provider_activation",
+                    reason="canonical provider role policy is unavailable",
+                    now=now,
+                    persist_roster=False,
+                )
             if not row:
                 return {"decision": "block", "reason": f"agent not found in registry: {agent_id}"}
             roster.append(row)
         else:
             return {"decision": "block", "reason": f"agent not found in roster: {agent_id}"}
-    registry_row = registry_row_for(agent_id)
-    if not row.get("fallback_models") and registry_row.get("fallback_models"):
-        row["fallback_models"] = registry_row["fallback_models"]
     try:
         canonical_row = role_agent_row_for(
             agent_id,
             organization_instance_id=organization_instance_id,
         )
-    except (OSError, ValueError):
+    except (OSError, ValueError, UnicodeDecodeError):
         canonical_row = {}
     if not canonical_row:
         request_id = exact_hook_request_id(hook_input, prefix="policy")
@@ -13943,9 +14527,13 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             agent_id=agent_id,
             request_id=request_id,
             event_type="provider_activation",
-            reason="canonical codex role policy is unavailable",
+            reason="canonical provider role policy is unavailable",
             now=now,
         )
+    routing_candidate, routing_changed_fields = canonical_provider_routing_candidate(
+        row,
+        canonical_row,
+    )
     canonical_provider = normalize_cell(canonical_row.get("provider")).lower()
     canonical_execution_mode = normalize_cell(canonical_row.get("execution_mode")).lower()
     canonical_intended_model = ""
@@ -13954,7 +14542,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     provider_policy_error = ""
     if canonical_provider == "openai" and canonical_execution_mode == "codex":
         codex_execution_row, model_policy_error = canonical_codex_execution_policy(
-            row,
+            routing_candidate,
             organization_instance_id=organization_instance_id,
         )
         provider_policy_error = model_policy_error
@@ -13962,7 +14550,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         provider_runtime = ("codex_exec", "codex")
     elif canonical_provider == "anthropic" and canonical_execution_mode == "claude":
         claude_execution_row, provider_policy_error = canonical_claude_execution_policy(
-            row,
+            routing_candidate,
             organization_instance_id=organization_instance_id,
         )
         canonical_intended_model = normalize_cell(claude_execution_row.get("intended_model"))
@@ -13970,6 +14558,11 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     else:
         provider_policy_error = "canonical provider policy is unsupported"
         provider_runtime = None
+    if provider_policy_error in {
+        "canonical codex role policy is unavailable",
+        "canonical claude role policy is unavailable",
+    }:
+        provider_policy_error = "canonical provider role policy is unavailable"
     if provider_policy_error:
         request_id = exact_hook_request_id(hook_input, prefix="policy")
         return reject_provider_identity_policy(
@@ -13992,9 +14585,43 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         if provider_runtime == ("codex_exec", "codex")
         else claude_execution_row
     )
-    bind_response_policy_identity(row, bound_execution_row)
     policy_evidence = canonical_execution_evidence(bound_execution_row)
     preflight_request_id = exact_hook_request_id(hook_input)
+    if routing_changed_fields:
+        reset_response_evidence(
+            row,
+            now,
+            "Persisted provider routing reconciled to canonical role policy.",
+            usage_source="canonical_provider_routing_reconciliation",
+        )
+        for field in CANONICAL_PROVIDER_ROUTING_FIELDS:
+            row[field] = routing_candidate[field]
+    bind_response_policy_identity(row, bound_execution_row)
+    if routing_changed_fields:
+        update_provider_response_state(state, roster)
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
+        append_jsonl_atomic(
+            session_dir / "invocation-evidence.jsonl",
+            invocation_evidence_entry(
+                ts=now,
+                runtime=runtime,
+                event_type="provider_activation",
+                session_id=str(session_id),
+                organization_instance_id=organization_instance_id,
+                agent_id=agent_id,
+                result="provider_routing_reconciled",
+                usage_source="canonical_provider_routing_reconciliation",
+                effective_model="",
+                request_id=preflight_request_id,
+                notes="Persisted provider routing reconciled to canonical role policy.",
+                extra={
+                    **policy_evidence,
+                    "provider_invoked": False,
+                    "routing_fields_changed": routing_changed_fields,
+                },
+            ),
+        )
     git_policy_error = validate_git_operation_for_role(bound_execution_row, prompt)
     if git_policy_error:
         return reject_provider_prompt_policy(
@@ -14017,41 +14644,24 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         write_json_yaml(state_path, state)
     if roster_missing:
         write_json_yaml(roster_path, roster)
-    budget_row = claude_execution_row if provider_runtime == ("claude_cli", "claude") else row
-    max_budget_usd, budget_source = claude_activation_budget(budget_row, hook_input)
+    max_budget_usd = 0.0
+    budget_source = "unavailable"
 
     if provider_runtime == ("codex_exec", "codex"):
-        if shutil.which("codex") is None:
-            return reject_provider_command_unavailable(
-                runtime=runtime,
-                state=state,
-                roster=roster,
-                row=row,
-                session_dir=session_dir,
-                state_path=state_path,
-                roster_path=roster_path,
-                session_id=str(session_id),
-                agent_id=agent_id,
-                request_id=preflight_request_id,
-                event_type="provider_activation",
-                provider_label="codex",
-                usage_source="codex_exec_json_command_unavailable",
-                policy_evidence=policy_evidence,
-                now=now,
-            )
         cwd = str(hook_input.get("cwd") or state.get("cwd") or os.getcwd())
-        command = codex_activation_command(
-            codex_execution_row,
-            codex_exec_role_prompt(codex_execution_row, prompt),
-            cwd,
-        )
         started = time.monotonic()
         try:
-            completed = run_command_with_bounded_output(
-                command,
+            launch = launch_provider_with_canonical_policy(
+                bound_execution_row=codex_execution_row,
+                organization_instance_id=organization_instance_id,
+                executable_name="codex",
+                command_builder=lambda final_row: codex_activation_command(
+                    final_row,
+                    codex_exec_role_prompt(final_row, prompt),
+                    cwd,
+                ),
+                runner=run_command_with_bounded_output,
                 timeout=env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
-                stdout_limit_bytes=CODEX_JSONL_MAX_CHARS,
-                stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
             )
         except OSError as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -14088,11 +14698,68 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     notes=process_note,
                     extra={
                         **policy_evidence,
+                        "provider_invoked": False,
+                        "policy_check_phase": "launch",
+                        "initial_canonical_execution_policy_digest": normalize_cell(
+                            codex_execution_row.get("canonical_execution_policy_digest")
+                        ),
+                        "launch_policy_digest": normalize_cell(
+                            codex_execution_row.get("canonical_execution_policy_digest")
+                        ),
                         **provider_oserror_evidence(exc),
                     },
                 ),
             )
             return {"decision": "block", "reason": process_note}
+        if launch["status"] in {"policy_drift", "lock_timeout", "lock_unavailable"}:
+            return reject_provider_prelaunch_policy(
+                runtime=runtime,
+                state=state,
+                roster=roster,
+                row=row,
+                session_dir=session_dir,
+                state_path=state_path,
+                roster_path=roster_path,
+                session_id=str(session_id),
+                agent_id=agent_id,
+                request_id=preflight_request_id,
+                event_type="provider_activation",
+                gate_status=launch["status"],
+                initial_policy_digest=launch["initial_policy_digest"],
+                launch_policy_digest=launch["launch_policy_digest"],
+                launch_lock=launch["launch_lock"],
+                policy_evidence=policy_evidence,
+                now=now,
+            )
+        codex_execution_row = launch["execution_row"]
+        canonical_intended_model = normalize_cell(codex_execution_row.get("intended_model"))
+        policy_evidence = {
+            **canonical_execution_evidence(codex_execution_row),
+            "initial_canonical_execution_policy_digest": launch["initial_policy_digest"],
+            "launch_policy_digest": launch["launch_policy_digest"],
+            "launch_lock": launch["launch_lock"],
+            "policy_check_phase": "postlaunch" if launch["status"] == "started" else "prelaunch",
+            "provider_invoked": launch["status"] == "started",
+        }
+        if launch["status"] == "command_unavailable":
+            return reject_provider_command_unavailable(
+                runtime=runtime,
+                state=state,
+                roster=roster,
+                row=row,
+                session_dir=session_dir,
+                state_path=state_path,
+                roster_path=roster_path,
+                session_id=str(session_id),
+                agent_id=agent_id,
+                request_id=preflight_request_id,
+                event_type="provider_activation",
+                provider_label="codex",
+                usage_source="codex_exec_json_command_unavailable",
+                policy_evidence=policy_evidence,
+                now=now,
+            )
+        completed = launch["completed"]
         elapsed_ms = int((time.monotonic() - started) * 1000)
         output_rejection_type, output_rejection_reason = codex_bounded_output_rejection(completed)
         if output_rejection_type:
@@ -14424,36 +15091,25 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             "decision": "block",
             "reason": f"agent is not routed to Claude provider: {agent_id} provider={row.get('provider', '')}",
         }
-    if shutil.which("claude") is None:
-        return reject_provider_command_unavailable(
-            runtime=runtime,
-            state=state,
-            roster=roster,
-            row=row,
-            session_dir=session_dir,
-            state_path=state_path,
-            roster_path=roster_path,
-            session_id=str(session_id),
-            agent_id=agent_id,
-            request_id=preflight_request_id,
-            event_type="provider_activation",
-            provider_label="claude",
-            usage_source="claude_print_json_command_unavailable",
-            policy_evidence=policy_evidence,
-            now=now,
-        )
-
     transcript_path = planned_provider_transcript_path(
         session_dir,
         agent_id=agent_id,
         request_id=preflight_request_id,
         suffix=".json",
     )
-    command = claude_activation_command(claude_execution_row, prompt, max_budget_usd)
+    def build_claude_activation_command(final_row: dict[str, Any]) -> list[str]:
+        nonlocal max_budget_usd, budget_source
+        max_budget_usd, budget_source = claude_activation_budget(final_row, hook_input)
+        return claude_activation_command(final_row, prompt, max_budget_usd)
+
     started = time.monotonic()
     try:
-        completed = run_claude_command_with_bounded_output(
-            command,
+        launch = launch_provider_with_canonical_policy(
+            bound_execution_row=claude_execution_row,
+            organization_instance_id=organization_instance_id,
+            executable_name="claude",
+            command_builder=build_claude_activation_command,
+            runner=run_claude_command_with_bounded_output,
             timeout=env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
@@ -14491,6 +15147,14 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 notes=process_note,
                 extra={
                     **policy_evidence,
+                    "provider_invoked": False,
+                    "policy_check_phase": "launch",
+                    "initial_canonical_execution_policy_digest": normalize_cell(
+                        claude_execution_row.get("canonical_execution_policy_digest")
+                    ),
+                    "launch_policy_digest": normalize_cell(
+                        claude_execution_row.get("canonical_execution_policy_digest")
+                    ),
                     **exception_evidence,
                     "transcript_path": str(transcript_path),
                     "transcript_written": False,
@@ -14500,6 +15164,55 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             ),
         )
         return {"decision": "block", "reason": process_note}
+    if launch["status"] in {"policy_drift", "lock_timeout", "lock_unavailable"}:
+        return reject_provider_prelaunch_policy(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=preflight_request_id,
+            event_type="provider_activation",
+            gate_status=launch["status"],
+            initial_policy_digest=launch["initial_policy_digest"],
+            launch_policy_digest=launch["launch_policy_digest"],
+            launch_lock=launch["launch_lock"],
+            policy_evidence=policy_evidence,
+            now=now,
+        )
+    claude_execution_row = launch["execution_row"]
+    canonical_intended_model = normalize_cell(claude_execution_row.get("intended_model"))
+    policy_evidence = {
+        **canonical_execution_evidence(claude_execution_row),
+        "initial_canonical_execution_policy_digest": launch["initial_policy_digest"],
+        "launch_policy_digest": launch["launch_policy_digest"],
+        "launch_lock": launch["launch_lock"],
+        "policy_check_phase": "postlaunch" if launch["status"] == "started" else "prelaunch",
+        "provider_invoked": launch["status"] == "started",
+    }
+    if launch["status"] == "command_unavailable":
+        return reject_provider_command_unavailable(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=preflight_request_id,
+            event_type="provider_activation",
+            provider_label="claude",
+            usage_source="claude_print_json_command_unavailable",
+            policy_evidence=policy_evidence,
+            now=now,
+        )
+    completed = launch["completed"]
     elapsed_ms = int((time.monotonic() - started) * 1000)
     output_rejection_type, output_rejection_reason = claude_bounded_output_rejection(
         completed

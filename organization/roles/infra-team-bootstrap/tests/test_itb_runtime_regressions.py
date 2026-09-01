@@ -27,6 +27,12 @@ def load_builder_module():
     return module
 
 
+def policy_load_exception(exception_type, sensitive_detail: str) -> BaseException:
+    if exception_type is UnicodeDecodeError:
+        return UnicodeDecodeError("utf-8", b"\xff", 0, 1, sensitive_detail)
+    return exception_type(sensitive_detail)
+
+
 class ScandirStub:
     def __init__(self, entries=(), *, error: OSError | None = None):
         self._entries = iter(entries)
@@ -1625,6 +1631,53 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
         """Ignore persisted unknown routing and reject malformed canonical policy."""
         builder = load_builder_module()
 
+        for exception_type in (OSError, ValueError, UnicodeDecodeError):
+            case = f"canonical_lookup_{exception_type.__name__}"
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                sensitive_detail = f"{case}-private-registry-detail"
+                with mock.patch.object(
+                    builder,
+                    "role_agent_row_for",
+                    side_effect=policy_load_exception(exception_type, sensitive_detail),
+                ), mock.patch.object(
+                    builder,
+                    "codex_exec_agent_dispatch",
+                ) as codex_mock, mock.patch.object(
+                    builder,
+                    "claude_cli_agent_dispatch",
+                ) as claude_mock, mock.patch.object(
+                    builder.shutil,
+                    "which",
+                ) as which_mock, mock.patch.object(
+                    builder,
+                    "run_command_with_bounded_output",
+                ) as codex_runner, mock.patch.object(
+                    builder,
+                    "run_claude_command_with_bounded_output",
+                ) as claude_runner:
+                    output = builder.agent_dispatch(
+                        runtime="codex",
+                        state_root=Path(tmp),
+                        hook_input={
+                            "session_id": "session",
+                            "organization_instance_id": "org-generic-policy-load",
+                            "agent_id": "tech-backend",
+                            "request_id": f"req-{case}",
+                            "prompt": "Review only.",
+                        },
+                    )
+
+                self.assertEqual(
+                    output,
+                    {"decision": "block", "reason": "canonical role policy is unavailable"},
+                )
+                self.assertNotIn(sensitive_detail, json.dumps(output, sort_keys=True))
+                codex_mock.assert_not_called()
+                claude_mock.assert_not_called()
+                which_mock.assert_not_called()
+                codex_runner.assert_not_called()
+                claude_runner.assert_not_called()
+
         with self.subTest(case="unknown_persisted_role"), tempfile.TemporaryDirectory() as tmp:
             state_root = Path(tmp)
             session_dir = state_root / "session"
@@ -1894,6 +1947,662 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                 self.assertEqual(evidence["canonical_provider"], "anthropic")
                 self.assertEqual(evidence["canonical_execution_mode"], "claude")
                 self.assertEqual(evidence["intended_model"], canonical_claude["intended_model"])
+
+    def test_malformed_provider_rosters_persist_fail_closed_evidence(self) -> None:
+        """Reject non-list and non-UTF-8 rosters without retaining stale readiness."""
+        builder = load_builder_module()
+        consumers = (
+            (
+                "codex",
+                builder.codex_exec_agent_dispatch,
+                "canonical codex role policy is unavailable",
+                True,
+            ),
+            (
+                "claude",
+                builder.claude_cli_agent_dispatch,
+                "canonical claude role policy is unavailable",
+                True,
+            ),
+            (
+                "activation",
+                builder.provider_activate,
+                "canonical provider role policy is unavailable",
+                False,
+            ),
+        )
+        for consumer_label, consumer, decode_reason, has_dispatch_result in consumers:
+            for payload_kind in ("non_list", "invalid_utf8"):
+                case = f"{consumer_label}_{payload_kind}"
+                with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                    state_root = Path(tmp)
+                    session_dir = state_root / "session"
+                    session_dir.mkdir(parents=True)
+                    (session_dir / "bootstrap.json").write_text(
+                        json.dumps(
+                            {
+                                "organization_instance_id": "org-malformed-roster",
+                                "provider_response_ready_count": 1,
+                                "provider_response_scope": "response_evidence",
+                                "readiness_scope": "response_evidence",
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    sensitive_detail = f"{case}-private-roster-detail"
+                    if payload_kind == "non_list":
+                        roster_bytes = json.dumps(
+                            {
+                                "agent_id": "tech-backend",
+                                "response_status": "invoked",
+                                "private": sensitive_detail,
+                            }
+                        ).encode("utf-8")
+                        expected_reason = "roster.json is not a list"
+                    else:
+                        roster_bytes = b"\xff" + sensitive_detail.encode("utf-8")
+                        expected_reason = decode_reason
+                    roster_path = session_dir / "roster.json"
+                    roster_path.write_bytes(roster_bytes)
+
+                    with mock.patch.object(builder.shutil, "which") as which_mock, mock.patch.object(
+                        builder,
+                        "run_command_with_bounded_output",
+                    ) as codex_mock, mock.patch.object(
+                        builder,
+                        "run_claude_command_with_bounded_output",
+                    ) as claude_mock:
+                        output = consumer(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input={
+                                "session_id": "session",
+                                "organization_instance_id": "org-malformed-roster",
+                                "agent_id": "tech-backend",
+                                "request_id": f"req-{case}",
+                                "cwd": "/tmp/project",
+                                "prompt": "Review only.",
+                            },
+                        )
+
+                    state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+                    evidence = json.loads(
+                        (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+                    )
+                    serialized = json.dumps(
+                        {"output": output, "state": state, "evidence": evidence},
+                        sort_keys=True,
+                    )
+                    self.assertEqual(output["decision"], "block")
+                    self.assertEqual(output["reason"], expected_reason)
+                    if has_dispatch_result:
+                        self.assertEqual(output["agentDispatch"]["result"], "provider_model_policy_invalid")
+                    else:
+                        self.assertNotIn("agentDispatch", output)
+                    self.assertEqual(state["provider_response_ready_count"], 0)
+                    self.assertEqual(state["provider_response_scope"], "not_invoked")
+                    self.assertEqual(state["readiness_scope"], "metadata_only")
+                    self.assertEqual(evidence["result"], "provider_model_policy_invalid")
+                    self.assertFalse(evidence["provider_invoked"])
+                    self.assertEqual(roster_path.read_bytes(), roster_bytes)
+                    self.assertNotIn(sensitive_detail, serialized)
+                    which_mock.assert_not_called()
+                    codex_mock.assert_not_called()
+                    claude_mock.assert_not_called()
+
+    def test_provider_policy_load_errors_persist_fail_closed_evidence(self) -> None:
+        """Convert missing or malformed canonical policy loads into bounded rejections."""
+        builder = load_builder_module()
+
+        def write_stale_state(session_dir: Path, organization_instance_id: str) -> None:
+            (session_dir / "bootstrap.json").write_text(
+                json.dumps(
+                    {
+                        "organization_instance_id": organization_instance_id,
+                        "provider_response_ready_count": 1,
+                        "provider_response_scope": "response_evidence",
+                        "readiness_scope": "response_evidence",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        direct_consumers = (
+            (
+                "codex",
+                builder.codex_exec_agent_dispatch,
+                "canonical codex role policy is unavailable",
+            ),
+            (
+                "claude",
+                builder.claude_cli_agent_dispatch,
+                "canonical claude role policy is unavailable",
+            ),
+        )
+        for provider_label, consumer, expected_reason in direct_consumers:
+            for exception_type in (OSError, ValueError, UnicodeDecodeError):
+                case = f"{provider_label}_{exception_type.__name__}_missing_roster"
+                with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                    state_root = Path(tmp)
+                    session_dir = state_root / "session"
+                    session_dir.mkdir(parents=True)
+                    write_stale_state(session_dir, "org-policy-load-direct")
+                    sensitive_detail = f"{case}-private-registry-detail"
+                    with mock.patch.object(
+                        builder,
+                        "role_agent_rows",
+                        side_effect=policy_load_exception(exception_type, sensitive_detail),
+                    ), mock.patch.object(builder.shutil, "which") as which_mock, mock.patch.object(
+                        builder,
+                        "run_command_with_bounded_output",
+                    ) as codex_mock, mock.patch.object(
+                        builder,
+                        "run_claude_command_with_bounded_output",
+                    ) as claude_mock:
+                        output = consumer(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input={
+                                "session_id": "session",
+                                "organization_instance_id": "org-policy-load-direct",
+                                "agent_id": "tech-backend",
+                                "request_id": f"req-{case}",
+                                "cwd": "/tmp/project",
+                                "prompt": "Review only.",
+                            },
+                        )
+
+                    state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+                    evidence = json.loads(
+                        (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+                    )
+                    serialized = json.dumps(
+                        {"output": output, "state": state, "evidence": evidence},
+                        sort_keys=True,
+                    )
+                    self.assertEqual(output["decision"], "block")
+                    self.assertEqual(output["reason"], expected_reason)
+                    self.assertEqual(output["agentDispatch"]["result"], "provider_model_policy_invalid")
+                    self.assertEqual(state["provider_response_ready_count"], 0)
+                    self.assertEqual(state["provider_response_scope"], "not_invoked")
+                    self.assertEqual(state["readiness_scope"], "metadata_only")
+                    self.assertEqual(evidence["result"], "provider_model_policy_invalid")
+                    self.assertFalse(evidence["provider_invoked"])
+                    self.assertFalse((session_dir / "roster.json").exists())
+                    self.assertNotIn(sensitive_detail, serialized)
+                    which_mock.assert_not_called()
+                    codex_mock.assert_not_called()
+                    claude_mock.assert_not_called()
+
+        for exception_type in (OSError, ValueError, UnicodeDecodeError):
+            case = f"activation_{exception_type.__name__}_missing_roster"
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                state_root = Path(tmp)
+                session_dir = state_root / "session"
+                session_dir.mkdir(parents=True)
+                write_stale_state(session_dir, "org-policy-load-activation")
+                sensitive_detail = f"{case}-private-registry-detail"
+                with mock.patch.object(
+                    builder,
+                    "role_agent_rows",
+                    side_effect=policy_load_exception(exception_type, sensitive_detail),
+                ), mock.patch.object(builder.shutil, "which") as which_mock, mock.patch.object(
+                    builder,
+                    "run_command_with_bounded_output",
+                ) as codex_mock, mock.patch.object(
+                    builder,
+                    "run_claude_command_with_bounded_output",
+                ) as claude_mock:
+                    output = builder.provider_activate(
+                        runtime="codex",
+                        state_root=state_root,
+                        hook_input={
+                            "session_id": "session",
+                            "organization_instance_id": "org-policy-load-activation",
+                            "agent_id": "tech-backend",
+                            "request_id": f"req-{case}",
+                            "prompt": "Review only.",
+                        },
+                    )
+
+                state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+                evidence = json.loads(
+                    (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+                )
+                serialized = json.dumps(
+                    {"output": output, "state": state, "evidence": evidence},
+                    sort_keys=True,
+                )
+                self.assertEqual(output["decision"], "block")
+                self.assertEqual(output["reason"], "canonical provider role policy is unavailable")
+                self.assertEqual(state["provider_response_ready_count"], 0)
+                self.assertEqual(state["provider_response_scope"], "not_invoked")
+                self.assertEqual(state["readiness_scope"], "metadata_only")
+                self.assertEqual(evidence["result"], "provider_model_policy_invalid")
+                self.assertFalse(evidence["provider_invoked"])
+                self.assertFalse((session_dir / "roster.json").exists())
+                self.assertNotIn(sensitive_detail, serialized)
+                which_mock.assert_not_called()
+                codex_mock.assert_not_called()
+                claude_mock.assert_not_called()
+
+        canonical_codex = builder.role_agent_row_for(
+            "tech-backend",
+            organization_instance_id="org-policy-load-existing",
+        )
+        canonical_claude = {
+            "agent_id": "legacy-claude-role",
+            "role_id": "legacy-claude-role",
+            "organization_instance_id": "org-policy-load-existing",
+            "provider": "anthropic",
+            "execution_mode": "claude",
+            "intended_model": "claude-opus-4-6",
+            "fallback_models": "claude-sonnet-4-6",
+            "allowed_tools": ["Read"],
+            "git_operations_allowed": False,
+            "always_active": False,
+        }
+        for provider_label, canonical in (
+            ("codex", canonical_codex),
+            ("claude", canonical_claude),
+        ):
+            for exception_type in (OSError, ValueError, UnicodeDecodeError):
+                case = f"activation_{provider_label}_{exception_type.__name__}_existing_roster"
+                with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                    state_root = Path(tmp)
+                    session_dir = state_root / "session"
+                    session_dir.mkdir(parents=True)
+                    write_stale_state(session_dir, "org-policy-load-existing")
+                    stale = dict(canonical)
+                    stale.update(
+                        {
+                            "activation_status": "response_active",
+                            "response_status": "invoked",
+                            "provider_status": "provider_response_ready",
+                            "effective_model": canonical["intended_model"],
+                            "session_id": "stale-provider-session",
+                            "last_request_id": "stale-request",
+                            "usage_source": "provider-response",
+                        }
+                    )
+                    (session_dir / "roster.json").write_text(json.dumps([stale]), encoding="utf-8")
+                    sensitive_detail = f"{case}-private-policy-path"
+                    with mock.patch.object(
+                        builder,
+                        "role_agent_row_for",
+                        side_effect=policy_load_exception(exception_type, sensitive_detail),
+                    ), mock.patch.object(
+                        builder,
+                        "registry_row_for",
+                        side_effect=AssertionError("obsolete pre-policy lookup must not run"),
+                    ) as registry_mock, mock.patch.object(
+                        builder.shutil,
+                        "which",
+                    ) as which_mock, mock.patch.object(
+                        builder,
+                        "run_command_with_bounded_output",
+                    ) as codex_mock, mock.patch.object(
+                        builder,
+                        "run_claude_command_with_bounded_output",
+                    ) as claude_mock:
+                        output = builder.provider_activate(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input={
+                                "session_id": "session",
+                                "organization_instance_id": "org-policy-load-existing",
+                                "agent_id": canonical["agent_id"],
+                                "request_id": f"req-{case}",
+                                "prompt": "Review only.",
+                            },
+                        )
+
+                    state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+                    roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+                    evidence = json.loads(
+                        (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+                    )
+                    serialized = json.dumps(
+                        {"output": output, "state": state, "roster": roster, "evidence": evidence},
+                        sort_keys=True,
+                    )
+                    self.assertEqual(output["decision"], "block")
+                    self.assertEqual(output["reason"], "canonical provider role policy is unavailable")
+                    self.assertEqual(roster[0]["provider_status"], "provider_model_policy_invalid")
+                    self.assertEqual(roster[0]["response_status"], "not_invoked")
+                    self.assertEqual(roster[0]["effective_model"], "")
+                    self.assertEqual(state["provider_response_ready_count"], 0)
+                    self.assertEqual(state["provider_response_scope"], "not_invoked")
+                    self.assertEqual(state["readiness_scope"], "metadata_only")
+                    self.assertEqual(evidence["result"], "provider_model_policy_invalid")
+                    self.assertFalse(evidence["provider_invoked"])
+                    self.assertNotIn(sensitive_detail, serialized)
+                    registry_mock.assert_not_called()
+                    which_mock.assert_not_called()
+                    codex_mock.assert_not_called()
+                    claude_mock.assert_not_called()
+
+    def test_provider_activation_normalizes_second_policy_lookup_errors(self) -> None:
+        """Keep activation policy-load evidence provider-neutral across both reads."""
+        builder = load_builder_module()
+        canonical_codex = builder.role_agent_row_for(
+            "tech-backend",
+            organization_instance_id="org-activation-second-read",
+        )
+        canonical_claude = {
+            "agent_id": "legacy-claude-role",
+            "role_id": "legacy-claude-role",
+            "organization_instance_id": "org-activation-second-read",
+            "provider": "anthropic",
+            "execution_mode": "claude",
+            "intended_model": "claude-opus-4-6",
+            "fallback_models": "claude-sonnet-4-6",
+            "allowed_tools": ["Read"],
+            "git_operations_allowed": False,
+            "always_active": False,
+        }
+        for provider_label, canonical in (
+            ("codex", canonical_codex),
+            ("claude", canonical_claude),
+        ):
+            for exception_type in (OSError, ValueError, UnicodeDecodeError):
+                case = f"activation_{provider_label}_{exception_type.__name__}_second_policy_read"
+                with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                    state_root = Path(tmp)
+                    session_dir = state_root / "session"
+                    session_dir.mkdir(parents=True)
+                    (session_dir / "bootstrap.json").write_text(
+                        json.dumps(
+                            {
+                                "organization_instance_id": "org-activation-second-read",
+                                "provider_response_ready_count": 1,
+                                "provider_response_scope": "response_evidence",
+                                "readiness_scope": "response_evidence",
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    stale = dict(canonical)
+                    stale.update(
+                        {
+                            "activation_status": "response_active",
+                            "response_status": "invoked",
+                            "provider_status": "provider_response_ready",
+                            "effective_model": canonical["intended_model"],
+                            "session_id": "stale-provider-session",
+                            "last_request_id": "stale-request",
+                            "usage_source": "provider-response",
+                        }
+                    )
+                    (session_dir / "roster.json").write_text(json.dumps([stale]), encoding="utf-8")
+                    sensitive_detail = f"{case}-private-policy-path"
+                    with mock.patch.object(
+                        builder,
+                        "role_agent_row_for",
+                        side_effect=[dict(canonical), policy_load_exception(exception_type, sensitive_detail)],
+                    ) as policy_lookup, mock.patch.object(
+                        builder,
+                        "registry_row_for",
+                        side_effect=AssertionError("obsolete pre-policy lookup must not run"),
+                    ) as registry_mock, mock.patch.object(
+                        builder.shutil,
+                        "which",
+                    ) as which_mock, mock.patch.object(
+                        builder,
+                        "run_command_with_bounded_output",
+                    ) as codex_mock, mock.patch.object(
+                        builder,
+                        "run_claude_command_with_bounded_output",
+                    ) as claude_mock:
+                        output = builder.provider_activate(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input={
+                                "session_id": "session",
+                                "organization_instance_id": "org-activation-second-read",
+                                "agent_id": canonical["agent_id"],
+                                "request_id": f"req-{case}",
+                                "prompt": "Review only.",
+                            },
+                        )
+
+                    state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+                    roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+                    evidence = json.loads(
+                        (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+                    )
+                    serialized = json.dumps(
+                        {"output": output, "state": state, "roster": roster, "evidence": evidence},
+                        sort_keys=True,
+                    )
+                    self.assertEqual(output["decision"], "block")
+                    self.assertEqual(output["reason"], "canonical provider role policy is unavailable")
+                    self.assertEqual(policy_lookup.call_count, 2)
+                    self.assertEqual(roster[0]["provider_status"], "provider_model_policy_invalid")
+                    self.assertEqual(roster[0]["response_status"], "not_invoked")
+                    self.assertEqual(state["provider_response_ready_count"], 0)
+                    self.assertEqual(state["readiness_scope"], "metadata_only")
+                    self.assertEqual(evidence["result"], "provider_model_policy_invalid")
+                    self.assertFalse(evidence["provider_invoked"])
+                    self.assertNotIn(sensitive_detail, serialized)
+                    registry_mock.assert_not_called()
+                    which_mock.assert_not_called()
+                    codex_mock.assert_not_called()
+                    claude_mock.assert_not_called()
+
+    def test_direct_policy_lookup_error_matrix_with_existing_roster(self) -> None:
+        """Cover both direct adapters and both bounded policy-load exception classes."""
+        builder = load_builder_module()
+        canonical_codex = builder.role_agent_row_for(
+            "tech-backend",
+            organization_instance_id="org-direct-existing",
+        )
+        canonical_claude = {
+            "agent_id": "legacy-claude-role",
+            "role_id": "legacy-claude-role",
+            "organization_instance_id": "org-direct-existing",
+            "provider": "anthropic",
+            "execution_mode": "claude",
+            "intended_model": "claude-opus-4-6",
+            "fallback_models": "claude-sonnet-4-6",
+            "allowed_tools": ["Read"],
+            "git_operations_allowed": False,
+            "always_active": False,
+        }
+        direct_consumers = (
+            (
+                "codex",
+                builder.codex_exec_agent_dispatch,
+                canonical_codex,
+                "canonical codex role policy is unavailable",
+            ),
+            (
+                "claude",
+                builder.claude_cli_agent_dispatch,
+                canonical_claude,
+                "canonical claude role policy is unavailable",
+            ),
+        )
+        for provider_label, consumer, canonical, expected_reason in direct_consumers:
+            for exception_type in (OSError, ValueError, UnicodeDecodeError):
+                case = f"direct_{provider_label}_{exception_type.__name__}_existing_roster"
+                with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                    state_root = Path(tmp)
+                    session_dir = state_root / "session"
+                    session_dir.mkdir(parents=True)
+                    (session_dir / "bootstrap.json").write_text(
+                        json.dumps(
+                            {
+                                "organization_instance_id": "org-direct-existing",
+                                "provider_response_ready_count": 1,
+                                "provider_response_scope": "response_evidence",
+                                "readiness_scope": "response_evidence",
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    stale = dict(canonical)
+                    stale.update(
+                        {
+                            "activation_status": "response_active",
+                            "response_status": "invoked",
+                            "provider_status": "provider_response_ready",
+                            "effective_model": canonical["intended_model"],
+                            "session_id": "stale-provider-session",
+                            "last_request_id": "stale-request",
+                            "usage_source": "provider-response",
+                        }
+                    )
+                    (session_dir / "roster.json").write_text(json.dumps([stale]), encoding="utf-8")
+                    sensitive_detail = f"{case}-private-policy-path"
+                    with mock.patch.object(
+                        builder,
+                        "role_agent_row_for",
+                        side_effect=policy_load_exception(exception_type, sensitive_detail),
+                    ), mock.patch.object(builder.shutil, "which") as which_mock, mock.patch.object(
+                        builder,
+                        "run_command_with_bounded_output",
+                    ) as codex_mock, mock.patch.object(
+                        builder,
+                        "run_claude_command_with_bounded_output",
+                    ) as claude_mock:
+                        output = consumer(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input={
+                                "session_id": "session",
+                                "organization_instance_id": "org-direct-existing",
+                                "agent_id": canonical["agent_id"],
+                                "request_id": f"req-{case}",
+                                "cwd": "/tmp/project",
+                                "prompt": "Review only.",
+                            },
+                        )
+
+                    state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+                    roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+                    evidence = json.loads(
+                        (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+                    )
+                    serialized = json.dumps(
+                        {"output": output, "state": state, "roster": roster, "evidence": evidence},
+                        sort_keys=True,
+                    )
+                    self.assertEqual(output["decision"], "block")
+                    self.assertEqual(output["reason"], expected_reason)
+                    self.assertEqual(output["agentDispatch"]["result"], "provider_model_policy_invalid")
+                    self.assertEqual(roster[0]["provider_status"], "provider_model_policy_invalid")
+                    self.assertEqual(roster[0]["response_status"], "not_invoked")
+                    self.assertEqual(roster[0]["effective_model"], "")
+                    self.assertEqual(state["provider_response_ready_count"], 0)
+                    self.assertEqual(state["provider_response_scope"], "not_invoked")
+                    self.assertEqual(state["readiness_scope"], "metadata_only")
+                    self.assertEqual(evidence["result"], "provider_model_policy_invalid")
+                    self.assertFalse(evidence["provider_invoked"])
+                    self.assertNotIn(sensitive_detail, serialized)
+                    which_mock.assert_not_called()
+                    codex_mock.assert_not_called()
+                    claude_mock.assert_not_called()
+
+    def test_provider_policy_load_failure_recovers_after_policy_repair(self) -> None:
+        """Do not persist an incomplete roster that blocks a repaired activation."""
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = state_root / "session"
+            session_dir.mkdir(parents=True)
+            (session_dir / "bootstrap.json").write_text(
+                json.dumps(
+                    {
+                        "organization_instance_id": "org-policy-repair",
+                        "provider_response_ready_count": 1,
+                        "provider_response_scope": "response_evidence",
+                        "readiness_scope": "response_evidence",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                builder,
+                "role_agent_rows",
+                side_effect=policy_load_exception(
+                    UnicodeDecodeError,
+                    "private malformed registry detail",
+                ),
+            ), mock.patch.object(builder.shutil, "which") as first_which, mock.patch.object(
+                builder,
+                "run_command_with_bounded_output",
+            ) as first_runner:
+                rejected = builder.provider_activate(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={
+                        "session_id": "session",
+                        "organization_instance_id": "org-policy-repair",
+                        "agent_id": "tech-backend",
+                        "request_id": "req-policy-load-failed",
+                        "cwd": "/tmp/project",
+                        "prompt": "Review only.",
+                    },
+                )
+
+            self.assertEqual(rejected["decision"], "block")
+            self.assertEqual(rejected["reason"], "canonical provider role policy is unavailable")
+            self.assertFalse((session_dir / "roster.json").exists())
+            first_which.assert_not_called()
+            first_runner.assert_not_called()
+
+            def repaired_provider_response(*_args, **kwargs):
+                kwargs["process_started"](mock.Mock())
+                return subprocess.CompletedProcess(
+                    args=["codex"],
+                    returncode=0,
+                    stdout=current_codex_jsonl(),
+                    stderr="",
+                )
+
+            with mock.patch.object(
+                builder.shutil,
+                "which",
+                return_value="/usr/bin/codex",
+            ), mock.patch.object(
+                builder,
+                "run_command_with_bounded_output",
+                side_effect=repaired_provider_response,
+            ) as repaired_runner:
+                recovered = builder.provider_activate(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={
+                        "session_id": "session",
+                        "organization_instance_id": "org-policy-repair",
+                        "agent_id": "tech-backend",
+                        "request_id": "req-policy-load-repaired",
+                        "cwd": "/tmp/project",
+                        "prompt": "Review only.",
+                    },
+                )
+
+            state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+            roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+            evidence = [
+                json.loads(line)
+                for line in (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+            row = next(item for item in roster if item["agent_id"] == "tech-backend")
+            self.assertEqual(recovered["activation"]["provider"], "openai")
+            self.assertEqual(recovered["activation"]["effective_model"], "gpt-5.6-luna")
+            self.assertEqual(row["response_status"], "invoked")
+            self.assertEqual(row["provider_status"], "provider_response_ready")
+            self.assertEqual(state["provider_response_ready_count"], 1)
+            self.assertEqual(state["provider_response_scope"], "response_evidence")
+            self.assertEqual(state["readiness_scope"], "response_evidence")
+            self.assertEqual(evidence[0]["result"], "provider_model_policy_invalid")
+            self.assertFalse(evidence[0]["provider_invoked"])
+            self.assertEqual(evidence[-1]["result"], "provider_response_ready")
+            self.assertTrue(evidence[-1]["provider_invoked"])
+            self.assertEqual(evidence[-1]["launch_lock"], "released_after_process_start")
+            repaired_runner.assert_called_once()
 
     def test_claude_consumers_require_exact_reported_model_without_synthesis(self) -> None:
         """Keep omitted Claude identity unknown and reject a non-primary report."""
@@ -3103,6 +3812,718 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
         self.assertEqual(metric_extra["effective_model"], "")
         self.assertEqual(metric_extra["provider_identity_status"], "invalid")
 
+    def test_provider_policy_launch_lease_is_descriptor_bound_and_owner_checked(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            builder,
+            "PROVIDER_POLICY_LAUNCH_LOCK_ROOT",
+            Path(tmp) / "policy-locks",
+        ):
+            lease = builder.acquire_provider_policy_launch_lease(timeout_seconds=0.1)
+            with self.assertRaises(TimeoutError):
+                builder.acquire_provider_policy_launch_lease(timeout_seconds=0.01)
+            with self.assertRaises(ValueError):
+                builder.release_provider_policy_launch_lease(
+                    lease,
+                    lease_id="not-the-owner",
+                )
+            self.assertFalse(lease["released"])
+            builder.release_provider_policy_launch_lease(
+                lease,
+                lease_id=lease["lease_id"],
+            )
+            builder.release_provider_policy_launch_lease(
+                lease,
+                lease_id=lease["lease_id"],
+            )
+            replacement = builder.acquire_provider_policy_launch_lease(timeout_seconds=0.1)
+            builder.release_provider_policy_launch_lease(
+                replacement,
+                lease_id=replacement["lease_id"],
+            )
+
+    def test_role_runtime_provider_policy_lock_namespace_matches(self) -> None:
+        repo_root = SKILL_ROOT.parents[2]
+        role_builder_path = (
+            repo_root
+            / "organization/roles/infra-team-bootstrap/scripts/itb_bootstrap_builder.py"
+        )
+        runtime_builder_path = (
+            repo_root
+            / "organization/runtime/infra-team-bootstrap/scripts/itb_bootstrap_builder.py"
+        )
+
+        def load_named(path: Path, name: str):
+            spec = importlib.util.spec_from_file_location(name, path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError(f"failed to load builder mirror: {path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        role_builder = load_named(role_builder_path, "itb_role_lock_namespace_test")
+        runtime_builder = load_named(runtime_builder_path, "itb_runtime_lock_namespace_test")
+        self.assertEqual(
+            role_builder.provider_policy_launch_lock_name(),
+            runtime_builder.provider_policy_launch_lock_name(),
+        )
+        self.assertEqual(
+            role_builder.PROVIDER_POLICY_LAUNCH_LOCK_ROOT,
+            runtime_builder.PROVIDER_POLICY_LAUNCH_LOCK_ROOT,
+        )
+        original_name = role_builder.provider_policy_launch_lock_name()
+        with mock.patch.object(
+            role_builder,
+            "MODEL_REGISTRY",
+            Path("/different/model-registry.md"),
+        ), mock.patch.object(
+            role_builder,
+            "ROLE_AGENT_REGISTRY",
+            Path("/different/role-agent-registry.yaml"),
+        ):
+            self.assertEqual(
+                role_builder.provider_policy_launch_lock_name(),
+                original_name,
+            )
+
+    def test_provider_launch_guard_releases_lease_at_process_start(self) -> None:
+        builder = load_builder_module()
+        canonical = {
+            "agent_id": "tech-backend",
+            "role_id": "tech-backend",
+            "organization_instance_id": "org-launch-linearization",
+            "status": "active",
+            "always_active": False,
+            "provider": "openai",
+            "execution_mode": "codex",
+            "intended_model": "gpt-5.6-luna",
+            "fallback_models": "",
+            "allowed_tools": ["Read"],
+            "git_operations_allowed": False,
+            "queue_consumer": False,
+            "queue_finalizer": "role-report",
+        }
+        with mock.patch.object(builder, "role_agent_row_for", return_value=canonical):
+            bound, policy_error = builder.canonical_codex_execution_policy(
+                canonical,
+                organization_instance_id="org-launch-linearization",
+            )
+        self.assertEqual(policy_error, "")
+
+        real_popen = subprocess.Popen
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            builder,
+            "PROVIDER_POLICY_LAUNCH_LOCK_ROOT",
+            Path(tmp) / "policy-locks",
+        ), mock.patch.object(
+            builder,
+            "role_agent_row_for",
+            return_value=canonical,
+        ), mock.patch.object(
+            builder.shutil,
+            "which",
+            return_value=sys.executable,
+        ):
+            writer_acquired = threading.Event()
+            launch_finished = threading.Event()
+            interlock = {
+                "blocked_before_popen": False,
+                "writer_acquired_before_output_complete": False,
+            }
+            writer_threads: list[threading.Thread] = []
+
+            def cooperative_writer() -> None:
+                writer_lease = builder.acquire_provider_policy_launch_lease(
+                    timeout_seconds=2.0
+                )
+                interlock["writer_acquired_before_output_complete"] = not launch_finished.is_set()
+                writer_acquired.set()
+                builder.release_provider_policy_launch_lease(
+                    writer_lease,
+                    lease_id=writer_lease["lease_id"],
+                )
+
+            def checking_popen(*args, **kwargs):
+                writer = threading.Thread(target=cooperative_writer)
+                writer_threads.append(writer)
+                writer.start()
+                time.sleep(0.1)
+                interlock["blocked_before_popen"] = not writer_acquired.is_set()
+                return real_popen(*args, **kwargs)
+
+            with mock.patch.object(
+                builder.subprocess,
+                "Popen",
+                side_effect=checking_popen,
+            ):
+                launch = builder.launch_provider_with_canonical_policy(
+                    bound_execution_row=bound,
+                    organization_instance_id="org-launch-linearization",
+                    executable_name="python3",
+                    command_builder=lambda _final_row: [
+                        sys.executable,
+                        "-c",
+                        "import sys,time; time.sleep(0.4); sys.stdout.write('{}')",
+                    ],
+                    runner=builder.run_command_with_bounded_output,
+                    timeout=10,
+                )
+            launch_finished.set()
+            for writer in writer_threads:
+                writer.join(timeout=2.0)
+
+        self.assertEqual(launch["status"], "started")
+        self.assertEqual(launch["completed"].stdout, "{}")
+        self.assertTrue(interlock["blocked_before_popen"])
+        self.assertTrue(writer_acquired.is_set())
+        self.assertTrue(interlock["writer_acquired_before_output_complete"])
+        self.assertEqual(
+            launch["initial_policy_digest"],
+            launch["launch_policy_digest"],
+        )
+
+    def test_bounded_runner_terminates_child_when_process_start_callback_fails(self) -> None:
+        builder = load_builder_module()
+        process_ref: dict[str, object] = {}
+
+        def reject_process_start(process) -> None:
+            process_ref["process"] = process
+            raise RuntimeError("launch lease release failed")
+
+        with self.assertRaisesRegex(RuntimeError, "launch lease release failed"):
+            builder.run_command_with_bounded_output(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                timeout=2,
+                process_started=reject_process_start,
+            )
+        process = process_ref["process"]
+        self.assertIsNotNone(process.poll())
+
+    def test_prelaunch_digest_covers_authorization_and_routing_fields(self) -> None:
+        builder = load_builder_module()
+        canonical = {
+            "agent_id": "tech-backend",
+            "role_id": "tech-backend",
+            "organization_instance_id": "org-prelaunch-digest",
+            "status": "active",
+            "always_active": False,
+            "provider": "openai",
+            "execution_mode": "codex",
+            "intended_model": "gpt-5.6-luna",
+            "fallback_models": "",
+            "allowed_tools": ["Read"],
+            "git_operations_allowed": False,
+            "queue_consumer": False,
+            "queue_finalizer": "role-report",
+        }
+        with mock.patch.object(builder, "role_agent_row_for", return_value=canonical):
+            bound, policy_error = builder.canonical_codex_execution_policy(
+                canonical,
+                organization_instance_id="org-prelaunch-digest",
+            )
+        self.assertEqual(policy_error, "")
+        mutations = {
+            "agent_id": "tech-qa",
+            "role_id": "tech-qa",
+            "organization_instance_id": "org-prelaunch-digest-changed",
+            "status": "inactive",
+            "always_active": True,
+            "provider": "anthropic",
+            "execution_mode": "claude",
+            "intended_model": "gpt-5.6-sol",
+            "fallback_models": "gpt-5.6-sol",
+            "allowed_tools": ["Read", "Write"],
+            "git_operations_allowed": True,
+            "queue_consumer": True,
+            "queue_finalizer": "none",
+        }
+        self.assertEqual(
+            set(mutations),
+            set(builder.CANONICAL_PROVIDER_EXECUTION_FIELDS),
+        )
+        initial_digest = builder.canonical_execution_policy_digest(bound)
+        self.assertEqual(initial_digest, bound["canonical_execution_policy_digest"])
+        for field_name, changed_value in mutations.items():
+            changed = dict(bound)
+            changed[field_name] = changed_value
+            with self.subTest(field=field_name):
+                final_digest = builder.canonical_execution_policy_digest(changed)
+            self.assertTrue(final_digest)
+            self.assertNotEqual(final_digest, initial_digest)
+
+    def test_provider_consumers_block_policy_drift_before_launch(self) -> None:
+        builder = load_builder_module()
+        provider_cases = (
+            ("codex_direct", "openai", "codex", "gpt-5.6-luna"),
+            ("codex_activation", "openai", "codex", "gpt-5.6-luna"),
+            ("claude_direct", "anthropic", "claude", "claude-opus-4-6"),
+            ("claude_activation", "anthropic", "claude", "claude-opus-4-6"),
+        )
+        for consumer, provider, execution_mode, model in provider_cases:
+            with self.subTest(consumer=consumer), tempfile.TemporaryDirectory() as tmp:
+                state_root = Path(tmp)
+                session_dir = state_root / "session"
+                session_dir.mkdir(parents=True)
+                agent_id = "tech-backend" if provider == "openai" else "legacy-claude-role"
+                canonical = {
+                    "agent_id": agent_id,
+                    "role_id": agent_id,
+                    "organization_instance_id": "org-prelaunch-drift",
+                    "status": "active",
+                    "always_active": False,
+                    "provider": provider,
+                    "execution_mode": execution_mode,
+                    "intended_model": model,
+                    "fallback_models": "",
+                    "allowed_tools": ["Read"],
+                    "git_operations_allowed": False,
+                    "queue_consumer": False,
+                    "queue_finalizer": "role-report",
+                }
+                changed = dict(canonical)
+                changed["allowed_tools"] = ["Read", "Write"]
+                stale = dict(canonical)
+                stale.update(
+                    {
+                        "activation_status": "response_active",
+                        "response_status": "invoked",
+                        "provider_status": "provider_response_ready",
+                        "usage_source": "codex_exec_json" if provider == "openai" else "claude_print_json",
+                        "effective_model": model,
+                        "session_id": "stale-provider-session",
+                        "last_request_id": "stale-request",
+                    }
+                )
+                (session_dir / "bootstrap.json").write_text(
+                    json.dumps(
+                        {
+                            "organization_instance_id": "org-prelaunch-drift",
+                            "readiness_scope": "response_evidence",
+                            "provider_response_scope": "response_evidence",
+                            "provider_response_ready_count": 1,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (session_dir / "roster.json").write_text(json.dumps([stale]), encoding="utf-8")
+                lease_state = {"acquired": False, "released": False}
+
+                def current_policy(*_args, **_kwargs):
+                    return changed if lease_state["acquired"] else canonical
+
+                def acquire_lease(*_args, **_kwargs):
+                    lease_state["acquired"] = True
+                    return {
+                        "lease_id": "lease-prelaunch-drift",
+                        "released": False,
+                    }
+
+                def release_lease(lease, *, lease_id):
+                    self.assertEqual(lease_id, "lease-prelaunch-drift")
+                    lease["released"] = True
+                    lease_state["released"] = True
+
+                with mock.patch.object(
+                    builder,
+                    "role_agent_row_for",
+                    side_effect=current_policy,
+                ), mock.patch.object(
+                    builder,
+                    "acquire_provider_policy_launch_lease",
+                    side_effect=acquire_lease,
+                ), mock.patch.object(
+                    builder,
+                    "release_provider_policy_launch_lease",
+                    side_effect=release_lease,
+                ), mock.patch.object(
+                    builder.shutil,
+                    "which",
+                    side_effect=AssertionError("command discovery must not run after prelaunch drift"),
+                ) as which_mock, mock.patch.object(
+                    builder,
+                    "run_command_with_bounded_output",
+                    side_effect=AssertionError("Codex must not launch after prelaunch drift"),
+                ) as codex_mock, mock.patch.object(
+                    builder,
+                    "run_claude_command_with_bounded_output",
+                    side_effect=AssertionError("Claude must not launch after prelaunch drift"),
+                ) as claude_mock:
+                    hook_input = {
+                        "session_id": "session",
+                        "organization_instance_id": "org-prelaunch-drift",
+                        "agent_id": agent_id,
+                        "request_id": f"req-{consumer}",
+                        "cwd": "/tmp/project",
+                        "prompt": "Review only.",
+                    }
+                    if consumer == "codex_direct":
+                        output = builder.codex_exec_agent_dispatch(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input=hook_input,
+                        )
+                    elif consumer == "claude_direct":
+                        output = builder.claude_cli_agent_dispatch(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input=hook_input,
+                        )
+                    else:
+                        output = builder.provider_activate(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input=hook_input,
+                        )
+
+                self.assertEqual(output["decision"], "block")
+                self.assertEqual(output["reason"], builder.PROVIDER_POLICY_DRIFT_NOTE)
+                self.assertTrue(lease_state["released"])
+                which_mock.assert_not_called()
+                codex_mock.assert_not_called()
+                claude_mock.assert_not_called()
+                state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+                row = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))[0]
+                evidence = json.loads(
+                    (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+                )
+                self.assertEqual(row["provider_status"], "provider_policy_drift")
+                self.assertEqual(row["response_status"], "not_invoked")
+                self.assertEqual(row["effective_model"], "")
+                self.assertEqual(state["provider_response_ready_count"], 0)
+                self.assertEqual(evidence["result"], "provider_policy_drift")
+                self.assertFalse(evidence["provider_invoked"])
+                self.assertEqual(evidence["policy_check_phase"], "prelaunch")
+                self.assertEqual(evidence["launch_lock"], "acquired")
+                self.assertTrue(evidence["initial_canonical_execution_policy_digest"])
+                self.assertTrue(evidence["launch_policy_digest"])
+                self.assertNotEqual(
+                    evidence["initial_canonical_execution_policy_digest"],
+                    evidence["launch_policy_digest"],
+                )
+
+    def test_provider_consumers_record_positive_launch_evidence(self) -> None:
+        builder = load_builder_module()
+        provider_cases = (
+            ("codex_direct", "openai", "codex", "gpt-5.6-luna"),
+            ("codex_activation", "openai", "codex", "gpt-5.6-luna"),
+            ("claude_direct", "anthropic", "claude", "claude-opus-4-6"),
+            ("claude_activation", "anthropic", "claude", "claude-opus-4-6"),
+        )
+        for consumer, provider, execution_mode, model in provider_cases:
+            with self.subTest(consumer=consumer), tempfile.TemporaryDirectory() as tmp:
+                state_root = Path(tmp)
+                session_dir = state_root / "session"
+                session_dir.mkdir(parents=True)
+                agent_id = "tech-backend" if provider == "openai" else "legacy-claude-role"
+                canonical = {
+                    "agent_id": agent_id,
+                    "role_id": agent_id,
+                    "organization_instance_id": "org-positive-launch",
+                    "status": "active",
+                    "always_active": False,
+                    "provider": provider,
+                    "execution_mode": execution_mode,
+                    "intended_model": model,
+                    "fallback_models": "",
+                    "allowed_tools": ["Read"],
+                    "git_operations_allowed": False,
+                    "queue_consumer": False,
+                    "queue_finalizer": "role-report",
+                }
+                (session_dir / "roster.json").write_text(json.dumps([canonical]), encoding="utf-8")
+                if provider == "openai":
+                    completed = subprocess.CompletedProcess(
+                        args=["codex"],
+                        returncode=0,
+                        stdout=current_codex_jsonl(),
+                        stderr="",
+                    )
+                else:
+                    completed = subprocess.CompletedProcess(
+                        args=["claude"],
+                        returncode=0,
+                        stdout=json.dumps(
+                            {
+                                "result": "review complete",
+                                "model": model,
+                                "usage": {"input_tokens": 1, "output_tokens": 2},
+                                "duration_api_ms": 3,
+                                "session_id": "provider-session",
+                                "request_id": "provider-request",
+                                "num_turns": 1,
+                            }
+                        ),
+                        stderr="",
+                    )
+
+                def run_provider(command, *, timeout, process_started):
+                    self.assertGreater(timeout, 0)
+                    process_started(mock.Mock())
+                    completed.args = command
+                    return completed
+
+                provider_runner = (
+                    "run_command_with_bounded_output"
+                    if provider == "openai"
+                    else "run_claude_command_with_bounded_output"
+                )
+                other_runner = (
+                    "run_claude_command_with_bounded_output"
+                    if provider == "openai"
+                    else "run_command_with_bounded_output"
+                )
+                with mock.patch.object(
+                    builder,
+                    "PROVIDER_POLICY_LAUNCH_LOCK_ROOT",
+                    Path(tmp) / "policy-locks",
+                ), mock.patch.object(
+                    builder,
+                    "role_agent_row_for",
+                    return_value=canonical,
+                ), mock.patch.object(
+                    builder.shutil,
+                    "which",
+                    return_value=f"/usr/bin/{'codex' if provider == 'openai' else 'claude'}",
+                ), mock.patch.object(
+                    builder,
+                    provider_runner,
+                    side_effect=run_provider,
+                ) as run_mock, mock.patch.object(
+                    builder,
+                    other_runner,
+                    side_effect=AssertionError("wrong provider runner selected"),
+                ) as other_mock:
+                    hook_input = {
+                        "session_id": "session",
+                        "organization_instance_id": "org-positive-launch",
+                        "agent_id": agent_id,
+                        "request_id": f"req-{consumer}",
+                        "cwd": "/tmp/project",
+                        "prompt": "Review only.",
+                    }
+                    if consumer == "codex_direct":
+                        output = builder.codex_exec_agent_dispatch(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input=hook_input,
+                        )
+                    elif consumer == "claude_direct":
+                        output = builder.claude_cli_agent_dispatch(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input=hook_input,
+                        )
+                    else:
+                        output = builder.provider_activate(
+                            runtime="codex",
+                            state_root=state_root,
+                            hook_input=hook_input,
+                        )
+
+                self.assertNotIn("decision", output)
+                run_mock.assert_called_once()
+                other_mock.assert_not_called()
+                evidence = json.loads(
+                    (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+                )
+                self.assertEqual(evidence["result"], "provider_response_ready")
+                self.assertTrue(evidence["provider_invoked"])
+                self.assertEqual(evidence["policy_check_phase"], "postlaunch")
+                self.assertEqual(evidence["launch_lock"], "released_after_process_start")
+                self.assertTrue(evidence["initial_canonical_execution_policy_digest"])
+                self.assertEqual(
+                    evidence["initial_canonical_execution_policy_digest"],
+                    evidence["launch_policy_digest"],
+                )
+
+    def test_provider_consumers_block_launch_lease_failure_before_command_discovery(self) -> None:
+        builder = load_builder_module()
+        provider_cases = (
+            ("codex_direct", "openai", "codex", "gpt-5.6-luna"),
+            ("codex_activation", "openai", "codex", "gpt-5.6-luna"),
+            ("claude_direct", "anthropic", "claude", "claude-opus-4-6"),
+            ("claude_activation", "anthropic", "claude", "claude-opus-4-6"),
+        )
+        failure_cases = (
+            (
+                "timeout",
+                TimeoutError("busy"),
+                "provider policy launch lease timed out",
+                "provider_launch_lock_timeout",
+            ),
+            (
+                "unavailable",
+                OSError("unsafe lock path detail"),
+                "provider policy launch lease is unavailable",
+                "provider_launch_lock_unavailable",
+            ),
+        )
+        for consumer, provider, execution_mode, model in provider_cases:
+            for failure_name, failure, expected_reason, expected_result in failure_cases:
+                with self.subTest(consumer=consumer, failure=failure_name), tempfile.TemporaryDirectory() as tmp:
+                    state_root = Path(tmp)
+                    session_dir = state_root / "session"
+                    session_dir.mkdir(parents=True)
+                    agent_id = "tech-backend" if provider == "openai" else "legacy-claude-role"
+                    canonical = {
+                        "agent_id": agent_id,
+                        "role_id": agent_id,
+                        "organization_instance_id": "org-launch-lock-failure",
+                        "status": "active",
+                        "always_active": False,
+                        "provider": provider,
+                        "execution_mode": execution_mode,
+                        "intended_model": model,
+                        "fallback_models": "",
+                        "allowed_tools": ["Read"],
+                        "git_operations_allowed": False,
+                        "queue_consumer": False,
+                        "queue_finalizer": "role-report",
+                    }
+                    (session_dir / "roster.json").write_text(
+                        json.dumps([canonical]),
+                        encoding="utf-8",
+                    )
+                    with mock.patch.object(
+                        builder,
+                        "role_agent_row_for",
+                        return_value=canonical,
+                    ), mock.patch.object(
+                        builder,
+                        "acquire_provider_policy_launch_lease",
+                        side_effect=failure,
+                    ), mock.patch.object(
+                        builder.shutil,
+                        "which",
+                        side_effect=AssertionError("command discovery must not run on lease failure"),
+                    ) as which_mock, mock.patch.object(
+                        builder,
+                        "run_command_with_bounded_output",
+                        side_effect=AssertionError("Codex must not run on lease failure"),
+                    ) as codex_mock, mock.patch.object(
+                        builder,
+                        "run_claude_command_with_bounded_output",
+                        side_effect=AssertionError("Claude must not run on lease failure"),
+                    ) as claude_mock:
+                        hook_input = {
+                            "session_id": "session",
+                            "organization_instance_id": "org-launch-lock-failure",
+                            "agent_id": agent_id,
+                            "request_id": f"req-{consumer}-{failure_name}",
+                            "cwd": "/tmp/project",
+                            "prompt": "Review only.",
+                        }
+                        if consumer == "codex_direct":
+                            output = builder.codex_exec_agent_dispatch(
+                                runtime="codex",
+                                state_root=state_root,
+                                hook_input=hook_input,
+                            )
+                        elif consumer == "claude_direct":
+                            output = builder.claude_cli_agent_dispatch(
+                                runtime="codex",
+                                state_root=state_root,
+                                hook_input=hook_input,
+                            )
+                        else:
+                            output = builder.provider_activate(
+                                runtime="codex",
+                                state_root=state_root,
+                                hook_input=hook_input,
+                            )
+
+                    self.assertEqual(output["decision"], "block")
+                    self.assertEqual(output["reason"], expected_reason)
+                    self.assertNotIn("unsafe lock path detail", json.dumps(output))
+                    which_mock.assert_not_called()
+                    codex_mock.assert_not_called()
+                    claude_mock.assert_not_called()
+                    evidence = json.loads(
+                        (session_dir / "invocation-evidence.jsonl")
+                        .read_text(encoding="utf-8")
+                        .splitlines()[-1]
+                    )
+                    self.assertEqual(evidence["result"], expected_result)
+                    self.assertFalse(evidence["provider_invoked"])
+                    self.assertEqual(evidence["policy_check_phase"], "prelaunch")
+                    self.assertEqual(evidence["launch_lock"], failure_name)
+
+    def test_generic_dispatch_never_launches_provider_selected_by_stale_policy(self) -> None:
+        builder = load_builder_module()
+        codex_policy = {
+            "agent_id": "tech-backend",
+            "role_id": "tech-backend",
+            "organization_instance_id": "org-generic-route-drift",
+            "status": "active",
+            "always_active": False,
+            "provider": "openai",
+            "execution_mode": "codex",
+            "intended_model": "gpt-5.6-luna",
+            "fallback_models": "",
+            "allowed_tools": ["Read"],
+            "git_operations_allowed": False,
+            "queue_consumer": False,
+            "queue_finalizer": "role-report",
+        }
+        claude_policy = dict(codex_policy)
+        claude_policy.update(
+            {
+                "provider": "anthropic",
+                "execution_mode": "claude",
+                "intended_model": "claude-opus-4-6",
+            }
+        )
+        calls = {"count": 0}
+
+        def changing_policy(*_args, **_kwargs):
+            calls["count"] += 1
+            return codex_policy if calls["count"] == 1 else claude_policy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = state_root / "session"
+            session_dir.mkdir(parents=True)
+            (session_dir / "roster.json").write_text(json.dumps([codex_policy]), encoding="utf-8")
+            with mock.patch.object(
+                builder,
+                "role_agent_row_for",
+                side_effect=changing_policy,
+            ), mock.patch.object(
+                builder,
+                "acquire_provider_policy_launch_lease",
+                side_effect=AssertionError("stale generic route must fail before launch lease"),
+            ) as lease_mock, mock.patch.object(
+                builder.shutil,
+                "which",
+                side_effect=AssertionError("stale generic route must not discover a command"),
+            ) as which_mock, mock.patch.object(
+                builder,
+                "run_command_with_bounded_output",
+                side_effect=AssertionError("stale generic route must not launch Codex"),
+            ) as run_mock:
+                output = builder.agent_dispatch(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={
+                        "session_id": "session",
+                        "organization_instance_id": "org-generic-route-drift",
+                        "agent_id": "tech-backend",
+                        "request_id": "req-generic-route-drift",
+                        "cwd": "/tmp/project",
+                        "prompt": "Review only.",
+                    },
+                )
+
+            self.assertEqual(output["decision"], "block")
+            lease_mock.assert_not_called()
+            which_mock.assert_not_called()
+            run_mock.assert_not_called()
+            evidence = json.loads(
+                (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+            )
+            self.assertEqual(evidence["result"], "provider_model_policy_invalid")
+            self.assertFalse(evidence["provider_invoked"])
+
     def test_provider_consumers_block_policy_drift_after_execution(self) -> None:
         """Never return success when canonical policy changes during a provider call."""
         builder = load_builder_module()
@@ -4102,8 +5523,8 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
             "ValueError",
         )
 
-    def test_codex_consumers_preflight_canonical_model_policy(self) -> None:
-        """Reject missing or tampered mutable routing before provider execution."""
+    def test_direct_codex_consumer_preflights_canonical_model_policy(self) -> None:
+        """Keep direct dispatch fail closed for missing or tampered routing."""
         builder = load_builder_module()
         variants = (
             (
@@ -4154,74 +5575,60 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
         )
 
         for variant, routing, expected_reason in variants:
-            for consumer in ("agent_dispatch", "provider_activate"):
-                with self.subTest(variant=variant, consumer=consumer), tempfile.TemporaryDirectory() as tmp:
-                    state_root = Path(tmp)
-                    session_dir = state_root / "session"
-                    session_dir.mkdir(parents=True)
-                    row_input = {
-                        "agent_id": "tech-backend",
-                        "allowed_tools": ["Read", "Grep", "Glob"],
-                        "git_operations_allowed": False,
-                    }
-                    row_input.update(routing)
-                    (session_dir / "roster.json").write_text(
-                        json.dumps([row_input]),
-                        encoding="utf-8",
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as tmp:
+                state_root = Path(tmp)
+                session_dir = state_root / "session"
+                session_dir.mkdir(parents=True)
+                row_input = {
+                    "agent_id": "tech-backend",
+                    "allowed_tools": ["Read", "Grep", "Glob"],
+                    "git_operations_allowed": False,
+                }
+                row_input.update(routing)
+                (session_dir / "roster.json").write_text(
+                    json.dumps([row_input]),
+                    encoding="utf-8",
+                )
+                with mock.patch.object(
+                    builder.shutil,
+                    "which",
+                    return_value="/usr/bin/codex",
+                ) as which_mock, mock.patch.object(
+                    builder,
+                    "run_command_with_bounded_output",
+                ) as run_mock:
+                    output = builder.codex_exec_agent_dispatch(
+                        runtime="codex",
+                        state_root=state_root,
+                        hook_input={
+                            "session_id": "session",
+                            "agent_id": row_input["agent_id"],
+                            "request_id": f"req-{variant}",
+                            "cwd": "/tmp/project",
+                            "prompt": "Review only.",
+                        },
                     )
-                    with mock.patch.object(
-                        builder.shutil,
-                        "which",
-                        return_value="/usr/bin/codex",
-                    ) as which_mock, mock.patch.object(
-                        builder,
-                        "run_command_with_bounded_output",
-                    ) as run_mock:
-                        if consumer == "agent_dispatch":
-                            output = builder.codex_exec_agent_dispatch(
-                                runtime="codex",
-                                state_root=state_root,
-                                hook_input={
-                                    "session_id": "session",
-                                    "agent_id": row_input["agent_id"],
-                                    "request_id": f"req-{variant}",
-                                    "cwd": "/tmp/project",
-                                    "prompt": "Review only.",
-                                },
-                            )
-                        else:
-                            output = builder.provider_activate(
-                                runtime="codex",
-                                state_root=state_root,
-                                hook_input={
-                                    "session_id": "session",
-                                    "agent_id": row_input["agent_id"],
-                                    "request_id": f"req-{variant}",
-                                    "cwd": "/tmp/project",
-                                },
-                            )
 
-                    which_mock.assert_not_called()
-                    run_mock.assert_not_called()
-                    state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
-                    roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
-                    evidence = json.loads(
-                        (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
-                    )
-                    row = next(item for item in roster if item["agent_id"] == row_input["agent_id"])
-                    self.assertEqual(output["decision"], "block")
-                    self.assertEqual(output["reason"], expected_reason)
-                    self.assertNotIn("gpt-5.6-sol", json.dumps(output))
-                    self.assertNotIn("anthropic", json.dumps(output))
-                    self.assertEqual(row["provider_status"], "provider_model_policy_invalid")
-                    self.assertEqual(row["response_status"], "not_invoked")
-                    self.assertEqual(row["effective_model"], "")
-                    self.assertNotEqual(state["readiness_scope"], "response_evidence")
-                    self.assertEqual(evidence["result"], "provider_model_policy_invalid")
-                    self.assertEqual(evidence["effective_model"], "")
-                    self.assertFalse(evidence["provider_invoked"])
-                    if consumer == "agent_dispatch":
-                        self.assertEqual(output["agentDispatch"]["effective_model"], "")
+                which_mock.assert_not_called()
+                run_mock.assert_not_called()
+                state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
+                roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+                evidence = json.loads(
+                    (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+                )
+                row = next(item for item in roster if item["agent_id"] == row_input["agent_id"])
+                self.assertEqual(output["decision"], "block")
+                self.assertEqual(output["reason"], expected_reason)
+                self.assertNotIn("gpt-5.6-sol", json.dumps(output))
+                self.assertNotIn("anthropic", json.dumps(output))
+                self.assertEqual(row["provider_status"], "provider_model_policy_invalid")
+                self.assertEqual(row["response_status"], "not_invoked")
+                self.assertEqual(row["effective_model"], "")
+                self.assertNotEqual(state["readiness_scope"], "response_evidence")
+                self.assertEqual(evidence["result"], "provider_model_policy_invalid")
+                self.assertEqual(evidence["effective_model"], "")
+                self.assertFalse(evidence["provider_invoked"])
+                self.assertEqual(output["agentDispatch"]["effective_model"], "")
 
         canonical_codex = builder.role_agent_row_for("tech-backend")
         raw_codex_model = " `gpt-5.6-luna` "
@@ -4289,6 +5696,168 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                 )
                 self.assertEqual(roster[0]["effective_model"], "gpt-5.6-luna")
                 self.assertEqual(evidence["effective_model"], "gpt-5.6-luna")
+
+    def test_provider_activate_reconciles_known_stale_routing_before_execution(self) -> None:
+        builder = load_builder_module()
+        canonical = builder.role_agent_row_for(
+            "tech-backend",
+            organization_instance_id="org-reconcile",
+        )
+        stale = dict(canonical)
+        stale.update(
+            {
+                "provider": "anthropic",
+                "execution_mode": "claude",
+                "intended_model": "claude-opus-4-6",
+                "fallback_models": "claude-sonnet-4-6",
+                "activation_status": "response_active",
+                "response_status": "invoked",
+                "provider_status": "provider_response_ready",
+                "usage_source": "claude_print_json",
+                "effective_model": "claude-opus-4-6",
+                "session_id": "stale-provider-session",
+                "last_request_id": "stale-request",
+                "canonical_execution_policy_digest": "stale-digest",
+                "canonical_provider": "anthropic",
+                "canonical_execution_mode": "claude",
+                "canonical_intended_model": "claude-opus-4-6",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = state_root / "session"
+            session_dir.mkdir(parents=True)
+            (session_dir / "bootstrap.json").write_text(
+                json.dumps(
+                    {
+                        "organization_instance_id": "org-reconcile",
+                        "readiness_scope": "response_evidence",
+                        "provider_response_scope": "response_evidence",
+                        "provider_response_ready_count": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_dir / "roster.json").write_text(json.dumps([stale]), encoding="utf-8")
+
+            def completed_after_reconciliation(*_args, **_kwargs):
+                intermediate_roster = json.loads(
+                    (session_dir / "roster.json").read_text(encoding="utf-8")
+                )
+                intermediate_state = json.loads(
+                    (session_dir / "bootstrap.json").read_text(encoding="utf-8")
+                )
+                intermediate_row = intermediate_roster[0]
+                self.assertEqual(intermediate_row["provider"], "openai")
+                self.assertEqual(intermediate_row["execution_mode"], "codex")
+                self.assertEqual(intermediate_row["intended_model"], "gpt-5.6-luna")
+                self.assertEqual(intermediate_row["fallback_models"], "")
+                self.assertEqual(intermediate_row["response_status"], "not_invoked")
+                self.assertEqual(intermediate_row["effective_model"], "")
+                self.assertEqual(intermediate_row["session_id"], "")
+                self.assertEqual(intermediate_row["last_request_id"], "")
+                self.assertEqual(intermediate_state["provider_response_ready_count"], 0)
+                self.assertEqual(intermediate_state["provider_response_scope"], "not_invoked")
+                self.assertEqual(intermediate_state["readiness_scope"], "metadata_only")
+                reconciliation = json.loads(
+                    (session_dir / "invocation-evidence.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()[-1]
+                )
+                self.assertEqual(reconciliation["result"], "provider_routing_reconciled")
+                self.assertFalse(reconciliation["provider_invoked"])
+                self.assertEqual(
+                    reconciliation["routing_fields_changed"],
+                    ["provider", "execution_mode", "intended_model", "fallback_models"],
+                )
+                return subprocess.CompletedProcess(
+                    args=["codex"],
+                    returncode=0,
+                    stdout=current_codex_jsonl(),
+                    stderr="",
+                )
+
+            with mock.patch.object(
+                builder.shutil,
+                "which",
+                return_value="/usr/bin/codex",
+            ), mock.patch.object(
+                builder,
+                "run_command_with_bounded_output",
+                side_effect=completed_after_reconciliation,
+            ) as codex_mock, mock.patch.object(
+                builder,
+                "run_claude_command_with_bounded_output",
+                side_effect=AssertionError("stale Claude route must not be selected"),
+            ) as claude_mock:
+                output = builder.provider_activate(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={
+                        "session_id": "session",
+                        "organization_instance_id": "org-reconcile",
+                        "agent_id": "tech-backend",
+                        "request_id": "req-reconcile",
+                        "cwd": "/tmp/project",
+                        "prompt": "Review only.",
+                    },
+                )
+
+            self.assertEqual(output["activation"]["provider"], "openai")
+            codex_mock.assert_called_once()
+            claude_mock.assert_not_called()
+            final_roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+            final_evidence = [
+                json.loads(line)
+                for line in (session_dir / "invocation-evidence.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(final_roster[0]["provider"], "openai")
+            self.assertEqual(final_roster[0]["response_status"], "invoked")
+            self.assertEqual(final_evidence[0]["result"], "provider_routing_reconciled")
+            self.assertEqual(final_evidence[-1]["result"], "provider_response_ready")
+
+        with self.subTest(case="unknown_role"), tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            session_dir = state_root / "session"
+            session_dir.mkdir(parents=True)
+            (session_dir / "roster.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "agent_id": "unknown-role",
+                            "provider": "anthropic",
+                            "execution_mode": "claude",
+                            "intended_model": "claude-opus-4-6",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                builder,
+                "run_command_with_bounded_output",
+                side_effect=AssertionError("unknown role must not run Codex"),
+            ) as codex_mock, mock.patch.object(
+                builder,
+                "run_claude_command_with_bounded_output",
+                side_effect=AssertionError("unknown role must not run Claude"),
+            ) as claude_mock:
+                output = builder.provider_activate(
+                    runtime="codex",
+                    state_root=state_root,
+                    hook_input={
+                        "session_id": "session",
+                        "agent_id": "unknown-role",
+                        "request_id": "req-unknown-role",
+                    },
+                )
+
+            self.assertEqual(output["decision"], "block")
+            self.assertEqual(output["reason"], "canonical provider role policy is unavailable")
+            codex_mock.assert_not_called()
+            claude_mock.assert_not_called()
 
 
     def test_codex_consumers_redact_nonzero_process_output(self) -> None:
