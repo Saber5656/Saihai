@@ -127,7 +127,7 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
                     "result": "activation ok",
                     "usage": {"input_tokens": 1, "output_tokens": 2},
                     "duration_api_ms": 3,
-                    "model": "gpt-5.5",
+                    "model": "gpt-5.6-luna",
                     "request_id": "req-test",
                     "session_id": "provider-session",
                     "num_turns": 1,
@@ -305,11 +305,17 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             rows = builder.parse_model_registry_file(registry)
             self.assertEqual(rows[0]["agent_id"], "tech-backend")
 
-    def test_codex_activation_defaults_to_luna_max(self) -> None:
-        """Pin default Codex activations to Luna at maximum reasoning effort."""
+    def test_codex_activation_requires_explicit_luna_policy(self) -> None:
+        """Reject missing model policy and pin canonical execution to Luna Max."""
         builder = load_builder_module()
+        with self.assertRaisesRegex(ValueError, "requires an intended model policy"):
+            builder.codex_activation_command(
+                {"agent_id": "tech-backend"},
+                "hello",
+                "/tmp/project",
+            )
         command = builder.codex_activation_command(
-            {"agent_id": "tech-backend"},
+            builder.role_agent_row_for("tech-backend"),
             "hello",
             "/tmp/project",
         )
@@ -331,7 +337,11 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             "/tmp/project",
         )
         tampered_command = builder.codex_activation_command(
-            {"agent_id": "gate-task-evaluator", "allowed_tools": ["Bash"]},
+            {
+                "agent_id": "gate-task-evaluator",
+                "intended_model": "gpt-5.6-luna",
+                "allowed_tools": ["Bash"],
+            },
             "evaluate",
             "/tmp/project",
         )
@@ -421,8 +431,8 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
                         {
                             "agent_id": "tech-backend",
                             "provider": "openai",
-                            "execution_mode": "codex_exec",
-                            "intended_model": "gpt-5.5",
+                            "execution_mode": "codex",
+                            "intended_model": "gpt-5.6-luna",
                             "allowed_tools": ["Read", "Grep", "Glob"],
                             "git_operations_allowed": False,
                         }

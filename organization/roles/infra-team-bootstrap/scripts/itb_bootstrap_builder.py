@@ -19,7 +19,6 @@ import stat as stat_module
 import subprocess
 import sys
 import time
-import traceback
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -243,6 +242,7 @@ def load_hook_input() -> dict[str, Any]:
     fd = sys.stdin.fileno()
     old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
     chunks: list[bytes] = []
+    total_bytes = 0
     try:
         fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
         while True:
@@ -252,25 +252,42 @@ def load_hook_input() -> dict[str, Any]:
                 break
             if not chunk:
                 break
+            total_bytes += len(chunk)
+            if total_bytes > CODEX_JSONL_MAX_CHARS:
+                raise ValueError("hook stdin exceeds the bounded input limit")
             chunks.append(chunk)
     finally:
         fcntl.fcntl(fd, fcntl.F_SETFL, old_flags)
-    raw = b"".join(chunks).decode("utf-8", errors="replace")
+    raw = b"".join(chunks).decode("utf-8", errors="strict")
     if not raw.strip():
         return {}
-    return json.loads(raw)
+    return parse_provider_json_object(raw, context="hook stdin")
 
 
 def load_json_file_input(path_value: str) -> dict[str, Any]:
     path = Path(path_value).expanduser()
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("--input-json-file must contain a JSON object")
-    return data
+    with path.open("rb") as fh:
+        raw_bytes = fh.read(CODEX_JSONL_MAX_CHARS + 1)
+    if len(raw_bytes) > CODEX_JSONL_MAX_CHARS:
+        raise ValueError("--input-json-file exceeds the bounded input limit")
+    return parse_provider_json_object(
+        raw_bytes.decode("utf-8", errors="strict"),
+        context="--input-json-file",
+    )
 
 
 def safe_id(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value or "unknown-session")
+    raw = value if isinstance(value, str) else str(value or "")
+    raw = raw or "unknown-session"
+    if (
+        raw not in {".", ".."}
+        and len(raw) <= 96
+        and re.fullmatch(r"[A-Za-z0-9_.-]+", raw)
+    ):
+        return raw
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._-") or "id"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f"{slug[:64]}-{digest}"
 
 
 def bool_cell(value: str) -> bool:
@@ -526,8 +543,8 @@ def parse_basic_yaml_config(raw: str, path: Path) -> Any:
     return parsed
 
 
-def load_yaml_config(path: Path) -> Any:
-    raw = path.read_text(encoding="utf-8")
+def parse_yaml_config_text(raw: str, path: Path) -> Any:
+    """Parse one already-read JSON/YAML document while retaining source context."""
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -543,6 +560,10 @@ def load_yaml_config(path: Path) -> Any:
         raise
     except Exception as exc:
         raise ValueError(f"YAML config parse failed: {path}: {exc}") from exc
+
+
+def load_yaml_config(path: Path) -> Any:
+    return parse_yaml_config_text(path.read_text(encoding="utf-8"), path)
 
 
 def parse_model_registry_file(path: Path) -> list[dict[str, str]]:
@@ -738,10 +759,11 @@ def claude_transport_allowed_tools_argument_for_role(row: dict[str, Any]) -> str
 def claude_tools_argument_for_role(row: dict[str, Any]) -> str:
     tools = normalize_allowed_tools(row.get("allowed_tools", []))
     agent_id = normalize_cell(row.get("agent_id") or row.get("role_id"))
-    if not tools and agent_id:
+    policy_is_bound = bool(normalize_cell(row.get("canonical_execution_policy_digest")))
+    if not policy_is_bound and not tools and agent_id:
         registry_row = role_agent_row_for(agent_id)
         tools = normalize_allowed_tools(registry_row.get("allowed_tools", [])) if registry_row else []
-    if not tools and agent_id:
+    if not policy_is_bound and not tools and agent_id:
         tools = skill_allowed_tools(agent_id)
     for tool in normalize_allowed_tools(claude_transport_allowed_tools_argument_for_role(row)):
         if tool not in tools:
@@ -1484,6 +1506,104 @@ def atomic_write_text(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def planned_provider_transcript_path(
+    session_dir: Path,
+    *,
+    agent_id: str,
+    request_id: str,
+    suffix: str,
+) -> Path:
+    return (
+        session_dir
+        / "provider-exec"
+        / safe_id(agent_id)
+        / f"{safe_id(request_id)}{suffix}"
+    )
+
+
+def persist_validated_provider_transcript(
+    session_dir: Path,
+    *,
+    agent_id: str,
+    request_id: str,
+    suffix: str,
+    content: str,
+) -> tuple[Path, dict[str, Any]]:
+    planned = planned_provider_transcript_path(
+        session_dir,
+        agent_id=agent_id,
+        request_id=request_id,
+        suffix=suffix,
+    )
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    opened_fds: list[int] = []
+    current_fd = -1
+    temporary_name = ""
+    try:
+        current_fd = os.open(session_dir, directory_flags)
+        opened_fds.append(current_fd)
+        for component in ("provider-exec", safe_id(agent_id)):
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=current_fd)
+            except FileExistsError:
+                pass
+            current_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            opened_fds.append(current_fd)
+
+        filename = f"{safe_id(request_id)}{suffix}"
+        temporary_name = f".{filename}.{uuid.uuid4().hex}.tmp"
+        file_flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        file_fd = os.open(
+            temporary_name,
+            file_flags,
+            0o600,
+            dir_fd=current_fd,
+        )
+        try:
+            remaining = memoryview(content.encode("utf-8"))
+            while remaining:
+                written = os.write(file_fd, remaining)
+                if written <= 0:
+                    raise OSError("provider transcript write made no progress")
+                remaining = remaining[written:]
+            os.fsync(file_fd)
+        finally:
+            os.close(file_fd)
+        os.replace(
+            temporary_name,
+            filename,
+            src_dir_fd=current_fd,
+            dst_dir_fd=current_fd,
+        )
+        temporary_name = ""
+    except OSError as exc:
+        return planned, {
+            "provider_transcript_error_type": "filesystem_error",
+            **provider_oserror_evidence(exc),
+        }
+    finally:
+        if temporary_name and current_fd >= 0:
+            try:
+                os.unlink(temporary_name, dir_fd=current_fd)
+            except OSError:
+                pass
+        for fd in reversed(opened_fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    return planned, {}
+
+
 def report_file_integrity(path: Path) -> dict[str, Any]:
     data = path.read_bytes()
     text = data.decode("utf-8")
@@ -1510,14 +1630,39 @@ def read_json_yaml(path: Path) -> Any:
 
 def queue_root_for(session_dir: Path, hook_input: dict[str, Any] | None = None) -> Path:
     hook_input = hook_input or {}
-    value = (
-        hook_input.get("queue_root")
-        or hook_input.get("queueRoot")
-        or os.environ.get("ITB_QUEUE_ROOT")
+    configured_value = os.environ.get("ITB_QUEUE_ROOT")
+    trusted_root = (
+        Path(configured_value).expanduser()
+        if configured_value
+        else session_dir / "queue"
     )
-    if value:
-        return Path(str(value)).expanduser()
-    return session_dir / "queue"
+    if configured_value and not trusted_root.is_absolute():
+        raise ValueError("ITB_QUEUE_ROOT must be an absolute path")
+    if trusted_root.is_symlink():
+        raise ValueError("trusted queue_root must not be a symlink")
+    trusted_root = trusted_root.resolve()
+
+    supplied_values: list[str] = []
+    for key in ("queue_root", "queueRoot"):
+        if key not in hook_input:
+            continue
+        value = hook_input.get(key)
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or "\x00" in value
+            or len(value) > 4096
+        ):
+            raise ValueError("hook queue_root metadata is invalid")
+        supplied_values.append(value)
+    if len(set(supplied_values)) > 1:
+        raise ValueError("hook queue_root aliases conflict")
+    if supplied_values:
+        supplied_root = Path(supplied_values[0]).expanduser()
+        if supplied_root.is_symlink() or supplied_root.resolve() != trusted_root:
+            raise ValueError("hook queue_root does not match the trusted queue root")
+    return trusted_root
 
 
 def queue_component_errors(value: str, field_name: str) -> list[str]:
@@ -1526,7 +1671,7 @@ def queue_component_errors(value: str, field_name: str) -> list[str]:
     if value in {".", ".."}:
         return [f"{field_name} must not be a relative path marker"]
     if safe_id(value) != value:
-        return [f"{field_name} contains unsafe path characters: {value}"]
+        return [f"{field_name} contains unsafe path characters"]
     return []
 
 
@@ -1540,6 +1685,405 @@ def queue_relative_path_errors(value: str, field_name: str) -> list[str]:
     for part in path.parts:
         errors.extend(queue_component_errors(part, field_name))
     return errors
+
+
+QUEUE_FILE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def open_relative_directory_fd(
+    root: Path,
+    components: tuple[str, ...],
+    *,
+    create: bool,
+) -> int:
+    """Open one directory chain without following replaceable child symlinks."""
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current_fd = os.open(root, flags)
+    try:
+        for component in components:
+            if (
+                not component
+                or component in {".", ".."}
+                or "/" in component
+                or "\x00" in component
+            ):
+                raise ValueError("directory component is invalid")
+            if create:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+            next_fd = os.open(component, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def open_queue_parent_fd(
+    queue_root: Path,
+    value: str,
+    field_name: str,
+    *,
+    create: bool,
+) -> tuple[int, str]:
+    errors = queue_relative_path_errors(value, field_name)
+    if errors:
+        raise ValueError("; ".join(errors))
+    parts = Path(value).parts
+    parent_fd = open_relative_directory_fd(
+        queue_root,
+        tuple(parts[:-1]),
+        create=create,
+    )
+    return parent_fd, parts[-1]
+
+
+def read_regular_file_bytes_at(
+    parent_fd: int,
+    filename: str,
+    field_name: str,
+    *,
+    max_bytes: int = QUEUE_FILE_MAX_BYTES,
+) -> bytes:
+    """Read one bounded regular file relative to an already trusted directory."""
+    file_fd = -1
+    try:
+        file_fd = os.open(
+            filename,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        stat = os.fstat(file_fd)
+        if not stat_module.S_ISREG(stat.st_mode):
+            raise ValueError(f"{field_name} must reference a regular file")
+        if stat.st_size > max_bytes:
+            raise ValueError(f"{field_name} exceeds the bounded file limit")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(file_fd, min(64 * 1024, max_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"{field_name} exceeds the bounded file limit")
+        return b"".join(chunks)
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+
+
+def read_queue_file_bytes(
+    queue_root: Path,
+    value: str,
+    field_name: str,
+    *,
+    max_bytes: int = QUEUE_FILE_MAX_BYTES,
+) -> bytes:
+    """Read a regular queue file through one descriptor-bound parent chain."""
+    parent_fd, filename = open_queue_parent_fd(
+        queue_root,
+        value,
+        field_name,
+        create=False,
+    )
+    try:
+        return read_regular_file_bytes_at(
+            parent_fd,
+            filename,
+            field_name,
+            max_bytes=max_bytes,
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def read_queue_json_yaml(queue_root: Path, value: str, field_name: str) -> Any:
+    raw = read_queue_file_bytes(queue_root, value, field_name).decode("utf-8", errors="strict")
+    return parse_yaml_config_text(raw, queue_root / value)
+
+
+def read_queue_directory_regular_files(
+    queue_root: Path,
+    directory_value: str,
+    field_name: str,
+    *,
+    suffixes: tuple[str, ...],
+    max_files: int,
+    max_entries: int,
+) -> list[tuple[str, bytes]]:
+    """Enumerate and read queue files through one descriptor-bound directory."""
+    directory_path = Path(directory_value)
+    errors: list[str] = []
+    if directory_path.is_absolute() or not directory_path.parts:
+        errors.append(f"{field_name} must be relative to queue_root")
+    for part in directory_path.parts:
+        errors.extend(queue_component_errors(part, field_name))
+    if errors:
+        raise ValueError("; ".join(errors))
+    if max_files <= 0 or max_entries <= 0:
+        return []
+
+    directory_fd = open_relative_directory_fd(
+        queue_root,
+        tuple(directory_path.parts),
+        create=False,
+    )
+    try:
+        candidates: list[tuple[int, str]] = []
+        with os.scandir(directory_fd) as scanner:
+            for index, entry in enumerate(scanner):
+                if index >= max_entries:
+                    raise ValueError(f"{field_name} exceeds the bounded entry limit")
+                name = entry.name
+                if (
+                    not name
+                    or name in {".", ".."}
+                    or "/" in name
+                    or "\x00" in name
+                    or not name.lower().endswith(suffixes)
+                ):
+                    continue
+                try:
+                    stat = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat_module.S_ISREG(stat.st_mode):
+                    candidates.append((stat.st_mtime_ns, name))
+        candidates.sort(reverse=True)
+        files: list[tuple[str, bytes]] = []
+        for _mtime_ns, name in candidates[:max_files]:
+            try:
+                data = read_regular_file_bytes_at(
+                    directory_fd,
+                    name,
+                    field_name,
+                )
+            except (OSError, ValueError):
+                continue
+            files.append((f"{directory_value}/{name}", data))
+        return files
+    finally:
+        os.close(directory_fd)
+
+
+def queue_file_exists(queue_root: Path, value: str, field_name: str) -> bool:
+    try:
+        read_queue_file_bytes(queue_root, value, field_name, max_bytes=1)
+    except FileNotFoundError:
+        return False
+    except ValueError as exc:
+        if "bounded file limit" not in str(exc):
+            raise
+    return True
+
+
+def atomic_write_queue_text(
+    queue_root: Path,
+    value: str,
+    field_name: str,
+    text: str,
+) -> None:
+    """Atomically replace one queue file without reopening an approved pathname."""
+    encoded = text.encode("utf-8")
+    if len(encoded) > QUEUE_FILE_MAX_BYTES:
+        raise ValueError(f"{field_name} exceeds the bounded serialized file limit")
+    parent_fd, filename = open_queue_parent_fd(
+        queue_root,
+        value,
+        field_name,
+        create=True,
+    )
+    temporary_name = f".{filename}.{uuid.uuid4().hex}.tmp"
+    file_fd = -1
+    try:
+        file_fd = os.open(
+            temporary_name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        remaining = memoryview(encoded)
+        while remaining:
+            written = os.write(file_fd, remaining)
+            if written <= 0:
+                raise OSError("queue file write made no progress")
+            remaining = remaining[written:]
+        os.fsync(file_fd)
+        os.close(file_fd)
+        file_fd = -1
+        os.replace(
+            temporary_name,
+            filename,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+        )
+        temporary_name = ""
+        os.fsync(parent_fd)
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        if temporary_name:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+        os.close(parent_fd)
+
+
+def write_queue_json_yaml(queue_root: Path, value: str, field_name: str, data: Any) -> None:
+    atomic_write_queue_text(
+        queue_root,
+        value,
+        field_name,
+        json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+
+
+def queue_file_integrity_from_bytes(data: bytes) -> dict[str, Any]:
+    """Describe the exact bounded byte snapshot used by a queue consumer."""
+    text = data.decode("utf-8", errors="strict")
+    return {
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "line_count": len(text.splitlines()),
+        "byte_count": len(data),
+    }
+
+
+def queue_file_integrity(queue_root: Path, value: str, field_name: str) -> dict[str, Any]:
+    return queue_file_integrity_from_bytes(
+        read_queue_file_bytes(queue_root, value, field_name)
+    )
+
+
+def append_queue_jsonl(
+    queue_root: Path,
+    value: str,
+    field_name: str,
+    entry: dict[str, Any],
+) -> None:
+    """Append one queue JSONL event while holding a lock on the descriptor-bound file."""
+    parent_fd, filename = open_queue_parent_fd(
+        queue_root,
+        value,
+        field_name,
+        create=True,
+    )
+    file_fd = -1
+    try:
+        file_fd = os.open(
+            filename,
+            os.O_WRONLY
+            | os.O_APPEND
+            | os.O_CREAT
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        fcntl.flock(file_fd, fcntl.LOCK_EX)
+        remaining = memoryview(
+            (json.dumps(json_event_safe(entry), ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        )
+        while remaining:
+            written = os.write(file_fd, remaining)
+            if written <= 0:
+                raise OSError("queue JSONL append made no progress")
+            remaining = remaining[written:]
+        os.fsync(file_fd)
+    finally:
+        if file_fd >= 0:
+            try:
+                fcntl.flock(file_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(file_fd)
+        os.close(parent_fd)
+
+
+def acquire_descriptor_queue_lock(
+    queue_root: Path,
+    value: str,
+    field_name: str,
+    *,
+    timeout_seconds: float = 5.0,
+) -> tuple[int, int]:
+    """Acquire a queue-local flock without reopening its replaceable parent path."""
+    parent_fd, filename = open_queue_parent_fd(
+        queue_root,
+        value,
+        field_name,
+        create=True,
+    )
+    file_fd = -1
+    try:
+        file_fd = os.open(
+            filename,
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        stat = os.fstat(file_fd)
+        if not stat_module.S_ISREG(stat.st_mode):
+            raise ValueError(f"{field_name} must reference a regular lock file")
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            try:
+                fcntl.flock(file_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("queue descriptor lock timeout")
+                time.sleep(0.05)
+        owner_text = json.dumps(
+            {
+                "pid": os.getpid(),
+                "created_at": current_timestamp(),
+                "lock_type": "queue_descriptor",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ) + "\n"
+        os.ftruncate(file_fd, 0)
+        os.lseek(file_fd, 0, os.SEEK_SET)
+        remaining = memoryview(owner_text.encode("utf-8"))
+        while remaining:
+            written = os.write(file_fd, remaining)
+            if written <= 0:
+                raise OSError("queue lock owner write made no progress")
+            remaining = remaining[written:]
+        os.fsync(file_fd)
+        return parent_fd, file_fd
+    except Exception:
+        if file_fd >= 0:
+            try:
+                fcntl.flock(file_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(file_fd)
+        os.close(parent_fd)
+        raise
+
+
+def release_descriptor_queue_lock(handle: tuple[int, int]) -> None:
+    """Release a descriptor-bound queue lock without any pathname mutation."""
+    parent_fd, file_fd = handle
+    try:
+        fcntl.flock(file_fd, fcntl.LOCK_UN)
+    finally:
+        try:
+            os.close(file_fd)
+        finally:
+            os.close(parent_fd)
 
 
 def process_is_alive(pid: int) -> bool:
@@ -1886,10 +2430,16 @@ def shared_file_update_output(
     return {"sharedFileUpdate": event}
 
 
-def load_inbox(path: Path, role_id: str) -> dict[str, Any]:
-    if not path.exists():
+def load_inbox(
+    path: Path,
+    role_id: str,
+    queue_root: Path,
+) -> dict[str, Any]:
+    try:
+        inbox_ref = str(path.relative_to(queue_root))
+        data = read_queue_json_yaml(queue_root, inbox_ref, "inbox_path")
+    except FileNotFoundError:
         return {"envelope_version": "1", "role_id": role_id, "messages": []}
-    data = read_json_yaml(path)
     if not isinstance(data, dict):
         raise ValueError(f"inbox must contain an object: {path}")
     messages = data.get("messages")
@@ -1907,24 +2457,38 @@ def append_inbox_message(
     task_payload_path: Path | None = None,
     task_payload_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    lock_path = queue_root / "locks" / "enqueue.lock"
-    acquire_queue_lock(lock_path)
+    lock_handle = acquire_descriptor_queue_lock(
+        queue_root,
+        "locks/enqueue.flock",
+        "enqueue_lock_path",
+    )
     try:
-        inbox = load_inbox(path, role_id)
+        inbox = load_inbox(path, role_id, queue_root)
         inbox["envelope_version"] = str(inbox.get("envelope_version") or "1")
         inbox["role_id"] = role_id
         inbox.setdefault("messages", [])
         if any(item.get("message_id") == message["message_id"] for item in inbox["messages"] if isinstance(item, dict)):
             raise ValueError(f"duplicate message_id for {role_id}: {message['message_id']}")
         if task_payload_path and task_payload_data is not None:
-            if task_payload_path.exists():
+            task_payload_ref = str(task_payload_path.relative_to(queue_root))
+            if queue_file_exists(queue_root, task_payload_ref, "task_payload_path"):
                 raise ValueError(f"task payload already exists: {task_payload_path}")
-            write_json_yaml(task_payload_path, task_payload_data)
+            write_queue_json_yaml(
+                queue_root,
+                task_payload_ref,
+                "task_payload_path",
+                task_payload_data,
+            )
         inbox["messages"].append(message)
-        write_json_yaml(path, inbox)
+        write_queue_json_yaml(
+            queue_root,
+            str(path.relative_to(queue_root)),
+            "inbox_path",
+            inbox,
+        )
         return inbox
     finally:
-        release_queue_lock(lock_path)
+        release_descriptor_queue_lock(lock_handle)
 
 
 def update_inbox_message(
@@ -1934,19 +2498,75 @@ def update_inbox_message(
     queue_root: Path,
     updates: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    lock_path = queue_root / "locks" / "enqueue.lock"
-    acquire_queue_lock(lock_path)
+    lock_handle = acquire_descriptor_queue_lock(
+        queue_root,
+        "locks/enqueue.flock",
+        "enqueue_lock_path",
+    )
     try:
-        inbox = load_inbox(path, role_id)
+        inbox = load_inbox(path, role_id, queue_root)
         for item in inbox.get("messages", []):
             if isinstance(item, dict) and item.get("message_id") == message_id:
                 item.update(updates)
                 prune_terminal_inbox_messages(inbox, role_id, queue_root)
-                write_json_yaml(path, inbox)
+                write_queue_json_yaml(
+                    queue_root,
+                    str(path.relative_to(queue_root)),
+                    "inbox_path",
+                    inbox,
+                )
                 return inbox, item
         raise ValueError(f"message_id not found for {role_id}: {message_id}")
     finally:
-        release_queue_lock(lock_path)
+        release_descriptor_queue_lock(lock_handle)
+
+
+def terminalize_invalid_inbox_message_if_current(
+    path: Path,
+    role_id: str,
+    message_id: str,
+    queue_root: Path,
+    report_ref: str,
+    expected_report_sha256: str,
+    updates: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    """Fail a nonterminal message only while the observed report is still current."""
+    lock_handle = acquire_descriptor_queue_lock(
+        queue_root,
+        "locks/enqueue.flock",
+        "enqueue_lock_path",
+    )
+    try:
+        inbox = load_inbox(path, role_id, queue_root)
+        for item in inbox.get("messages", []):
+            if not isinstance(item, dict) or item.get("message_id") != message_id:
+                continue
+            current_status = normalize_cell(item.get("status") or "pending").lower()
+            if current_status in {"done", "failed"}:
+                return False, dict(item)
+            try:
+                current_integrity = queue_file_integrity(
+                    queue_root,
+                    report_ref,
+                    "report_path",
+                )
+            except (FileNotFoundError, OSError, UnicodeError, ValueError):
+                return False, dict(item)
+            if current_integrity["sha256"] != expected_report_sha256:
+                return False, dict(item)
+            item.update(updates)
+            persisted = dict(item)
+            prune_terminal_inbox_messages(inbox, role_id, queue_root)
+            write_queue_json_yaml(
+                queue_root,
+                str(path.relative_to(queue_root)),
+                "inbox_path",
+                inbox,
+            )
+            return True, persisted
+        raise ValueError(f"message_id not found for {role_id}: {message_id}")
+    finally:
+        release_descriptor_queue_lock(lock_handle)
 
 
 def prune_terminal_inbox_messages(inbox: dict[str, Any], role_id: str, queue_root: Path) -> None:
@@ -1973,8 +2593,10 @@ def prune_terminal_inbox_messages(inbox: dict[str, Any], role_id: str, queue_roo
     retained_messages: list[Any] = []
     for index, item in enumerate(messages):
         if index in archive_indexes and isinstance(item, dict):
-            append_jsonl_atomic(
-                archive_path,
+            append_queue_jsonl(
+                queue_root,
+                str(archive_path.relative_to(queue_root)),
+                "inbox_archive_path",
                 {
                     "archived_at": archived_at,
                     "role_id": role_id,
@@ -1992,16 +2614,16 @@ def prune_terminal_inbox_messages(inbox: dict[str, Any], role_id: str, queue_roo
     }
 
 
-def first_pending_message(path: Path, role_id: str) -> dict[str, Any] | None:
-    inbox = load_inbox(path, role_id)
+def first_pending_message(path: Path, role_id: str, queue_root: Path) -> dict[str, Any] | None:
+    inbox = load_inbox(path, role_id, queue_root)
     for item in inbox.get("messages", []):
         if isinstance(item, dict) and item.get("status") == "pending":
             return dict(item)
     return None
 
 
-def pending_inbox_messages(path: Path, role_id: str) -> list[dict[str, Any]]:
-    inbox = load_inbox(path, role_id)
+def pending_inbox_messages(path: Path, role_id: str, queue_root: Path) -> list[dict[str, Any]]:
+    inbox = load_inbox(path, role_id, queue_root)
     return [
         dict(item)
         for item in inbox.get("messages", [])
@@ -2016,23 +2638,36 @@ def claim_pending_message(
     *,
     now: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    lock_path = queue_root / "locks" / "enqueue.lock"
-    acquire_queue_lock(lock_path)
+    lock_handle = acquire_descriptor_queue_lock(
+        queue_root,
+        "locks/enqueue.flock",
+        "enqueue_lock_path",
+    )
     try:
-        inbox = load_inbox(path, role_id)
+        inbox = load_inbox(path, role_id, queue_root)
         for item in inbox.get("messages", []):
             if isinstance(item, dict) and item.get("status") == "pending":
                 item["status"] = "processing"
                 item["processing_started_at"] = now
-                write_json_yaml(path, inbox)
+                write_queue_json_yaml(
+                    queue_root,
+                    str(path.relative_to(queue_root)),
+                    "inbox_path",
+                    inbox,
+                )
                 return dict(item), inbox
         return None, inbox
     finally:
-        release_queue_lock(lock_path)
+        release_descriptor_queue_lock(lock_handle)
 
 
-def queue_message_by_id(path: Path, role_id: str, message_id: str) -> dict[str, Any]:
-    inbox = load_inbox(path, role_id)
+def queue_message_by_id(
+    path: Path,
+    role_id: str,
+    message_id: str,
+    queue_root: Path,
+) -> dict[str, Any]:
+    inbox = load_inbox(path, role_id, queue_root)
     for item in inbox.get("messages", []):
         if isinstance(item, dict) and item.get("message_id") == message_id:
             return dict(item)
@@ -2295,7 +2930,12 @@ def append_queue_metric(
             result=result,
             sla_breached=bool(metric.get("sla_breached")),
         )
-    append_jsonl_atomic(queue_root / "metrics" / f"{role_id}.jsonl", metric)
+    append_queue_jsonl(
+        queue_root,
+        f"metrics/{role_id}.jsonl",
+        "queue_metric_path",
+        metric,
+    )
     append_jsonl_atomic(session_dir / "gate-metrics.jsonl", metric)
 
 
@@ -2363,43 +3003,32 @@ def append_gate_command_metric(
         result=result,
         sla_breached=bool(metric.get("sla_breached")),
     )
-    append_jsonl_atomic(queue_root / "metrics" / f"{role_id}.jsonl", metric)
+    append_queue_jsonl(
+        queue_root,
+        f"metrics/{role_id}.jsonl",
+        "queue_metric_path",
+        metric,
+    )
     append_jsonl_atomic(session_dir / "gate-metrics.jsonl", metric)
 
 
 def optional_metric_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
-    if isinstance(value, bool):
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        or value > CODEX_EVIDENCE_METRIC_MAX_VALUE
+    ):
         return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        try:
-            return int(float(str(value)))
-        except (TypeError, ValueError):
-            return None
+    return value
 
 
-def nested_metric_int(data: dict[str, Any], paths: list[tuple[str, ...]]) -> int | None:
-    for path in paths:
-        current: Any = data
-        for key in path:
-            if not isinstance(current, dict) or key not in current:
-                current = None
-                break
-            current = current[key]
-        parsed = optional_metric_int(current)
-        if parsed is not None:
-            return parsed
-    return None
-
-
-def collect_provider_usage_metrics(data: dict[str, Any]) -> dict[str, int]:
-    fields: dict[str, int] = {}
-    input_tokens = nested_metric_int(
-        data,
-        [
+PROVIDER_USAGE_METRIC_PATHS = (
+        (
+            "input_tokens",
+            (
             ("input_tokens",),
             ("inputTokens",),
             ("prompt_tokens",),
@@ -2416,11 +3045,11 @@ def collect_provider_usage_metrics(data: dict[str, Any]) -> dict[str, int]:
             ("response", "usage", "prompt_tokens"),
             ("metrics", "input_tokens"),
             ("metrics", "inputTokens"),
-        ],
-    )
-    output_tokens = nested_metric_int(
-        data,
-        [
+            ),
+        ),
+        (
+            "output_tokens",
+            (
             ("output_tokens",),
             ("outputTokens",),
             ("completion_tokens",),
@@ -2437,11 +3066,11 @@ def collect_provider_usage_metrics(data: dict[str, Any]) -> dict[str, int]:
             ("response", "usage", "completion_tokens"),
             ("metrics", "output_tokens"),
             ("metrics", "outputTokens"),
-        ],
-    )
-    total_tokens = nested_metric_int(
-        data,
-        [
+            ),
+        ),
+        (
+            "total_tokens",
+            (
             ("total_tokens",),
             ("totalTokens",),
             ("usage", "total_tokens"),
@@ -2452,11 +3081,11 @@ def collect_provider_usage_metrics(data: dict[str, Any]) -> dict[str, int]:
             ("response", "usage", "totalTokens"),
             ("metrics", "total_tokens"),
             ("metrics", "totalTokens"),
-        ],
-    )
-    duration_api_ms = nested_metric_int(
-        data,
-        [
+            ),
+        ),
+        (
+            "duration_api_ms",
+            (
             ("duration_api_ms",),
             ("durationApiMs",),
             ("api_duration_ms",),
@@ -2469,11 +3098,11 @@ def collect_provider_usage_metrics(data: dict[str, Any]) -> dict[str, int]:
             ("response", "durationApiMs"),
             ("message", "duration_api_ms"),
             ("message", "durationApiMs"),
-        ],
-    )
-    num_turns = nested_metric_int(
-        data,
-        [
+            ),
+        ),
+        (
+            "num_turns",
+            (
             ("num_turns",),
             ("numTurns",),
             ("turn_count",),
@@ -2484,11 +3113,11 @@ def collect_provider_usage_metrics(data: dict[str, Any]) -> dict[str, int]:
             ("response", "numTurns"),
             ("message", "num_turns"),
             ("message", "numTurns"),
-        ],
-    )
-    turn_duration_ms = nested_metric_int(
-        data,
-        [
+            ),
+        ),
+        (
+            "turn_duration_ms",
+            (
             ("turn_duration_ms",),
             ("turnDurationMs",),
             ("metrics", "turn_duration_ms"),
@@ -2497,136 +3126,212 @@ def collect_provider_usage_metrics(data: dict[str, Any]) -> dict[str, int]:
             ("response", "turnDurationMs"),
             ("message", "turn_duration_ms"),
             ("message", "turnDurationMs"),
-        ],
-    )
-    if input_tokens is not None:
-        fields["input_tokens"] = input_tokens
-    if output_tokens is not None:
-        fields["output_tokens"] = output_tokens
-    if total_tokens is not None:
-        fields["total_tokens"] = total_tokens
-    if duration_api_ms is not None:
-        fields["duration_api_ms"] = duration_api_ms
-    if turn_duration_ms is not None:
-        fields["turn_duration_ms"] = turn_duration_ms
-    if num_turns is not None:
-        fields["num_turns"] = num_turns
-    return fields
+            ),
+        ),
+)
 
 
-def provider_turn_duration_metric_fields(record: dict[str, Any]) -> dict[str, int]:
+def collect_provider_usage_metrics(data: dict[str, Any]) -> tuple[dict[str, int], bool]:
+    """Return exact bounded metrics and reject conflicting aliases as one unit."""
+    fields: dict[str, int] = {}
+    for canonical, paths in PROVIDER_USAGE_METRIC_PATHS:
+        value, aliases_valid = exact_provider_metric_alias(data, paths)
+        if not aliases_valid:
+            return {}, False
+        if value is not None:
+            fields[canonical] = value
+
+    input_tokens = fields.get("input_tokens")
+    output_tokens = fields.get("output_tokens")
+    total_tokens = fields.get("total_tokens")
+    if total_tokens is not None and (input_tokens is None) != (output_tokens is None):
+        return {}, False
+    if input_tokens is not None and output_tokens is not None:
+        derived_total = optional_metric_int(input_tokens + output_tokens)
+        if derived_total is None or (
+            total_tokens is not None and total_tokens != derived_total
+        ):
+            return {}, False
+    return fields, True
+
+
+def provider_turn_duration_metric_fields(record: dict[str, Any]) -> tuple[dict[str, int], bool]:
     if (
         normalize_cell(record.get("type")) != "system"
         or normalize_cell(record.get("subtype")) != "turn_duration"
     ):
-        return {}
-    turn_duration_ms = nested_metric_int(
+        return {}, True
+    turn_duration_ms, aliases_valid = exact_provider_metric_alias(
         record,
-        [
+        (
             ("turn_duration_ms",),
             ("turnDurationMs",),
             ("duration_ms",),
             ("durationMs",),
-        ],
+        ),
     )
-    return {"turn_duration_ms": turn_duration_ms} if turn_duration_ms is not None else {}
+    if not aliases_valid:
+        return {}, False
+    return ({"turn_duration_ms": turn_duration_ms} if turn_duration_ms is not None else {}), True
 
 
-def provider_transcript_records(path: Path) -> list[dict[str, Any]]:
+def provider_transcript_records(
+    path: Path,
+    *,
+    directory_fd: int | None = None,
+) -> list[dict[str, Any]]:
+    previous_byte = b""
     try:
-        stat = path.stat()
-        if not path.is_file():
+        if directory_fd is None and path.is_symlink():
             return []
         max_bytes = env_int_default("ITB_PROVIDER_USAGE_TRANSCRIPT_MAX_BYTES", 2 * 1024 * 1024)
         if max_bytes <= 0:
             return []
-        offset = max(0, stat.st_size - max_bytes)
-        with path.open("rb") as fh:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(
+            path.name if directory_fd is not None else path,
+            flags,
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(fd, "rb") as fh:
+            stat = os.fstat(fh.fileno())
+            if not stat_module.S_ISREG(stat.st_mode):
+                return []
+            offset = max(0, stat.st_size - max_bytes)
             if offset:
-                fh.seek(offset)
+                fh.seek(offset - 1)
+                previous_byte = fh.read(1)
             raw_bytes = fh.read(max_bytes)
     except OSError:
         return []
-    raw = raw_bytes.decode("utf-8", errors="replace").strip()
+    if offset and previous_byte != b"\n":
+        first_newline = raw_bytes.find(b"\n")
+        if first_newline < 0:
+            return []
+        raw_bytes = raw_bytes[first_newline + 1 :]
+    try:
+        raw = raw_bytes.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return [{"reported_model_metadata_valid": False}]
     if not raw:
         return []
     if not offset:
+        parsed_full_value = True
         try:
-            parsed = json.loads(raw)
+            parsed = parse_provider_json_value(raw)
         except json.JSONDecodeError:
+            parsed_full_value = False
             parsed = None
-        if isinstance(parsed, dict):
-            return [parsed]
-        if isinstance(parsed, list):
-            return [item for item in parsed if isinstance(item, dict)]
+        except (ValueError, RecursionError):
+            return [{"reported_model_metadata_valid": False}]
+        if parsed_full_value:
+            if isinstance(parsed, dict):
+                return [parsed]
+            if isinstance(parsed, list):
+                records = [item for item in parsed if isinstance(item, dict)]
+                if len(records) != len(parsed):
+                    records.append({"reported_model_metadata_valid": False})
+                return records
+            return [{"reported_model_metadata_valid": False}]
 
     lines = raw.splitlines()
-    if offset and lines:
-        lines = lines[1:]
     records: list[dict[str, Any]] = []
     for line in lines:
         if not line.strip():
             continue
         try:
-            event = json.loads(line)
+            event = parse_provider_json_value(line)
         except json.JSONDecodeError:
+            records.append({"reported_model_metadata_valid": False})
+            continue
+        except (ValueError, RecursionError):
+            records.append({"reported_model_metadata_valid": False})
             continue
         if isinstance(event, dict):
             records.append(event)
+        else:
+            records.append({"reported_model_metadata_valid": False})
     return records
 
 
-def provider_transcript_usage_metric_fields_from_records(records: list[dict[str, Any]]) -> dict[str, int]:
+def provider_transcript_usage_metric_fields_from_records(records: list[dict[str, Any]]) -> dict[str, Any]:
     fields: dict[str, int] = {}
     for record in records:
-        record_fields = collect_provider_usage_metrics(record)
+        record_fields, record_valid = collect_provider_usage_metrics(record)
+        if not record_valid:
+            return {"reported_usage_metadata_valid": False}
         if (
             normalize_cell(record.get("type")) == "system"
             and normalize_cell(record.get("subtype")) == "turn_duration"
         ):
             record_fields.pop("duration_api_ms", None)
-            record_fields.update(provider_turn_duration_metric_fields(record))
+            turn_fields, turn_valid = provider_turn_duration_metric_fields(record)
+            if not turn_valid:
+                return {"reported_usage_metadata_valid": False}
+            record_fields.update(turn_fields)
         for key, value in record_fields.items():
+            if key in fields and fields[key] != value:
+                return {"reported_usage_metadata_valid": False}
             fields[key] = value
-    if "total_tokens" not in fields and ("input_tokens" in fields or "output_tokens" in fields):
-        fields["total_tokens"] = int(fields.get("input_tokens") or 0) + int(fields.get("output_tokens") or 0)
+    input_tokens = fields.get("input_tokens")
+    output_tokens = fields.get("output_tokens")
+    total_tokens = fields.get("total_tokens")
+    if total_tokens is not None and (input_tokens is None) != (output_tokens is None):
+        return {"reported_usage_metadata_valid": False}
+    if input_tokens is not None or output_tokens is not None:
+        derived_total = optional_metric_int(
+            int(input_tokens or 0) + int(output_tokens or 0)
+        )
+        if derived_total is None or (
+            total_tokens is not None
+            and total_tokens != derived_total
+        ):
+            return {"reported_usage_metadata_valid": False}
+        fields["total_tokens"] = derived_total
     return fields
 
 
-def provider_transcript_usage_metric_fields(evidence: dict[str, Any]) -> dict[str, int]:
-    path_text = normalize_cell(evidence.get("transcript_path") or evidence.get("transcriptPath"))
-    if not path_text:
-        return {}
-    transcript_path = Path(os.path.expanduser(path_text))
-    return provider_transcript_usage_metric_fields_from_records(provider_transcript_records(transcript_path))
-
-
-def provider_transcript_metadata_fields_from_records(records: list[dict[str, Any]]) -> dict[str, str]:
-    fields: dict[str, str] = {}
+def provider_transcript_metadata_fields_from_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    reported_models: list[str] = []
+    request_ids: list[str] = []
+    model_metadata_valid = True
+    request_metadata_valid = True
     for record in records:
-        request_id = normalize_cell(
-            record.get("requestId")
-            or record.get("request_id")
-            or str_from_nested(record, [("message", "requestId"), ("message", "request_id")])
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        request_id, request_valid, request_present = exact_string_alias_from_sources(
+            record,
+            message,
+            keys=("requestId", "request_id"),
+            max_chars=CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
         )
-        effective_model = normalize_cell(
-            record.get("model")
-            or record.get("effective_model")
-            or record.get("effectiveModel")
-            or str_from_nested(record, [("message", "model"), ("message", "effective_model"), ("message", "effectiveModel")])
+        if request_present:
+            if request_valid:
+                request_ids.append(request_id)
+            else:
+                request_metadata_valid = False
+        if not provider_identity_markers_are_valid(record, message):
+            model_metadata_valid = False
+        effective_model, model_valid, model_present = exact_model_alias_from_sources(
+            record,
+            message,
         )
-        if request_id:
-            fields["request_id"] = request_id
-        if effective_model:
-            fields["effective_model"] = effective_model
+        if model_present:
+            if model_valid:
+                reported_models.append(effective_model)
+            else:
+                model_metadata_valid = False
+    if len(set(reported_models)) > 1:
+        model_metadata_valid = False
+    if len(set(request_ids)) > 1:
+        request_metadata_valid = False
+    if request_metadata_valid and request_ids:
+        fields["request_id"] = request_ids[-1]
+    if model_metadata_valid and reported_models:
+        fields["effective_model"] = reported_models[-1]
+    fields["reported_model_metadata_valid"] = model_metadata_valid
+    fields["request_id_metadata_valid"] = request_metadata_valid
     return fields
-
-
-def provider_transcript_metadata_fields(path_text: str) -> dict[str, str]:
-    if not normalize_cell(path_text):
-        return {}
-    transcript_path = Path(os.path.expanduser(path_text))
-    return provider_transcript_metadata_fields_from_records(provider_transcript_records(transcript_path))
 
 
 def claude_project_dir_name_for_cwd(cwd: Path) -> str:
@@ -2635,6 +3340,19 @@ def claude_project_dir_name_for_cwd(cwd: Path) -> str:
 
 def claude_project_transcript_dir_for_cwd(cwd: Path) -> Path:
     return Path.home() / ".claude" / "projects" / claude_project_dir_name_for_cwd(cwd)
+
+
+def path_has_symlink_component(path: Path, *, root: Path) -> bool:
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        return True
+    current = root
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
 
 
 def claude_transcript_cwd_candidates_for_role_report(
@@ -2658,12 +3376,12 @@ def claude_transcript_cwd_candidates_for_role_report(
         seen.add(key)
         candidates.append(path)
 
-    for cwd_value in preferred_cwds or []:
-        add_candidate(cwd_value)
     session_dir = state_root / safe_id(session_id)
     bootstrap_state = read_json_object_if_exists(session_dir / "bootstrap.json")
     add_candidate(bootstrap_state.get("cwd"))
     add_candidate(state_root / safe_id(session_id) / "provider-state" / safe_id(role_id) / "claude")
+    # Provider-supplied cwd values are advisory and must not expand transcript discovery.
+    _ = preferred_cwds
     return candidates
 
 
@@ -2681,15 +3399,29 @@ def provider_transcript_text_has_exact_token(record: dict[str, Any], token: str)
 
 
 def provider_transcript_record_cwd(record: dict[str, Any]) -> str:
-    return normalize_cell(record.get("cwd") or str_from_nested(record, [("message", "cwd")]))
+    message = record.get("message") if isinstance(record.get("message"), dict) else {}
+    value, valid, present = exact_string_alias_from_sources(
+        record,
+        message,
+        keys=("cwd",),
+        max_chars=4096,
+    )
+    return value if valid and present else ""
 
 
 def provider_transcript_record_timestamp(record: dict[str, Any]) -> str:
-    return normalize_cell(record.get("timestamp") or str_from_nested(record, [("message", "timestamp")]))
+    message = record.get("message") if isinstance(record.get("message"), dict) else {}
+    value, valid, present = exact_string_alias_from_sources(
+        record,
+        message,
+        keys=("timestamp",),
+        max_chars=128,
+    )
+    return value if valid and present else ""
 
 
 def provider_transcript_record_is_human_prompt(record: dict[str, Any]) -> bool:
-    if normalize_cell(record.get("type")) != "user":
+    if record.get("type") != "user":
         return False
     message = record.get("message")
     if not isinstance(message, dict):
@@ -2735,13 +3467,14 @@ def provider_transcript_role_message_window(records: list[dict[str, Any]], match
 def role_report_transcript_match_for_path(
     path: Path,
     *,
+    directory_fd: int | None = None,
     provider_cwd: Path,
     message_id: str,
     task_id: str,
     message_created_at: str,
     supplied_request_id: str,
 ) -> tuple[str, list[dict[str, Any]], dict[str, str], dict[str, int]]:
-    records = provider_transcript_records(path)
+    records = provider_transcript_records(path, directory_fd=directory_fd)
     match_indices = [
         index
         for index, record in enumerate(records)
@@ -2757,12 +3490,13 @@ def role_report_transcript_match_for_path(
         return "not_found", [], {}, {}
     window_records = provider_transcript_role_message_window(records, match_indices[-1])
     metadata_fields = provider_transcript_metadata_fields_from_records(window_records)
-    normalized_supplied_request_id = normalize_cell(supplied_request_id)
-    if normalized_supplied_request_id not in ROLE_REPORT_INTERACTIVE_REQUEST_PLACEHOLDERS:
-        transcript_request_id = normalize_cell(metadata_fields.get("request_id"))
+    if metadata_fields.pop("request_id_metadata_valid", False) is not True:
+        return "request_id_metadata_invalid", [], {}, {}
+    if supplied_request_id not in ROLE_REPORT_INTERACTIVE_REQUEST_PLACEHOLDERS:
+        transcript_request_id = metadata_fields.get("request_id")
         if not transcript_request_id:
             return "request_id_missing", [], {}, {}
-        if transcript_request_id != normalized_supplied_request_id:
+        if transcript_request_id != supplied_request_id:
             return "request_id_mismatch", [], {}, {}
     return "found", window_records, metadata_fields, provider_transcript_usage_metric_fields_from_records(window_records)
 
@@ -2792,31 +3526,51 @@ def discover_claude_transcript_path_for_role_report(
         preferred_cwds=candidate_cwds,
     ):
         project_dir = claude_project_transcript_dir_for_cwd(provider_cwd)
-        if not project_dir.is_dir():
+        project_fd = -1
+        try:
+            project_fd = open_relative_directory_fd(
+                Path.home(),
+                (
+                    ".claude",
+                    "projects",
+                    claude_project_dir_name_for_cwd(provider_cwd),
+                ),
+                create=False,
+            )
+        except OSError:
             continue
         project_dir_seen = True
         try:
-            candidates = sorted(
-                [path for path in project_dir.glob("*.jsonl") if path.is_file()],
-                key=lambda path: path.stat().st_mtime,
-                reverse=True,
-            )[:max_files]
+            candidates: list[tuple[float, str]] = []
+            for name in os.listdir(project_fd):
+                if not name.endswith(".jsonl") or Path(name).name != name:
+                    continue
+                try:
+                    stat = os.stat(name, dir_fd=project_fd, follow_symlinks=False)
+                except OSError:
+                    unreadable_seen = True
+                    continue
+                if stat_module.S_ISREG(stat.st_mode):
+                    candidates.append((stat.st_mtime, name))
+            for _mtime, name in sorted(candidates, reverse=True)[:max_files]:
+                path = project_dir / name
+                status, _window_records, metadata_fields, usage_fields = role_report_transcript_match_for_path(
+                    path,
+                    directory_fd=project_fd,
+                    provider_cwd=provider_cwd,
+                    message_id=message_id,
+                    task_id=task_id,
+                    message_created_at=message_created_at,
+                    supplied_request_id=supplied_request_id,
+                )
+                if status == "found":
+                    matches.append((path, metadata_fields, usage_fields))
+                elif status not in {"not_found"}:
+                    rejected_statuses.append(status)
         except OSError:
             unreadable_seen = True
-            continue
-        for path in candidates:
-            status, _window_records, metadata_fields, usage_fields = role_report_transcript_match_for_path(
-                path,
-                provider_cwd=provider_cwd,
-                message_id=message_id,
-                task_id=task_id,
-                message_created_at=message_created_at,
-                supplied_request_id=supplied_request_id,
-            )
-            if status == "found":
-                matches.append((path, metadata_fields, usage_fields))
-            elif status not in {"not_found"}:
-                rejected_statuses.append(status)
+        finally:
+            os.close(project_fd)
     if len(matches) == 1:
         path, metadata_fields, usage_fields = matches[0]
         return str(path), "found", metadata_fields, usage_fields
@@ -2870,7 +3624,9 @@ def enrich_role_report_provider_evidence_from_claude_transcript(
     provider_evidence["usage_source"] = "claude_transcript_jsonl"
     provider_evidence["transcript_usage_scope"] = "matched_turn"
     for key, value in metadata_fields.items():
-        if value and (key != "request_id" or normalize_cell(provider_evidence.get("request_id")) in {"", "interactive-role-report"}):
+        if key == "reported_model_metadata_valid":
+            provider_evidence[key] = value
+        elif value and (key != "request_id" or normalize_cell(provider_evidence.get("request_id")) in {"", "interactive-role-report"}):
             provider_evidence[key] = value
     for key, value in usage_fields.items():
         if not normalize_cell(provider_evidence.get(key)):
@@ -2878,31 +3634,32 @@ def enrich_role_report_provider_evidence_from_claude_transcript(
 
 
 def provider_usage_metric_fields(evidence: dict[str, Any] | None) -> dict[str, Any]:
+    """Return bounded usage fields and preserve an explicit invalid identity marker."""
     if not isinstance(evidence, dict):
         return {}
-    direct_fields = collect_provider_usage_metrics(evidence)
-    transcript_fields: dict[str, int] = {}
-    if (
-        normalize_cell(evidence.get("transcript_usage_scope")) != "matched_turn"
-        and any(
-            key not in direct_fields
-            for key in ("input_tokens", "output_tokens", "duration_api_ms", "turn_duration_ms", "num_turns")
-        )
-    ):
-        transcript_fields = provider_transcript_usage_metric_fields(evidence)
-    input_tokens = direct_fields.get("input_tokens", transcript_fields.get("input_tokens"))
-    output_tokens = direct_fields.get("output_tokens", transcript_fields.get("output_tokens"))
-    total_tokens = direct_fields.get("total_tokens", transcript_fields.get("total_tokens"))
-    duration_api_ms = direct_fields.get("duration_api_ms", transcript_fields.get("duration_api_ms"))
-    turn_duration_ms = direct_fields.get("turn_duration_ms", transcript_fields.get("turn_duration_ms"))
-    num_turns = direct_fields.get("num_turns", transcript_fields.get("num_turns"))
+    if provider_evidence_runtime_errors(evidence):
+        return {"provider_usage_metadata_valid": False}
+    direct_fields, usage_valid = collect_provider_usage_metrics(evidence)
+    if not usage_valid or evidence.get("reported_usage_metadata_valid") is False:
+        return {"provider_usage_metadata_valid": False}
+    input_tokens = direct_fields.get("input_tokens")
+    output_tokens = direct_fields.get("output_tokens")
+    total_tokens = direct_fields.get("total_tokens")
+    duration_api_ms = direct_fields.get("duration_api_ms")
+    turn_duration_ms = direct_fields.get("turn_duration_ms")
+    num_turns = direct_fields.get("num_turns")
     fields: dict[str, Any] = {}
     if input_tokens is not None:
         fields["input_tokens"] = input_tokens
     if output_tokens is not None:
         fields["output_tokens"] = output_tokens
     if input_tokens is not None or output_tokens is not None:
-        fields["total_tokens"] = int(input_tokens or 0) + int(output_tokens or 0)
+        derived_total = optional_metric_int(
+            int(input_tokens or 0) + int(output_tokens or 0)
+        )
+        if derived_total is None:
+            return {"provider_usage_metadata_valid": False}
+        fields["total_tokens"] = derived_total
     elif total_tokens is not None:
         fields["total_tokens"] = total_tokens
     if duration_api_ms is not None:
@@ -2911,6 +3668,8 @@ def provider_usage_metric_fields(evidence: dict[str, Any] | None) -> dict[str, A
         fields["turn_duration_ms"] = turn_duration_ms
     if num_turns is not None:
         fields["num_turns"] = num_turns
+    if not provider_identity_markers_are_valid(evidence):
+        fields["provider_identity_status"] = "invalid"
     return fields
 
 
@@ -2965,16 +3724,14 @@ def gate_latency_task_payload_created_at(queue_root: Path, metric: dict[str, Any
         return ""
     if queue_component_errors(task_id, "task_id") or queue_component_errors(message_id, "message_id"):
         return ""
-    payload_path = queue_root / "tasks" / task_id / f"{message_id}.yaml"
+    payload_ref = f"tasks/{task_id}/{message_id}.yaml"
     try:
-        payload_path.resolve().relative_to(queue_root.resolve())
-    except (OSError, ValueError):
-        return ""
-    if not payload_path.exists():
-        return ""
-    try:
-        payload = read_json_yaml(payload_path)
-    except (OSError, ValueError, json.JSONDecodeError):
+        payload = read_queue_json_yaml(
+            queue_root,
+            payload_ref,
+            "metric_task_payload_path",
+        )
+    except (FileNotFoundError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return ""
     if not isinstance(payload, dict):
         return ""
@@ -2985,22 +3742,22 @@ def gate_latency_inbox_message_created_at(queue_root: Path, metric: dict[str, An
     role_id, _task_id, message_id = gate_latency_metric_key(metric)
     if not role_id or not message_id:
         return ""
-    candidates: list[Path] = [queue_root / "inbox" / f"{role_id}.yaml"]
+    candidate_refs = [f"inbox/{role_id}.yaml"]
     try:
         role_row = role_agent_row_for(role_id)
     except Exception:
         role_row = {}
     inbox_ref = normalize_cell(role_row.get("inbox_path")) if isinstance(role_row, dict) else ""
-    if inbox_ref:
-        candidate = queue_root / inbox_ref
-        if candidate not in candidates:
-            candidates.append(candidate)
-    for path in candidates:
-        if not path.exists():
-            continue
+    if inbox_ref and inbox_ref not in candidate_refs:
+        candidate_refs.append(inbox_ref)
+    for candidate_ref in candidate_refs:
         try:
-            inbox = read_json_yaml(path)
-        except (OSError, ValueError, json.JSONDecodeError):
+            inbox = read_queue_json_yaml(
+                queue_root,
+                candidate_ref,
+                "metric_inbox_path",
+            )
+        except (FileNotFoundError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
             continue
         if not isinstance(inbox, dict):
             continue
@@ -3029,57 +3786,24 @@ def gate_latency_metric_message_created_at(
     )
 
 
-def gate_latency_role_report_candidate_paths(queue_root: Path, metric: dict[str, Any]) -> list[Path]:
-    candidates: list[Path] = []
-    seen: set[Path] = set()
-
-    def add_candidate(path: Path) -> None:
-        if path in seen:
-            return
-        seen.add(path)
-        candidates.append(path)
-
-    report_path_value = normalize_cell(metric.get("report_path") or metric.get("report_ref") or metric.get("reportPath"))
-    if report_path_value:
+def gate_latency_role_report_explicit_refs(queue_root: Path, metric: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    for key in ("report_path", "report_ref", "reportPath"):
+        report_path_value = normalize_cell(metric.get(key))
+        if not report_path_value:
+            continue
         report_path = Path(os.path.expanduser(report_path_value))
         if report_path.is_absolute():
             try:
-                report_path.resolve().relative_to(queue_root.resolve())
-            except (OSError, ValueError):
-                pass
-            else:
-                add_candidate(report_path)
-        else:
-            try:
-                add_candidate(safe_queue_relative_path(queue_root, report_path_value, "metric_report_path"))
+                report_ref = str(report_path.relative_to(queue_root))
             except ValueError:
-                pass
-
-    role_id = gate_latency_metric_role_id(metric)
-    task_id = normalize_cell(metric.get("task_id"))
-    if not role_id or not task_id:
-        return candidates
-    report_dir = queue_root / "reports" / role_id / task_id
-    if not report_dir.is_dir():
-        return candidates
-    max_files = env_int_default("ITB_GATE_LATENCY_REPORT_ENRICHMENT_MAX_FILES", 64)
-    if max_files <= 0:
-        return candidates
-    try:
-        report_files = sorted(
-            [
-                path
-                for pattern in ("*.yaml", "*.yml", "*.json")
-                for path in report_dir.glob(pattern)
-                if path.is_file()
-            ],
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )[:max_files]
-    except OSError:
-        return candidates
-    for path in report_files:
-        add_candidate(path)
+                continue
+        else:
+            report_ref = report_path_value
+        if queue_relative_path_errors(report_ref, "metric_report_path"):
+            continue
+        if report_ref not in candidates:
+            candidates.append(report_ref)
     return candidates
 
 
@@ -3102,20 +3826,65 @@ def gate_latency_role_report_for_metric(
     queue_root: Path,
     metric: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
-    for path in gate_latency_role_report_candidate_paths(queue_root, metric):
+    for report_ref in gate_latency_role_report_explicit_refs(queue_root, metric):
         try:
-            report = read_json_yaml(path)
-        except (OSError, ValueError, json.JSONDecodeError):
+            report = read_queue_json_yaml(
+                queue_root,
+                report_ref,
+                "metric_report_path",
+            )
+        except (FileNotFoundError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
             continue
         if isinstance(report, dict) and gate_latency_role_report_matches_metric(report, metric):
-            return report, str(path)
+            return report, str(queue_root / report_ref)
+
+    role_id = gate_latency_metric_role_id(metric)
+    task_id = normalize_cell(metric.get("task_id"))
+    if (
+        not role_id
+        or not task_id
+        or queue_component_errors(role_id, "metric_role_id")
+        or queue_component_errors(task_id, "metric_task_id")
+    ):
+        return {}, ""
+    max_files = env_int_default("ITB_GATE_LATENCY_REPORT_ENRICHMENT_MAX_FILES", 64)
+    max_entries = env_int_default("ITB_GATE_LATENCY_REPORT_ENRICHMENT_MAX_ENTRIES", 1024)
+    try:
+        report_files = read_queue_directory_regular_files(
+            queue_root,
+            f"reports/{role_id}/{task_id}",
+            "metric_report_directory",
+            suffixes=(".yaml", ".yml", ".json"),
+            max_files=max_files,
+            max_entries=max_entries,
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        return {}, ""
+    for report_ref, raw in report_files:
+        try:
+            report = parse_yaml_config_text(
+                raw.decode("utf-8", errors="strict"),
+                queue_root / report_ref,
+            )
+        except (UnicodeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(report, dict) and gate_latency_role_report_matches_metric(report, metric):
+            return report, str(queue_root / report_ref)
     return {}, ""
 
 
 def gate_latency_report_provider_evidence(report: dict[str, Any]) -> dict[str, Any]:
-    evidence = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
-    if not evidence and isinstance(report.get("evidence"), dict):
-        evidence = report.get("evidence")
+    evidence, aliases_valid, present = exact_alias_value_from_sources(
+        report,
+        keys=("provider_evidence", "providerEvidence", "evidence"),
+        default={},
+    )
+    if not aliases_valid or (present and not isinstance(evidence, dict)):
+        return {
+            "effective_model": "",
+            "reported_model_metadata_valid": False,
+            "provider_identity_status": "invalid",
+        }
     return dict(evidence) if isinstance(evidence, dict) else {}
 
 
@@ -3127,13 +3896,52 @@ def gate_latency_enrich_provider_evidence_from_report(
     message_created_at: str = "",
 ) -> dict[str, Any]:
     evidence = gate_latency_report_provider_evidence(report)
-    evidence.setdefault("provider", normalize_cell(metric.get("provider")))
-    evidence.setdefault("effective_model", metric_effective_model(metric))
-    evidence.setdefault("usage_source", normalize_cell(metric.get("usage_source")))
-    evidence.setdefault("transcript_path", normalize_cell(metric.get("transcript_path") or metric.get("transcriptPath")))
-    evidence.setdefault("session_id", normalize_cell(metric.get("session_id")))
+    if "provider" not in evidence and "provider" in metric:
+        evidence["provider"] = metric.get("provider")
+    if "intended_model" not in evidence and "intended_model" in metric:
+        evidence["intended_model"] = metric.get("intended_model")
+    if "effective_model" not in evidence and "effective_model" in metric:
+        evidence["effective_model"] = metric.get("effective_model")
+    for key, value in (
+        ("usage_source", normalize_cell(metric.get("usage_source"))),
+        (
+            "transcript_path",
+            normalize_cell(metric.get("transcript_path") or metric.get("transcriptPath")),
+        ),
+        ("session_id", normalize_cell(metric.get("session_id"))),
+    ):
+        if key not in evidence and value:
+            evidence[key] = value
     session_id = normalize_cell(evidence.get("session_id") or metric.get("session_id"))
     role_id = gate_latency_metric_role_id(metric)
+    organization_instance_id = normalize_cell(
+        evidence.get("organization_instance_id") or metric.get("organization_instance_id")
+    )
+    try:
+        role_row = role_agent_row_for(
+            role_id,
+            organization_instance_id=organization_instance_id,
+        )
+    except (OSError, ValueError):
+        role_row = {}
+    if not role_row:
+        return {
+            "provider_identity_status": "invalid",
+            "effective_model": "",
+            "reported_model_metadata_valid": False,
+        }
+    evidence, identity_errors = bind_canonical_provider_evidence(
+        role_row,
+        evidence,
+        model_sources=(metric,),
+        validate_usage=False,
+    )
+    if identity_errors:
+        return {
+            "provider_identity_status": "invalid",
+            "effective_model": "",
+            "reported_model_metadata_valid": False,
+        }
     if session_id and role_id:
         enrich_role_report_provider_evidence_from_claude_transcript(
             evidence,
@@ -3146,6 +3954,14 @@ def gate_latency_enrich_provider_evidence_from_report(
                 "created_at": normalize_cell(message_created_at),
             },
         )
+    evidence, identity_errors = bind_canonical_provider_evidence(role_row, evidence)
+    if identity_errors or provider_evidence_runtime_errors(evidence):
+        return {
+            "provider_identity_status": "invalid",
+            "effective_model": "",
+            "reported_model_metadata_valid": False,
+        }
+    evidence["provider_identity_status"] = "valid"
     return evidence
 
 
@@ -3168,7 +3984,25 @@ def gate_latency_enrich_metric_from_report(
         report=report,
         message_created_at=message_created_at,
     )
+    if evidence.get("provider_identity_status") != "valid":
+        rejected = clear_metric_provider_identity(metric)
+        return rejected, {
+            "result": "rejected_provider_identity",
+            "report_path": report_path,
+            "changed_fields": ["effective_model"] if metric.get("effective_model") else [],
+            "transcript_discovery_status": "",
+        }
     usage_fields = provider_usage_metric_fields(evidence)
+    if usage_fields.get("provider_usage_metadata_valid") is False:
+        rejected = clear_metric_provider_identity(metric)
+        return rejected, {
+            "result": "rejected_provider_evidence",
+            "report_path": report_path,
+            "changed_fields": ["effective_model"] if metric.get("effective_model") else [],
+            "transcript_discovery_status": normalize_cell(
+                evidence.get("transcript_discovery_status")
+            ),
+        }
     enriched = dict(metric)
     changed_fields: list[str] = []
     for key, value in usage_fields.items():
@@ -3176,8 +4010,19 @@ def gate_latency_enrich_metric_from_report(
             enriched[key] = value
             changed_fields.append(key)
 
-    for key in ("request_id", "usage_source", "effective_model", "transcript_path"):
-        value = normalize_cell(evidence.get(key))
+    for key in (
+        "request_id",
+        "usage_source",
+        "provider",
+        "intended_model",
+        "effective_model",
+        "transcript_path",
+    ):
+        value = (
+            evidence.get(key)
+            if key == "effective_model" and isinstance(evidence.get(key), str)
+            else normalize_cell(evidence.get(key))
+        )
         if value and (key != "usage_source" or changed_fields or not normalize_cell(enriched.get(key))):
             if normalize_cell(enriched.get(key)) != value:
                 enriched[key] = value
@@ -3302,17 +4147,21 @@ def append_agent_dispatch_metric(
         "event_type": "agent_dispatch",
         "result": result,
         "usage_source": usage_source,
-        "effective_model": effective_model,
         "started_at": started_at,
         "completed_at": completed_at,
         "duration_sec": round(max(0.0, duration_seconds), 3),
     }
+    set_optional_effective_model(metric, effective_model)
     if input_tokens is not None:
         metric["input_tokens"] = input_tokens
     if output_tokens is not None:
         metric["output_tokens"] = output_tokens
     if input_tokens is not None or output_tokens is not None:
-        metric["total_tokens"] = int(input_tokens or 0) + int(output_tokens or 0)
+        total_tokens = optional_metric_int(
+            int(input_tokens or 0) + int(output_tokens or 0)
+        )
+        if total_tokens is not None:
+            metric["total_tokens"] = total_tokens
     if duration_api_ms is not None:
         metric["duration_api_ms"] = duration_api_ms
     if turn_duration_ms is not None:
@@ -3321,7 +4170,12 @@ def append_agent_dispatch_metric(
         metric["num_turns"] = num_turns
     if completion_source:
         metric["completion_source"] = completion_source
-    append_jsonl_atomic(queue_root / "metrics" / f"{agent_id}.jsonl", metric)
+    append_queue_jsonl(
+        queue_root,
+        f"metrics/{agent_id}.jsonl",
+        "queue_metric_path",
+        metric,
+    )
     append_jsonl_atomic(session_dir / "gate-metrics.jsonl", metric)
 
 
@@ -3334,12 +4188,81 @@ def percentile(values: list[float], ratio: float) -> float:
 
 
 def metric_effective_model(metric: dict[str, Any]) -> str:
-    model = normalize_cell(metric.get("effective_model") or metric.get("intended_model") or metric.get("model"))
-    if model:
-        return model
+    """Return only exact, canonically bound provider-observed model identity."""
+    effective_model, aliases_valid, model_present = exact_model_alias_from_sources(metric)
+    if not aliases_valid or not model_present or not effective_model:
+        return ""
+    usage_source = normalize_cell(metric.get("usage_source"))
+    if usage_source == "builder_command" and effective_model == "deterministic":
+        return effective_model
     role_id = normalize_cell(metric.get("role_id") or metric.get("agent_id"))
-    row = registry_row_for(role_id) if role_id else {}
-    return normalize_cell(row.get("primary_model"))
+    if not role_id:
+        return ""
+    try:
+        canonical_role_row = role_agent_row_for(
+            role_id,
+            organization_instance_id=normalize_cell(metric.get("organization_instance_id")),
+        )
+    except (OSError, ValueError):
+        canonical_role_row = {}
+    if not canonical_role_row:
+        return ""
+    bound, errors = bind_canonical_provider_evidence(
+        canonical_role_row,
+        {
+            "usage_source": usage_source,
+        },
+        model_sources=(metric,),
+    )
+    return "" if errors else str(bound.get("effective_model") or "")
+
+
+def clear_metric_provider_identity(metric: dict[str, Any]) -> dict[str, Any]:
+    """Remove every model alias from an invalid metric before further processing."""
+    cleared = dict(metric)
+    for key in ("model", "effective_model", "effectiveModel", "reported_effective_model"):
+        cleared.pop(key, None)
+    cleared["effective_model"] = ""
+    cleared["reported_model_metadata_valid"] = False
+    cleared["provider_identity_status"] = "invalid"
+    return cleared
+
+
+def metric_provider_identity_is_valid(metric: dict[str, Any]) -> bool:
+    """Distinguish valid unknown identity from conflicting or mismatched identity."""
+    if not provider_identity_markers_are_valid(metric):
+        return False
+    effective_model, aliases_valid, model_present = exact_model_alias_from_sources(metric)
+    if not aliases_valid:
+        return False
+    if model_present and effective_model:
+        return bool(metric_effective_model(metric))
+    identity_present = any(
+        key in metric
+        for key in ("provider", "intended_model", "intendedModel", "primary_model")
+    )
+    if not identity_present:
+        return True
+    role_id = normalize_cell(metric.get("role_id") or metric.get("agent_id"))
+    if not role_id:
+        return False
+    try:
+        canonical_role_row = role_agent_row_for(
+            role_id,
+            organization_instance_id=normalize_cell(metric.get("organization_instance_id")),
+        )
+    except (OSError, ValueError):
+        canonical_role_row = {}
+    if not canonical_role_row:
+        return False
+    _bound, errors = bind_canonical_provider_evidence(
+        canonical_role_row,
+        {
+            "usage_source": normalize_cell(metric.get("usage_source")),
+        },
+        model_sources=(metric,),
+    )
+    return not errors
 
 
 def latency_variant(metric: dict[str, Any]) -> str:
@@ -3392,6 +4315,8 @@ def gate_latency_is_terminal_or_response_metric(metric: dict[str, Any]) -> bool:
 def gate_latency_summary_rows(metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
     buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for metric in metrics:
+        if not metric_provider_identity_is_valid(metric):
+            continue
         role_id = normalize_cell(metric.get("role_id") or metric.get("agent_id"))
         if not role_id.startswith(("gate-", "teams-project-manager")):
             continue
@@ -3463,6 +4388,8 @@ def metric_timestamp_sort_key(metric: dict[str, Any]) -> str:
 def task_latency_timeline_rows(metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
     tasks: dict[str, dict[str, Any]] = {}
     for metric in sorted(metrics, key=metric_timestamp_sort_key):
+        if not metric_provider_identity_is_valid(metric):
+            continue
         task_id = normalize_cell(metric.get("task_id"))
         if not task_id:
             continue
@@ -3554,6 +4481,7 @@ def gate_latency_duration_bucket(metrics: list[dict[str, Any]], predicate: Calla
         metric
         for metric in metrics
         if predicate(metric)
+        and metric_provider_identity_is_valid(metric)
         and gate_latency_is_terminal_or_response_metric(metric)
         and normalize_cell(metric.get("result")) in {"done", "provider_response_ready", "report_recovered"}
         and latency_metric_duration_sec(metric) > 0
@@ -3673,10 +4601,12 @@ def append_gate_latency_chain_metric(chain: dict[str, list[dict[str, Any]]], leg
 
 
 def gate_latency_success_duration_metrics(metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return successful duration samples whose provider identity is not invalid."""
     return [
         metric
         for metric in metrics
-        if gate_latency_is_terminal_or_response_metric(metric)
+        if metric_provider_identity_is_valid(metric)
+        and gate_latency_is_terminal_or_response_metric(metric)
         and normalize_cell(metric.get("result")) in {"done", "provider_response_ready", "report_recovered"}
         and latency_metric_duration_sec(metric) > 0
     ]
@@ -4071,11 +5001,18 @@ def safe_queue_relative_path(queue_root: Path, value: str, field_name: str) -> P
     errors = queue_relative_path_errors(value, field_name)
     if errors:
         raise ValueError("; ".join(errors))
+    if queue_root.is_symlink():
+        raise ValueError("queue_root must not be a symlink")
     path = queue_root / value
+    current = queue_root
+    for part in Path(value).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"{field_name} traverses a symlink")
     try:
         path.resolve().relative_to(queue_root.resolve())
     except ValueError as exc:
-        raise ValueError(f"{field_name} escapes queue_root: {value}") from exc
+        raise ValueError(f"{field_name} escapes queue_root") from exc
     return path
 
 
@@ -4093,6 +5030,51 @@ def validate_queue_message(message: dict[str, Any]) -> list[str]:
 
 def normalize_cell(value: Any) -> str:
     return str(value or "").strip().strip("`")
+
+
+def exact_alias_value_from_sources(
+    *sources: dict[str, Any],
+    keys: tuple[str, ...],
+    default: Any = None,
+) -> tuple[Any, bool, bool]:
+    """Return one exact raw alias value without discarding cross-source conflicts."""
+    values: list[Any] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            if key in source:
+                values.append(source.get(key))
+    if not values:
+        return default, True, False
+    first = values[0]
+    if any(type(value) is not type(first) or value != first for value in values[1:]):
+        return default, False, True
+    return first, True, True
+
+
+def exact_alias_value_from_source_specs(
+    *source_specs: tuple[dict[str, Any], tuple[str, ...]],
+    default: Any = None,
+) -> tuple[Any, bool, bool]:
+    """Merge alias groups that intentionally differ between trusted input layers."""
+    values: list[Any] = []
+    for source, keys in source_specs:
+        value, valid, present = exact_alias_value_from_sources(
+            source,
+            keys=keys,
+            default=default,
+        )
+        if not valid:
+            return default, False, True
+        if present:
+            values.append(value)
+    if not values:
+        return default, True, False
+    first = values[0]
+    if any(type(value) is not type(first) or value != first for value in values[1:]):
+        return default, False, True
+    return first, True, True
 
 
 def value_present(value: Any) -> bool:
@@ -8236,7 +9218,25 @@ def finalize_role_queue_report(
     report_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = current_timestamp()
-    message = queue_message_by_id(inbox_path, role_id, message_id)
+    try:
+        canonical_role_row = role_agent_row_for(
+            role_id,
+            organization_instance_id=normalize_cell(provider_evidence.get("organization_instance_id")),
+        )
+    except (OSError, ValueError):
+        canonical_role_row = {}
+    if not canonical_role_row:
+        raise ValueError("canonical role provider identity is unavailable")
+    provider_evidence, identity_errors = bind_canonical_provider_evidence(
+        canonical_role_row,
+        provider_evidence,
+    )
+    if identity_errors:
+        raise ValueError("provider evidence identity does not match canonical role")
+    runtime_errors = provider_evidence_runtime_errors(provider_evidence)
+    if runtime_errors:
+        raise ValueError("; ".join(runtime_errors))
+    message = queue_message_by_id(inbox_path, role_id, message_id, queue_root)
     prompt_submit_chain_id = queue_message_prompt_submit_chain_id(message)
     report_path = safe_queue_relative_path(queue_root, report_ref, "report_path")
     status_value = "done" if status == "done" else "failed"
@@ -8270,8 +9270,8 @@ def finalize_role_queue_report(
         if key not in report:
             report[key] = value
     stamp_terminal_report_schema_validation(report, role_id=role_id, message_id=message_id)
-    write_json_yaml(report_path, report)
-    integrity = report_file_integrity(report_path)
+    write_queue_json_yaml(queue_root, report_ref, "report_path", report)
+    integrity = queue_file_integrity(queue_root, report_ref, "report_path")
     inbox_updates: dict[str, Any] = {
         "status": status_value,
         "report_path": report_ref,
@@ -8302,13 +9302,19 @@ def finalize_role_queue_report(
     )
     metric_extra = provider_usage_metric_fields(provider_evidence) | {
         "usage_source": normalize_cell(provider_evidence.get("usage_source")),
-        "effective_model": normalize_cell(provider_evidence.get("effective_model")),
+        "provider": normalize_cell(provider_evidence.get("provider")),
+        "intended_model": normalize_cell(provider_evidence.get("intended_model")),
+        "effective_model": provider_evidence.get("effective_model") if isinstance(provider_evidence.get("effective_model"), str) else "",
         "transcript_path": normalize_cell(provider_evidence.get("transcript_path")),
         "report_path": str(report_path),
         "report_ref": report_ref,
     }
     if prompt_submit_chain_id:
         metric_extra["prompt_submit_chain_id"] = prompt_submit_chain_id
+    duration_value = provider_evidence.get("duration_sec")
+    duration_seconds = 0.0 if duration_value is None or duration_value == "" else float(duration_value)
+    retry_value = provider_evidence.get("retry_count")
+    retry_count = 0 if retry_value is None or retry_value == "" else retry_value
     append_queue_metric(
         session_dir=session_dir,
         queue_root=queue_root,
@@ -8320,8 +9326,8 @@ def finalize_role_queue_report(
         event_type="finalized",
         result=status_value,
         now=now,
-        duration_seconds=float(provider_evidence.get("duration_sec") or 0.0),
-        retry_count=int(provider_evidence.get("retry_count") or 0),
+        duration_seconds=duration_seconds,
+        retry_count=retry_count,
         extra=metric_extra,
     )
     output = {
@@ -8329,6 +9335,7 @@ def finalize_role_queue_report(
         "role_id": role_id,
         "message_id": message_id,
         "task_id": normalize_cell(message.get("task_id")),
+        "queue_root": str(queue_root),
         "report_path": str(report_path),
         "report_ref": report_ref,
         "report_integrity": integrity,
@@ -8370,10 +9377,16 @@ def auto_handoff_report_data(finalized: dict[str, Any]) -> tuple[dict[str, Any],
     if not report_path_raw:
         return {}, ["auto handoff report_path missing"]
     report_path = Path(report_path_raw)
-    if not report_path.exists():
-        return {}, [f"auto handoff report_path does not exist: {report_path}"]
+    queue_root_raw = normalize_cell(finalized.get("queue_root"))
+    report_ref = normalize_cell(finalized.get("report_ref"))
+    if not queue_root_raw or not report_ref:
+        return {}, ["auto handoff queue metadata missing"]
     try:
-        data = read_json_yaml(report_path)
+        data = read_queue_json_yaml(
+            Path(queue_root_raw),
+            report_ref,
+            "auto_handoff_report_path",
+        )
     except Exception as exc:
         return {}, [f"auto handoff report unreadable: {report_path}: {type(exc).__name__}: {exc}"]
     if not isinstance(data, dict):
@@ -8951,7 +9964,7 @@ def maybe_enqueue_auto_queue_handoff(
 
 def role_report(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
     if hook_input.get("_cli_report_json_error"):
-        return {"decision": "block", "reason": f"role-report invalid report-json: {hook_input.get('_cli_report_json_error')}"}
+        return {"decision": "block", "reason": "role-report invalid report-json"}
     session_id = str(
         current_session_id(state_root, hook_input)
         or "unknown-session"
@@ -8959,11 +9972,10 @@ def role_report(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -
     session_dir = state_root / safe_id(session_id)
     state_path = session_dir / "bootstrap.json"
     state = read_json(state_path) if state_path.exists() else {}
-    organization_instance_id = str(
-        state.get("organization_instance_id")
-        or hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or organization_id(session_id)
+    organization_instance_id = resolve_organization_instance_id(
+        state,
+        hook_input,
+        session_id,
     )
     role_id = normalize_cell(
         hook_input.get("role_id")
@@ -9004,9 +10016,14 @@ def role_report(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -
     queue_root = queue_root_for(session_dir, hook_input)
     inbox_path = queue_root / str(role_row["inbox_path"])
     try:
-        message = queue_message_by_id(inbox_path, role_id, message_id)
-    except ValueError as exc:
-        return {"decision": "block", "reason": str(exc)}
+        message = queue_message_by_id(inbox_path, role_id, message_id, queue_root)
+    except ValueError:
+        return {
+            "decision": "block",
+            "reason": "role-report message lookup failed",
+            "error_code": "role_report_message_lookup_failed",
+            "error_type": "ValueError",
+        }
 
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
     report_ref = normalize_cell(
@@ -9019,25 +10036,78 @@ def role_report(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -
 
     raw_status = normalize_cell(hook_input.get("status") or "done").lower()
     status = "done" if raw_status in {"done", "complete", "completed", "success", "ok"} else "failed"
-    provider_evidence = hook_input.get("provider_evidence")
-    if not isinstance(provider_evidence, dict):
-        provider_evidence = {}
-    provider_evidence = dict(provider_evidence)
-    provider_evidence.setdefault("provider", normalize_cell(role_row.get("provider")) or "unknown")
-    provider_evidence.setdefault("intended_model", normalize_cell(role_row.get("intended_model")))
-    provider_evidence.setdefault("effective_model", normalize_cell(hook_input.get("effective_model") or hook_input.get("effectiveModel") or role_row.get("intended_model")))
-    provider_evidence.setdefault("provider_session_id", normalize_cell(hook_input.get("provider_session_id") or hook_input.get("providerSessionId") or session_id))
-    provider_evidence.setdefault("request_id", normalize_cell(hook_input.get("request_id") or hook_input.get("requestId") or "interactive-role-report"))
-    provider_evidence.setdefault("usage_source", normalize_cell(hook_input.get("usage_source") or hook_input.get("usageSource") or "provider_authored_role_report"))
-    provider_evidence.setdefault("transcript_path", normalize_cell(hook_input.get("transcript_path") or hook_input.get("transcriptPath")))
-    provider_evidence.setdefault("session_id", session_id)
-    provider_evidence.setdefault("organization_instance_id", organization_instance_id)
-    provider_evidence.setdefault("duration_sec", hook_input.get("duration_sec") or hook_input.get("durationSec") or 0)
-    provider_evidence.setdefault("input_tokens", hook_input.get("input_tokens") or hook_input.get("inputTokens") or "")
-    provider_evidence.setdefault("output_tokens", hook_input.get("output_tokens") or hook_input.get("outputTokens") or "")
-    provider_evidence.setdefault("duration_api_ms", hook_input.get("duration_api_ms") or hook_input.get("durationApiMs") or "")
-    provider_evidence.setdefault("num_turns", hook_input.get("num_turns") or hook_input.get("numTurns") or "")
-    provider_evidence.setdefault("retry_count", hook_input.get("retry_count") or hook_input.get("retryCount") or message.get("retry_count") or 0)
+    provider_evidence_value, evidence_aliases_valid, evidence_present = exact_alias_value_from_sources(
+        hook_input,
+        keys=("provider_evidence", "providerEvidence"),
+        default={},
+    )
+    if not evidence_aliases_valid or (evidence_present and not isinstance(provider_evidence_value, dict)):
+        return {"decision": "block", "reason": "provider evidence aliases conflict"}
+    provider_evidence = dict(provider_evidence_value) if isinstance(provider_evidence_value, dict) else {}
+    for canonical, aliases, default, set_when_absent in (
+        ("provider_session_id", ("provider_session_id", "providerSessionId"), session_id, True),
+        ("request_id", ("request_id", "requestId"), "interactive-role-report", True),
+        ("usage_source", ("usage_source", "usageSource"), "provider_authored_role_report", True),
+        ("transcript_path", ("transcript_path", "transcriptPath"), "", False),
+        ("duration_sec", ("duration_sec", "durationSec"), 0, True),
+        ("input_tokens", ("input_tokens", "inputTokens"), "", False),
+        ("output_tokens", ("output_tokens", "outputTokens"), "", False),
+        ("total_tokens", ("total_tokens", "totalTokens"), "", False),
+        ("duration_api_ms", ("duration_api_ms", "durationApiMs"), "", False),
+        ("turn_duration_ms", ("turn_duration_ms", "turnDurationMs"), "", False),
+        ("num_turns", ("num_turns", "numTurns"), "", False),
+        (
+            "retry_count",
+            ("retry_count", "retryCount"),
+            message.get("retry_count") if "retry_count" in message else 0,
+            True,
+        ),
+    ):
+        value, aliases_valid, present = exact_alias_value_from_sources(
+            provider_evidence,
+            hook_input,
+            keys=aliases,
+            default=default,
+        )
+        if not aliases_valid:
+            return {"decision": "block", "reason": "provider evidence aliases conflict"}
+        for alias in aliases:
+            provider_evidence.pop(alias, None)
+        if present or set_when_absent:
+            provider_evidence[canonical] = value
+    for canonical, aliases, expected in (
+        ("session_id", ("session_id", "sessionId"), session_id),
+        (
+            "organization_instance_id",
+            ("organization_instance_id", "organizationInstanceId"),
+            organization_instance_id,
+        ),
+    ):
+        value, aliases_valid, present = exact_alias_value_from_sources(
+            provider_evidence,
+            hook_input,
+            keys=aliases,
+            default=expected,
+        )
+        if not aliases_valid or (present and value != expected):
+            return {"decision": "block", "reason": "provider evidence session identity is invalid"}
+        for alias in aliases:
+            provider_evidence.pop(alias, None)
+        provider_evidence[canonical] = expected
+    runtime_errors = provider_evidence_runtime_errors(
+        provider_evidence,
+        require_completion_ids=False,
+    )
+    if runtime_errors:
+        return {"decision": "block", "reason": "; ".join(runtime_errors)}
+    provider_evidence, identity_errors = bind_canonical_provider_evidence(
+        role_row,
+        provider_evidence,
+        model_sources=(hook_input,),
+        validate_usage=False,
+    )
+    if identity_errors:
+        return {"decision": "block", "reason": "provider evidence identity does not match canonical role"}
     enrich_role_report_provider_evidence_from_claude_transcript(
         provider_evidence,
         state_root=state_root,
@@ -9045,6 +10115,18 @@ def role_report(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -
         role_id=role_id,
         message=message,
     )
+    runtime_errors = provider_evidence_runtime_errors(
+        provider_evidence,
+        require_completion_ids=True,
+    )
+    if runtime_errors:
+        return {"decision": "block", "reason": "; ".join(runtime_errors)}
+    provider_evidence, identity_errors = bind_canonical_provider_evidence(
+        role_row,
+        provider_evidence,
+    )
+    if identity_errors:
+        return {"decision": "block", "reason": "provider evidence identity does not match canonical role"}
 
     files_changed = hook_input.get("files_changed") or hook_input.get("filesChanged") or []
     blockers = hook_input.get("blockers") or []
@@ -9085,8 +10167,20 @@ def role_report(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -
             improvement_log=[str(item) for item in improvement_log],
             report_extra=report_extra,
         )
-    except (TimeoutError, ValueError) as exc:
-        return {"decision": "block", "reason": str(exc)}
+    except TimeoutError:
+        return {
+            "decision": "block",
+            "reason": "role-report finalization timed out",
+            "error_code": "role_report_finalization_timeout",
+            "error_type": "TimeoutError",
+        }
+    except ValueError:
+        return {
+            "decision": "block",
+            "reason": "role-report finalization failed",
+            "error_code": "role_report_finalization_failed",
+            "error_type": "ValueError",
+        }
 
     auto_handoff_input = merge_auto_handoff_context_from_payload(hook_input, payload, payload_authoritative=True)
     if truthy_input(payload.get("skip_auto_queue_handoff") or payload.get("skipAutoQueueHandoff")):
@@ -9231,6 +10325,85 @@ def agent_runtime(row: dict[str, Any]) -> tuple[str, str] | None:
 
 
 
+def exact_string_alias_from_sources(
+    *sources: dict[str, Any],
+    keys: tuple[str, ...],
+    max_chars: int,
+) -> tuple[str, bool, bool]:
+    """Return one exact non-empty bounded string while distinguishing omission."""
+    value, aliases_valid, present = exact_alias_value_from_sources(
+        *sources,
+        keys=keys,
+        default="",
+    )
+    if not present:
+        return "", True, False
+    if (
+        not aliases_valid
+        or not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or "\x00" in value
+        or len(value) > max_chars
+    ):
+        return "", False, True
+    return value, True, True
+
+
+def exact_model_alias_from_sources(
+    *sources: dict[str, Any],
+    keys: tuple[str, ...] = (
+        "model",
+        "effective_model",
+        "effectiveModel",
+        "reported_effective_model",
+    ),
+) -> tuple[str, bool, bool]:
+    """Return an exact optional model identity; explicit empty is invalid."""
+    return exact_string_alias_from_sources(
+        *sources,
+        keys=keys,
+        max_chars=CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+    )
+
+
+def set_optional_effective_model(target: dict[str, Any], effective_model: str) -> None:
+    """Represent a validated unknown model by omission, never by explicit emptiness."""
+    for key in ("model", "effective_model", "effectiveModel", "reported_effective_model"):
+        target.pop(key, None)
+    if effective_model:
+        target["effective_model"] = effective_model
+
+
+def exact_hook_request_id(hook_input: dict[str, Any], *, prefix: str = "req") -> str:
+    request_id, aliases_valid, present = exact_string_alias_from_sources(
+        hook_input,
+        keys=("request_id", "requestId"),
+        max_chars=CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+    )
+    if not aliases_valid:
+        raise ValueError("provider request identity aliases are invalid")
+    return request_id if present else f"{prefix}-{uuid.uuid4().hex}"
+
+
+def provider_identity_markers_are_valid(*sources: dict[str, Any]) -> bool:
+    """Accept present identity markers only when they use exact trusted values."""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        if (
+            "reported_model_metadata_valid" in source
+            and source.get("reported_model_metadata_valid") is not True
+        ):
+            return False
+        if (
+            "provider_identity_status" in source
+            and source.get("provider_identity_status") != "valid"
+        ):
+            return False
+    return True
+
+
 def validate_provider_evidence(
     *,
     agent_id: str,
@@ -9240,33 +10413,992 @@ def validate_provider_evidence(
     usage_source: str,
 ) -> list[str]:
     errors: list[str] = []
-    normalized_provider = (provider or "").strip().lower()
-    normalized_intended = (intended_model or "").strip().lower()
-    normalized_effective = (effective_model or "").strip().lower()
+    normalized_provider = provider.strip().lower() if isinstance(provider, str) else ""
+    reported_intended = intended_model if isinstance(intended_model, str) else ""
+    effective_type_valid = effective_model is None or isinstance(effective_model, str)
+    reported_effective = effective_model if isinstance(effective_model, str) else ""
+    normalized_intended = reported_intended.strip().lower()
+    normalized_effective = reported_effective.strip().lower()
     normalized_usage = (usage_source or "").strip().lower()
 
     expects_claude = normalized_provider == "anthropic" or normalized_intended.startswith("claude-")
     expects_openai = normalized_provider == "openai" or normalized_intended.startswith("gpt-")
 
+    if not effective_type_valid:
+        errors.append(
+            f"{agent_id}: provider-reported effective model does not match intended model"
+        )
+    elif reported_effective and not reported_intended:
+        errors.append(
+            f"{agent_id}: provider-reported effective model does not match intended model"
+        )
+
     if expects_claude:
-        if not normalized_effective.startswith("claude-"):
+        if reported_effective and reported_effective != reported_intended and not errors:
             errors.append(
-                f"{agent_id}: provider mismatch; intended Claude/anthropic but effective_model={effective_model or '<empty>'}"
+                f"{agent_id}: provider-reported effective model does not match intended model"
             )
         if "claude" not in normalized_usage:
             errors.append(
-                f"{agent_id}: provider mismatch; intended Claude/anthropic but usage_source={usage_source or '<empty>'}"
+                f"{agent_id}: provider-reported usage source does not match intended provider"
             )
     elif expects_openai:
-        if normalized_effective.startswith("claude-"):
+        if normalized_effective.startswith("claude-") and not errors:
             errors.append(
-                f"{agent_id}: provider mismatch; intended OpenAI/Codex but effective_model={effective_model or '<empty>'}"
+                f"{agent_id}: provider-reported effective model does not match intended model"
+            )
+        elif reported_effective and reported_intended and reported_effective != reported_intended and not errors:
+            errors.append(
+                f"{agent_id}: provider-reported effective model does not match intended model"
             )
         if normalized_usage and "claude" in normalized_usage:
             errors.append(
-                f"{agent_id}: provider mismatch; intended OpenAI/Codex but usage_source={usage_source or '<empty>'}"
+                f"{agent_id}: provider-reported usage source does not match intended provider"
             )
     return errors
+
+
+def bind_canonical_provider_evidence(
+    role_row: dict[str, Any],
+    evidence: dict[str, Any],
+    *,
+    model_sources: tuple[dict[str, Any], ...] = (),
+    validate_usage: bool = True,
+) -> tuple[dict[str, Any], list[str]]:
+    """Bind report/metric evidence to canonical role identity before persistence."""
+    bound = dict(evidence)
+    errors: list[str] = []
+    canonical_provider = normalize_cell(role_row.get("provider")).lower()
+    canonical_intended = normalize_cell(
+        role_row.get("intended_model") or role_row.get("primary_model")
+    )
+    if not canonical_provider or not canonical_intended:
+        errors.append("canonical provider identity is unavailable")
+
+    for field, aliases, canonical_value in (
+        ("provider", ("provider",), canonical_provider),
+        (
+            "intended_model",
+            ("intended_model", "intendedModel", "primary_model"),
+            canonical_intended,
+        ),
+    ):
+        for source in (evidence, *model_sources):
+            supplied_value, aliases_valid, identity_present = exact_model_alias_from_sources(
+                source,
+                keys=aliases,
+            )
+            if not aliases_valid:
+                errors.append(f"provider evidence {field} metadata is invalid")
+            elif (
+                identity_present
+                and supplied_value != canonical_value
+            ):
+                errors.append(f"provider evidence {field} does not match canonical role")
+
+    reported_model, metadata_valid, model_present = exact_model_alias_from_sources(
+        evidence,
+        *model_sources,
+        keys=("model", "effective_model", "effectiveModel", "reported_effective_model"),
+    )
+    if not provider_identity_markers_are_valid(evidence, *model_sources):
+        metadata_valid = False
+    bound.pop("model", None)
+    bound.pop("effectiveModel", None)
+    bound.pop("reported_effective_model", None)
+    bound.pop("intendedModel", None)
+    bound.pop("primary_model", None)
+    bound["provider"] = canonical_provider
+    bound["intended_model"] = canonical_intended
+    if metadata_valid and model_present:
+        bound["effective_model"] = reported_model
+    elif metadata_valid:
+        bound.pop("effective_model", None)
+    else:
+        bound["effective_model"] = ""
+    bound["reported_model_metadata_valid"] = metadata_valid
+    if not metadata_valid:
+        errors.append("provider-reported effective model metadata is invalid")
+    elif canonical_provider and canonical_intended:
+        errors.extend(
+            validate_provider_evidence(
+                agent_id=normalize_cell(role_row.get("agent_id") or role_row.get("role_id") or "role-agent"),
+                provider=canonical_provider,
+                intended_model=canonical_intended,
+                effective_model=reported_model,
+                usage_source=normalize_cell(bound.get("usage_source")) if validate_usage else "",
+            )
+        )
+        if not validate_usage:
+            errors = [
+                error
+                for error in errors
+                if "usage source" not in error
+            ]
+    return bound, list(dict.fromkeys(errors))
+
+
+def codex_reported_model_errors(
+    row: dict[str, Any],
+    effective_model: str,
+    canonical_intended_model: str,
+) -> list[str]:
+    """Validate reported Codex identity against preflight-bound canonical policy."""
+    agent_id = normalize_cell(row.get("agent_id") or row.get("role_id") or "<unknown>")
+    if not normalize_cell(canonical_intended_model):
+        return [f"{agent_id}: canonical intended model policy is unavailable"]
+    return validate_provider_evidence(
+        agent_id=agent_id,
+        provider="openai",
+        intended_model=canonical_intended_model,
+        effective_model=effective_model,
+        usage_source="codex_exec_json",
+    )
+
+
+def claude_reported_model(data: dict[str, Any]) -> tuple[str, bool]:
+    """Return one exact Claude model alias and reject ambiguous metadata."""
+    if not provider_identity_markers_are_valid(data):
+        return "", False
+    values: list[str] = []
+    present = False
+    for key in ("model", "effective_model", "effectiveModel", "reported_effective_model"):
+        if key not in data:
+            continue
+        present = True
+        value = data.get(key)
+        if not isinstance(value, str):
+            return "", False
+        values.append(value)
+    if not present:
+        return "", True
+    if len(set(values)) != 1:
+        return "", False
+    value = values[0]
+    if (
+        not value
+        or value != value.strip()
+        or len(value) > CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS
+        or "\x00" in value
+    ):
+        return "", False
+    return value, True
+
+
+def nested_provider_value(
+    data: dict[str, Any],
+    path: tuple[str, ...],
+) -> tuple[Any, bool, bool]:
+    """Read one provider field while distinguishing absence from malformed parents."""
+    current: Any = data
+    for key in path:
+        if not isinstance(current, dict):
+            return None, False, True
+        if key not in current:
+            return None, True, False
+        current = current[key]
+    return current, True, True
+
+
+def exact_provider_metric_alias(
+    data: dict[str, Any],
+    paths: tuple[tuple[str, ...], ...],
+) -> tuple[int | None, bool]:
+    """Accept one exact bounded integer across all present provider aliases."""
+    values: list[int] = []
+    for path in paths:
+        value, parent_valid, present = nested_provider_value(data, path)
+        if not parent_valid:
+            return None, False
+        if not present:
+            continue
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > CODEX_EVIDENCE_METRIC_MAX_VALUE
+        ):
+            return None, False
+        values.append(value)
+    if len(set(values)) > 1:
+        return None, False
+    return (values[0] if values else None), True
+
+
+def exact_provider_cost_alias(data: dict[str, Any]) -> tuple[float | None, bool]:
+    """Accept one exact finite non-negative Claude cost across both aliases."""
+    values: list[float] = []
+    for key in ("total_cost_usd", "totalCostUsd"):
+        if key not in data:
+            continue
+        value = data.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None, False
+        if isinstance(value, int) and (
+            value < 0 or value > CLAUDE_RESPONSE_COST_MAX_USD
+        ):
+            return None, False
+        numeric_value = float(value)
+        if (
+            not math.isfinite(numeric_value)
+            or numeric_value < 0
+            or numeric_value > CLAUDE_RESPONSE_COST_MAX_USD
+        ):
+            return None, False
+        values.append(numeric_value)
+    if len(set(values)) > 1:
+        return None, False
+    return (values[0] if values else None), True
+
+
+def provider_evidence_runtime_errors(
+    evidence: dict[str, Any],
+    *,
+    require_completion_ids: bool = False,
+) -> list[str]:
+    """Validate untrusted generic evidence without coercion or value reflection."""
+    errors: list[str] = []
+    if not provider_json_structure_is_safe(evidence):
+        errors.append("provider evidence exceeds structural safety limits")
+    try:
+        encoded_size = len(json.dumps(evidence, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError, RecursionError):
+        encoded_size = 64 * 1024 + 1
+    if encoded_size > 64 * 1024:
+        errors.append("provider evidence exceeds the bounded input limit")
+
+    string_limits = {
+        "provider": 128,
+        "intended_model": 128,
+        "intendedModel": 128,
+        "primary_model": 128,
+        "model": 128,
+        "effective_model": 128,
+        "effectiveModel": 128,
+        "reported_effective_model": 128,
+        "provider_session_id": CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+        "providerSessionId": CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+        "session_id": CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+        "sessionId": CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+        "request_id": CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+        "requestId": CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+        "usage_source": 128,
+        "usageSource": 128,
+        "organization_instance_id": CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+        "organizationInstanceId": CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+        "transcript_path": 4096,
+        "transcriptPath": 4096,
+        "launch_cwd": 4096,
+        "provider_launch_cwd": 4096,
+        "provider_cwd": 4096,
+        "workspace_cwd": 4096,
+        "provider_workspace_cwd": 4096,
+        "transcript_discovery_status": 128,
+        "transcript_discovery_source": 128,
+        "transcript_usage_scope": 128,
+    }
+    sanitized_invalid_identity = (
+        evidence.get("reported_model_metadata_valid") is False
+        and evidence.get("provider_identity_status") == "invalid"
+    )
+    for key, limit in string_limits.items():
+        value = evidence.get(key)
+        if key not in evidence:
+            continue
+        if value is None or value == "":
+            if key == "effective_model" and value == "" and sanitized_invalid_identity:
+                continue
+            errors.append(f"provider evidence {key} is invalid")
+            continue
+        if (
+            not isinstance(value, str)
+            or value != value.strip()
+            or "\x00" in value
+            or len(value) > limit
+        ):
+            errors.append(f"provider evidence {key} is invalid")
+
+    for canonical, aliases in (
+        ("provider_session_id", ("provider_session_id", "providerSessionId")),
+        ("session_id", ("session_id", "sessionId")),
+        ("request_id", ("request_id", "requestId")),
+        ("usage_source", ("usage_source", "usageSource")),
+        ("transcript_path", ("transcript_path", "transcriptPath")),
+        ("organization_instance_id", ("organization_instance_id", "organizationInstanceId")),
+    ):
+        values = [evidence.get(key) for key in aliases if key in evidence]
+        if len(values) > 1 and any(value != values[0] for value in values[1:]):
+            errors.append(f"provider evidence {canonical} aliases conflict")
+
+    intended_aliases = ("intended_model", "intendedModel", "primary_model")
+    intended_values = [evidence.get(key) for key in intended_aliases if key in evidence]
+    if all(
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and "\x00" not in value
+        and len(value) <= CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS
+        for value in intended_values
+    ):
+        _intended_model, intended_aliases_valid, _intended_present = exact_model_alias_from_sources(
+            evidence,
+            keys=intended_aliases,
+        )
+        if not intended_aliases_valid:
+            errors.append("provider evidence intended_model aliases conflict")
+    reported_aliases = (
+        "model",
+        "effective_model",
+        "effectiveModel",
+        "reported_effective_model",
+    )
+    sanitized_reported_identity = (
+        sanitized_invalid_identity
+        and all(
+            key == "effective_model" and evidence.get(key) == ""
+            for key in reported_aliases
+            if key in evidence
+        )
+    )
+    reported_values = [evidence.get(key) for key in reported_aliases if key in evidence]
+    reported_values_are_individually_valid = all(
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and "\x00" not in value
+        and len(value) <= CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS
+        for value in reported_values
+    )
+    if not sanitized_reported_identity and reported_values_are_individually_valid:
+        _reported_model, reported_aliases_valid, _reported_present = exact_model_alias_from_sources(
+            evidence,
+            keys=reported_aliases,
+        )
+        if not reported_aliases_valid:
+            errors.append("provider evidence effective_model aliases conflict")
+
+    if "reported_model_metadata_valid" in evidence and not isinstance(
+        evidence.get("reported_model_metadata_valid"), bool
+    ):
+        errors.append("provider evidence reported_model_metadata_valid is invalid")
+    if (
+        "reported_usage_metadata_valid" in evidence
+        and evidence.get("reported_usage_metadata_valid") is not True
+    ):
+        errors.append("provider evidence reported_usage_metadata_valid is invalid")
+    if "provider_identity_status" in evidence and evidence.get("provider_identity_status") not in {
+        "valid",
+        "invalid",
+    }:
+        errors.append("provider evidence provider_identity_status is invalid")
+
+    validated_metrics: dict[str, int] = {}
+    for canonical, paths in PROVIDER_USAGE_METRIC_PATHS:
+        values: list[int] = []
+        valid = True
+        for path in paths:
+            value, parent_valid, present = nested_provider_value(evidence, path)
+            if not parent_valid:
+                valid = False
+                break
+            if not present:
+                continue
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                or value > CODEX_EVIDENCE_METRIC_MAX_VALUE
+            ):
+                valid = False
+                break
+            values.append(value)
+        if len(set(values)) > 1:
+            valid = False
+        if not valid:
+            errors.append(f"provider evidence {canonical} is invalid")
+        elif values:
+            validated_metrics[canonical] = values[0]
+
+    input_tokens = validated_metrics.get("input_tokens")
+    output_tokens = validated_metrics.get("output_tokens")
+    total_tokens = validated_metrics.get("total_tokens")
+    if total_tokens is not None and (input_tokens is None) != (output_tokens is None):
+        errors.append("provider evidence total_tokens is invalid")
+    if input_tokens is not None and output_tokens is not None:
+        derived_total = optional_metric_int(input_tokens + output_tokens)
+        if derived_total is None or (
+            total_tokens is not None and total_tokens != derived_total
+        ):
+            errors.append("provider evidence total_tokens is invalid")
+
+    for key, maximum in (("retry_count", 10_000), ("retryCount", 10_000)):
+        value = evidence.get(key)
+        if key not in evidence:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > maximum:
+            errors.append(f"provider evidence {key} is invalid")
+    for key in ("duration_sec", "durationSec"):
+        value = evidence.get(key)
+        if key not in evidence:
+            continue
+        valid_duration = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if valid_duration and isinstance(value, int):
+            valid_duration = 0 <= value <= PROVIDER_EXCEPTION_TIMEOUT_MAX_SECONDS
+        elif valid_duration:
+            valid_duration = (
+                math.isfinite(value)
+                and 0 <= value <= PROVIDER_EXCEPTION_TIMEOUT_MAX_SECONDS
+            )
+        if not valid_duration:
+            errors.append(f"provider evidence {key} is invalid")
+
+    for canonical, aliases in (
+        ("retry_count", ("retry_count", "retryCount")),
+        ("duration_sec", ("duration_sec", "durationSec")),
+    ):
+        values = [evidence.get(key) for key in aliases if key in evidence]
+        if len(values) > 1 and any(value != values[0] for value in values[1:]):
+            errors.append(f"provider evidence {canonical} aliases conflict")
+
+    if require_completion_ids:
+        for key in ("provider_session_id", "request_id", "usage_source", "transcript_path"):
+            value = evidence.get(key)
+            if not isinstance(value, str) or not value:
+                errors.append(f"provider evidence missing {key}")
+    return list(dict.fromkeys(errors))
+
+
+def claude_response_fields(data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Extract exact typed Claude response fields without coercion or alias overwrite."""
+    fields: dict[str, Any] = {}
+    for canonical, aliases, max_chars in (
+        ("result_text", ("result", "message"), CODEX_JSONL_MAX_CHARS),
+        ("provider_session_id", ("session_id", "sessionId"), CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS),
+        ("request_id", ("request_id", "requestId"), CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS),
+    ):
+        value, aliases_valid, _present = exact_string_alias_from_sources(
+            data,
+            keys=aliases,
+            max_chars=max_chars,
+        )
+        if not aliases_valid:
+            return {}, False
+        fields[canonical] = value
+    for canonical, paths in (
+        (
+            "input_tokens",
+            (
+                ("usage", "input_tokens"),
+                ("usage", "inputTokens"),
+                ("input_tokens",),
+                ("inputTokens",),
+            ),
+        ),
+        (
+            "output_tokens",
+            (
+                ("usage", "output_tokens"),
+                ("usage", "outputTokens"),
+                ("output_tokens",),
+                ("outputTokens",),
+            ),
+        ),
+        (
+            "duration_api_ms",
+            (
+                ("duration_api_ms",),
+                ("durationApiMs",),
+                ("metrics", "duration_api_ms"),
+            ),
+        ),
+        ("num_turns", (("num_turns",), ("numTurns",))),
+    ):
+        value, aliases_valid = exact_provider_metric_alias(data, paths)
+        if not aliases_valid:
+            return {}, False
+        fields[canonical] = value
+    input_tokens = fields.get("input_tokens")
+    output_tokens = fields.get("output_tokens")
+    if (
+        input_tokens is not None
+        and output_tokens is not None
+        and optional_metric_int(input_tokens + output_tokens) is None
+    ):
+        return {}, False
+    total_cost_usd, cost_valid = exact_provider_cost_alias(data)
+    if not cost_valid:
+        return {}, False
+    fields["total_cost_usd"] = total_cost_usd
+    return fields, True
+
+
+def claude_reported_model_errors(
+    row: dict[str, Any],
+    reported_model: str,
+    canonical_intended_model: str,
+    *,
+    metadata_valid: bool = True,
+) -> list[str]:
+    """Reject a non-empty Claude model report that differs from bound policy."""
+    agent_id = normalize_cell(row.get("agent_id") or row.get("role_id") or "<unknown>")
+    intended_model = normalize_cell(canonical_intended_model)
+    if not intended_model:
+        return [f"{agent_id}: canonical intended model policy is unavailable"]
+    if not metadata_valid or (reported_model and reported_model != intended_model):
+        return [f"{agent_id}: provider-reported effective model does not match intended model"]
+    return []
+
+
+PROVIDER_POLICY_DRIFT_NOTE = "canonical provider policy changed during execution"
+
+
+CANONICAL_PROVIDER_EXECUTION_FIELDS = (
+    "agent_id",
+    "role_id",
+    "organization_instance_id",
+    "status",
+    "always_active",
+    "provider",
+    "execution_mode",
+    "intended_model",
+    "fallback_models",
+    "allowed_tools",
+    "git_operations_allowed",
+    "queue_consumer",
+    "queue_finalizer",
+)
+
+
+def bind_canonical_provider_execution(
+    row: dict[str, Any],
+    canonical_row: dict[str, Any],
+    *,
+    expected_provider: str,
+    expected_execution_mode: str,
+    provider_label: str,
+    expected_model: str = "",
+    expected_model_prefix: str = "",
+) -> tuple[dict[str, Any], str]:
+    """Validate mutable routing and return a canonical static execution row."""
+    canonical_provider = normalize_cell(canonical_row.get("provider")).lower()
+    canonical_execution_mode = normalize_cell(canonical_row.get("execution_mode")).lower()
+    if canonical_provider != expected_provider or canonical_execution_mode != expected_execution_mode:
+        return {}, f"canonical role is not authorized for {provider_label} execution"
+    persisted_provider = normalize_cell(row.get("provider")).lower()
+    persisted_execution_mode = normalize_cell(row.get("execution_mode")).lower()
+    if persisted_provider != canonical_provider:
+        return {}, "persisted provider policy does not match canonical role"
+    if persisted_execution_mode != canonical_execution_mode:
+        return {}, "persisted execution policy does not match canonical role"
+    canonical_model = normalize_cell(canonical_row.get("intended_model"))
+    persisted_model = normalize_cell(row.get("intended_model"))
+    if not canonical_model:
+        return {}, "canonical intended model policy is unavailable"
+    if expected_model and canonical_model != expected_model:
+        return {}, "canonical intended model policy is unsupported"
+    if expected_model_prefix and not canonical_model.startswith(expected_model_prefix):
+        return {}, "canonical intended model policy is unsupported"
+    if not persisted_model:
+        return {}, "persisted intended model policy is unavailable"
+    if persisted_model != canonical_model:
+        return {}, "persisted intended model policy does not match canonical role"
+    canonical_fallbacks = normalize_cell(canonical_row.get("fallback_models"))
+    fallback_models = [
+        normalize_cell(item)
+        for item in canonical_fallbacks.split(",")
+        if normalize_cell(item)
+    ]
+    if expected_provider == "openai" and fallback_models:
+        return {}, "canonical fallback model policy is unsupported"
+    if expected_provider == "anthropic" and any(
+        not model.startswith("claude-") or model == canonical_model
+        for model in fallback_models
+    ):
+        return {}, "canonical fallback model policy is unsupported"
+    canonical_tools = normalize_allowed_tools(canonical_row.get("allowed_tools", []))
+    if any(
+        tool.split("(", 1)[0] not in AGENT_DISPATCH_ALLOWED_TOOL_NAMES
+        for tool in canonical_tools
+    ):
+        return {}, "canonical allowed tools policy is unsupported"
+    execution_row = dict(row)
+    for field in CANONICAL_PROVIDER_EXECUTION_FIELDS:
+        if field in canonical_row:
+            execution_row[field] = canonical_row[field]
+        else:
+            execution_row.pop(field, None)
+    execution_row["provider"] = canonical_provider
+    execution_row["execution_mode"] = canonical_execution_mode
+    execution_row["intended_model"] = canonical_model
+    execution_row["fallback_models"] = ",".join(fallback_models)
+    execution_row["allowed_tools"] = canonical_tools
+    digest_payload = {
+        field: execution_row.get(field)
+        for field in CANONICAL_PROVIDER_EXECUTION_FIELDS
+    }
+    execution_row["canonical_execution_policy_digest"] = hashlib.sha256(
+        json.dumps(
+            digest_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return execution_row, ""
+
+
+def canonical_codex_execution_policy(
+    row: dict[str, Any],
+    *,
+    organization_instance_id: str,
+) -> tuple[dict[str, Any], str]:
+    """Bind a persisted row to canonical Codex execution policy."""
+    agent_id = normalize_cell(row.get("agent_id") or row.get("role_id"))
+    if not agent_id:
+        return {}, "codex role identity is unavailable"
+    try:
+        canonical_row = role_agent_row_for(
+            agent_id,
+            organization_instance_id=organization_instance_id,
+        )
+    except (OSError, ValueError):
+        return {}, "canonical codex role policy is unavailable"
+    if not canonical_row:
+        return {}, "canonical codex role policy is unavailable"
+    return bind_canonical_provider_execution(
+        row,
+        canonical_row,
+        expected_provider="openai",
+        expected_execution_mode="codex",
+        provider_label="Codex",
+        expected_model=DEFAULT_CODEX_MODEL,
+    )
+
+
+def canonical_claude_execution_policy(
+    row: dict[str, Any],
+    *,
+    organization_instance_id: str,
+) -> tuple[dict[str, Any], str]:
+    """Bind a persisted row to canonical Claude execution policy."""
+    agent_id = normalize_cell(row.get("agent_id") or row.get("role_id"))
+    if not agent_id:
+        return {}, "claude role identity is unavailable"
+    try:
+        canonical_row = role_agent_row_for(
+            agent_id,
+            organization_instance_id=organization_instance_id,
+        )
+    except (OSError, ValueError):
+        return {}, "canonical claude role policy is unavailable"
+    if not canonical_row:
+        return {}, "canonical claude role policy is unavailable"
+    return bind_canonical_provider_execution(
+        row,
+        canonical_row,
+        expected_provider="anthropic",
+        expected_execution_mode="claude",
+        provider_label="Claude",
+        expected_model_prefix="claude-",
+    )
+
+
+def canonical_execution_evidence(execution_row: dict[str, Any]) -> dict[str, Any]:
+    """Return immutable evidence fields for the exact bound provider policy."""
+    return {
+        "canonical_execution_policy_digest": normalize_cell(
+            execution_row.get("canonical_execution_policy_digest")
+        ),
+        "canonical_provider": normalize_cell(execution_row.get("provider")).lower(),
+        "canonical_execution_mode": normalize_cell(execution_row.get("execution_mode")).lower(),
+        "intended_model": normalize_cell(execution_row.get("intended_model")),
+    }
+
+
+def bind_response_policy_identity(row: dict[str, Any], execution_row: dict[str, Any]) -> None:
+    """Bind mutable response readiness to the exact canonical execution policy."""
+    evidence = canonical_execution_evidence(execution_row)
+    row["canonical_execution_policy_digest"] = evidence["canonical_execution_policy_digest"]
+    row["canonical_provider"] = evidence["canonical_provider"]
+    row["canonical_execution_mode"] = evidence["canonical_execution_mode"]
+    row["canonical_intended_model"] = evidence["intended_model"]
+    row["organization_instance_id"] = normalize_cell(execution_row.get("organization_instance_id"))
+
+
+def response_policy_identity_is_current(row: dict[str, Any]) -> bool:
+    """Reject response readiness whose canonical provider policy has drifted."""
+    expected_digest = normalize_cell(row.get("canonical_execution_policy_digest"))
+    if not expected_digest:
+        return False
+    provider = normalize_cell(row.get("canonical_provider")).lower()
+    execution_mode = normalize_cell(row.get("canonical_execution_mode")).lower()
+    organization_instance_id = normalize_cell(row.get("organization_instance_id"))
+    if provider == "openai" and execution_mode == "codex":
+        execution_row, policy_error = canonical_codex_execution_policy(
+            row,
+            organization_instance_id=organization_instance_id,
+        )
+    elif provider == "anthropic" and execution_mode == "claude":
+        execution_row, policy_error = canonical_claude_execution_policy(
+            row,
+            organization_instance_id=organization_instance_id,
+        )
+    else:
+        return False
+    return not policy_error and normalize_cell(
+        execution_row.get("canonical_execution_policy_digest")
+    ) == expected_digest
+
+
+def reject_provider_identity_policy(
+    *,
+    runtime: str,
+    state: dict[str, Any],
+    roster: list[Any],
+    row: dict[str, Any],
+    session_dir: Path,
+    state_path: Path,
+    roster_path: Path,
+    session_id: str,
+    agent_id: str,
+    request_id: str,
+    event_type: str,
+    reason: str,
+    now: str,
+) -> dict[str, Any]:
+    """Persist a non-invoking, fail-closed canonical identity rejection."""
+    reset_response_evidence(
+        row,
+        now,
+        reason,
+        usage_source="provider_identity_policy_preflight",
+    )
+    row["provider_status"] = "provider_model_policy_invalid"
+    update_provider_response_state(state, roster)
+    state_prefix = "last_agent_dispatch" if event_type == "agent_dispatch" else "last_provider_activation"
+    state[f"{state_prefix}_agent"] = agent_id
+    state[f"{state_prefix}_at"] = now
+    state[f"{state_prefix}_usage_source"] = row["usage_source"]
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
+    append_jsonl_atomic(
+        session_dir / "invocation-evidence.jsonl",
+        invocation_evidence_entry(
+            ts=now,
+            runtime=runtime,
+            event_type=event_type,
+            session_id=session_id,
+            organization_instance_id=state.get("organization_instance_id", organization_id(session_id)),
+            agent_id=agent_id,
+            result="provider_model_policy_invalid",
+            usage_source=row["usage_source"],
+            effective_model="",
+            request_id=request_id,
+            notes=reason,
+            extra={"policy_source": "canonical_role_registry", "provider_invoked": False},
+        ),
+    )
+    result: dict[str, Any] = {"decision": "block", "reason": reason}
+    if event_type == "agent_dispatch":
+        result["agentDispatch"] = {
+            "agent_id": agent_id,
+            "request_id": request_id,
+            "result": "provider_model_policy_invalid",
+            "usage_source": row["usage_source"],
+            "effective_model": "",
+        }
+    return result
+
+
+def reject_provider_prompt_policy(
+    *,
+    runtime: str,
+    state: dict[str, Any],
+    roster: list[Any],
+    row: dict[str, Any],
+    session_dir: Path,
+    state_path: Path,
+    roster_path: Path,
+    session_id: str,
+    agent_id: str,
+    request_id: str,
+    event_type: str,
+    reason: str,
+    policy_evidence: dict[str, Any],
+    now: str,
+) -> dict[str, Any]:
+    """Invalidate stale readiness when a trusted role prompt policy rejects execution."""
+    usage_source = "provider_prompt_policy_rejected"
+    reset_response_evidence(row, now, reason, usage_source=usage_source)
+    row["provider_status"] = "provider_prompt_policy_rejected"
+    update_provider_response_state(state, roster)
+    state_prefix = "last_agent_dispatch" if event_type == "agent_dispatch" else "last_provider_activation"
+    state[f"{state_prefix}_agent"] = agent_id
+    state[f"{state_prefix}_at"] = now
+    state[f"{state_prefix}_usage_source"] = usage_source
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
+    append_jsonl_atomic(
+        session_dir / "invocation-evidence.jsonl",
+        invocation_evidence_entry(
+            ts=now,
+            runtime=runtime,
+            event_type=event_type,
+            session_id=session_id,
+            organization_instance_id=state.get(
+                "organization_instance_id",
+                organization_id(session_id),
+            ),
+            agent_id=agent_id,
+            result="provider_prompt_policy_rejected",
+            usage_source=usage_source,
+            effective_model="",
+            request_id=request_id,
+            notes=reason,
+            extra={
+                **policy_evidence,
+                "provider_invoked": False,
+                "prompt_policy": "git_operations_allowed",
+            },
+        ),
+    )
+    result: dict[str, Any] = {"decision": "block", "reason": reason}
+    if event_type == "agent_dispatch":
+        result["agentDispatch"] = {
+            "agent_id": agent_id,
+            "request_id": request_id,
+            "result": "provider_prompt_policy_rejected",
+            "usage_source": usage_source,
+            "effective_model": "",
+        }
+    return result
+
+
+def reject_provider_command_unavailable(
+    *,
+    runtime: str,
+    state: dict[str, Any],
+    roster: list[Any],
+    row: dict[str, Any],
+    session_dir: Path,
+    state_path: Path,
+    roster_path: Path,
+    session_id: str,
+    agent_id: str,
+    request_id: str,
+    event_type: str,
+    provider_label: str,
+    usage_source: str,
+    policy_evidence: dict[str, Any],
+    now: str,
+) -> dict[str, Any]:
+    """Invalidate stale readiness and persist bounded command-unavailable evidence."""
+    reason = f"{provider_label} command not found"
+    reset_response_evidence(
+        row,
+        now,
+        reason,
+        usage_source=usage_source,
+    )
+    row["provider_status"] = "provider_command_unavailable"
+    update_provider_response_state(state, roster)
+    state_prefix = "last_agent_dispatch" if event_type == "agent_dispatch" else "last_provider_activation"
+    state[f"{state_prefix}_agent"] = agent_id
+    state[f"{state_prefix}_at"] = now
+    state[f"{state_prefix}_usage_source"] = row["usage_source"]
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
+    append_jsonl_atomic(
+        session_dir / "invocation-evidence.jsonl",
+        invocation_evidence_entry(
+            ts=now,
+            runtime=runtime,
+            event_type=event_type,
+            session_id=session_id,
+            organization_instance_id=state.get(
+                "organization_instance_id",
+                organization_id(session_id),
+            ),
+            agent_id=agent_id,
+            result="provider_command_unavailable",
+            usage_source=row["usage_source"],
+            effective_model="",
+            request_id=request_id or "unavailable",
+            notes=reason,
+            extra={
+                **policy_evidence,
+                "provider_invoked": False,
+                "provider_command_available": False,
+            },
+        ),
+    )
+    return {"decision": "block", "reason": reason}
+
+
+def reject_claude_provider_output(
+    *,
+    runtime: str,
+    state: dict[str, Any],
+    roster: list[Any],
+    row: dict[str, Any],
+    session_dir: Path,
+    state_path: Path,
+    roster_path: Path,
+    session_id: str,
+    agent_id: str,
+    request_id: str,
+    event_type: str,
+    result: str,
+    usage_source: str,
+    reason: str,
+    duration_api_ms: int,
+    transcript_path: Path,
+    policy_evidence: dict[str, Any],
+    extra_evidence: dict[str, Any],
+    now: str,
+) -> dict[str, Any]:
+    """Persist a fixed Claude output rejection without retaining raw output."""
+    reset_response_evidence(
+        row,
+        now,
+        reason,
+        usage_source=usage_source,
+    )
+    row["provider_status"] = result
+    update_provider_response_state(state, roster)
+    state_prefix = "last_agent_dispatch" if event_type == "agent_dispatch" else "last_provider_activation"
+    state[f"{state_prefix}_agent"] = agent_id
+    state[f"{state_prefix}_at"] = now
+    state[f"{state_prefix}_usage_source"] = row["usage_source"]
+    write_json_yaml(roster_path, roster)
+    write_json_yaml(state_path, state)
+    append_jsonl_atomic(
+        session_dir / "invocation-evidence.jsonl",
+        invocation_evidence_entry(
+            ts=now,
+            runtime=runtime,
+            event_type=event_type,
+            session_id=session_id,
+            organization_instance_id=state.get(
+                "organization_instance_id",
+                organization_id(session_id),
+            ),
+            agent_id=agent_id,
+            result=result,
+            usage_source=row["usage_source"],
+            effective_model="",
+            request_id=request_id or "unavailable",
+            duration_api_ms=duration_api_ms,
+            notes=reason,
+            extra={
+                **policy_evidence,
+                **extra_evidence,
+                "transcript_path": str(transcript_path),
+                "transcript_written": False,
+            },
+        ),
+    )
+    return {"decision": "block", "reason": reason}
 
 
 MODEL_TIER_RANKS = {
@@ -9634,8 +11766,8 @@ def claude_effort_for_model(model: Any) -> str:
 
 
 def codex_model_for_agent(row: dict[str, Any]) -> str:
-    """Return the registry-selected Codex model or the Luna default."""
-    return normalize_cell(row.get("intended_model", "") or DEFAULT_CODEX_MODEL)
+    """Return the explicitly selected Codex model without inventing policy."""
+    return normalize_cell(row.get("intended_model", ""))
 
 
 def codex_reasoning_effort() -> str:
@@ -9773,9 +11905,16 @@ def claude_activation_command(row: dict[str, Any], prompt: str, max_budget_usd: 
 
 def codex_activation_command(row: dict[str, Any], prompt: str, cwd: str) -> list[str]:
     """Build a Codex activation command pinned to the selected model and max effort."""
-    model = row.get("intended_model", "") or DEFAULT_CODEX_MODEL
+    model = codex_model_for_agent(row)
+    if not model:
+        raise ValueError("codex activation requires an intended model policy")
     effort = DEFAULT_CODEX_REASONING_EFFORT
     tier = os.environ.get("ITB_CODEX_SERVICE_TIER") or DEFAULT_CODEX_SERVICE_TIER
+    sandbox = (
+        codex_sandbox_for_tools(normalize_allowed_tools(row.get("allowed_tools", [])))
+        if normalize_cell(row.get("canonical_execution_policy_digest"))
+        else codex_sandbox_for_role(row)
+    )
     return [
         "codex",
         "exec",
@@ -9788,7 +11927,7 @@ def codex_activation_command(row: dict[str, Any], prompt: str, cwd: str) -> list
         "--cd",
         cwd,
         "--sandbox",
-        codex_sandbox_for_role(row),
+        sandbox,
         "-c",
         f'model_reasoning_effort="{effort}"',
         "-c",
@@ -9801,10 +11940,14 @@ CODEX_JSONL_MAX_CHARS = 8 * 1024 * 1024
 CODEX_JSONL_MAX_LINE_CHARS = 1024 * 1024
 CODEX_JSONL_MAX_EVENTS = 10_000
 CODEX_STDERR_MAX_BYTES = 1024 * 1024
-CODEX_EVIDENCE_NOTE_MAX_CHARS = 4096
+CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS = 512
+CLAUDE_RESPONSE_COST_MAX_USD = 1_000_000_000.0
+PROVIDER_EXCEPTION_TIMEOUT_MAX_SECONDS = 86_400
+PROVIDER_EXCEPTION_ERRNO_MAX = 4095
 CODEX_JSON_MAX_DEPTH = 128
 CODEX_JSON_MAX_NODES = 100_000
 CODEX_EVIDENCE_METRIC_MAX_VALUE = (1 << 63) - 1
+PROVIDER_IDENTIFIER_MAX_CHARS = 512
 CODEX_CURRENT_EVENT_TYPES = {
     "thread.started",
     "turn.started",
@@ -9882,13 +12025,22 @@ def codex_event_string(event: dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def provider_identifier_is_valid(value: Any) -> bool:
+    """Accept only bounded, display-safe identifiers from provider output."""
+    return bool(
+        isinstance(value, str)
+        and 1 <= len(value) <= PROVIDER_IDENTIFIER_MAX_CHARS
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*", value)
+    )
+
+
 def codex_event_consistent_string(event: dict[str, Any], *keys: str) -> tuple[str, bool]:
     values: list[str] = []
     for key in keys:
         if key not in event:
             continue
         value = event.get(key)
-        if not isinstance(value, str) or not value or value != value.strip():
+        if not provider_identifier_is_valid(value) or value != value.strip():
             return "", False
         values.append(value)
     if len(set(values)) > 1:
@@ -9897,7 +12049,10 @@ def codex_event_consistent_string(event: dict[str, Any], *keys: str) -> tuple[st
 
 
 def codex_event_model(event: dict[str, Any]) -> tuple[str, bool]:
-    model_keys = ("model", "effective_model", "effectiveModel")
+    """Return one exact Codex model alias and reject malformed or conflicting data."""
+    if not provider_identity_markers_are_valid(event):
+        return "", False
+    model_keys = ("model", "effective_model", "effectiveModel", "reported_effective_model")
     if any(
         key in event and event.get(key) is not None and not isinstance(event.get(key), str)
         for key in model_keys
@@ -9949,6 +12104,12 @@ def codex_event_usage(event: dict[str, Any]) -> tuple[dict[str, int], bool]:
     output_tokens = typed_usage.get("output_tokens")
     reasoning_output_tokens = typed_usage.get("reasoning_output_tokens")
     total_tokens = typed_usage.get("total_tokens")
+    if (
+        input_tokens is not None
+        and output_tokens is not None
+        and optional_metric_int(input_tokens + output_tokens) is None
+    ):
+        return {}, False
     if cached_input_tokens is not None and (
         input_tokens is None or cached_input_tokens > input_tokens
     ):
@@ -9997,20 +12158,23 @@ def codex_event_consistent_metric(event: dict[str, Any], *keys: str) -> tuple[in
     return (values[0] if values else None), True
 
 
-def codex_json_object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+def provider_json_object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a provider JSON object while rejecting every duplicate key."""
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"duplicate JSON object key: {key}")
+            raise ValueError("provider JSON contains duplicate object keys")
         result[key] = value
     return result
 
 
-def codex_json_reject_nonstandard_constant(value: str) -> Any:
-    raise ValueError(f"nonstandard JSON numeric constant: {value}")
+def provider_json_reject_nonstandard_constant(value: str) -> Any:
+    """Reject NaN and infinity spellings that are outside strict JSON."""
+    raise ValueError("provider JSON contains a nonstandard numeric constant")
 
 
-def codex_json_structure_is_safe(value: Any) -> bool:
+def provider_json_structure_is_safe(value: Any) -> bool:
+    """Bound provider JSON depth, node count, and non-finite numbers."""
     stack: list[tuple[Any, int]] = [(value, 0)]
     node_count = 0
     while stack:
@@ -10025,6 +12189,28 @@ def codex_json_structure_is_safe(value: Any) -> bool:
         elif isinstance(node, list):
             stack.extend((item, depth + 1) for item in node)
     return True
+
+
+def parse_provider_json_value(raw: str) -> Any:
+    """Parse bounded strict provider JSON without duplicate-key overwrites."""
+    if len(raw) > CODEX_JSONL_MAX_CHARS:
+        raise ValueError("provider JSON exceeds the bounded input limit")
+    parsed = json.loads(
+        raw,
+        object_pairs_hook=provider_json_object_without_duplicates,
+        parse_constant=provider_json_reject_nonstandard_constant,
+    )
+    if not provider_json_structure_is_safe(parsed):
+        raise ValueError("provider JSON exceeds structural safety limits")
+    return parsed
+
+
+def parse_provider_json_object(raw: str, *, context: str) -> dict[str, Any]:
+    """Parse a strict provider-authored JSON object for one named ingress."""
+    parsed = parse_provider_json_value(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{context} must contain a JSON object")
+    return parsed
 
 
 def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
@@ -10187,41 +12373,159 @@ def run_command_with_bounded_output(
     return completed
 
 
-def codex_bounded_output_rejection(
+def run_claude_command_with_bounded_output(
+    command: list[str],
+    *,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    """Run Claude with byte limits enforced before any transcript persistence."""
+    return run_command_with_bounded_output(
+        command,
+        timeout=timeout,
+        stdout_limit_bytes=CODEX_JSONL_MAX_CHARS,
+        stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
+    )
+
+
+def provider_bounded_output_rejection(
     completed: subprocess.CompletedProcess[str],
+    *,
+    provider_label: str,
 ) -> tuple[str, str]:
+    label = provider_label.strip().lower()
     if bool(getattr(completed, "output_timed_out", False)):
         return (
             "provider_response_timeout",
-            "codex provider process exceeded its execution timeout",
+            f"{label} provider process exceeded its execution timeout",
         )
     exceeded = str(getattr(completed, "output_limit_exceeded", "") or "")
     if exceeded:
         return (
             "provider_output_limit_exceeded",
-            f"codex provider output exceeded the bounded byte limit: {exceeded}",
+            f"{label} provider output exceeded the bounded byte limit: {exceeded}",
         )
     read_error = str(getattr(completed, "output_read_error", "") or "")
     if read_error:
         return (
             "provider_output_read_failed",
-            f"codex provider output could not be read safely: {read_error}",
+            f"{label} provider output could not be read safely: {read_error}",
         )
     if bool(getattr(completed, "output_decode_error", False)):
         return (
             "provider_output_decode_failed",
-            "codex provider output was not valid UTF-8",
+            f"{label} provider output was not valid UTF-8",
         )
     return "", ""
 
 
-def bounded_provider_process_note(completed: subprocess.CompletedProcess[str]) -> str:
-    value = completed.stderr.strip() or completed.stdout.strip()
-    if len(value) <= CODEX_EVIDENCE_NOTE_MAX_CHARS:
-        return value
-    suffix = "... [truncated]"
-    content_limit = max(0, CODEX_EVIDENCE_NOTE_MAX_CHARS - len(suffix))
-    return (value[:content_limit] + suffix)[:CODEX_EVIDENCE_NOTE_MAX_CHARS]
+def codex_bounded_output_rejection(
+    completed: subprocess.CompletedProcess[str],
+) -> tuple[str, str]:
+    return provider_bounded_output_rejection(
+        completed,
+        provider_label="codex",
+    )
+
+
+def claude_bounded_output_rejection(
+    completed: subprocess.CompletedProcess[str],
+) -> tuple[str, str]:
+    return provider_bounded_output_rejection(
+        completed,
+        provider_label="claude",
+    )
+
+
+def provider_returncode_evidence(
+    completed: subprocess.CompletedProcess[str],
+) -> dict[str, int | None]:
+    """Return a bounded process status without retaining provider output."""
+    returncode = completed.returncode
+    if (
+        not isinstance(returncode, int)
+        or isinstance(returncode, bool)
+        or returncode < -255
+        or returncode > 255
+    ):
+        returncode = None
+    return {"provider_returncode": returncode}
+
+
+def provider_oserror_evidence(exc: OSError) -> dict[str, Any]:
+    """Return only bounded, non-secret process launch failure fields."""
+    errno_value = (
+        exc.errno
+        if isinstance(exc.errno, int)
+        and not isinstance(exc.errno, bool)
+        and 0 <= exc.errno <= PROVIDER_EXCEPTION_ERRNO_MAX
+        else None
+    )
+    return {
+        "provider_exception_type": "OSError",
+        "provider_exception_errno": errno_value,
+    }
+
+
+def claude_process_exception_evidence(
+    exc: OSError | subprocess.TimeoutExpired | UnicodeError,
+) -> tuple[str, str, str, dict[str, Any]]:
+    """Return sanitized Claude process failure evidence without command or prompt data."""
+    if isinstance(exc, UnicodeError):
+        return (
+            "provider_output_decode_failed",
+            "claude_print_json_decode_failed",
+            "claude provider output was not valid UTF-8",
+            {"provider_exception_type": "UnicodeDecodeError"},
+        )
+    if isinstance(exc, subprocess.TimeoutExpired):
+        timeout_seconds: int | float | None = None
+        if isinstance(exc.timeout, (int, float)) and not isinstance(exc.timeout, bool):
+            try:
+                numeric_timeout = float(exc.timeout)
+            except (OverflowError, ValueError):
+                numeric_timeout = math.nan
+            if (
+                math.isfinite(numeric_timeout)
+                and 0 <= numeric_timeout <= PROVIDER_EXCEPTION_TIMEOUT_MAX_SECONDS
+            ):
+                timeout_seconds = (
+                    exc.timeout
+                    if isinstance(exc.timeout, int)
+                    else round(numeric_timeout, 3)
+                )
+        return (
+            "provider_response_timeout",
+            "claude_print_json_timeout",
+            "claude provider process exceeded its execution timeout",
+            {
+                "provider_exception_type": "TimeoutExpired",
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+    return (
+        "provider_process_failed",
+        "claude_print_json_launch_failed",
+        "claude provider process failed to start",
+        provider_oserror_evidence(exc),
+    )
+
+
+def claude_parse_exception_type(exc: BaseException) -> str:
+    """Map parser failures to a fixed, non-provider-controlled allowlist."""
+    if isinstance(exc, RecursionError):
+        return "RecursionError"
+    if isinstance(exc, TypeError):
+        return "TypeError"
+    return "ValueError"
+
+
+def codex_parse_exception_type(exc: BaseException) -> str:
+    """Map Codex parser failures to a fixed, non-provider-controlled allowlist."""
+    if isinstance(exc, RecursionError):
+        return "RecursionError"
+    if isinstance(exc, json.JSONDecodeError):
+        return "JSONDecodeError"
+    return "ValueError"
 
 
 def parse_codex_json_output(stdout: str) -> dict[str, Any]:
@@ -10253,14 +12557,14 @@ def parse_codex_json_output(stdout: str) -> dict[str, Any]:
         try:
             event = json.loads(
                 line,
-                object_pairs_hook=codex_json_object_without_duplicates,
-                parse_constant=codex_json_reject_nonstandard_constant,
+                object_pairs_hook=provider_json_object_without_duplicates,
+                parse_constant=provider_json_reject_nonstandard_constant,
             )
         except json.JSONDecodeError:
             raise
         except (ValueError, RecursionError):
             return {}
-        if not codex_json_structure_is_safe(event):
+        if not provider_json_structure_is_safe(event):
             return {}
         if not isinstance(event, dict):
             stream_conflict = True
@@ -10289,11 +12593,7 @@ def parse_codex_json_output(stdout: str) -> dict[str, Any]:
                 item_type = item.get("type")
                 if not isinstance(item_type, str) or item_type not in CODEX_CURRENT_ITEM_TYPES:
                     stream_conflict = True
-                elif (
-                    not isinstance(item.get("id"), str)
-                    or not item.get("id", "")
-                    or item.get("id") != item.get("id", "").strip()
-                ):
+                elif not provider_identifier_is_valid(item.get("id")):
                     stream_conflict = True
                 else:
                     current_item = item
@@ -10483,12 +12783,7 @@ Provider request:
 
 
 def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(
-        hook_input.get("session_id")
-        or hook_input.get("sessionId")
-        or current_session_id(state_root, hook_input)
-        or "unknown-session"
-    )
+    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
     session_dir = state_root / safe_id(session_id)
     state_path = session_dir / "bootstrap.json"
     roster_path = session_dir / "roster.json"
@@ -10498,11 +12793,10 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     state = read_json(state_path) if state_path.exists() else {}
     if not isinstance(state, dict):
         state = {}
-    organization_instance_id = str(
-        state.get("organization_instance_id")
-        or hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or organization_id(session_id)
+    organization_instance_id = resolve_organization_instance_id(
+        state,
+        hook_input,
+        session_id,
     )
     state.setdefault("runtime", runtime)
     state.setdefault("session_id", session_id)
@@ -10521,6 +12815,7 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         return {"decision": "block", "reason": "codex exec provider adapter requires agent_id"}
     if not prompt.strip():
         return {"decision": "block", "reason": "codex exec provider adapter requires prompt"}
+    request_id = exact_hook_request_id(hook_input)
 
     row = next((item for item in roster if isinstance(item, dict) and item.get("agent_id") == agent_id), None)
     if row is None:
@@ -10528,36 +12823,122 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         if not row:
             return {"decision": "block", "reason": f"agent not found in registry: {agent_id}"}
         roster.append(row)
-    if agent_runtime(row) != ("codex_exec", "codex"):
-        return {
-            "decision": "block",
-            "reason": (
-                f"codex exec provider adapter requires OpenAI/codex role: "
-                f"{agent_id} provider={row.get('provider', '')} execution_mode={row.get('execution_mode', '')}"
-            ),
-        }
-    git_policy_error = validate_git_operation_for_role(row, prompt)
+    execution_row, model_policy_error = canonical_codex_execution_policy(
+        row,
+        organization_instance_id=organization_instance_id,
+    )
+    if model_policy_error:
+        return reject_provider_identity_policy(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            reason=model_policy_error,
+            now=now,
+        )
+    canonical_intended_model = normalize_cell(execution_row.get("intended_model"))
+    bind_response_policy_identity(row, execution_row)
+    policy_evidence = canonical_execution_evidence(execution_row)
+    git_policy_error = validate_git_operation_for_role(execution_row, prompt)
     if git_policy_error:
-        return {"decision": "block", "reason": git_policy_error}
+        return reject_provider_prompt_policy(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            reason=git_policy_error,
+            policy_evidence=policy_evidence,
+            now=now,
+        )
     if shutil.which("codex") is None:
-        return {"decision": "block", "reason": "codex command not found"}
+        return reject_provider_command_unavailable(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            provider_label="codex",
+            usage_source="codex_exec_json_command_unavailable",
+            policy_evidence=policy_evidence,
+            now=now,
+        )
 
     cwd = str(hook_input.get("cwd") or state.get("cwd") or os.getcwd())
-    request_id = normalize_cell(hook_input.get("request_id") or hook_input.get("requestId") or f"req-{uuid.uuid4().hex}")
-    transcript_dir = session_dir / "provider-exec" / safe_id(agent_id)
-    transcript_dir.mkdir(parents=True, exist_ok=True)
-    transcript_path = transcript_dir / f"{safe_id(request_id)}.jsonl"
-    command = codex_activation_command(row, codex_exec_role_prompt(row, prompt), cwd)
-    started = time.monotonic()
-    completed = run_command_with_bounded_output(
-        command,
-        timeout=env_int("ITB_CODEX_EXEC_DISPATCH_TIMEOUT_SECONDS") or env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
-        stdout_limit_bytes=CODEX_JSONL_MAX_CHARS,
-        stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
+    transcript_path = planned_provider_transcript_path(
+        session_dir,
+        agent_id=agent_id,
+        request_id=request_id,
+        suffix=".jsonl",
     )
+    command = codex_activation_command(execution_row, codex_exec_role_prompt(execution_row, prompt), cwd)
+    started = time.monotonic()
+    try:
+        completed = run_command_with_bounded_output(
+            command,
+            timeout=env_int("ITB_CODEX_EXEC_DISPATCH_TIMEOUT_SECONDS") or env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
+            stdout_limit_bytes=CODEX_JSONL_MAX_CHARS,
+            stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
+        )
+    except OSError as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        process_note = "codex provider process failed to start"
+        reset_response_evidence(
+            row,
+            now,
+            process_note,
+            usage_source="codex_exec_json_launch_failed",
+        )
+        row["provider_status"] = "provider_process_failed"
+        update_provider_response_state(state, roster)
+        state["last_agent_dispatch_agent"] = agent_id
+        state["last_agent_dispatch_at"] = now
+        state["last_agent_dispatch_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
+        append_jsonl_atomic(
+            session_dir / "invocation-evidence.jsonl",
+            invocation_evidence_entry(
+                ts=now,
+                runtime=runtime,
+                event_type="agent_dispatch",
+                session_id=session_id,
+                organization_instance_id=organization_instance_id,
+                agent_id=agent_id,
+                result="provider_process_failed",
+                usage_source=row["usage_source"],
+                effective_model="",
+                request_id=request_id,
+                duration_api_ms=elapsed_ms,
+                notes=process_note,
+                extra={
+                    **policy_evidence,
+                    **provider_oserror_evidence(exc),
+                },
+            ),
+        )
+        return {"decision": "block", "reason": process_note}
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
-    transcript_path.write_text(completed.stdout, encoding="utf-8")
     output_rejection_type, output_rejection_reason = codex_bounded_output_rejection(completed)
     if output_rejection_type:
         reset_response_evidence(
@@ -10583,12 +12964,14 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
                 agent_id=agent_id,
                 result=output_rejection_type,
                 usage_source=row["usage_source"],
-                effective_model=row.get("intended_model", ""),
+                effective_model="",
                 request_id=request_id,
                 duration_api_ms=elapsed_ms,
                 notes=output_rejection_reason,
                 extra={
+                    **policy_evidence,
                     "transcript_path": str(transcript_path),
+                    "transcript_written": False,
                     "cwd": cwd,
                     "output_rejection_type": output_rejection_type,
                 },
@@ -10606,7 +12989,7 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             },
         }
     if completed.returncode != 0:
-        process_note = bounded_provider_process_note(completed) or "codex provider process failed"
+        process_note = "codex provider process failed"
         reset_response_evidence(
             row,
             now,
@@ -10630,21 +13013,29 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
                 agent_id=agent_id,
                 result="provider_process_failed",
                 usage_source="codex_exec_json",
-                effective_model=row.get("intended_model", ""),
+                effective_model="",
                 request_id=request_id,
                 duration_api_ms=elapsed_ms,
                 notes=process_note,
-                extra={"transcript_path": str(transcript_path), "cwd": cwd},
+                extra={
+                    **policy_evidence,
+                    "transcript_path": str(transcript_path),
+                    "transcript_written": False,
+                    "cwd": cwd,
+                    **provider_returncode_evidence(completed),
+                },
             ),
         )
         return {"decision": "block", "reason": process_note}
 
     codex_parse_error = ""
+    codex_parse_error_type_value = ""
     try:
         codex_result = parse_codex_json_output(completed.stdout)
     except (json.JSONDecodeError, ValueError, RecursionError) as exc:
         codex_result = {}
-        codex_parse_error = f"codex json output unreadable: {exc}"
+        codex_parse_error = "codex provider output was not valid JSON"
+        codex_parse_error_type_value = codex_parse_exception_type(exc)
 
     input_tokens = int_from_nested(
         codex_result,
@@ -10660,7 +13051,11 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     )
     duration_api_ms = codex_duration_api_ms if codex_duration_api_ms is not None else elapsed_ms
     provider_session_id = str_from_nested(codex_result, [("session_id",), ("sessionId",)])
-    output_request_id = str_from_nested(codex_result, [("request_id",), ("requestId",)]) or request_id
+    provider_reported_request_id = str_from_nested(
+        codex_result,
+        [("request_id",), ("requestId",)],
+    )
+    output_request_id = request_id
     effective_model = str_from_nested(
         codex_result,
         [("model",), ("effective_model",), ("effectiveModel",)],
@@ -10674,12 +13069,56 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         or (codex_duration_api_ms is not None and codex_duration_api_ms > 0)
         or (num_turns is not None and num_turns > 0)
     )
-    result_name = "provider_response_ready" if has_inference_evidence and result_text else "provider_response_no_inference"
+    model_evidence_errors = codex_reported_model_errors(
+        row,
+        effective_model,
+        canonical_intended_model,
+    )
+    model_evidence_note = "; ".join(model_evidence_errors)
+    policy_drift_detected = bool(
+        not model_evidence_errors
+        and has_inference_evidence
+        and result_text
+        and not response_policy_identity_is_current(row)
+    )
+    result_name = (
+        "provider_model_mismatch"
+        if model_evidence_errors
+        else "provider_policy_drift"
+        if policy_drift_detected
+        else "provider_response_ready"
+        if has_inference_evidence and result_text
+        else "provider_response_no_inference"
+    )
+    transcript_written = False
+    transcript_error_evidence: dict[str, Any] = {}
+    if result_name == "provider_response_ready":
+        transcript_path, transcript_error_evidence = persist_validated_provider_transcript(
+            session_dir,
+            agent_id=agent_id,
+            request_id=request_id,
+            suffix=".jsonl",
+            content=completed.stdout,
+        )
+        if transcript_error_evidence:
+            result_name = "provider_transcript_write_failed"
+            codex_parse_error = "codex provider transcript could not be written"
+        else:
+            transcript_written = True
     row["last_seen_at"] = now
     row["last_request_id"] = output_request_id
-    row["effective_model"] = effective_model
+    set_optional_effective_model(row, effective_model)
     row["session_id"] = provider_session_id
-    row["usage_source"] = "codex_exec_json" if result_name == "provider_response_ready" else "codex_exec_json_no_inference"
+    if result_name == "provider_response_ready":
+        row["usage_source"] = "codex_exec_json"
+    elif result_name == "provider_model_mismatch":
+        row["usage_source"] = "codex_exec_json_model_mismatch"
+    elif result_name == "provider_policy_drift":
+        row["usage_source"] = "codex_exec_json_policy_drift"
+    elif result_name == "provider_transcript_write_failed":
+        row["usage_source"] = "codex_exec_json_transcript_write_failed"
+    else:
+        row["usage_source"] = "codex_exec_json_no_inference"
     row["provider_status"] = result_name
     if result_name == "provider_response_ready":
         row["activation_status"] = "response_active"
@@ -10689,8 +13128,19 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         reset_response_evidence(
             row,
             now,
-            codex_parse_error or "Codex exec one-shot agent-dispatch produced no response evidence.",
-            usage_source="codex_exec_json_no_inference",
+            model_evidence_note
+            or (PROVIDER_POLICY_DRIFT_NOTE if policy_drift_detected else "")
+            or codex_parse_error
+            or "Codex exec one-shot agent-dispatch produced no response evidence.",
+            usage_source=(
+                "codex_exec_json_model_mismatch"
+                if result_name == "provider_model_mismatch"
+                else "codex_exec_json_policy_drift"
+                if result_name == "provider_policy_drift"
+                else "codex_exec_json_transcript_write_failed"
+                if result_name == "provider_transcript_write_failed"
+                else "codex_exec_json_no_inference"
+            ),
         )
         row["provider_status"] = result_name
         row["last_request_id"] = output_request_id
@@ -10699,9 +13149,6 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     state["last_agent_dispatch_agent"] = agent_id
     state["last_agent_dispatch_at"] = now
     state["last_agent_dispatch_usage_source"] = row["usage_source"]
-    if result_name == "provider_response_ready":
-        state["readiness_scope"] = "response_evidence"
-
     write_json_yaml(roster_path, roster)
     write_json_yaml(state_path, state)
     append_jsonl_atomic(
@@ -10724,26 +13171,54 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             notes=(
                 "Codex exec one-shot agent-dispatch completed."
                 if result_name == "provider_response_ready"
-                else codex_parse_error or "Codex exec one-shot produced no inference evidence."
+                else model_evidence_note
+                or (PROVIDER_POLICY_DRIFT_NOTE if policy_drift_detected else "")
+                or codex_parse_error
+                or "Codex exec one-shot produced no inference evidence."
             ),
             extra={
+                **policy_evidence,
                 "provider_session_id": provider_session_id,
                 "transcript_path": str(transcript_path),
+                "transcript_written": transcript_written,
                 "stdout_result_present": bool(result_text),
                 "cwd": cwd,
+                "policy_drift_detected": policy_drift_detected,
+                **(
+                    {"provider_reported_request_id": provider_reported_request_id}
+                    if provider_reported_request_id
+                    else {}
+                ),
+                **(
+                    {"provider_parse_error_type": codex_parse_error_type_value}
+                    if codex_parse_error_type_value
+                    else {}
+                ),
+                **transcript_error_evidence,
             },
         ),
     )
     if result_name != "provider_response_ready":
         return {
             "decision": "block",
-            "reason": codex_parse_error or "codex exec provider adapter produced no response evidence",
+            "reason": model_evidence_note
+            or (PROVIDER_POLICY_DRIFT_NOTE if policy_drift_detected else "")
+            or codex_parse_error
+            or "codex exec provider adapter produced no response evidence",
             "agentDispatch": {
                 "agent_id": agent_id,
                 "request_id": output_request_id,
                 "result": result_name,
                 "usage_source": row["usage_source"],
-                "effective_model": effective_model,
+                "effective_model": (
+                    ""
+                    if result_name in {
+                        "provider_model_mismatch",
+                        "provider_policy_drift",
+                        "provider_transcript_write_failed",
+                    }
+                    else effective_model
+                ),
                 "transcript_path": str(transcript_path),
             },
         }
@@ -10754,10 +13229,11 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             "request_id": output_request_id,
             "result": "provider_response_ready",
             "provider": "openai",
-            "intended_model": row.get("intended_model", ""),
+            "intended_model": canonical_intended_model,
             "effective_model": effective_model,
             "usage_source": "codex_exec_json",
             "provider_session_id": provider_session_id,
+            "provider_reported_request_id": provider_reported_request_id,
             "session_id": session_id,
             "organization_instance_id": organization_instance_id,
             "transcript_path": str(transcript_path),
@@ -10780,12 +13256,7 @@ Provider request:
 
 
 def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(
-        hook_input.get("session_id")
-        or hook_input.get("sessionId")
-        or current_session_id(state_root, hook_input)
-        or "unknown-session"
-    )
+    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
     session_dir = state_root / safe_id(session_id)
     state_path = session_dir / "bootstrap.json"
     roster_path = session_dir / "roster.json"
@@ -10797,11 +13268,10 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     state = read_json(state_path) if not state_missing else {}
     if not isinstance(state, dict):
         state = {}
-    organization_instance_id = str(
-        state.get("organization_instance_id")
-        or hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or organization_id(session_id)
+    organization_instance_id = resolve_organization_instance_id(
+        state,
+        hook_input,
+        session_id,
     )
     state.setdefault("runtime", runtime)
     state.setdefault("session_id", session_id)
@@ -10828,39 +13298,174 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         if not row:
             return {"decision": "block", "reason": f"agent not found in registry: {agent_id}"}
         roster.append(row)
-    if agent_runtime(row) != ("claude_cli", "claude"):
-        return {
-            "decision": "block",
-            "reason": (
-                f"claude CLI provider adapter requires Anthropic/Claude role: "
-                f"{agent_id} provider={row.get('provider', '')} execution_mode={row.get('execution_mode', '')}"
-            ),
-        }
-    git_policy_error = validate_git_operation_for_role(row, prompt)
-    if git_policy_error:
-        return {"decision": "block", "reason": git_policy_error}
-    if shutil.which("claude") is None:
-        return {"decision": "block", "reason": "claude command not found"}
-
-    request_id = normalize_cell(hook_input.get("request_id") or hook_input.get("requestId") or f"req-{uuid.uuid4().hex}")
-    transcript_dir = session_dir / "provider-exec" / safe_id(agent_id)
-    transcript_dir.mkdir(parents=True, exist_ok=True)
-    transcript_path = transcript_dir / f"{safe_id(request_id)}.json"
-    max_budget_usd, budget_source = claude_activation_budget(row, hook_input)
-    command = claude_activation_command(row, claude_cli_role_prompt(row, prompt), max_budget_usd)
-    started = time.monotonic()
-    completed = subprocess.run(
-        command,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=env_int("ITB_CLAUDE_CLI_DISPATCH_TIMEOUT_SECONDS") or env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
-        check=False,
+    request_id = exact_hook_request_id(hook_input)
+    execution_row, model_policy_error = canonical_claude_execution_policy(
+        row,
+        organization_instance_id=organization_instance_id,
     )
+    if model_policy_error:
+        return reject_provider_identity_policy(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            reason=model_policy_error,
+            now=now,
+        )
+    canonical_intended_model = normalize_cell(execution_row.get("intended_model"))
+    bind_response_policy_identity(row, execution_row)
+    policy_evidence = canonical_execution_evidence(execution_row)
+    git_policy_error = validate_git_operation_for_role(execution_row, prompt)
+    if git_policy_error:
+        return reject_provider_prompt_policy(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            reason=git_policy_error,
+            policy_evidence=policy_evidence,
+            now=now,
+        )
+    if shutil.which("claude") is None:
+        return reject_provider_command_unavailable(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            provider_label="claude",
+            usage_source="claude_print_json_command_unavailable",
+            policy_evidence=policy_evidence,
+            now=now,
+        )
+
+    transcript_path = planned_provider_transcript_path(
+        session_dir,
+        agent_id=agent_id,
+        request_id=request_id,
+        suffix=".json",
+    )
+    max_budget_usd, budget_source = claude_activation_budget(execution_row, hook_input)
+    command = claude_activation_command(execution_row, claude_cli_role_prompt(execution_row, prompt), max_budget_usd)
+    started = time.monotonic()
+    try:
+        completed = run_claude_command_with_bounded_output(
+            command,
+            timeout=env_int("ITB_CLAUDE_CLI_DISPATCH_TIMEOUT_SECONDS") or env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        result, usage_source, process_note, exception_evidence = claude_process_exception_evidence(exc)
+        reset_response_evidence(
+            row,
+            now,
+            process_note,
+            usage_source=usage_source,
+        )
+        row["provider_status"] = result
+        update_provider_response_state(state, roster)
+        state["last_agent_dispatch_agent"] = agent_id
+        state["last_agent_dispatch_at"] = now
+        state["last_agent_dispatch_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
+        append_jsonl_atomic(
+            session_dir / "invocation-evidence.jsonl",
+            invocation_evidence_entry(
+                ts=now,
+                runtime=runtime,
+                event_type="agent_dispatch",
+                session_id=session_id,
+                organization_instance_id=organization_instance_id,
+                agent_id=agent_id,
+                result=result,
+                usage_source=row["usage_source"],
+                effective_model="",
+                request_id=request_id,
+                duration_api_ms=elapsed_ms,
+                notes=process_note,
+                extra={
+                    **policy_evidence,
+                    **exception_evidence,
+                    "transcript_path": str(transcript_path),
+                    "transcript_written": False,
+                    "max_budget_usd": max_budget_usd,
+                    "budget_source": budget_source,
+                },
+            ),
+        )
+        return {"decision": "block", "reason": process_note}
     elapsed_seconds = time.monotonic() - started
     elapsed_ms = int(elapsed_seconds * 1000)
-    transcript_path.write_text(completed.stdout, encoding="utf-8")
+    output_rejection_type, output_rejection_reason = claude_bounded_output_rejection(
+        completed
+    )
+    if output_rejection_type:
+        rejection_usage_source = {
+            "provider_response_timeout": "claude_print_json_timeout",
+            "provider_output_limit_exceeded": "claude_print_json_output_limit",
+            "provider_output_read_failed": "claude_print_json_read_failed",
+            "provider_output_decode_failed": "claude_print_json_decode_failed",
+        }[output_rejection_type]
+        return reject_claude_provider_output(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            result=output_rejection_type,
+            usage_source=rejection_usage_source,
+            reason=output_rejection_reason,
+            duration_api_ms=elapsed_ms,
+            transcript_path=transcript_path,
+            policy_evidence=policy_evidence,
+            extra_evidence={
+                "output_rejection_type": output_rejection_type,
+                "max_budget_usd": max_budget_usd,
+                "budget_source": budget_source,
+            },
+            now=now,
+        )
     if completed.returncode != 0:
+        process_note = "claude provider process failed"
+        reset_response_evidence(
+            row,
+            now,
+            process_note,
+            usage_source="claude_print_json_process_failed",
+        )
+        update_provider_response_state(state, roster)
+        state["last_agent_dispatch_agent"] = agent_id
+        state["last_agent_dispatch_at"] = now
+        state["last_agent_dispatch_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
         append_jsonl_atomic(
             session_dir / "invocation-evidence.jsonl",
             invocation_evidence_entry(
@@ -10872,38 +13477,108 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
                 agent_id=agent_id,
                 result="provider_process_failed",
                 usage_source="claude_print_json",
-                effective_model=row.get("intended_model", ""),
+                effective_model="",
                 request_id=request_id,
                 duration_api_ms=elapsed_ms,
-                notes=completed.stderr.strip() or completed.stdout.strip(),
-                extra={"transcript_path": str(transcript_path), "max_budget_usd": max_budget_usd, "budget_source": budget_source},
+                notes=process_note,
+                extra={
+                    **policy_evidence,
+                    "transcript_path": str(transcript_path),
+                    "transcript_written": False,
+                    "max_budget_usd": max_budget_usd,
+                    "budget_source": budget_source,
+                    **provider_returncode_evidence(completed),
+                },
             ),
         )
-        return {"decision": "block", "reason": completed.stderr.strip() or completed.stdout.strip()}
+        return {"decision": "block", "reason": process_note}
 
     try:
         claude_result = parse_claude_json_output(completed.stdout)
-    except json.JSONDecodeError as exc:
-        return {"decision": "block", "reason": f"claude json output unreadable: {exc}"}
+    except (TypeError, ValueError, RecursionError) as exc:
+        parse_note = "claude provider output was not valid JSON"
+        reset_response_evidence(
+            row,
+            now,
+            parse_note,
+            usage_source="claude_print_json_parse_failed",
+        )
+        row["provider_status"] = "provider_output_parse_failed"
+        update_provider_response_state(state, roster)
+        state["last_agent_dispatch_agent"] = agent_id
+        state["last_agent_dispatch_at"] = now
+        state["last_agent_dispatch_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
+        append_jsonl_atomic(
+            session_dir / "invocation-evidence.jsonl",
+            invocation_evidence_entry(
+                ts=now,
+                runtime=runtime,
+                event_type="agent_dispatch",
+                session_id=session_id,
+                organization_instance_id=organization_instance_id,
+                agent_id=agent_id,
+                result="provider_output_parse_failed",
+                usage_source=row["usage_source"],
+                effective_model="",
+                request_id=request_id,
+                duration_api_ms=elapsed_ms,
+                notes=parse_note,
+                extra={
+                    **policy_evidence,
+                    "transcript_path": str(transcript_path),
+                    "transcript_written": False,
+                    "provider_parse_error_type": claude_parse_exception_type(exc),
+                },
+            ),
+        )
+        return {"decision": "block", "reason": parse_note}
 
-    input_tokens = int_from_nested(
-        claude_result,
-        [("usage", "input_tokens"), ("usage", "inputTokens"), ("input_tokens",), ("inputTokens",)],
-    )
-    output_tokens = int_from_nested(
-        claude_result,
-        [("usage", "output_tokens"), ("usage", "outputTokens"), ("output_tokens",), ("outputTokens",)],
-    )
-    claude_duration_api_ms = int_from_nested(
-        claude_result,
-        [("duration_api_ms",), ("durationApiMs",), ("metrics", "duration_api_ms")],
-    )
+    response_fields, response_fields_valid = claude_response_fields(claude_result)
+    if not response_fields_valid:
+        return reject_claude_provider_output(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=session_id,
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="agent_dispatch",
+            result="provider_output_metadata_invalid",
+            usage_source="claude_print_json_metadata_invalid",
+            reason="claude provider output metadata was invalid",
+            duration_api_ms=elapsed_ms,
+            transcript_path=transcript_path,
+            policy_evidence=policy_evidence,
+            extra_evidence={
+                "provider_metadata_error_type": "typed_field_or_alias_conflict",
+                "max_budget_usd": max_budget_usd,
+                "budget_source": budget_source,
+            },
+            now=now,
+        )
+    input_tokens = response_fields["input_tokens"]
+    output_tokens = response_fields["output_tokens"]
+    claude_duration_api_ms = response_fields["duration_api_ms"]
     duration_api_ms = claude_duration_api_ms if claude_duration_api_ms is not None else elapsed_ms
-    provider_session_id = str_from_nested(claude_result, [("session_id",), ("sessionId",)])
-    output_request_id = str_from_nested(claude_result, [("request_id",), ("requestId",)]) or request_id
-    effective_model = str_from_nested(claude_result, [("model",), ("effective_model",), ("effectiveModel",)]) or row.get("intended_model", "")
-    result_text = str(claude_result.get("result") or claude_result.get("message") or "").strip()
-    num_turns = int_from_nested(claude_result, [("num_turns",), ("numTurns",)])
+    provider_session_id = response_fields["provider_session_id"]
+    output_request_id = response_fields["request_id"] or request_id
+    reported_effective_model, reported_model_metadata_valid = claude_reported_model(claude_result)
+    model_evidence_errors = claude_reported_model_errors(
+        row,
+        reported_effective_model,
+        canonical_intended_model,
+        metadata_valid=reported_model_metadata_valid,
+    )
+    model_evidence_note = "; ".join(model_evidence_errors)
+    effective_model = canonical_intended_model if reported_effective_model else ""
+    result_text = response_fields["result_text"].strip()
+    num_turns = response_fields["num_turns"]
     has_inference_evidence = bool(
         result_text
         or (input_tokens is not None and input_tokens > 0)
@@ -10911,28 +13586,84 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         or (claude_duration_api_ms is not None and claude_duration_api_ms > 0)
         or (num_turns is not None and num_turns > 0)
     )
-    result_name = "provider_response_ready" if has_inference_evidence and result_text else "provider_response_no_inference"
+    policy_drift_detected = bool(
+        not model_evidence_errors
+        and has_inference_evidence
+        and result_text
+        and not response_policy_identity_is_current(row)
+    )
+    result_name = (
+        "provider_model_mismatch"
+        if model_evidence_errors
+        else "provider_policy_drift"
+        if policy_drift_detected
+        else "provider_response_ready"
+        if has_inference_evidence and result_text
+        else "provider_response_no_inference"
+    )
+    transcript_written = False
+    transcript_error_evidence: dict[str, Any] = {}
+    if result_name == "provider_response_ready":
+        transcript_path, transcript_error_evidence = persist_validated_provider_transcript(
+            session_dir,
+            agent_id=agent_id,
+            request_id=request_id,
+            suffix=".json",
+            content=completed.stdout,
+        )
+        if transcript_error_evidence:
+            result_name = "provider_transcript_write_failed"
+        else:
+            transcript_written = True
     row["last_seen_at"] = now
     row["last_request_id"] = output_request_id
-    row["effective_model"] = effective_model
+    set_optional_effective_model(row, effective_model)
     row["session_id"] = provider_session_id
-    row["usage_source"] = "claude_print_json" if result_name == "provider_response_ready" else "claude_print_json_no_inference"
+    row["usage_source"] = (
+        "claude_print_json"
+        if result_name == "provider_response_ready"
+        else "claude_print_json_model_mismatch"
+        if result_name == "provider_model_mismatch"
+        else "claude_print_json_policy_drift"
+        if result_name == "provider_policy_drift"
+        else "claude_print_json_transcript_write_failed"
+        if result_name == "provider_transcript_write_failed"
+        else "claude_print_json_no_inference"
+    )
     row["provider_status"] = result_name
     if result_name == "provider_response_ready":
         row["activation_status"] = "response_active"
         row["response_status"] = "invoked"
         row["notes"] = "Claude CLI one-shot agent-dispatch completed with response evidence."
     else:
-        row["response_status"] = "not_invoked"
-        row["notes"] = "Claude CLI one-shot agent-dispatch produced no response text or inference evidence."
+        reset_response_evidence(
+            row,
+            now,
+            model_evidence_note
+            or (PROVIDER_POLICY_DRIFT_NOTE if policy_drift_detected else "")
+            or (
+                "claude provider transcript could not be written"
+                if result_name == "provider_transcript_write_failed"
+                else ""
+            )
+            or "Claude CLI one-shot agent-dispatch produced no response text or inference evidence.",
+            usage_source=(
+                "claude_print_json_model_mismatch"
+                if result_name == "provider_model_mismatch"
+                else "claude_print_json_policy_drift"
+                if result_name == "provider_policy_drift"
+                else "claude_print_json_transcript_write_failed"
+                if result_name == "provider_transcript_write_failed"
+                else "claude_print_json_no_inference"
+            ),
+        )
+        row["provider_status"] = result_name
+        row["last_request_id"] = output_request_id
 
     update_provider_response_state(state, roster)
     state["last_agent_dispatch_agent"] = agent_id
     state["last_agent_dispatch_at"] = now
     state["last_agent_dispatch_usage_source"] = row["usage_source"]
-    if result_name == "provider_response_ready":
-        state["readiness_scope"] = "response_evidence"
-
     write_json_yaml(roster_path, roster)
     write_json_yaml(state_path, state)
     append_jsonl_atomic(
@@ -10946,32 +13677,74 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             agent_id=agent_id,
             result=result_name,
             usage_source=row["usage_source"],
-            effective_model=effective_model,
+            effective_model=(
+                reported_effective_model
+                if result_name == "provider_model_mismatch"
+                else effective_model
+            ),
             request_id=output_request_id,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             duration_api_ms=duration_api_ms,
             num_turns=num_turns,
-            notes="Claude CLI one-shot agent-dispatch completed." if result_name == "provider_response_ready" else "Claude CLI one-shot produced no inference evidence.",
+            notes=(
+                "Claude CLI one-shot agent-dispatch completed."
+                if result_name == "provider_response_ready"
+                else model_evidence_note
+                or (PROVIDER_POLICY_DRIFT_NOTE if policy_drift_detected else "")
+                or (
+                    "claude provider transcript could not be written"
+                    if result_name == "provider_transcript_write_failed"
+                    else ""
+                )
+                or "Claude CLI one-shot produced no inference evidence."
+            ),
             extra={
+                **policy_evidence,
                 "provider_session_id": provider_session_id,
+                **(
+                    {"reported_effective_model": reported_effective_model}
+                    if reported_effective_model or result_name != "provider_response_ready"
+                    else {}
+                ),
+                "reported_model_metadata_valid": reported_model_metadata_valid,
                 "transcript_path": str(transcript_path),
+                "transcript_written": transcript_written,
                 "stdout_result_present": bool(result_text),
                 "max_budget_usd": max_budget_usd,
                 "budget_source": budget_source,
+                "policy_drift_detected": policy_drift_detected,
+                **transcript_error_evidence,
             },
         ),
     )
     if result_name != "provider_response_ready":
         return {
             "decision": "block",
-            "reason": "claude CLI provider adapter produced no response evidence",
+            "reason": (
+                model_evidence_note
+                or (PROVIDER_POLICY_DRIFT_NOTE if policy_drift_detected else "")
+                or (
+                    "claude provider transcript could not be written"
+                    if result_name == "provider_transcript_write_failed"
+                    else ""
+                )
+                or "claude CLI provider adapter produced no response evidence"
+            ),
             "agentDispatch": {
                 "agent_id": agent_id,
                 "request_id": output_request_id,
                 "result": result_name,
                 "usage_source": row["usage_source"],
-                "effective_model": effective_model,
+                "effective_model": (
+                    ""
+                    if result_name in {
+                        "provider_model_mismatch",
+                        "provider_policy_drift",
+                        "provider_transcript_write_failed",
+                    }
+                    else effective_model
+                ),
                 "transcript_path": str(transcript_path),
             },
         }
@@ -10982,7 +13755,7 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             "request_id": output_request_id,
             "result": "provider_response_ready",
             "provider": "anthropic",
-            "intended_model": row.get("intended_model", ""),
+            "intended_model": canonical_intended_model,
             "effective_model": effective_model,
             "usage_source": "claude_print_json",
             "provider_session_id": provider_session_id,
@@ -11002,33 +13775,31 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
 
 
 def agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(
-        hook_input.get("session_id")
-        or hook_input.get("sessionId")
-        or current_session_id(state_root, hook_input)
-        or "unknown-session"
-    )
-    organization_instance_id = str(
-        hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or organization_id(session_id)
+    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
+    organization_instance_id = resolve_organization_instance_id(
+        {},
+        hook_input,
+        session_id,
     )
     agent_id = normalize_cell(hook_input.get("agent_id") or hook_input.get("agentId"))
     if not agent_id:
         return {"decision": "block", "reason": "agent-dispatch requires agent_id"}
-    row = role_agent_row_for(agent_id, organization_instance_id=organization_instance_id)
+    try:
+        row = role_agent_row_for(
+            agent_id,
+            organization_instance_id=organization_instance_id,
+        )
+    except (OSError, ValueError):
+        row = {}
     if not row:
-        session_dir = state_root / safe_id(session_id)
-        roster_path = session_dir / "roster.json"
-        roster = read_json(roster_path) if roster_path.exists() else []
-        if isinstance(roster, list):
-            row = next((item for item in roster if isinstance(item, dict) and item.get("agent_id") == agent_id), {})
-    provider_runtime = agent_runtime(row) if row else None
-    if provider_runtime == ("codex_exec", "codex"):
+        return {"decision": "block", "reason": "canonical role policy is unavailable"}
+    provider = normalize_cell(row.get("provider")).lower()
+    execution_mode = normalize_cell(row.get("execution_mode")).lower()
+    if provider == "openai" and execution_mode == "codex":
         return codex_exec_agent_dispatch(runtime=runtime, state_root=state_root, hook_input=hook_input)
-    if provider_runtime == ("claude_cli", "claude"):
+    if provider == "anthropic" and execution_mode == "claude":
         return claude_cli_agent_dispatch(runtime=runtime, state_root=state_root, hook_input=hook_input)
-    return {"decision": "block", "reason": f"unsupported headless agent-dispatch provider for {agent_id}"}
+    return {"decision": "block", "reason": "canonical provider policy is unsupported"}
 
 
 def reset_response_evidence(
@@ -11037,6 +13808,7 @@ def reset_response_evidence(
     note: str,
     usage_source: str = "claude_print_json_no_inference",
 ) -> None:
+    """Clear every provider-model alias before marking an invocation not ready."""
     always_active = row.get("always_active")
     if isinstance(always_active, bool):
         is_always_active = always_active
@@ -11045,7 +13817,11 @@ def reset_response_evidence(
     row["activation_status"] = "metadata_ready" if is_always_active else "idle"
     row["response_status"] = "not_invoked"
     row["provider_status"] = "provider_no_inference"
+    for key in ("model", "effective_model", "effectiveModel", "reported_effective_model"):
+        row.pop(key, None)
     row["effective_model"] = ""
+    row.pop("reported_model_metadata_valid", None)
+    row.pop("provider_identity_status", None)
     row["session_id"] = ""
     row["last_request_id"] = ""
     row["usage_source"] = usage_source
@@ -11053,26 +13829,48 @@ def reset_response_evidence(
     row["notes"] = note
 
 
+def provider_response_evidence_is_current(row: dict[str, Any]) -> bool:
+    """Require complete bound invocation state without requiring model synthesis."""
+    usage_source = normalize_cell(row.get("usage_source"))
+    return bool(
+        row.get("activation_status") == "response_active"
+        and row.get("response_status") == "invoked"
+        and row.get("provider_status") == "provider_response_ready"
+        and usage_source
+        and usage_source != "bootstrap_metadata_only"
+        and metric_provider_identity_is_valid(row)
+        and response_policy_identity_is_current(row)
+    )
+
+
 def provider_response_ready_count(roster: list[Any]) -> int:
-    return sum(1 for item in roster if isinstance(item, dict) and item.get("response_status") == "invoked")
+    return sum(
+        1
+        for item in roster
+        if isinstance(item, dict)
+        and provider_response_evidence_is_current(item)
+    )
 
 
 def update_provider_response_state(state: dict[str, Any], roster: list[Any]) -> None:
     response_ready = provider_response_ready_count(roster)
     state["provider_response_ready_count"] = response_ready
     state["provider_response_scope"] = "response_evidence" if response_ready else "not_invoked"
-    if response_ready == 0 and state.get("readiness_scope") == "response_evidence":
+    if response_ready:
+        state["readiness_scope"] = "response_evidence"
+    elif state.get("readiness_scope") == "response_evidence":
         state["readiness_scope"] = "metadata_only"
 
 
 def parse_claude_json_output(stdout: str) -> dict[str, Any]:
+    """Parse one strict Claude JSON object without duplicate-key overwrites."""
     raw = stdout.strip()
     if not raw:
         return {}
-    parsed = json.loads(raw)
-    if isinstance(parsed, dict):
-        return parsed
-    return {"raw": parsed}
+    return parse_provider_json_object(
+        raw,
+        context="claude provider output",
+    )
 
 
 def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
@@ -11093,11 +13891,10 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     state = read_json(state_path) if not state_missing else {}
     if not isinstance(state, dict):
         return {"decision": "block", "reason": "bootstrap.json is not an object"}
-    organization_instance_id = str(
-        state.get("organization_instance_id")
-        or hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or organization_id(str(session_id))
+    organization_instance_id = resolve_organization_instance_id(
+        state,
+        hook_input,
+        str(session_id),
     )
     state.setdefault("runtime", runtime)
     state.setdefault("session_id", session_id)
@@ -11125,25 +13922,177 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     registry_row = registry_row_for(agent_id)
     if not row.get("fallback_models") and registry_row.get("fallback_models"):
         row["fallback_models"] = registry_row["fallback_models"]
+    try:
+        canonical_row = role_agent_row_for(
+            agent_id,
+            organization_instance_id=organization_instance_id,
+        )
+    except (OSError, ValueError):
+        canonical_row = {}
+    if not canonical_row:
+        request_id = exact_hook_request_id(hook_input, prefix="policy")
+        return reject_provider_identity_policy(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="provider_activation",
+            reason="canonical codex role policy is unavailable",
+            now=now,
+        )
+    canonical_provider = normalize_cell(canonical_row.get("provider")).lower()
+    canonical_execution_mode = normalize_cell(canonical_row.get("execution_mode")).lower()
+    canonical_intended_model = ""
+    codex_execution_row: dict[str, Any] = {}
+    claude_execution_row: dict[str, Any] = {}
+    provider_policy_error = ""
+    if canonical_provider == "openai" and canonical_execution_mode == "codex":
+        codex_execution_row, model_policy_error = canonical_codex_execution_policy(
+            row,
+            organization_instance_id=organization_instance_id,
+        )
+        provider_policy_error = model_policy_error
+        canonical_intended_model = normalize_cell(codex_execution_row.get("intended_model"))
+        provider_runtime = ("codex_exec", "codex")
+    elif canonical_provider == "anthropic" and canonical_execution_mode == "claude":
+        claude_execution_row, provider_policy_error = canonical_claude_execution_policy(
+            row,
+            organization_instance_id=organization_instance_id,
+        )
+        canonical_intended_model = normalize_cell(claude_execution_row.get("intended_model"))
+        provider_runtime = ("claude_cli", "claude")
+    else:
+        provider_policy_error = "canonical provider policy is unsupported"
+        provider_runtime = None
+    if provider_policy_error:
+        request_id = exact_hook_request_id(hook_input, prefix="policy")
+        return reject_provider_identity_policy(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=request_id,
+            event_type="provider_activation",
+            reason=provider_policy_error,
+            now=now,
+        )
+    bound_execution_row = (
+        codex_execution_row
+        if provider_runtime == ("codex_exec", "codex")
+        else claude_execution_row
+    )
+    bind_response_policy_identity(row, bound_execution_row)
+    policy_evidence = canonical_execution_evidence(bound_execution_row)
+    preflight_request_id = exact_hook_request_id(hook_input)
+    git_policy_error = validate_git_operation_for_role(bound_execution_row, prompt)
+    if git_policy_error:
+        return reject_provider_prompt_policy(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=preflight_request_id,
+            event_type="provider_activation",
+            reason=git_policy_error,
+            policy_evidence=policy_evidence,
+            now=now,
+        )
     if state_missing:
         write_json_yaml(state_path, state)
     if roster_missing:
         write_json_yaml(roster_path, roster)
-    max_budget_usd, budget_source = claude_activation_budget(row, hook_input)
+    budget_row = claude_execution_row if provider_runtime == ("claude_cli", "claude") else row
+    max_budget_usd, budget_source = claude_activation_budget(budget_row, hook_input)
 
-    provider_runtime = agent_runtime(row)
     if provider_runtime == ("codex_exec", "codex"):
         if shutil.which("codex") is None:
-            return {"decision": "block", "reason": "codex command not found"}
+            return reject_provider_command_unavailable(
+                runtime=runtime,
+                state=state,
+                roster=roster,
+                row=row,
+                session_dir=session_dir,
+                state_path=state_path,
+                roster_path=roster_path,
+                session_id=str(session_id),
+                agent_id=agent_id,
+                request_id=preflight_request_id,
+                event_type="provider_activation",
+                provider_label="codex",
+                usage_source="codex_exec_json_command_unavailable",
+                policy_evidence=policy_evidence,
+                now=now,
+            )
         cwd = str(hook_input.get("cwd") or state.get("cwd") or os.getcwd())
-        command = codex_activation_command(row, codex_exec_role_prompt(row, prompt), cwd)
-        started = time.monotonic()
-        completed = run_command_with_bounded_output(
-            command,
-            timeout=env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
-            stdout_limit_bytes=CODEX_JSONL_MAX_CHARS,
-            stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
+        command = codex_activation_command(
+            codex_execution_row,
+            codex_exec_role_prompt(codex_execution_row, prompt),
+            cwd,
         )
+        started = time.monotonic()
+        try:
+            completed = run_command_with_bounded_output(
+                command,
+                timeout=env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
+                stdout_limit_bytes=CODEX_JSONL_MAX_CHARS,
+                stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
+            )
+        except OSError as exc:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            process_note = "codex provider process failed to start"
+            reset_response_evidence(
+                row,
+                now,
+                process_note,
+                usage_source="codex_exec_json_launch_failed",
+            )
+            row["provider_status"] = "provider_process_failed"
+            update_provider_response_state(state, roster)
+            state["last_provider_activation_agent"] = agent_id
+            state["last_provider_activation_at"] = now
+            state["last_provider_activation_usage_source"] = row["usage_source"]
+            write_json_yaml(roster_path, roster)
+            write_json_yaml(state_path, state)
+            append_jsonl_atomic(
+                session_dir / "invocation-evidence.jsonl",
+                invocation_evidence_entry(
+                    ts=now,
+                    runtime=runtime,
+                    event_type="provider_activation",
+                    session_id=str(session_id),
+                    organization_instance_id=state.get(
+                        "organization_instance_id",
+                        organization_id(str(session_id)),
+                    ),
+                    agent_id=agent_id,
+                    result="provider_activation_failed",
+                    usage_source=row["usage_source"],
+                    effective_model="",
+                    duration_api_ms=elapsed_ms,
+                    notes=process_note,
+                    extra={
+                        **policy_evidence,
+                        **provider_oserror_evidence(exc),
+                    },
+                ),
+            )
+            return {"decision": "block", "reason": process_note}
         elapsed_ms = int((time.monotonic() - started) * 1000)
         output_rejection_type, output_rejection_reason = codex_bounded_output_rejection(completed)
         if output_rejection_type:
@@ -11170,15 +14119,18 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     agent_id=agent_id,
                     result=output_rejection_type,
                     usage_source=row["usage_source"],
-                    effective_model=row.get("intended_model", ""),
+                    effective_model="",
                     duration_api_ms=elapsed_ms,
                     notes=output_rejection_reason,
-                    extra={"output_rejection_type": output_rejection_type},
+                    extra={
+                        **policy_evidence,
+                        "output_rejection_type": output_rejection_type,
+                    },
                 ),
             )
             return {"decision": "block", "reason": output_rejection_reason}
         if completed.returncode != 0:
-            process_note = bounded_provider_process_note(completed) or "codex provider process failed"
+            process_note = "codex provider process failed"
             reset_response_evidence(
                 row,
                 now,
@@ -11202,19 +14154,25 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     agent_id=agent_id,
                     result="provider_activation_failed",
                     usage_source="codex_exec_json",
-                    effective_model=row.get("intended_model", ""),
+                    effective_model="",
                     notes=process_note,
                     duration_api_ms=elapsed_ms,
+                    extra={
+                        **policy_evidence,
+                        **provider_returncode_evidence(completed),
+                    },
                 ),
             )
             return {"decision": "block", "reason": process_note}
 
         codex_parse_error = ""
+        codex_parse_error_type_value = ""
         try:
             codex_result = parse_codex_json_output(completed.stdout)
         except (json.JSONDecodeError, ValueError, RecursionError) as exc:
             codex_result = {}
-            codex_parse_error = f"codex json output unreadable: {exc}"
+            codex_parse_error = "codex provider output was not valid JSON"
+            codex_parse_error_type_value = codex_parse_exception_type(exc)
 
         input_tokens = int_from_nested(
             codex_result,
@@ -11230,14 +14188,119 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         )
         duration_api_ms = codex_duration_api_ms if codex_duration_api_ms is not None else elapsed_ms
         provider_session_id = str_from_nested(codex_result, [("session_id",), ("sessionId",)])
-        request_id = str_from_nested(codex_result, [("request_id",), ("requestId",)])
+        provider_reported_request_id = str_from_nested(
+            codex_result,
+            [("request_id",), ("requestId",)],
+        )
         effective_model = str_from_nested(
             codex_result,
             [("model",), ("effective_model",), ("effectiveModel",)],
         )
         result_text = str(codex_result.get("result") or codex_result.get("message") or "")
         num_turns = int_from_nested(codex_result, [("num_turns",), ("numTurns",)])
+        model_evidence_errors = codex_reported_model_errors(
+            row,
+            effective_model,
+            canonical_intended_model,
+        )
+        if model_evidence_errors:
+            model_evidence_note = "; ".join(model_evidence_errors)
+            reset_response_evidence(
+                row,
+                now,
+                model_evidence_note,
+                usage_source="codex_exec_json_model_mismatch",
+            )
+            row["provider_status"] = "provider_model_mismatch"
+            update_provider_response_state(state, roster)
+            state["last_provider_activation_agent"] = agent_id
+            state["last_provider_activation_at"] = now
+            state["last_provider_activation_usage_source"] = row["usage_source"]
+            write_json_yaml(roster_path, roster)
+            write_json_yaml(state_path, state)
+            append_jsonl_atomic(
+                session_dir / "invocation-evidence.jsonl",
+                invocation_evidence_entry(
+                    ts=now,
+                    runtime=runtime,
+                    event_type="provider_activation",
+                    session_id=str(session_id),
+                    organization_instance_id=state.get("organization_instance_id", organization_id(str(session_id))),
+                    agent_id=agent_id,
+                    result="provider_model_mismatch",
+                    usage_source=row["usage_source"],
+                    effective_model=effective_model,
+                    request_id=preflight_request_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    duration_api_ms=duration_api_ms,
+                    num_turns=num_turns,
+                    notes=model_evidence_note,
+                    extra={
+                        **policy_evidence,
+                        "provider_session_id": provider_session_id,
+                        **(
+                            {"provider_reported_request_id": provider_reported_request_id}
+                            if provider_reported_request_id
+                            else {}
+                        ),
+                        "intended_model": canonical_intended_model,
+                        "stdout_result_present": bool(result_text),
+                    },
+                ),
+            )
+            return {"decision": "block", "reason": model_evidence_note}
+
         has_inference_evidence = bool(result_text.strip())
+        if has_inference_evidence and not response_policy_identity_is_current(row):
+            reset_response_evidence(
+                row,
+                now,
+                PROVIDER_POLICY_DRIFT_NOTE,
+                usage_source="codex_exec_json_policy_drift",
+            )
+            row["provider_status"] = "provider_policy_drift"
+            update_provider_response_state(state, roster)
+            state["last_provider_activation_agent"] = agent_id
+            state["last_provider_activation_at"] = now
+            state["last_provider_activation_usage_source"] = row["usage_source"]
+            write_json_yaml(roster_path, roster)
+            write_json_yaml(state_path, state)
+            append_jsonl_atomic(
+                session_dir / "invocation-evidence.jsonl",
+                invocation_evidence_entry(
+                    ts=now,
+                    runtime=runtime,
+                    event_type="provider_activation",
+                    session_id=str(session_id),
+                    organization_instance_id=state.get(
+                        "organization_instance_id",
+                        organization_id(str(session_id)),
+                    ),
+                    agent_id=agent_id,
+                    result="provider_policy_drift",
+                    usage_source=row["usage_source"],
+                    effective_model=effective_model,
+                    request_id=preflight_request_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    duration_api_ms=duration_api_ms,
+                    num_turns=num_turns,
+                    notes=PROVIDER_POLICY_DRIFT_NOTE,
+                    extra={
+                        **policy_evidence,
+                        "provider_session_id": provider_session_id,
+                        **(
+                            {"provider_reported_request_id": provider_reported_request_id}
+                            if provider_reported_request_id
+                            else {}
+                        ),
+                        "stdout_result_present": bool(result_text),
+                        "policy_drift_detected": True,
+                    },
+                ),
+            )
+            return {"decision": "block", "reason": PROVIDER_POLICY_DRIFT_NOTE}
         if not has_inference_evidence:
             reset_response_evidence(
                 row,
@@ -11264,15 +14327,26 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     result="provider_activation_no_inference",
                     usage_source="codex_exec_json",
                     effective_model=effective_model,
-                    request_id=request_id or "unavailable",
+                    request_id=preflight_request_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     duration_api_ms=duration_api_ms,
                     num_turns=num_turns,
                     notes=codex_parse_error or "Codex exec returned success but no authoritative response text.",
                     extra={
+                        **policy_evidence,
                         "provider_session_id": provider_session_id,
+                        **(
+                            {"provider_reported_request_id": provider_reported_request_id}
+                            if provider_reported_request_id
+                            else {}
+                        ),
                         "stdout_result_present": bool(result_text),
+                        **(
+                            {"provider_parse_error_type": codex_parse_error_type_value}
+                            if codex_parse_error_type_value
+                            else {}
+                        ),
                     },
                 ),
             )
@@ -11284,15 +14358,14 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         row["activation_status"] = "response_active"
         row["response_status"] = "invoked"
         row["provider_status"] = "provider_response_ready"
-        row["effective_model"] = effective_model
+        set_optional_effective_model(row, effective_model)
         row["session_id"] = provider_session_id
-        row["last_request_id"] = request_id
+        row["last_request_id"] = preflight_request_id
         row["usage_source"] = "codex_exec_json"
         row["last_seen_at"] = now
         row["notes"] = "Codex exec provider activation produced runtime response evidence."
 
         update_provider_response_state(state, roster)
-        state["readiness_scope"] = "response_evidence"
         state["last_provider_activation_agent"] = agent_id
         state["last_provider_activation_at"] = now
         state["last_provider_activation_usage_source"] = "codex_exec_json"
@@ -11311,14 +14384,20 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 result="provider_response_ready",
                 usage_source="codex_exec_json",
                 effective_model=effective_model,
-                request_id=request_id or "unavailable",
+                request_id=preflight_request_id,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 duration_api_ms=duration_api_ms,
                 num_turns=num_turns,
                 notes="Codex exec activation completed and usage evidence was recorded.",
                 extra={
+                    **policy_evidence,
                     "provider_session_id": provider_session_id,
+                    **(
+                        {"provider_reported_request_id": provider_reported_request_id}
+                        if provider_reported_request_id
+                        else {}
+                    ),
                     "stdout_result_present": bool(result_text),
                 },
             ),
@@ -11333,7 +14412,8 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 "provider": "openai",
                 "effective_model": effective_model,
                 "session_id": provider_session_id,
-                "request_id": request_id,
+                "request_id": preflight_request_id,
+                "provider_reported_request_id": provider_reported_request_id,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "usage_source": "codex_exec_json",
@@ -11345,20 +14425,131 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             "reason": f"agent is not routed to Claude provider: {agent_id} provider={row.get('provider', '')}",
         }
     if shutil.which("claude") is None:
-        return {"decision": "block", "reason": "claude command not found"}
+        return reject_provider_command_unavailable(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=preflight_request_id,
+            event_type="provider_activation",
+            provider_label="claude",
+            usage_source="claude_print_json_command_unavailable",
+            policy_evidence=policy_evidence,
+            now=now,
+        )
 
-    command = claude_activation_command(row, prompt, max_budget_usd)
-    started = time.monotonic()
-    completed = subprocess.run(
-        command,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
-        check=False,
+    transcript_path = planned_provider_transcript_path(
+        session_dir,
+        agent_id=agent_id,
+        request_id=preflight_request_id,
+        suffix=".json",
     )
+    command = claude_activation_command(claude_execution_row, prompt, max_budget_usd)
+    started = time.monotonic()
+    try:
+        completed = run_claude_command_with_bounded_output(
+            command,
+            timeout=env_int("ITB_PROVIDER_ACTIVATION_TIMEOUT_SECONDS") or 120,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        result, usage_source, process_note, exception_evidence = claude_process_exception_evidence(exc)
+        reset_response_evidence(
+            row,
+            now,
+            process_note,
+            usage_source=usage_source,
+        )
+        row["provider_status"] = result
+        update_provider_response_state(state, roster)
+        state["last_provider_activation_agent"] = agent_id
+        state["last_provider_activation_at"] = now
+        state["last_provider_activation_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
+        append_jsonl_atomic(
+            session_dir / "invocation-evidence.jsonl",
+            invocation_evidence_entry(
+                ts=now,
+                runtime=runtime,
+                event_type="provider_activation",
+                session_id=str(session_id),
+                organization_instance_id=state.get(
+                    "organization_instance_id",
+                    organization_id(str(session_id)),
+                ),
+                agent_id=agent_id,
+                result=result,
+                usage_source=row["usage_source"],
+                effective_model="",
+                duration_api_ms=elapsed_ms,
+                notes=process_note,
+                extra={
+                    **policy_evidence,
+                    **exception_evidence,
+                    "transcript_path": str(transcript_path),
+                    "transcript_written": False,
+                    "max_budget_usd": max_budget_usd,
+                    "budget_source": budget_source,
+                },
+            ),
+        )
+        return {"decision": "block", "reason": process_note}
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    output_rejection_type, output_rejection_reason = claude_bounded_output_rejection(
+        completed
+    )
+    if output_rejection_type:
+        rejection_usage_source = {
+            "provider_response_timeout": "claude_print_json_timeout",
+            "provider_output_limit_exceeded": "claude_print_json_output_limit",
+            "provider_output_read_failed": "claude_print_json_read_failed",
+            "provider_output_decode_failed": "claude_print_json_decode_failed",
+        }[output_rejection_type]
+        return reject_claude_provider_output(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=preflight_request_id,
+            event_type="provider_activation",
+            result=output_rejection_type,
+            usage_source=rejection_usage_source,
+            reason=output_rejection_reason,
+            duration_api_ms=elapsed_ms,
+            transcript_path=transcript_path,
+            policy_evidence=policy_evidence,
+            extra_evidence={
+                "output_rejection_type": output_rejection_type,
+                "max_budget_usd": max_budget_usd,
+                "budget_source": budget_source,
+            },
+            now=now,
+        )
     if completed.returncode != 0:
+        process_note = "claude provider process failed"
+        reset_response_evidence(
+            row,
+            now,
+            process_note,
+            usage_source="claude_print_json_process_failed",
+        )
+        update_provider_response_state(state, roster)
+        state["last_provider_activation_agent"] = agent_id
+        state["last_provider_activation_at"] = now
+        state["last_provider_activation_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
         append_jsonl(
             session_dir / "invocation-evidence.jsonl",
             invocation_evidence_entry(
@@ -11370,40 +14561,111 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 agent_id=agent_id,
                 result="provider_activation_failed",
                 usage_source="claude_print_json",
-                effective_model=row.get("intended_model", ""),
-                notes=completed.stderr.strip() or completed.stdout.strip(),
+                effective_model="",
+                notes=process_note,
                 duration_api_ms=elapsed_ms,
                 extra={
+                    **policy_evidence,
+                    "transcript_path": str(transcript_path),
+                    "transcript_written": False,
+                    "max_budget_usd": max_budget_usd,
+                    "budget_source": budget_source,
+                    **provider_returncode_evidence(completed),
+                },
+            ),
+        )
+        return {"decision": "block", "reason": process_note}
+
+    try:
+        claude_result = parse_claude_json_output(completed.stdout)
+    except (TypeError, ValueError, RecursionError) as exc:
+        parse_note = "claude provider output was not valid JSON"
+        reset_response_evidence(
+            row,
+            now,
+            parse_note,
+            usage_source="claude_print_json_parse_failed",
+        )
+        row["provider_status"] = "provider_output_parse_failed"
+        update_provider_response_state(state, roster)
+        state["last_provider_activation_agent"] = agent_id
+        state["last_provider_activation_at"] = now
+        state["last_provider_activation_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
+        append_jsonl_atomic(
+            session_dir / "invocation-evidence.jsonl",
+            invocation_evidence_entry(
+                ts=now,
+                runtime=runtime,
+                event_type="provider_activation",
+                session_id=str(session_id),
+                organization_instance_id=state.get(
+                    "organization_instance_id",
+                    organization_id(str(session_id)),
+                ),
+                agent_id=agent_id,
+                result="provider_output_parse_failed",
+                usage_source=row["usage_source"],
+                effective_model="",
+                duration_api_ms=elapsed_ms,
+                notes=parse_note,
+                extra={
+                    **policy_evidence,
+                    "transcript_path": str(transcript_path),
+                    "transcript_written": False,
+                    "provider_parse_error_type": claude_parse_exception_type(exc),
                     "max_budget_usd": max_budget_usd,
                     "budget_source": budget_source,
                 },
             ),
         )
-        return {"decision": "block", "reason": completed.stderr.strip() or completed.stdout.strip()}
+        return {"decision": "block", "reason": parse_note}
 
-    try:
-        claude_result = parse_claude_json_output(completed.stdout)
-    except json.JSONDecodeError as exc:
-        return {"decision": "block", "reason": f"claude json output unreadable: {exc}"}
-
-    input_tokens = int_from_nested(
-        claude_result,
-        [("usage", "input_tokens"), ("usage", "inputTokens"), ("input_tokens",), ("inputTokens",)],
-    )
-    output_tokens = int_from_nested(
-        claude_result,
-        [("usage", "output_tokens"), ("usage", "outputTokens"), ("output_tokens",), ("outputTokens",)],
-    )
-    claude_duration_api_ms = int_from_nested(
-        claude_result,
-        [("duration_api_ms",), ("durationApiMs",), ("metrics", "duration_api_ms")],
-    )
+    response_fields, response_fields_valid = claude_response_fields(claude_result)
+    if not response_fields_valid:
+        return reject_claude_provider_output(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=preflight_request_id,
+            event_type="provider_activation",
+            result="provider_output_metadata_invalid",
+            usage_source="claude_print_json_metadata_invalid",
+            reason="claude provider output metadata was invalid",
+            duration_api_ms=elapsed_ms,
+            transcript_path=transcript_path,
+            policy_evidence=policy_evidence,
+            extra_evidence={
+                "provider_metadata_error_type": "typed_field_or_alias_conflict",
+                "max_budget_usd": max_budget_usd,
+                "budget_source": budget_source,
+            },
+            now=now,
+        )
+    input_tokens = response_fields["input_tokens"]
+    output_tokens = response_fields["output_tokens"]
+    claude_duration_api_ms = response_fields["duration_api_ms"]
     duration_api_ms = claude_duration_api_ms if claude_duration_api_ms is not None else elapsed_ms
-    provider_session_id = str_from_nested(claude_result, [("session_id",), ("sessionId",)])
-    request_id = str_from_nested(claude_result, [("request_id",), ("requestId",)])
-    effective_model = str_from_nested(claude_result, [("model",), ("effective_model",), ("effectiveModel",)]) or row.get("intended_model", "")
-    result_text = str(claude_result.get("result") or claude_result.get("message") or "")
-    num_turns = int_from_nested(claude_result, [("num_turns",), ("numTurns",)])
+    provider_session_id = response_fields["provider_session_id"]
+    request_id = response_fields["request_id"] or preflight_request_id
+    reported_effective_model, reported_model_metadata_valid = claude_reported_model(claude_result)
+    model_evidence_errors = claude_reported_model_errors(
+        row,
+        reported_effective_model,
+        canonical_intended_model,
+        metadata_valid=reported_model_metadata_valid,
+    )
+    model_evidence_note = "; ".join(model_evidence_errors)
+    effective_model = canonical_intended_model if reported_effective_model else ""
+    result_text = response_fields["result_text"]
+    num_turns = response_fields["num_turns"]
     has_inference_evidence = bool(
         result_text.strip()
         or (input_tokens is not None and input_tokens > 0)
@@ -11411,11 +14673,113 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         or (claude_duration_api_ms is not None and claude_duration_api_ms > 0)
         or (num_turns is not None and num_turns > 0)
     )
+    if model_evidence_errors:
+        reset_response_evidence(
+            row,
+            now,
+            model_evidence_note,
+            usage_source="claude_print_json_model_mismatch",
+        )
+        row["provider_status"] = "provider_model_mismatch"
+        update_provider_response_state(state, roster)
+        state["last_provider_activation_agent"] = agent_id
+        state["last_provider_activation_at"] = now
+        state["last_provider_activation_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
+        append_jsonl_atomic(
+            session_dir / "invocation-evidence.jsonl",
+            invocation_evidence_entry(
+                ts=now,
+                runtime=runtime,
+                event_type="provider_activation",
+                session_id=str(session_id),
+                organization_instance_id=state.get(
+                    "organization_instance_id",
+                    organization_id(str(session_id)),
+                ),
+                agent_id=agent_id,
+                result="provider_model_mismatch",
+                usage_source=row["usage_source"],
+                effective_model=reported_effective_model,
+                request_id=request_id or "unavailable",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_api_ms=duration_api_ms,
+                num_turns=num_turns,
+                notes=model_evidence_note,
+                extra={
+                    **policy_evidence,
+                    "provider_session_id": provider_session_id,
+                    "reported_effective_model": reported_effective_model,
+                    "reported_model_metadata_valid": reported_model_metadata_valid,
+                    "total_cost_usd": response_fields["total_cost_usd"],
+                    "transcript_path": str(transcript_path),
+                    "transcript_written": False,
+                    "max_budget_usd": max_budget_usd,
+                    "budget_source": budget_source,
+                    "stdout_result_present": bool(result_text),
+                },
+            ),
+        )
+        return {"decision": "block", "reason": model_evidence_note}
+    if has_inference_evidence and not response_policy_identity_is_current(row):
+        reset_response_evidence(
+            row,
+            now,
+            PROVIDER_POLICY_DRIFT_NOTE,
+            usage_source="claude_print_json_policy_drift",
+        )
+        row["provider_status"] = "provider_policy_drift"
+        update_provider_response_state(state, roster)
+        state["last_provider_activation_agent"] = agent_id
+        state["last_provider_activation_at"] = now
+        state["last_provider_activation_usage_source"] = row["usage_source"]
+        write_json_yaml(roster_path, roster)
+        write_json_yaml(state_path, state)
+        append_jsonl_atomic(
+            session_dir / "invocation-evidence.jsonl",
+            invocation_evidence_entry(
+                ts=now,
+                runtime=runtime,
+                event_type="provider_activation",
+                session_id=str(session_id),
+                organization_instance_id=state.get(
+                    "organization_instance_id",
+                    organization_id(str(session_id)),
+                ),
+                agent_id=agent_id,
+                result="provider_policy_drift",
+                usage_source=row["usage_source"],
+                effective_model=effective_model,
+                request_id=request_id or "unavailable",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_api_ms=duration_api_ms,
+                num_turns=num_turns,
+                notes=PROVIDER_POLICY_DRIFT_NOTE,
+                extra={
+                    **policy_evidence,
+                    "provider_session_id": provider_session_id,
+                    "reported_effective_model": reported_effective_model,
+                    "reported_model_metadata_valid": reported_model_metadata_valid,
+                    "total_cost_usd": response_fields["total_cost_usd"],
+                    "transcript_path": str(transcript_path),
+                    "transcript_written": False,
+                    "max_budget_usd": max_budget_usd,
+                    "budget_source": budget_source,
+                    "stdout_result_present": bool(result_text),
+                    "policy_drift_detected": True,
+                },
+            ),
+        )
+        return {"decision": "block", "reason": PROVIDER_POLICY_DRIFT_NOTE}
     if not has_inference_evidence:
         reset_response_evidence(
             row,
             now,
             "Claude --print returned no inference evidence; previous response evidence, if any, was invalidated.",
+            usage_source="claude_print_json_no_inference",
         )
         update_provider_response_state(state, roster)
         state["last_provider_activation_agent"] = agent_id
@@ -11442,22 +14806,60 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 num_turns=num_turns,
                 notes="Claude --print returned success but no result, tokens, turns, or API duration.",
                 extra={
-                "provider_session_id": provider_session_id,
-                "total_cost_usd": claude_result.get("total_cost_usd", claude_result.get("totalCostUsd")),
-                "max_budget_usd": max_budget_usd,
-                "budget_source": budget_source,
-            },
-        ),
-    )
+                    **policy_evidence,
+                    "provider_session_id": provider_session_id,
+                    "reported_effective_model": reported_effective_model,
+                    "reported_model_metadata_valid": reported_model_metadata_valid,
+                    "total_cost_usd": response_fields["total_cost_usd"],
+                    "transcript_path": str(transcript_path),
+                    "transcript_written": False,
+                    "max_budget_usd": max_budget_usd,
+                    "budget_source": budget_source,
+                },
+            ),
+        )
         return {
             "decision": "block",
             "reason": "claude provider activation produced no inference evidence",
         }
 
+    transcript_path, transcript_error_evidence = persist_validated_provider_transcript(
+        session_dir,
+        agent_id=agent_id,
+        request_id=preflight_request_id,
+        suffix=".json",
+        content=completed.stdout,
+    )
+    if transcript_error_evidence:
+        return reject_claude_provider_output(
+            runtime=runtime,
+            state=state,
+            roster=roster,
+            row=row,
+            session_dir=session_dir,
+            state_path=state_path,
+            roster_path=roster_path,
+            session_id=str(session_id),
+            agent_id=agent_id,
+            request_id=request_id or preflight_request_id,
+            event_type="provider_activation",
+            result="provider_transcript_write_failed",
+            usage_source="claude_print_json_transcript_write_failed",
+            reason="claude provider transcript could not be written",
+            duration_api_ms=duration_api_ms,
+            transcript_path=transcript_path,
+            policy_evidence=policy_evidence,
+            extra_evidence={
+                **transcript_error_evidence,
+                "max_budget_usd": max_budget_usd,
+                "budget_source": budget_source,
+            },
+            now=now,
+        )
     row["activation_status"] = "response_active"
     row["response_status"] = "invoked"
     row["provider_status"] = "provider_response_ready"
-    row["effective_model"] = effective_model
+    set_optional_effective_model(row, effective_model)
     row["session_id"] = provider_session_id
     row["last_request_id"] = request_id
     row["usage_source"] = "claude_print_json"
@@ -11465,7 +14867,6 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
     row["notes"] = "Claude provider activation produced runtime response evidence."
 
     update_provider_response_state(state, roster)
-    state["readiness_scope"] = "response_evidence"
     state["last_provider_activation_agent"] = agent_id
     state["last_provider_activation_at"] = now
     state["last_provider_activation_usage_source"] = "claude_print_json"
@@ -11491,8 +14892,17 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             num_turns=num_turns,
             notes="Claude --print activation completed and usage evidence was recorded.",
             extra={
+                **policy_evidence,
                 "provider_session_id": provider_session_id,
-                "total_cost_usd": claude_result.get("total_cost_usd", claude_result.get("totalCostUsd")),
+                **(
+                    {"reported_effective_model": reported_effective_model}
+                    if reported_effective_model
+                    else {}
+                ),
+                "reported_model_metadata_valid": reported_model_metadata_valid,
+                "total_cost_usd": response_fields["total_cost_usd"],
+                "transcript_path": str(transcript_path),
+                "transcript_written": True,
                 "stdout_result_present": bool(result_text),
                 "max_budget_usd": max_budget_usd,
                 "budget_source": budget_source,
@@ -11572,7 +14982,6 @@ def invocation_evidence_entry(
         "session_id": session_id,
         "request_id": request_id,
         "result": result,
-        "effective_model": effective_model,
         "usage_source": usage_source,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -11580,6 +14989,8 @@ def invocation_evidence_entry(
         "num_turns": num_turns,
         "notes": notes,
     }
+    if effective_model or result != "provider_response_ready":
+        entry["effective_model"] = effective_model
     if extra:
         entry.update(extra)
     return entry
@@ -11910,32 +15321,34 @@ def validate_preflight_state(session_dir: Path, state: dict[str, Any]) -> tuple[
         warnings.append("invocation-evidence.jsonl missing; legacy metadata-only state")
 
     # Metadata-only SessionStart never proves provider response availability. Activation
-    # code may mark response_active only after provider evidence is recorded.
+    # code may mark response_active only after bound provider evidence is recorded.
     for row in roster:
         status = row.get("activation_status", "")
         usage_source = row.get("usage_source", "")
-        has_response_evidence = bool(
-            row.get("effective_model")
-            and usage_source
-            and usage_source != "bootstrap_metadata_only"
-        )
+        has_response_evidence = provider_response_evidence_is_current(row)
         if status == "response_active" and not has_response_evidence:
             errors.append(f"{row.get('agent_id', '<unknown>')}: response_active without runtime evidence")
         if status == "response_active" and has_response_evidence:
-            errors.extend(validate_provider_evidence(
-                agent_id=row.get("agent_id", "<unknown>"),
-                provider=row.get("provider", ""),
-                intended_model=row.get("intended_model", ""),
-                effective_model=row.get("effective_model", ""),
-                usage_source=usage_source,
-            ))
-            tier_warning = model_tier_mismatch_warning(
-                row.get("agent_id", "<unknown>"),
-                row.get("intended_model", ""),
-                row.get("effective_model", ""),
-            )
-            if tier_warning:
-                warnings.append(tier_warning)
+            effective_model = row.get("effective_model", "")
+            if effective_model:
+                errors.extend(validate_provider_evidence(
+                    agent_id=row.get("agent_id", "<unknown>"),
+                    provider=row.get("provider", ""),
+                    intended_model=row.get("intended_model", ""),
+                    effective_model=effective_model,
+                    usage_source=usage_source,
+                ))
+                tier_warning = model_tier_mismatch_warning(
+                    row.get("agent_id", "<unknown>"),
+                    row.get("intended_model", ""),
+                    effective_model,
+                )
+                if tier_warning:
+                    warnings.append(tier_warning)
+            else:
+                warnings.append(
+                    f"{row.get('agent_id', '<unknown>')}: provider-reported effective model unavailable; identity remains unknown"
+                )
         if status == "active" and not has_response_evidence:
             warnings.append(f"{row.get('agent_id', '<unknown>')}: legacy active without runtime evidence")
 
@@ -15291,7 +18704,7 @@ def role_queue(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) ->
     inbox_path = queue_root / str(role_row["inbox_path"])
     action = normalize_cell(hook_input.get("action") or "enqueue").lower()
     if action == "inspect":
-        inbox = load_inbox(inbox_path, role_id)
+        inbox = load_inbox(inbox_path, role_id, queue_root)
         return {
             "roleQueue": {
                 "action": "inspect",
@@ -15324,7 +18737,7 @@ def role_queue(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) ->
         return {"decision": "block", "reason": "; ".join(component_errors)}
     report_path = Path(str(role_row["report_dir"])) / task_id / f"{report_id}.yaml"
     try:
-        pending_before_enqueue = pending_inbox_messages(inbox_path, role_id)
+        pending_before_enqueue = pending_inbox_messages(inbox_path, role_id, queue_root)
     except ValueError as exc:
         return {"decision": "block", "reason": str(exc)}
     instruction = str(hook_input.get("instruction") or hook_input.get("prompt") or "")
@@ -15792,8 +19205,8 @@ def agent_call(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) ->
     }
 
 
-def active_inbox_messages(path: Path, role_id: str) -> list[dict[str, Any]]:
-    inbox = load_inbox(path, role_id)
+def active_inbox_messages(path: Path, role_id: str, queue_root: Path) -> list[dict[str, Any]]:
+    inbox = load_inbox(path, role_id, queue_root)
     return [
         dict(item)
         for item in inbox.get("messages", [])
@@ -15931,7 +19344,7 @@ def agent_switch(*, runtime: str, state_root: Path, hook_input: dict[str, Any], 
     queue_root = queue_root_for(session_dir, manifest)
     inbox_path = queue_root / str(registry_row["inbox_path"])
     try:
-        active_messages = active_inbox_messages(inbox_path, target_role)
+        active_messages = active_inbox_messages(inbox_path, target_role, queue_root)
     except ValueError as exc:
         return {"decision": "block", "reason": str(exc), "agentSwitch": {"result": "blocked"}}
     if active_messages:
@@ -16007,7 +19420,7 @@ def role_queue_replay_failed(*, runtime: str, state_root: Path, hook_input: dict
         return {"decision": "block", "reason": f"role-agent registry has no active role: {role_id}"}
     queue_root = queue_root_for(session_dir, hook_input)
     inbox_path = queue_root / str(role_row["inbox_path"])
-    inbox = load_inbox(inbox_path, role_id)
+    inbox = load_inbox(inbox_path, role_id, queue_root)
     message_filter = normalize_cell(hook_input.get("message_id") or hook_input.get("messageId"))
     max_messages = bounded_int_input(
         hook_input.get("max_messages") or hook_input.get("maxMessages") or 1,
@@ -16135,7 +19548,7 @@ def role_queue_close_message(*, runtime: str, state_root: Path, hook_input: dict
     queue_root = queue_root_for(session_dir, hook_input)
     inbox_path = queue_root / str(role_row["inbox_path"])
     try:
-        message = queue_message_by_id(inbox_path, role_id, message_id)
+        message = queue_message_by_id(inbox_path, role_id, message_id, queue_root)
     except ValueError as exc:
         return {"decision": "block", "reason": str(exc)}
     message_status = normalize_cell(message.get("status") or "pending")
@@ -16145,7 +19558,7 @@ def role_queue_close_message(*, runtime: str, state_root: Path, hook_input: dict
             "reason": f"queue-close-message only closes pending messages: {message_id} is {message_status or 'unknown'}",
         }
     report_path, report_ref = role_agent_report_path(queue_root, role_row, message)
-    if report_path.exists():
+    if queue_file_exists(queue_root, report_ref, "report_path"):
         return {
             "decision": "block",
             "reason": f"queue-close-message found existing terminal report; run queue recovery before manual close: {report_ref}",
@@ -16190,55 +19603,189 @@ def role_queue_close_message(*, runtime: str, state_root: Path, hook_input: dict
 
 
 def role_agent_provider_evidence(role_row: dict[str, Any], hook_input: dict[str, Any]) -> dict[str, Any]:
-    supplied = hook_input.get("provider_evidence") if isinstance(hook_input.get("provider_evidence"), dict) else {}
-    supplied = supplied or {}
-    usage_source = normalize_cell(supplied.get("usage_source") or hook_input.get("usage_source") or "")
-    return {
-        "provider": role_row.get("provider", ""),
-        "intended_model": role_row.get("intended_model", ""),
-        "effective_model": normalize_cell(supplied.get("effective_model") or hook_input.get("effective_model") or ""),
-        "provider_session_id": normalize_cell(
-            supplied.get("provider_session_id")
-            or supplied.get("session_id")
-            or hook_input.get("provider_session_id")
-            or hook_input.get("providerSessionId")
-            or ""
+    alias_metadata_valid = True
+    supplied_value, supplied_aliases_valid, supplied_present = exact_alias_value_from_sources(
+        hook_input,
+        keys=("provider_evidence", "providerEvidence", "evidence"),
+        default={},
+    )
+    if not supplied_aliases_valid or (supplied_present and not isinstance(supplied_value, dict)):
+        alias_metadata_valid = False
+        supplied: dict[str, Any] = {}
+    else:
+        supplied = dict(supplied_value) if isinstance(supplied_value, dict) else {}
+
+    def exact_value(
+        default: Any,
+        *source_specs: tuple[dict[str, Any], tuple[str, ...]],
+    ) -> Any:
+        nonlocal alias_metadata_valid
+        value, aliases_valid, _present = exact_alias_value_from_source_specs(
+            *source_specs,
+            default=default,
+        )
+        if not aliases_valid:
+            alias_metadata_valid = False
+            return default
+        return value
+
+    usage_source = exact_value(
+        "",
+        (supplied, ("usage_source", "usageSource")),
+        (hook_input, ("usage_source", "usageSource")),
+    )
+    effective_model, metadata_valid, model_present = exact_model_alias_from_sources(
+        supplied,
+        hook_input,
+        keys=("model", "effective_model", "effectiveModel", "reported_effective_model"),
+    )
+    supplied_provider, provider_valid, provider_present = exact_model_alias_from_sources(
+        supplied,
+        hook_input,
+        keys=("provider",),
+    )
+    supplied_intended, intended_valid, intended_present = exact_model_alias_from_sources(
+        supplied,
+        hook_input,
+        keys=("intended_model", "intendedModel", "primary_model"),
+    )
+    canonical_provider = normalize_cell(role_row.get("provider")).lower()
+    canonical_intended = normalize_cell(
+        role_row.get("intended_model") or role_row.get("primary_model")
+    )
+    if (
+        not alias_metadata_valid
+        or not provider_valid
+        or not intended_valid
+        or (provider_present and supplied_provider != canonical_provider)
+        or (intended_present and supplied_intended != canonical_intended)
+    ):
+        metadata_valid = False
+    if not provider_identity_markers_are_valid(supplied, hook_input):
+        metadata_valid = False
+    evidence = {
+        "provider": canonical_provider,
+        "intended_model": canonical_intended,
+        "reported_model_metadata_valid": metadata_valid,
+        "provider_identity_status": "valid" if metadata_valid else "invalid",
+        "provider_session_id": exact_value(
+            "",
+            (supplied, ("provider_session_id", "providerSessionId", "session_id", "sessionId")),
+            (hook_input, ("provider_session_id", "providerSessionId")),
         ),
-        "request_id": normalize_cell(supplied.get("request_id") or hook_input.get("request_id") or ""),
+        "request_id": exact_value(
+            "",
+            (supplied, ("request_id", "requestId")),
+            (hook_input, ("request_id", "requestId")),
+        ),
         "usage_source": usage_source,
-        "transcript_path": normalize_cell(supplied.get("transcript_path") or hook_input.get("transcript_path") or ""),
-        "input_tokens": supplied.get("input_tokens", hook_input.get("input_tokens", "")),
-        "output_tokens": supplied.get("output_tokens", hook_input.get("output_tokens", "")),
-        "duration_api_ms": supplied.get("duration_api_ms", hook_input.get("duration_api_ms", "")),
-        "num_turns": supplied.get("num_turns", hook_input.get("num_turns", "")),
+        "transcript_path": exact_value(
+            "",
+            (supplied, ("transcript_path", "transcriptPath")),
+            (hook_input, ("transcript_path", "transcriptPath")),
+        ),
     }
+    if metadata_valid and model_present:
+        evidence["effective_model"] = effective_model
+    elif not metadata_valid:
+        evidence["effective_model"] = ""
+    for canonical, aliases in (
+        ("input_tokens", ("input_tokens", "inputTokens")),
+        ("output_tokens", ("output_tokens", "outputTokens")),
+        ("total_tokens", ("total_tokens", "totalTokens")),
+        ("duration_api_ms", ("duration_api_ms", "durationApiMs")),
+        ("turn_duration_ms", ("turn_duration_ms", "turnDurationMs")),
+        ("num_turns", ("num_turns", "numTurns")),
+        ("duration_sec", ("duration_sec", "durationSec")),
+        ("retry_count", ("retry_count", "retryCount")),
+    ):
+        value, aliases_valid, present = exact_alias_value_from_source_specs(
+            (supplied, aliases),
+            (hook_input, aliases),
+            default=None,
+        )
+        if not aliases_valid:
+            alias_metadata_valid = False
+        elif present:
+            evidence[canonical] = value
+    organization_value, organization_valid, organization_present = exact_alias_value_from_source_specs(
+        (supplied, ("organization_instance_id", "organizationInstanceId")),
+        (hook_input, ("organization_instance_id", "organizationInstanceId")),
+        default=None,
+    )
+    canonical_organization = normalize_cell(role_row.get("organization_instance_id"))
+    if not organization_valid or (
+        canonical_organization
+        and organization_present
+        and organization_value != canonical_organization
+    ):
+        alias_metadata_valid = False
+    elif canonical_organization:
+        evidence["organization_instance_id"] = canonical_organization
+    elif organization_present:
+        evidence["organization_instance_id"] = organization_value
+    if not alias_metadata_valid:
+        evidence["effective_model"] = ""
+        evidence["reported_model_metadata_valid"] = False
+        evidence["provider_identity_status"] = "invalid"
+    return evidence
 
 
 def validate_role_agent_provider_evidence(evidence: dict[str, Any]) -> list[str]:
-    usage_source = normalize_cell(evidence.get("usage_source"))
-    if not usage_source:
-        return ["provider evidence usage_source is required; local stub completion is disabled"]
-    if usage_source == LOCAL_STUB_USAGE_SOURCE:
-        return ["role_agent_worker_local_stub is not valid completion evidence"]
-    errors = validate_provider_evidence(
-        agent_id=normalize_cell(evidence.get("agent_id") or "role-agent-worker"),
-        provider=normalize_cell(evidence.get("provider")),
-        intended_model=normalize_cell(evidence.get("intended_model")),
-        effective_model=normalize_cell(evidence.get("effective_model")),
-        usage_source=usage_source,
+    errors = provider_evidence_runtime_errors(
+        evidence,
+        require_completion_ids=True,
     )
-    for key in ("provider_session_id", "request_id", "transcript_path"):
-        if not normalize_cell(evidence.get(key)):
-            errors.append(f"provider evidence missing {key}")
-    if normalize_cell(evidence.get("provider_session_id")) == "not_invoked":
+    usage_source = evidence.get("usage_source") if isinstance(evidence.get("usage_source"), str) else ""
+    if not usage_source:
+        errors.append("provider evidence usage_source is required; local stub completion is disabled")
+    if usage_source == LOCAL_STUB_USAGE_SOURCE:
+        errors.append("role_agent_worker_local_stub is not valid completion evidence")
+    if not provider_identity_markers_are_valid(evidence):
+        errors.append("provider-reported effective model metadata is invalid")
+    errors.extend(validate_provider_evidence(
+        agent_id=(evidence.get("agent_id") if isinstance(evidence.get("agent_id"), str) else "role-agent-worker"),
+        provider=(evidence.get("provider") if isinstance(evidence.get("provider"), str) else ""),
+        intended_model=(evidence.get("intended_model") if isinstance(evidence.get("intended_model"), str) else ""),
+        effective_model=evidence.get("effective_model"),
+        usage_source=usage_source,
+    ))
+    if evidence.get("provider_session_id") == "not_invoked":
         errors.append("provider evidence session is not_invoked")
-    return errors
+    return list(dict.fromkeys(errors))
+
+
+def sanitize_invalid_provider_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    """Retain only bounded canonical identity markers for a failed report."""
+    def safe_identity(key: str) -> str:
+        value = evidence.get(key)
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+            or "\x00" in value
+            or len(value) > 128
+        ):
+            return ""
+        return value
+
+    return {
+        "provider": safe_identity("provider"),
+        "intended_model": safe_identity("intended_model"),
+        "effective_model": "",
+        "reported_model_metadata_valid": False,
+        "provider_identity_status": "invalid",
+        "usage_source": "invalid_provider_evidence",
+    }
 
 
 def hook_input_has_provider_evidence(hook_input: dict[str, Any]) -> bool:
-    supplied = hook_input.get("provider_evidence")
-    if isinstance(supplied, dict) and normalize_cell(supplied.get("usage_source")):
-        return True
+    for key in ("provider_evidence", "providerEvidence", "evidence"):
+        supplied = hook_input.get(key)
+        if isinstance(supplied, dict) and normalize_cell(
+            supplied.get("usage_source") or supplied.get("usageSource")
+        ):
+            return True
     return bool(normalize_cell(hook_input.get("usage_source")))
 
 
@@ -16248,7 +19795,7 @@ def role_agent_load_instruction(queue_root: Path, message: dict[str, Any]) -> tu
     if not instruction_ref:
         return "", ""
     instruction_path = safe_queue_relative_path(queue_root, instruction_ref, "instruction_ref")
-    data = read_json_yaml(instruction_path)
+    data = read_queue_json_yaml(queue_root, instruction_ref, "instruction_ref")
     if not isinstance(data, dict):
         raise ValueError(f"instruction payload must contain an object: {instruction_ref}")
     return str(data.get("instruction") or ""), str(instruction_path)
@@ -16267,30 +19814,117 @@ def role_agent_report_path(queue_root: Path, role_row: dict[str, Any], message: 
     return report_path, report_ref
 
 
+def terminal_queue_report_provider_evidence(
+    report: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    """Return one exact terminal evidence object without first-present alias loss."""
+    evidence, aliases_valid, present = exact_alias_value_from_sources(
+        report,
+        keys=("provider_evidence", "providerEvidence", "evidence"),
+        default={},
+    )
+    if not aliases_valid or (present and not isinstance(evidence, dict)):
+        return {}, False
+    return (dict(evidence) if isinstance(evidence, dict) else {}), True
+
+
+def bind_terminal_queue_report_provider_evidence(
+    report: dict[str, Any],
+    *,
+    role_id: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Canonically bind terminal evidence or preserve a fully sanitized invalid failure."""
+    evidence, aliases_valid = terminal_queue_report_provider_evidence(report)
+    if not aliases_valid:
+        return {}, ["terminal report provider evidence aliases conflict"]
+    if not evidence:
+        return {}, []
+    runtime_errors = provider_evidence_runtime_errors(
+        evidence,
+        require_completion_ids=normalize_cell(report.get("status")).lower() == "done",
+    )
+    try:
+        canonical_role_row = role_agent_row_for(
+            role_id,
+            organization_instance_id=normalize_cell(evidence.get("organization_instance_id")),
+        )
+    except (OSError, ValueError):
+        canonical_role_row = {}
+    if not canonical_role_row:
+        return {}, ["terminal report canonical provider identity is unavailable"]
+
+    status_invalid = evidence.get("provider_identity_status") == "invalid"
+    metadata_invalid = evidence.get("reported_model_metadata_valid") is False
+    if status_invalid or metadata_invalid:
+        errors: list[str] = []
+        if not (status_invalid and metadata_invalid):
+            errors.append("terminal report invalid provider identity marker is incomplete")
+        for key in ("model", "effective_model", "effectiveModel", "reported_effective_model"):
+            if key not in evidence:
+                continue
+            if key == "effective_model" and evidence.get(key) == "":
+                continue
+            errors.append("terminal report sanitized invalid evidence retains model identity")
+            break
+        identity_only = dict(evidence)
+        for key in (
+            "model",
+            "effective_model",
+            "effectiveModel",
+            "reported_effective_model",
+            "reported_model_metadata_valid",
+            "provider_identity_status",
+        ):
+            identity_only.pop(key, None)
+        bound, bind_errors = bind_canonical_provider_evidence(
+            canonical_role_row,
+            identity_only,
+            validate_usage=False,
+        )
+        return sanitize_invalid_provider_evidence(bound), list(
+            dict.fromkeys(runtime_errors + errors + bind_errors)
+        )
+
+    bound, errors = bind_canonical_provider_evidence(canonical_role_row, evidence)
+    if not errors:
+        bound["provider_identity_status"] = "valid"
+    return bound, list(dict.fromkeys(runtime_errors + errors))
+
+
 def validate_terminal_queue_report(report: dict[str, Any], *, role_id: str, message_id: str) -> list[str]:
+    """Validate terminal report schema and canonical provider identity fail closed."""
     errors: list[str] = []
     for key in ("report_version", "report_type", "from_role", "message_id", "created_at", "result", "status", "summary"):
         if not normalize_cell(report.get(key)):
             errors.append(f"report missing {key}")
     report_version = normalize_cell(report.get("report_version"))
     if report_version and report_version != "1":
-        errors.append(f"report_version must be 1: {report_version}")
+        errors.append("report_version must be 1")
     report_role = normalize_cell(report.get("from_role"))
     if report_role and report_role != role_id:
-        errors.append(f"report from_role mismatch: expected {role_id}, got {report_role}")
+        errors.append("report from_role mismatch")
     report_message_id = normalize_cell(report.get("message_id"))
     if report_message_id and report_message_id != message_id:
-        errors.append(f"report message_id mismatch: expected {message_id}, got {report_message_id}")
+        errors.append("report message_id mismatch")
     report_status = normalize_cell(report.get("status")).lower()
     if report_status and report_status not in {"done", "failed"}:
-        errors.append(f"report status must be done or failed: {report_status}")
+        errors.append("report status must be done or failed")
+    evidence, evidence_aliases_valid = terminal_queue_report_provider_evidence(report)
+    if not evidence_aliases_valid:
+        errors.append("terminal report provider evidence aliases conflict")
     if report_status == "done":
-        evidence = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
-        if not evidence and isinstance(report.get("evidence"), dict):
-            evidence = report.get("evidence")
         usage_source = normalized_publication_value(evidence.get("usage_source") if isinstance(evidence, dict) else "")
         if usage_source in INVALID_PUBLICATION_USAGE_SOURCES:
             errors.append("done report provider evidence usage_source is missing or not provider-backed")
+    if evidence_aliases_valid and evidence:
+        bound_evidence, identity_errors = bind_terminal_queue_report_provider_evidence(
+            report,
+            role_id=role_id,
+        )
+        if identity_errors:
+            errors.append("terminal report provider identity does not match canonical role")
+        elif report_status == "done" and bound_evidence.get("provider_identity_status") == "invalid":
+            errors.append("done report provider identity is explicitly invalid")
     return errors
 
 
@@ -16305,6 +19939,46 @@ def stamp_terminal_report_schema_validation(report: dict[str, Any], *, role_id: 
         raise ValueError("terminal queue report schema invalid: " + "; ".join(errors))
 
 
+TERMINAL_REPORT_VALIDATION_ERROR_LIMIT = 16
+TERMINAL_REPORT_VALIDATION_ERROR_CODES = frozenset(
+    {
+        *(f"report missing {key}" for key in (
+            "report_version",
+            "report_type",
+            "from_role",
+            "message_id",
+            "created_at",
+            "result",
+            "status",
+            "summary",
+        )),
+        "report_version must be 1",
+        "report from_role mismatch",
+        "report message_id mismatch",
+        "report status must be done or failed",
+        "terminal report provider evidence aliases conflict",
+        "done report provider evidence usage_source is missing or not provider-backed",
+        "terminal report provider identity does not match canonical role",
+        "done report provider identity is explicitly invalid",
+    }
+)
+
+
+def bounded_terminal_report_validation_errors(errors: list[str]) -> list[str]:
+    """Persist only fixed, bounded validation codes for untrusted reports."""
+    result: list[str] = []
+    for raw_error in errors[:TERMINAL_REPORT_VALIDATION_ERROR_LIMIT]:
+        error = normalize_cell(raw_error)
+        bounded = (
+            error
+            if error in TERMINAL_REPORT_VALIDATION_ERROR_CODES
+            else "terminal report invalid"
+        )
+        if bounded not in result:
+            result.append(bounded)
+    return result or ["terminal report invalid"]
+
+
 def record_invalid_queue_report(
     *,
     runtime: str,
@@ -16312,13 +19986,40 @@ def record_invalid_queue_report(
     session_id: str,
     organization_instance_id: str,
     queue_root: Path,
+    inbox_path: Path,
     role_id: str,
     message: dict[str, Any],
     report_path: Path,
     report_ref: str,
+    integrity: dict[str, Any],
     errors: list[str],
     now: str,
-) -> None:
+) -> bool:
+    safe_errors = bounded_terminal_report_validation_errors(errors)
+    message_id = normalize_cell(message.get("message_id"))
+    inbox_updates = {
+        "status": "failed",
+        "failed_at": now,
+        "error": "terminal_report_invalid",
+        "report_path": report_ref,
+        "report_sha256": integrity["sha256"],
+        "report_line_count": integrity["line_count"],
+        "report_byte_count": integrity["byte_count"],
+        "invalid_report_sha256": integrity["sha256"],
+        "invalid_report_errors": safe_errors,
+    }
+    transitioned, persisted_message = terminalize_invalid_inbox_message_if_current(
+        inbox_path,
+        role_id,
+        message_id,
+        queue_root,
+        report_ref,
+        integrity["sha256"],
+        inbox_updates,
+    )
+    if not transitioned:
+        return False
+    message.update(persisted_message)
     event = {
         "ts": now,
         "runtime": runtime,
@@ -16331,7 +20032,8 @@ def record_invalid_queue_report(
         "result": "invalid_report",
         "report_path": str(report_path),
         "report_ref": report_ref,
-        "errors": errors,
+        "report_integrity": integrity,
+        "errors": safe_errors,
     }
     append_jsonl_atomic(session_dir / "queue-events.jsonl", event)
     append_queue_metric(
@@ -16345,8 +20047,13 @@ def record_invalid_queue_report(
         event_type="report_invalid",
         result="invalid_report",
         now=now,
-        extra={"report_path": report_ref, "errors": errors},
+        extra={
+            "report_path": report_ref,
+            "report_sha256": integrity["sha256"],
+            "errors": safe_errors,
+        },
     )
+    return True
 
 
 def recover_pending_message_from_existing_report(
@@ -16363,15 +20070,22 @@ def recover_pending_message_from_existing_report(
     now: str,
     dry_run: bool = False,
 ) -> dict[str, Any] | None:
+    """Recover one terminal report only after re-binding its current provider identity."""
     message_id = normalize_cell(message.get("message_id"))
     if not message_id:
         return None
     report_path, report_ref = role_agent_report_path(queue_root, role_row, message)
-    if not report_path.exists():
+    try:
+        report_bytes = read_queue_file_bytes(queue_root, report_ref, "report_path")
+    except FileNotFoundError:
         return None
-    report = read_json_yaml(report_path)
+    report = parse_yaml_config_text(
+        report_bytes.decode("utf-8", errors="strict"),
+        queue_root / report_ref,
+    )
     if not isinstance(report, dict):
         return None
+    integrity = queue_file_integrity_from_bytes(report_bytes)
     schema_errors = validate_terminal_queue_report(report, role_id=role_id, message_id=message_id)
     if schema_errors:
         if dry_run:
@@ -16382,10 +20096,12 @@ def recover_pending_message_from_existing_report(
             session_id=session_id,
             organization_instance_id=organization_instance_id,
             queue_root=queue_root,
+            inbox_path=inbox_path,
             role_id=role_id,
             message=message,
             report_path=report_path,
             report_ref=report_ref,
+            integrity=integrity,
             errors=schema_errors,
             now=now,
         )
@@ -16393,7 +20109,31 @@ def recover_pending_message_from_existing_report(
     report_status = normalize_cell(report.get("status")).lower()
     if report_status not in {"done", "failed"}:
         return None
-    integrity = report_file_integrity(report_path)
+    evidence, identity_errors = bind_terminal_queue_report_provider_evidence(
+        report,
+        role_id=role_id,
+    )
+    if identity_errors or (
+        report_status == "done" and evidence.get("provider_identity_status") == "invalid"
+    ):
+        if dry_run:
+            return None
+        record_invalid_queue_report(
+            runtime=runtime,
+            session_dir=session_dir,
+            session_id=session_id,
+            organization_instance_id=organization_instance_id,
+            queue_root=queue_root,
+            inbox_path=inbox_path,
+            role_id=role_id,
+            message=message,
+            report_path=report_path,
+            report_ref=report_ref,
+            integrity=integrity,
+            errors=["terminal report provider identity does not match canonical role"],
+            now=now,
+        )
+        return None
 
     inbox_updates: dict[str, Any] = {
         "status": report_status,
@@ -16433,9 +20173,7 @@ def recover_pending_message_from_existing_report(
         }
     update_inbox_message(inbox_path, role_id, message_id, queue_root, inbox_updates)
 
-    evidence = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
-    if not evidence and isinstance(report.get("evidence"), dict):
-        evidence = report.get("evidence")
+    identity_status = normalize_cell(evidence.get("provider_identity_status"))
     roster_path = session_dir / "roster.json"
     fallback_roster = read_json(roster_path) if roster_path.exists() else []
     row_update = {
@@ -16443,7 +20181,11 @@ def recover_pending_message_from_existing_report(
         "organization_instance_id": organization_instance_id,
         "parent_session_id": session_id,
         "response_status": f"recovered_{report_status}",
-        "provider_status": "provider_report_recovered",
+        "provider_status": (
+            "provider_report_recovered_invalid_identity"
+            if identity_status == "invalid"
+            else "provider_report_recovered"
+        ),
         "last_seen_at": now,
         "last_recovered_at": now,
         "last_recovered_message_id": message_id,
@@ -16452,6 +20194,8 @@ def recover_pending_message_from_existing_report(
         "session_id": normalize_cell(evidence.get("provider_session_id") or evidence.get("session_id")),
         "last_request_id": normalize_cell(evidence.get("request_id")),
         "effective_model": normalize_cell(evidence.get("effective_model")),
+        "provider_identity_status": identity_status,
+        "reported_model_metadata_valid": evidence.get("reported_model_metadata_valid"),
         "transcript_path": normalize_cell(evidence.get("transcript_path")),
         "notes": f"queue recovery found terminal {report_status} report from {report_ref}",
     }
@@ -16507,6 +20251,8 @@ def recover_pending_message_from_existing_report(
             "report_path": report_ref,
             "report_integrity": integrity,
             "usage_source": normalize_cell(evidence.get("usage_source")),
+            "provider": normalize_cell(evidence.get("provider")),
+            "intended_model": normalize_cell(evidence.get("intended_model")),
             "effective_model": normalize_cell(evidence.get("effective_model")),
             "transcript_path": normalize_cell(evidence.get("transcript_path")),
         },
@@ -16577,29 +20323,36 @@ def queue_watch_snapshot(queue_root: Path, *, deadline: float | None = None) -> 
     aggregate = 0
     file_count = 0
     digest_modulus = 1 << 256
-    scanners: list[Any] = []
+    scanners: list[tuple[Any, int, str]] = []
     if queue_watch_deadline_expired(deadline):
         return None
+    root_fd = -1
     try:
-        root_scanner = os.scandir(queue_root)
+        root_fd = open_relative_directory_fd(queue_root, (), create=False)
+        root_scanner = os.scandir(root_fd)
     except FileNotFoundError:
+        if root_fd >= 0:
+            os.close(root_fd)
         if queue_watch_deadline_expired(deadline):
             return None
         return "missing"
     except OSError:
+        if root_fd >= 0:
+            os.close(root_fd)
         return None
-    scanners.append(root_scanner)
+    scanners.append((root_scanner, root_fd, ""))
     try:
         if queue_watch_deadline_expired(deadline):
             return None
         while scanners:
             if queue_watch_deadline_expired(deadline):
                 return None
-            scanner = scanners[-1]
+            scanner, directory_fd, relative_prefix = scanners[-1]
             try:
                 entry = next(scanner)
             except StopIteration:
                 scanner.close()
+                os.close(directory_fd)
                 scanners.pop()
                 continue
             except OSError:
@@ -16617,25 +20370,36 @@ def queue_watch_snapshot(queue_root: Path, *, deadline: float | None = None) -> 
             if queue_watch_deadline_expired(deadline):
                 return None
             if stat_module.S_ISDIR(entry_stat.st_mode):
+                child_fd = -1
                 try:
-                    child_scanner = os.scandir(entry.path)
+                    child_fd = os.open(
+                        entry.name,
+                        os.O_RDONLY
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=directory_fd,
+                    )
+                    child_scanner = os.scandir(child_fd)
                 except FileNotFoundError:
+                    if child_fd >= 0:
+                        os.close(child_fd)
                     if queue_watch_deadline_expired(deadline):
                         return None
                     continue
                 except OSError:
+                    if child_fd >= 0:
+                        os.close(child_fd)
                     return None
                 if queue_watch_deadline_expired(deadline):
                     child_scanner.close()
+                    os.close(child_fd)
                     return None
-                scanners.append(child_scanner)
+                child_prefix = f"{relative_prefix}/{entry.name}" if relative_prefix else entry.name
+                scanners.append((child_scanner, child_fd, child_prefix))
                 continue
             if not stat_module.S_ISREG(entry_stat.st_mode):
                 continue
-            try:
-                relative_path = Path(entry.path).relative_to(queue_root).as_posix()
-            except ValueError:
-                return None
+            relative_path = f"{relative_prefix}/{entry.name}" if relative_prefix else entry.name
             entry_digest = hashlib.sha256(
                 f"{relative_path}\0{entry_stat.st_mtime_ns}\0{entry_stat.st_size}\n".encode("utf-8")
             ).digest()
@@ -16645,8 +20409,9 @@ def queue_watch_snapshot(queue_root: Path, *, deadline: float | None = None) -> 
             return None
         return f"{file_count}:{aggregate:064x}"
     finally:
-        for scanner in reversed(scanners):
+        for scanner, directory_fd, _relative_prefix in reversed(scanners):
             scanner.close()
+            os.close(directory_fd)
 
 
 def queue_watch_wait_for_event(
@@ -16780,7 +20545,7 @@ def wait_for_role_queue_completion(
     last_event_wait: dict[str, Any] = {}
     while True:
         try:
-            current_message = queue_message_by_id(inbox_path, role_id, message_id)
+            current_message = queue_message_by_id(inbox_path, role_id, message_id, queue_root)
         except ValueError:
             current_message = message
         current_status = normalize_cell(current_message.get("status") or "pending").lower()
@@ -17040,8 +20805,8 @@ def dead_letter_pending_message(
         },
     }
     stamp_terminal_report_schema_validation(report, role_id=role_id, message_id=message_id)
-    write_json_yaml(report_path, report)
-    integrity = report_file_integrity(report_path)
+    write_queue_json_yaml(queue_root, report_ref, "report_path", report)
+    integrity = queue_file_integrity(queue_root, report_ref, "report_path")
     update_inbox_message(
         inbox_path,
         role_id,
@@ -17195,8 +20960,8 @@ def manual_close_pending_message(
         event["would_update_inbox"] = inbox_updates
         return event
 
-    write_json_yaml(report_path, report)
-    integrity = report_file_integrity(report_path)
+    write_queue_json_yaml(queue_root, report_ref, "report_path", report)
+    integrity = queue_file_integrity(queue_root, report_ref, "report_path")
     inbox_updates = inbox_updates | {
         "report_sha256": integrity["sha256"],
         "report_line_count": integrity["line_count"],
@@ -17348,8 +21113,25 @@ def write_role_agent_report(
         role_id=normalize_cell(role_row["role_id"]),
         message_id=normalize_cell(message.get("message_id")),
     )
-    write_json_yaml(report_path, report)
+    write_queue_json_yaml(queue_root, report_ref, "report_path", report)
     return report
+
+
+def role_agent_worker_exception_type(exc: BaseException) -> str:
+    """Classify a worker failure without retaining attacker-controlled exception text."""
+    if isinstance(exc, json.JSONDecodeError):
+        return "JSONDecodeError"
+    if isinstance(exc, UnicodeError):
+        return "UnicodeError"
+    if isinstance(exc, PermissionError):
+        return "PermissionError"
+    if isinstance(exc, OSError):
+        return "OSError"
+    if isinstance(exc, ValueError):
+        return "ValueError"
+    if isinstance(exc, RuntimeError):
+        return "RuntimeError"
+    return "Exception"
 
 
 def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
@@ -17360,12 +21142,11 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
     session_dir = state_root / safe_id(session_id)
     state_path = session_dir / "bootstrap.json"
     state = read_json(state_path) if state_path.exists() else {}
-    organization_instance_id = str(
-        state.get("organization_instance_id")
-        or hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or os.environ.get("ITB_ORGANIZATION_INSTANCE_ID")
-        or organization_id(session_id)
+    organization_instance_id = resolve_organization_instance_id(
+        state,
+        hook_input,
+        session_id,
+        trusted_default=os.environ.get("ITB_ORGANIZATION_INSTANCE_ID") or "",
     )
     role_id = normalize_cell(
         hook_input.get("role_id")
@@ -17383,7 +21164,7 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
     inbox_path = queue_root / str(role_row["inbox_path"])
     now = current_timestamp()
     if not hook_input_has_provider_evidence(hook_input):
-        inbox = load_inbox(inbox_path, role_id)
+        inbox = load_inbox(inbox_path, role_id, queue_root)
         pending = [
             message
             for message in inbox.get("messages", [])
@@ -17442,7 +21223,7 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
             result="completed",
             status="done",
         )
-        integrity = report_file_integrity(report_path)
+        integrity = queue_file_integrity(queue_root, report_ref, "report_path")
         update_inbox_message(
             inbox_path,
             role_id,
@@ -17487,7 +21268,9 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
             extra=provider_usage_metric_fields(evidence)
             | {
                 "usage_source": normalize_cell(evidence.get("usage_source")),
-                "effective_model": normalize_cell(evidence.get("effective_model")),
+                "provider": normalize_cell(evidence.get("provider")),
+                "intended_model": normalize_cell(evidence.get("intended_model")),
+                "effective_model": evidence.get("effective_model") if isinstance(evidence.get("effective_model"), str) else "",
                 "transcript_path": normalize_cell(evidence.get("transcript_path")),
                 "report_integrity": integrity,
             },
@@ -17502,10 +21285,13 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
             }
         }
     except Exception as exc:
-        error = str(exc)
+        error = "role_agent_worker_failed"
+        error_type = role_agent_worker_exception_type(exc)
         fallback_ref = str(Path(str(role_row["report_dir"])) / normalize_cell(message.get("task_id")) / f"failed-{message_id}.yaml")
         fallback_path = safe_queue_relative_path(queue_root, fallback_ref, "fallback_report_path")
-        evidence = role_agent_provider_evidence(role_row, hook_input)
+        evidence = sanitize_invalid_provider_evidence(
+            role_agent_provider_evidence(role_row, hook_input)
+        )
         report = write_role_agent_report(
             queue_root=queue_root,
             role_row=role_row,
@@ -17518,7 +21304,11 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
             status="failed",
             error=error,
         )
-        integrity = report_file_integrity(fallback_path)
+        integrity = queue_file_integrity(
+            queue_root,
+            fallback_ref,
+            "fallback_report_path",
+        )
         update_inbox_message(
             inbox_path,
             role_id,
@@ -17532,6 +21322,7 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
                 "report_line_count": integrity["line_count"],
                 "report_byte_count": integrity["byte_count"],
                 "error": error,
+                "error_type": error_type,
             },
         )
         append_queue_metric(
@@ -17548,9 +21339,11 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
             extra=provider_usage_metric_fields(evidence)
             | {
                 "error": error,
+                "error_type": error_type,
                 "usage_source": normalize_cell(evidence.get("usage_source")),
-                "effective_model": normalize_cell(evidence.get("effective_model")),
-                "transcript_path": normalize_cell(evidence.get("transcript_path")),
+                "provider": normalize_cell(evidence.get("provider")),
+                "intended_model": normalize_cell(evidence.get("intended_model")),
+                "effective_model": evidence.get("effective_model") if isinstance(evidence.get("effective_model"), str) else "",
                 "report_integrity": integrity,
             },
         )
@@ -17564,6 +21357,7 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
                 "report_path": str(fallback_path),
                 "messages_processed": 0,
                 "error": error,
+                "error_type": error_type,
                 "report": report,
             }
         }
@@ -17743,8 +21537,14 @@ def archive_shutdown(
 
 def resolve_session_id(state_root: Path, hook_input: dict[str, Any] | None = None) -> tuple[str, str]:
     if hook_input:
-        hook_session_id = normalize_cell(hook_input.get("session_id") or hook_input.get("sessionId"))
-        if hook_session_id:
+        hook_session_id, aliases_valid, present = exact_string_alias_from_sources(
+            hook_input,
+            keys=("session_id", "sessionId"),
+            max_chars=CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+        )
+        if not aliases_valid:
+            raise ValueError("hook session identity aliases are invalid")
+        if present:
             return hook_session_id, "hook_input"
     parent_session_id = normalize_cell(os.environ.get("ITB_PARENT_SESSION_ID"))
     if parent_session_id:
@@ -17758,6 +21558,37 @@ def resolve_session_id(state_root: Path, hook_input: dict[str, Any] | None = Non
 def current_session_id(state_root: Path, hook_input: dict[str, Any] | None = None) -> str:
     session_id, _source = resolve_session_id(state_root, hook_input)
     return session_id
+
+
+def resolve_organization_instance_id(
+    state: dict[str, Any],
+    hook_input: dict[str, Any],
+    session_id: str,
+    *,
+    trusted_default: str = "",
+) -> str:
+    """Exact-bind organization aliases across persisted state and current input."""
+    state_value, state_valid, state_present = exact_string_alias_from_sources(
+        state,
+        keys=("organization_instance_id", "organizationInstanceId"),
+        max_chars=CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+    )
+    hook_value, hook_valid, hook_present = exact_string_alias_from_sources(
+        hook_input,
+        keys=("organization_instance_id", "organizationInstanceId"),
+        max_chars=CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS,
+    )
+    if not state_valid or not hook_valid:
+        raise ValueError("organization identity aliases are invalid")
+    if state_present and hook_present and state_value != hook_value:
+        raise ValueError("organization identity does not match persisted state")
+    if state_present:
+        return state_value
+    if hook_present:
+        return hook_value
+    if trusted_default:
+        return trusted_default
+    return organization_id(session_id)
 
 
 
@@ -18153,22 +21984,41 @@ def record_hook_error(
     hook_input: dict[str, Any],
     exc: Exception,
 ) -> dict[str, Any]:
-    session_id = normalize_cell(
-        hook_input.get("session_id")
-        or hook_input.get("sessionId")
-        or hook_input.get("conversation_id")
-        or os.environ.get("ITB_PARENT_SESSION_ID")
-        or "unknown-session"
+    raw_session_id, session_aliases_valid, _session_present = exact_alias_value_from_sources(
+        hook_input,
+        keys=("session_id", "sessionId", "conversation_id"),
+        default=os.environ.get("ITB_PARENT_SESSION_ID") or "unknown-session",
     )
+    session_id = (
+        raw_session_id
+        if session_aliases_valid
+        and isinstance(raw_session_id, str)
+        and raw_session_id
+        and raw_session_id == raw_session_id.strip()
+        and "\x00" not in raw_session_id
+        and len(raw_session_id) <= CLAUDE_RESPONSE_IDENTIFIER_MAX_CHARS
+        else "invalid-session"
+    )
+    if isinstance(exc, UnicodeDecodeError):
+        error_type = "UnicodeDecodeError"
+    elif isinstance(exc, json.JSONDecodeError):
+        error_type = "JSONDecodeError"
+    elif isinstance(exc, RecursionError):
+        error_type = "RecursionError"
+    elif isinstance(exc, ValueError):
+        error_type = "ValueError"
+    elif isinstance(exc, OSError):
+        error_type = "OSError"
+    else:
+        error_type = "RuntimeError"
     session_dir = state_root / safe_id(session_id)
     event = {
         "ts": current_timestamp(),
         "runtime": runtime,
         "command": command,
         "session_id": session_id,
-        "error_type": type(exc).__name__,
-        "error": str(exc),
-        "traceback": traceback.format_exc(),
+        "error_type": error_type,
+        "error_code": "itb_hook_command_failed",
     }
     append_jsonl_atomic(session_dir / "hook-errors.jsonl", event)
     return event
@@ -18192,14 +22042,14 @@ def merge_cli_hook_input(
     merged = hook_input
     if include_report_json and getattr(args, "report_json", ""):
         try:
-            report_data = json.loads(args.report_json)
-        except json.JSONDecodeError as exc:
-            merged = merged | {"_cli_report_json_error": f"{type(exc).__name__}: {exc}"}
+            report_data = parse_provider_json_object(
+                args.report_json,
+                context="--report-json",
+            )
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            merged = merged | {"_cli_report_json_error": "invalid_provider_json"}
         else:
-            if isinstance(report_data, dict):
-                merged = merged | report_data
-            else:
-                merged = merged | {"_cli_report_json_error": "report-json must be a JSON object"}
+            merged = merged | report_data
     if args.session_id:
         merged = merged | {"session_id": args.session_id}
     if role_field and args.role_id:
@@ -18401,7 +22251,6 @@ def run_main_command(
 
 
 def main() -> int:
-    validate_vault(os.environ)
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
@@ -18461,6 +22310,7 @@ def main() -> int:
     state_root = Path(args.state_root).expanduser()
     hook_input: dict[str, Any] = {}
     try:
+        validate_vault(os.environ)
         hook_input = load_json_file_input(args.input_json_file) if args.input_json_file else load_hook_input()
         output = run_main_command(args=args, parser=parser, hook_input=hook_input, state_root=state_root)
         print(json.dumps(output, ensure_ascii=False))
@@ -18472,24 +22322,36 @@ def main() -> int:
             error_input = error_input | {"session_id": args.session_id}
         if args.role_id:
             error_input = error_input | {"role_id": args.role_id}
-        event = record_hook_error(
-            runtime=args.runtime,
-            state_root=state_root,
-            command=args.command,
-            hook_input=error_input,
-            exc=exc,
-        )
+        try:
+            event = record_hook_error(
+                runtime=args.runtime,
+                state_root=state_root,
+                command=args.command,
+                hook_input=error_input,
+                exc=exc,
+            )
+            hook_errors_path = str(
+                state_root / safe_id(event["session_id"]) / "hook-errors.jsonl"
+            )
+        except Exception:
+            event = {
+                "session_id": "error-evidence-unavailable",
+                "command": args.command,
+                "error_type": "RuntimeError",
+                "error_code": "itb_hook_error_evidence_unavailable",
+            }
+            hook_errors_path = ""
         print(
             json.dumps(
                 {
                     "decision": "block",
-                    "reason": f"ITB hook command failed: {type(exc).__name__}: {exc}",
+                    "reason": "ITB hook command failed",
                     "hookError": {
                         "session_id": event["session_id"],
                         "command": event["command"],
                         "error_type": event["error_type"],
-                        "error": event["error"],
-                        "hook_errors_path": str(state_root / safe_id(event["session_id"]) / "hook-errors.jsonl"),
+                        "error_code": event["error_code"],
+                        "hook_errors_path": hook_errors_path,
                     },
                 },
                 ensure_ascii=False,
