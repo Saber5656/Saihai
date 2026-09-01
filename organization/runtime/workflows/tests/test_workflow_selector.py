@@ -195,8 +195,12 @@ def test_registry_provider_adapters_are_data_driven() -> None:
         "required_exact_match",
         "Claude effective model policy",
     )
+    assert_equal(
+        adapters["codex_cli_openai_p0"]["effective_model_policy"],
+        "required_exact_match",
+        "pinned Codex effective model policy",
+    )
     for adapter_id in (
-        "codex_cli_openai_p0",
         "hermes_agent_oneshot_p0",
         "cursor_cli_p0",
         "grok_build_cli_candidate_p0",

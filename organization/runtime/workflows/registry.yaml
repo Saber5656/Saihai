@@ -276,7 +276,7 @@
       "provider_adapter_id": "codex_cli_openai_p0",
       "provider_target": "codex_cli_openai",
       "default_model": "gpt-5.6-luna",
-      "effective_model_policy": "record_without_equality",
+      "effective_model_policy": "required_exact_match",
       "transport": "headless_cli",
       "sync_mode": "sync",
       "context_freshness": "fresh_process",
