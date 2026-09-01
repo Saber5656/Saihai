@@ -19,13 +19,20 @@ BUILDER = SKILL_ROOT / "scripts" / "itb_bootstrap_builder.py"
 BUILDER_CODE = compile(BUILDER.read_bytes(), str(BUILDER), "exec")
 
 
-def load_builder_module():
+def _load_builder_module_once():
     spec = importlib.util.spec_from_file_location("itb_runtime_regressions_for_test", BUILDER)
     if spec is None or spec.loader is None:
         raise RuntimeError("failed to load ITB builder module")
     module = importlib.util.module_from_spec(spec)
     exec(BUILDER_CODE, module.__dict__)
     return module
+
+
+BUILDER_MODULE = _load_builder_module_once()
+
+
+def load_builder_module():
+    return BUILDER_MODULE
 
 
 def policy_load_exception(exception_type, sensitive_detail: str) -> BaseException:
@@ -122,16 +129,16 @@ def current_codex_jsonl(
 
 
 class ItbRuntimeRegressionTest(unittest.TestCase):
-    def test_cached_builder_code_uses_fresh_module_namespaces(self) -> None:
+    def test_cached_builder_module_reuses_process_local_import(self) -> None:
         first = load_builder_module()
-        first.test_only_marker = True
+        with mock.patch.object(first, "test_only_marker", True, create=True):
+            second = load_builder_module()
 
-        second = load_builder_module()
+            self.assertIs(first, second)
+            self.assertTrue(second.test_only_marker)
+            self.assertEqual(Path(second.__file__), BUILDER)
 
-        self.assertIsNot(first, second)
-        self.assertFalse(hasattr(second, "test_only_marker"))
-        self.assertEqual(Path(first.__file__), BUILDER)
-        self.assertEqual(Path(second.__file__), BUILDER)
+        self.assertFalse(hasattr(first, "test_only_marker"))
 
     def test_parse_codex_current_jsonl_extracts_final_message_session_and_usage(self) -> None:
         builder = load_builder_module()
