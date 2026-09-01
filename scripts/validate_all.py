@@ -49,6 +49,15 @@ def discover_suites() -> list[Path]:
     return discovered
 
 
+def select_shard(suites: list[Path], *, index: int, count: int) -> list[Path]:
+    """Return one deterministic, disjoint shard from an ordered suite list."""
+    if count < 1:
+        raise ValueError("shard count must be at least 1")
+    if index < 0 or index >= count:
+        raise ValueError(f"shard index must be between 0 and {count - 1}")
+    return [path for position, path in enumerate(suites) if position % count == index]
+
+
 def rel(path: Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix()
 
@@ -100,6 +109,12 @@ def tail(value: Any, limit: int = 500) -> str:
     return compact[-limit:]
 
 
+def emit_progress(event: str, **fields: Any) -> None:
+    """Emit a flushed machine-readable liveness event without polluting stdout."""
+    payload = {"schema_version": 1, "event": event, **fields}
+    print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
+
+
 def child_env() -> dict[str, str]:
     env = os.environ.copy()
     env["SAIHAI_ALLOW_LIVE_PROVIDERS"] = ""
@@ -140,10 +155,21 @@ def run_suite(path: Path, *, timeout: float = 300) -> dict[str, Any]:
             "detail": "",
         }
     if completed.returncode == 0 and payload is None:
+        cases = parse_unittest_cases(completed.stdout, completed.stderr)
+        if cases == 0:
+            return {
+                "path": rel(path),
+                "result": "fail",
+                "cases": 0,
+                "duration_seconds": duration,
+                "detail": "exit_zero_no_result_json",
+                "stdout_tail": tail(completed.stdout),
+                "stderr_tail": tail(completed.stderr),
+            }
         return {
             "path": rel(path),
             "result": "pass",
-            "cases": parse_unittest_cases(completed.stdout, completed.stderr),
+            "cases": cases,
             "duration_seconds": duration,
             "detail": "exit_zero_no_result_json",
         }
@@ -216,21 +242,64 @@ def compile_targets() -> tuple[bool, list[dict[str, str]]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run offline Saihai validation")
     parser.add_argument("--only", default="", help="only run suites whose path contains this substring")
+    parser.add_argument("--shard-index", type=int, default=None, help="zero-based suite shard index")
+    parser.add_argument("--shard-count", type=int, default=None, help="total number of suite shards")
     parser.add_argument("--list", action="store_true", help="list discovered suites and exit")
     args = parser.parse_args()
 
     suites = discover_suites()
     if args.only:
         suites = [path for path in suites if args.only in rel(path)]
+    shard_requested = args.shard_index is not None or args.shard_count is not None
+    if shard_requested and (args.shard_index is None or args.shard_count is None):
+        parser.error("--shard-index and --shard-count must be provided together")
+    if shard_requested:
+        try:
+            suites = select_shard(suites, index=args.shard_index, count=args.shard_count)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.list:
         for path in suites:
             print(rel(path))
         return
 
     started = time.perf_counter()
-    suite_results = [run_suite(path) for path in suites]
-    contract_results = [run_contract(command) for command in CONTRACT_CMDS]
+    emit_progress(
+        "validation_start",
+        suite_count=len(suites),
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
+    )
+    suite_results: list[dict[str, Any]] = []
+    for path in suites:
+        target = rel(path)
+        emit_progress("suite_start", target=target)
+        result = run_suite(path)
+        suite_results.append(result)
+        emit_progress(
+            "suite_complete",
+            target=target,
+            result=result["result"],
+            cases=result["cases"],
+            duration_seconds=result["duration_seconds"],
+            detail=result["detail"],
+        )
+    contract_results: list[dict[str, Any]] = []
+    for command in CONTRACT_CMDS:
+        target = " ".join(command)
+        emit_progress("contract_start", target=target)
+        result = run_contract(command)
+        contract_results.append(result)
+        emit_progress(
+            "contract_complete",
+            target=target,
+            result=result["result"],
+            duration_seconds=result["duration_seconds"],
+            detail=result["detail"],
+        )
+    emit_progress("compile_start")
     compiled, compile_errors = compile_targets()
+    emit_progress("compile_complete", result="pass" if compiled else "fail")
     no_suites = not suites
     failed = (
         no_suites
@@ -250,6 +319,11 @@ def main() -> None:
         summary["detail"] = "no_suites_matched"
     if compile_errors:
         summary["compile_errors"] = compile_errors
+    emit_progress(
+        "validation_complete",
+        result=summary["result"],
+        total_duration_seconds=summary["total_duration_seconds"],
+    )
     print(json.dumps(summary, ensure_ascii=False))
     raise SystemExit(1 if failed else 0)
 
