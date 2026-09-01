@@ -16,6 +16,7 @@ from unittest import mock
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 BUILDER = SKILL_ROOT / "scripts" / "itb_bootstrap_builder.py"
+BUILDER_CODE = compile(BUILDER.read_bytes(), str(BUILDER), "exec")
 
 
 def load_builder_module():
@@ -23,7 +24,7 @@ def load_builder_module():
     if spec is None or spec.loader is None:
         raise RuntimeError("failed to load ITB builder module")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    exec(BUILDER_CODE, module.__dict__)
     return module
 
 
@@ -121,6 +122,17 @@ def current_codex_jsonl(
 
 
 class ItbRuntimeRegressionTest(unittest.TestCase):
+    def test_cached_builder_code_uses_fresh_module_namespaces(self) -> None:
+        first = load_builder_module()
+        first.test_only_marker = True
+
+        second = load_builder_module()
+
+        self.assertIsNot(first, second)
+        self.assertFalse(hasattr(second, "test_only_marker"))
+        self.assertEqual(Path(first.__file__), BUILDER)
+        self.assertEqual(Path(second.__file__), BUILDER)
+
     def test_parse_codex_current_jsonl_extracts_final_message_session_and_usage(self) -> None:
         builder = load_builder_module()
 
