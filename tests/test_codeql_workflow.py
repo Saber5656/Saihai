@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Static security contract for the repository-owned CodeQL setup."""
 
+import json
 from pathlib import Path
 
 
@@ -63,4 +64,4 @@ def test_local_model_pack_remains_discoverable() -> None:
 if __name__ == "__main__":
     test_advanced_codeql_contract()
     test_local_model_pack_remains_discoverable()
-    print("test_codeql_workflow: ok")
+    print(json.dumps({"result": "pass", "cases": 2}, ensure_ascii=False))

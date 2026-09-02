@@ -251,6 +251,7 @@ def test_claude_stream_is_strictly_bound_to_one_init_and_result() -> None:
 
 
 def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
+    """Require the confined Codex wrapper to pin Luna and max effort."""
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         binary, digest = secure_file(root, "codex")
@@ -283,6 +284,8 @@ def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
     assert command[4] == binding["SAIHAI_CODEX_EXECUTABLE_PATH"]
     assert command[command.index("--sandbox") + 1] == "read-only"
     assert "--ignore-user-config" in command and "--ignore-rules" in command
+    assert command[command.index("--model") + 1] == provider_adapters.DEFAULT_CODEX_MODEL
+    assert 'model_reasoning_effort="max"' in command
 
 
 def test_host_binding_rejects_missing_digest_symlink_mode_and_digest_mismatch() -> None:

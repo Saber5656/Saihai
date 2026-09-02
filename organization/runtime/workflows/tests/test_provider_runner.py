@@ -940,7 +940,8 @@ def test_patched_live_missing_parsed_model_rejects_report_self_claim() -> None:
         assert not (state_root / "reports" / run_id / "review-external-review-report.json").exists()
 
 
-def test_live_codex_uses_declared_non_equality_model_semantics() -> None:
+def test_live_codex_uses_declared_exact_model_semantics() -> None:
+    """Require the provider-reported model to equal the pinned Luna model."""
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         run_id = "run-live-codex"
@@ -955,7 +956,7 @@ def test_live_codex_uses_declared_non_equality_model_semantics() -> None:
             provider_runner.work_order_path(state_root, run_id, "review")
         )
         assert_equal(order["provider_adapter_id"], "codex_cli_openai_p0", "Codex WO adapter")
-        assert_equal(order["intended_model"], "operator-selected-openai", "Codex WO model")
+        assert_equal(order["intended_model"], "gpt-5.6-luna", "Codex WO model")
         report = {
             "report_version": "1",
             "report_id": "report-live-codex",
@@ -983,7 +984,7 @@ def test_live_codex_uses_declared_non_equality_model_semantics() -> None:
             "report": report,
             "evidence_fields": {
                 "provider": "openai",
-                "effective_model": "gpt-runtime-reported",
+                "effective_model": "gpt-5.6-luna",
                 "provider_request_id": "codex-request",
                 "provider_session_id": "codex-session",
                 "usage": {},
@@ -1025,18 +1026,32 @@ def test_live_codex_uses_declared_non_equality_model_semantics() -> None:
         assert_equal(payload["decision"], "ok", "live Codex runner decision")
         assert_equal(payload["report_gate"]["outcome"], "report_valid", "Codex report gate")
         evidence = provider_runner.read_json(Path(payload["evidence_path"]))
-        assert_equal(evidence["intended_model"], "operator-selected-openai", "Codex evidence intended")
-        assert_equal(evidence["effective_model"], "gpt-runtime-reported", "Codex evidence effective")
+        assert_equal(evidence["intended_model"], "gpt-5.6-luna", "Codex evidence intended")
+        assert_equal(evidence["effective_model"], "gpt-5.6-luna", "Codex evidence effective")
         assert_equal(
             evidence["effective_model_policy"],
-            "record_without_equality",
+            "required_exact_match",
             "Codex policy snapshot",
         )
         assert_equal(
             evidence["model_assurance"],
-            "provider_reported_only",
+            "exact_match_enforced",
             "Codex assurance",
         )
+
+
+def test_live_codex_rejects_reported_model_mismatch() -> None:
+    adapter = provider_runner.load_provider_adapters()["codex_cli_openai_p0"]
+    outcome, report, details = provider_runner.enforce_effective_model_policy(
+        outcome="ok",
+        report={"provider_evidence": {}},
+        details={"effective_model": "gpt-runtime-reported"},
+        request={"intended_model": "gpt-5.6-luna"},
+        adapter=adapter,
+    )
+    assert_equal(outcome, provider_runner.PROVIDER_MODEL_MISMATCH, "Codex mismatch outcome")
+    assert_equal(report, None, "Codex mismatch report rejection")
+    assert_equal(details["reason"], provider_runner.PROVIDER_MODEL_MISMATCH, "typed reason")
 
 
 def test_adapter_request_rejects_tampered_intended_model_binding() -> None:
@@ -1780,7 +1795,8 @@ if __name__ == "__main__":
         test_live_guard_requires_flag_and_environment,
         test_patched_live_adapter_completes_without_raw_output_leakage,
         test_patched_live_missing_parsed_model_rejects_report_self_claim,
-        test_live_codex_uses_declared_non_equality_model_semantics,
+        test_live_codex_uses_declared_exact_model_semantics,
+        test_live_codex_rejects_reported_model_mismatch,
         test_adapter_request_rejects_tampered_intended_model_binding,
         test_adapter_descriptor_requires_effective_model_policy_declaration,
         test_waiting_provider_revalidates_recorded_adapter_policy,

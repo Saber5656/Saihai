@@ -13,6 +13,7 @@ from pathlib import Path
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 BUILDER = SKILL_ROOT / "scripts" / "itb_bootstrap_builder.py"
 HOOK_ROOT = SKILL_ROOT / "hooks"
+MODEL_REGISTRY = SKILL_ROOT / "references" / "model-registry.md"
 
 
 def load_builder_module():
@@ -126,7 +127,7 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
                     "result": "activation ok",
                     "usage": {"input_tokens": 1, "output_tokens": 2},
                     "duration_api_ms": 3,
-                    "model": "gpt-5.5",
+                    "model": "gpt-5.6-luna",
                     "request_id": "req-test",
                     "session_id": "provider-session",
                     "num_turns": 1,
@@ -142,12 +143,22 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
                 output = builder.provider_activate(
                     runtime="codex",
                     state_root=state_root,
-                    hook_input={"session_id": "headless-session", "agent_id": "tech-backend", "cwd": "/tmp/project"},
+                    hook_input={
+                        "session_id": "headless-session",
+                        "agent_id": "tech-backend",
+                        "cwd": "/tmp/project",
+                        "prompt": "Review provider contract",
+                    },
                 )
 
             self.assertNotIn("decision", output)
             self.assertEqual(output["activation"]["provider"], "openai")
             self.assertTrue(run_mock.called)
+            activation_prompt = run_mock.call_args.args[0][-1]
+            self.assertIn("You are `tech-backend`", activation_prompt)
+            self.assertIn("SKILL.md:", activation_prompt)
+            self.assertIn("follow its Flow Contract", activation_prompt)
+            self.assertIn("Provider request:\nReview provider contract", activation_prompt)
             state = json.loads((session_dir / "bootstrap.json").read_text(encoding="utf-8"))
             roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
             self.assertEqual(state["bootstrap_status"], "headless_metadata")
@@ -294,6 +305,92 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
             rows = builder.parse_model_registry_file(registry)
             self.assertEqual(rows[0]["agent_id"], "tech-backend")
 
+    def test_codex_activation_requires_explicit_luna_policy(self) -> None:
+        """Reject missing model policy and pin canonical execution to Luna Max."""
+        builder = load_builder_module()
+        with self.assertRaisesRegex(ValueError, "requires an intended model policy"):
+            builder.codex_activation_command(
+                {"agent_id": "tech-backend"},
+                "hello",
+                "/tmp/project",
+            )
+        command = builder.codex_activation_command(
+            builder.role_agent_row_for("tech-backend"),
+            "hello",
+            "/tmp/project",
+        )
+
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
+        self.assertIn('model_reasoning_effort="max"', command)
+
+    def test_codex_activation_preserves_declared_role_sandbox_scope(self) -> None:
+        """Keep read-only roles confined while retaining declared write capability."""
+        builder = load_builder_module()
+        read_only_command = builder.codex_activation_command(
+            builder.role_agent_row_for("gate-task-evaluator"),
+            "evaluate",
+            "/tmp/project",
+        )
+        write_command = builder.codex_activation_command(
+            builder.role_agent_row_for("teams-project-manager"),
+            "coordinate",
+            "/tmp/project",
+        )
+        tampered_command = builder.codex_activation_command(
+            {
+                "agent_id": "gate-task-evaluator",
+                "intended_model": "gpt-5.6-luna",
+                "allowed_tools": ["Bash"],
+            },
+            "evaluate",
+            "/tmp/project",
+        )
+
+        self.assertEqual(read_only_command[read_only_command.index("--sandbox") + 1], "read-only")
+        self.assertEqual(write_command[write_command.index("--sandbox") + 1], "workspace-write")
+        self.assertEqual(
+            tampered_command[tampered_command.index("--sandbox") + 1],
+            "read-only",
+        )
+        self.assertEqual(builder.codex_sandbox_for_role({}), "read-only")
+        self.assertEqual(
+            builder.codex_sandbox_for_role(
+                {"agent_id": "unknown-role", "allowed_tools": ["Bash", "Write"]}
+            ),
+            "read-only",
+        )
+        for tool in sorted(builder.CODEX_WORKSPACE_WRITE_TOOLS):
+            with self.subTest(tool=tool):
+                self.assertEqual(builder.codex_sandbox_for_tools([tool]), "workspace-write")
+        self.assertEqual(builder.codex_sandbox_for_tools([]), "read-only")
+        self.assertEqual(builder.codex_sandbox_for_tools(["Read", "Grep", "Glob"]), "read-only")
+
+    def test_active_registry_routes_every_role_through_luna_max(self) -> None:
+        """Require every active registry role to remain on the Luna-only route."""
+        builder = load_builder_module()
+        active_rows = [
+            row
+            for row in builder.parse_model_registry_file(MODEL_REGISTRY)
+            if row["status"] == "active"
+        ]
+
+        self.assertEqual(len(active_rows), 35)
+        self.assertTrue(active_rows)
+        for row in active_rows:
+            with self.subTest(agent_id=row["agent_id"]):
+                self.assertEqual(row["provider"], "openai")
+                self.assertEqual(row["primary_model"], "gpt-5.6-luna")
+                self.assertEqual(row["fallback_models"], "")
+                self.assertEqual(row["execution_mode"], "codex")
+                self.assertIn(row["long_run_preferred"], {"", "gpt-5.6-luna"})
+                command = builder.codex_activation_command(
+                    {"agent_id": row["agent_id"], "intended_model": row["primary_model"]},
+                    "review",
+                    "/tmp/project",
+                )
+                self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
+                self.assertIn('model_reasoning_effort="max"', command)
+
     def test_retired_hook_wrappers_are_not_shipped(self) -> None:
         shipped = {path.name for path in HOOK_ROOT.glob("*.sh")}
         self.assertEqual(shipped, {"itb-hook-common.sh", "itb-session-start.sh", "itb-final-response-guard.sh"})
@@ -334,8 +431,8 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
                         {
                             "agent_id": "tech-backend",
                             "provider": "openai",
-                            "execution_mode": "codex_exec",
-                            "intended_model": "gpt-5.5",
+                            "execution_mode": "codex",
+                            "intended_model": "gpt-5.6-luna",
                             "allowed_tools": ["Read", "Grep", "Glob"],
                             "git_operations_allowed": False,
                         }

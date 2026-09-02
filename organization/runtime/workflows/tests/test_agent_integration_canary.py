@@ -2054,7 +2054,7 @@ def main() -> None:
     ]
     for test in tests:
         test()
-    print(f"agent integration canary tests passed: {len(tests)}")
+    print(json.dumps({"result": "pass", "cases": len(tests)}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
