@@ -122,102 +122,171 @@ def child_env() -> dict[str, str]:
     return env
 
 
+def run_captured(
+    command: list[str],
+    *,
+    timeout: float,
+    heartbeat_event: str,
+    heartbeat_target: str,
+    heartbeat_interval: float = 30,
+) -> dict[str, Any]:
+    """Capture a child process while emitting metadata-only liveness events."""
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
+    if heartbeat_interval <= 0:
+        raise ValueError("heartbeat interval must be positive")
+
+    started = time.perf_counter()
+    process = subprocess.Popen(
+        command,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=child_env(),
+    )
+    deadline = started + timeout
+    try:
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                process.kill()
+                stdout, stderr = process.communicate()
+                return {
+                    "returncode": process.returncode,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "timed_out": True,
+                }
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=min(heartbeat_interval, remaining)
+                )
+            except subprocess.TimeoutExpired:
+                emit_progress(
+                    heartbeat_event,
+                    target=heartbeat_target,
+                    elapsed_seconds=round(time.perf_counter() - started, 3),
+                )
+                continue
+            return {
+                "returncode": process.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "timed_out": False,
+            }
+    except BaseException:
+        try:
+            process.kill()
+        except BaseException:
+            pass
+        try:
+            process.communicate()
+        except BaseException:
+            pass
+        raise
+
+
 def run_suite(path: Path, *, timeout: float = 300) -> dict[str, Any]:
     started = time.perf_counter()
-    try:
-        completed = subprocess.run(
-            [sys.executable, str(path)],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=child_env(),
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
+    target = rel(path)
+    completed = run_captured(
+        [sys.executable, str(path)],
+        timeout=timeout,
+        heartbeat_event="suite_heartbeat",
+        heartbeat_target=target,
+    )
+    if completed["timed_out"]:
         return {
-            "path": rel(path),
+            "path": target,
             "result": "fail",
             "cases": 0,
             "duration_seconds": round(time.perf_counter() - started, 3),
             "detail": "timeout",
-            "stdout_tail": tail(exc.stdout),
-            "stderr_tail": tail(exc.stderr),
+            "stdout_tail": tail(completed["stdout"]),
+            "stderr_tail": tail(completed["stderr"]),
         }
     duration = round(time.perf_counter() - started, 3)
-    payload = last_json_line(completed.stdout)
-    if completed.returncode == 0 and payload and payload.get("result") == "pass":
+    payload = last_json_line(completed["stdout"])
+    if completed["returncode"] == 0 and payload and payload.get("result") == "pass":
         return {
-            "path": rel(path),
+            "path": target,
             "result": "pass",
             "cases": int(payload.get("cases") or 0),
             "duration_seconds": duration,
             "detail": "",
         }
-    if completed.returncode == 0 and payload is None:
-        cases = parse_unittest_cases(completed.stdout, completed.stderr)
+    if completed["returncode"] == 0 and payload is None:
+        cases = parse_unittest_cases(completed["stdout"], completed["stderr"])
         if cases == 0:
             return {
-                "path": rel(path),
+                "path": target,
                 "result": "fail",
                 "cases": 0,
                 "duration_seconds": duration,
                 "detail": "exit_zero_no_result_json",
-                "stdout_tail": tail(completed.stdout),
-                "stderr_tail": tail(completed.stderr),
+                "stdout_tail": tail(completed["stdout"]),
+                "stderr_tail": tail(completed["stderr"]),
             }
         return {
-            "path": rel(path),
+            "path": target,
             "result": "pass",
             "cases": cases,
             "duration_seconds": duration,
             "detail": "exit_zero_no_result_json",
         }
     detail = "missing_result_json" if payload is None else f"result:{payload.get('result')}"
-    if completed.returncode != 0:
-        detail = f"exit:{completed.returncode}"
+    if completed["returncode"] != 0:
+        detail = f"exit:{completed['returncode']}"
     return {
-        "path": rel(path),
+        "path": target,
         "result": "fail",
         "cases": int((payload or {}).get("cases") or 0),
         "duration_seconds": duration,
         "detail": detail,
-        "stdout_tail": tail(completed.stdout),
-        "stderr_tail": tail(completed.stderr),
+        "stdout_tail": tail(completed["stdout"]),
+        "stderr_tail": tail(completed["stderr"]),
     }
 
 
 def run_contract(command: list[str], *, timeout: float = 300) -> dict[str, Any]:
     started = time.perf_counter()
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=child_env(),
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
+    target = " ".join(command)
+    completed = run_captured(
+        command,
+        timeout=timeout,
+        heartbeat_event="contract_heartbeat",
+        heartbeat_target=target,
+    )
+    if completed["timed_out"]:
         return {
             "command": command,
             "result": "fail",
             "duration_seconds": round(time.perf_counter() - started, 3),
             "detail": "timeout",
-            "stdout_tail": tail(exc.stdout),
-            "stderr_tail": tail(exc.stderr),
+            "stdout_tail": tail(completed["stdout"]),
+            "stderr_tail": tail(completed["stderr"]),
         }
     duration = round(time.perf_counter() - started, 3)
-    payload = parse_json_stdout(completed.stdout)
-    passed = completed.returncode == 0 and payload is not None and payload.get("decision") == "ok"
+    payload = parse_json_stdout(completed["stdout"])
+    passed = (
+        completed["returncode"] == 0
+        and payload is not None
+        and payload.get("decision") == "ok"
+    )
     return {
         "command": command,
         "result": "pass" if passed else "fail",
         "duration_seconds": duration,
-        "detail": "" if passed else (f"exit:{completed.returncode}" if completed.returncode else "decision_not_ok"),
-        "stdout_tail": "" if passed else tail(completed.stdout),
-        "stderr_tail": "" if passed else tail(completed.stderr),
+        "detail": ""
+        if passed
+        else (
+            f"exit:{completed['returncode']}"
+            if completed["returncode"]
+            else "decision_not_ok"
+        ),
+        "stdout_tail": "" if passed else tail(completed["stdout"]),
+        "stderr_tail": "" if passed else tail(completed["stderr"]),
     }
 
 

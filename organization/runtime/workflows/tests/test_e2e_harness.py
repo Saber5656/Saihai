@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import subprocess
@@ -328,24 +329,135 @@ def test_validate_all_fails_on_broken_suite() -> None:
 
 def test_validate_all_rejects_empty_zero_exit_suite() -> None:
     validate_all = load_validate_all_module()
-    original_run = validate_all.subprocess.run
-
-    class Completed:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    validate_all.subprocess.run = lambda *args, **kwargs: Completed()
+    original_run = validate_all.run_captured
+    validate_all.run_captured = lambda *args, **kwargs: {
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "timed_out": False,
+    }
     try:
         result = validate_all.run_suite(ROOT / "tests" / "test_empty_fixture.py")
     finally:
-        validate_all.subprocess.run = original_run
+        validate_all.run_captured = original_run
     assert_equal(result["result"], "fail", "empty zero-exit suite result")
     assert_equal(
         result["detail"],
         "exit_zero_no_result_json",
         "empty zero-exit suite detail",
     )
+
+
+def test_validate_all_captured_process_heartbeats_and_times_out() -> None:
+    validate_all = load_validate_all_module()
+    events: list[tuple[str, dict]] = []
+    original_emit = validate_all.emit_progress
+    validate_all.emit_progress = lambda event, **fields: events.append((event, fields))
+    try:
+        result = validate_all.run_captured(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys\n"
+                    "import time\n"
+                    "for index in range(5):\n"
+                    "    print(f'captured-out-{index}', flush=True)\n"
+                    "    print(f'captured-err-{index}', file=sys.stderr, flush=True)\n"
+                    "time.sleep(2)\n"
+                ),
+            ],
+            timeout=0.6,
+            heartbeat_event="suite_heartbeat",
+            heartbeat_target="tests/slow_fixture.py",
+            heartbeat_interval=0.1,
+        )
+    finally:
+        validate_all.emit_progress = original_emit
+
+    assert_equal(result["timed_out"], True, "captured process timeout")
+    assert result["returncode"] != 0
+    expected_stdout = [f"captured-out-{index}" for index in range(5)]
+    expected_stderr = [f"captured-err-{index}" for index in range(5)]
+    assert_equal(result["stdout"].splitlines(), expected_stdout, "captured timeout stdout")
+    assert_equal(result["stderr"].splitlines(), expected_stderr, "captured timeout stderr")
+    assert len(events) >= 3, events
+    for event, fields in events:
+        assert_equal(event, "suite_heartbeat", "heartbeat event")
+        assert_equal(fields["target"], "tests/slow_fixture.py", "heartbeat target")
+        assert fields["elapsed_seconds"] > 0
+        assert set(fields) == {"target", "elapsed_seconds"}
+    serialized_events = json.dumps(events)
+    for captured_line in expected_stdout + expected_stderr:
+        assert captured_line not in serialized_events
+
+
+def test_validate_all_production_heartbeat_defaults() -> None:
+    validate_all = load_validate_all_module()
+    captured_signature = inspect.signature(validate_all.run_captured)
+    suite_signature = inspect.signature(validate_all.run_suite)
+    contract_signature = inspect.signature(validate_all.run_contract)
+    assert_equal(
+        captured_signature.parameters["heartbeat_interval"].default,
+        30,
+        "production heartbeat interval",
+    )
+    assert_equal(
+        suite_signature.parameters["timeout"].default,
+        300,
+        "production suite timeout",
+    )
+    assert_equal(
+        contract_signature.parameters["timeout"].default,
+        300,
+        "production contract timeout",
+    )
+
+
+def test_validate_all_cleans_up_child_when_heartbeat_raises() -> None:
+    validate_all = load_validate_all_module()
+    spawned_processes = []
+    original_popen = validate_all.subprocess.Popen
+    original_emit = validate_all.emit_progress
+
+    def recording_popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        spawned_processes.append(process)
+        return process
+
+    def fail_heartbeat(*args, **kwargs) -> None:
+        raise RuntimeError("heartbeat emission failed")
+
+    validate_all.subprocess.Popen = recording_popen
+    validate_all.emit_progress = fail_heartbeat
+    try:
+        try:
+            validate_all.run_captured(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                timeout=5,
+                heartbeat_event="suite_heartbeat",
+                heartbeat_target="tests/exception_fixture.py",
+                heartbeat_interval=0.05,
+            )
+        except RuntimeError as exc:
+            assert_equal(str(exc), "heartbeat emission failed", "original exception")
+        else:
+            raise AssertionError("heartbeat exception was not propagated")
+    finally:
+        validate_all.subprocess.Popen = original_popen
+        validate_all.emit_progress = original_emit
+
+    assert_equal(len(spawned_processes), 1, "spawned process count")
+    process = spawned_processes[0]
+    was_reaped = process.poll() is not None
+    stdout_closed = process.stdout is not None and process.stdout.closed
+    stderr_closed = process.stderr is not None and process.stderr.closed
+    if not was_reaped:
+        process.kill()
+        process.communicate()
+    assert_equal(was_reaped, True, "exception child reaped")
+    assert_equal(stdout_closed, True, "exception stdout closed")
+    assert_equal(stderr_closed, True, "exception stderr closed")
 
 
 def test_validate_all_tail_decodes_timeout_bytes() -> None:
@@ -382,6 +494,9 @@ def main() -> None:
         test_validate_workflow_requires_every_shard,
         test_validate_all_fails_on_broken_suite,
         test_validate_all_rejects_empty_zero_exit_suite,
+        test_validate_all_captured_process_heartbeats_and_times_out,
+        test_validate_all_production_heartbeat_defaults,
+        test_validate_all_cleans_up_child_when_heartbeat_raises,
         test_validate_all_tail_decodes_timeout_bytes,
         test_validate_all_contract_timeout_is_reported,
     ]
