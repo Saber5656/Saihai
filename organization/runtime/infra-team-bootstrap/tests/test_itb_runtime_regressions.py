@@ -8426,6 +8426,56 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                 {"request_id": "one", "requestId": "two"}
             )
 
+    def test_generated_identifiers_use_sha256_and_preserve_precedence(self) -> None:
+        builder = load_builder_module()
+
+        generated_org_id = builder.organization_id("session")
+        self.assertEqual(generated_org_id, "org-3f3af1ecebbd")
+        self.assertEqual(len(generated_org_id), len("org-") + 12)
+        self.assertEqual(builder.organization_id("session"), generated_org_id)
+
+        micro_input = {"prompt": "Review only."}
+        generated_task_id = builder.micro_fast_path_task_id("session", micro_input)
+        self.assertEqual(generated_task_id, "MICRO-session-0aa07df96b89")
+        self.assertEqual(
+            builder.micro_fast_path_task_id("session", micro_input),
+            generated_task_id,
+        )
+        self.assertEqual(
+            builder.micro_fast_path_task_id(
+                "session",
+                {"task_id": "TSK-explicit", **micro_input},
+            ),
+            "TSK-explicit",
+        )
+
+        legacy_org_id = "org-legacy-sha1-id"
+        self.assertEqual(
+            builder.resolve_organization_instance_id(
+                {"organization_instance_id": legacy_org_id},
+                {},
+                "session",
+            ),
+            legacy_org_id,
+        )
+        self.assertEqual(
+            builder.resolve_organization_instance_id(
+                {},
+                {"organization_instance_id": "org-explicit"},
+                "session",
+            ),
+            "org-explicit",
+        )
+        self.assertEqual(
+            builder.resolve_organization_instance_id(
+                {},
+                {},
+                "session",
+                canonical_default="org-configured",
+            ),
+            "org-configured",
+        )
+
     def test_git_prompt_policy_rejection_clears_stale_readiness_for_both_facades(self) -> None:
         builder = load_builder_module()
         canonical = {
@@ -8993,7 +9043,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
             report_queue = root / "report-queue"
             trusted_report_dir = report_queue / "reports/tech-qa/task-id"
             trusted_report_dir.mkdir(parents=True)
-            trusted_report = {
+            toctou_report = {
                 "report_type": "role_queue_report",
                 "from_role": "tech-qa",
                 "task_id": "task-id",
@@ -9001,13 +9051,13 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                 "summary": "trusted",
             }
             (trusted_report_dir / "report.json").write_text(
-                json.dumps(trusted_report),
+                json.dumps(toctou_report),
                 encoding="utf-8",
             )
             report_external = root / "report-external"
             report_external.mkdir()
             (report_external / "report.json").write_text(
-                json.dumps({**trusted_report, "summary": "redirected"}),
+                json.dumps({**toctou_report, "summary": "redirected"}),
                 encoding="utf-8",
             )
             report_swapped = False
@@ -9040,7 +9090,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
             invalid_report_path.write_text(
                 json.dumps(
                     {
-                        **trusted_report,
+                        **toctou_report,
                         "provider_evidence": {
                             "provider": "openai",
                             "intended_model": "gpt-5.6-luna",
@@ -9304,7 +9354,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
             "allowed_tools": ["Read"],
             "git_operations_allowed": False,
         }
-        raw_secret = "SECRET-DO-NOT-PERSIST-" + ("x" * 4096)
+        invalid_field_marker = "fixture-invalid-report-value-" + ("z" * 4096)
         message = {
             "message_id": "message-id",
             "from_role": "tech-director",
@@ -9316,13 +9366,13 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
             "payload": {"report_path": "reports/tech-qa/task-id/report.yaml"},
         }
         invalid_report = {
-            "report_version": raw_secret,
+            "report_version": invalid_field_marker,
             "report_type": "role_queue_report",
-            "from_role": raw_secret,
-            "message_id": raw_secret,
+            "from_role": invalid_field_marker,
+            "message_id": invalid_field_marker,
             "created_at": "2026-09-01T00:00:01+09:00",
             "result": "failed",
-            "status": raw_secret,
+            "status": invalid_field_marker,
             "summary": "invalid",
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -9383,7 +9433,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                 gate_metrics,
                 queue_metrics,
             ):
-                self.assertNotIn(raw_secret, persisted)
+                self.assertNotIn(invalid_field_marker, persisted)
                 self.assertLess(len(persisted.encode("utf-8")), 16 * 1024)
 
     def test_invalid_terminal_report_never_overwrites_terminal_done(self) -> None:

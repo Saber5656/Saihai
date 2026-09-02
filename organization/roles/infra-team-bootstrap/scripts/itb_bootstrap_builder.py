@@ -1240,7 +1240,7 @@ def role_agent_row_for(role_id: str, *, organization_instance_id: str = "{org_in
 
 
 def organization_id(session_id: str) -> str:
-    digest = hashlib.sha1(session_id.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12]
     return f"org-{digest}"
 
 
@@ -1633,16 +1633,16 @@ def read_json_yaml(path: Path) -> Any:
 def queue_root_for(session_dir: Path, hook_input: dict[str, Any] | None = None) -> Path:
     hook_input = hook_input or {}
     configured_value = os.environ.get("ITB_QUEUE_ROOT")
-    trusted_root = (
+    canonical_root = (
         Path(configured_value).expanduser()
         if configured_value
         else session_dir / "queue"
     )
-    if configured_value and not trusted_root.is_absolute():
+    if configured_value and not canonical_root.is_absolute():
         raise ValueError("ITB_QUEUE_ROOT must be an absolute path")
-    if trusted_root.is_symlink():
+    if canonical_root.is_symlink():
         raise ValueError("trusted queue_root must not be a symlink")
-    trusted_root = trusted_root.resolve()
+    canonical_root = canonical_root.resolve()
 
     supplied_values: list[str] = []
     for key in ("queue_root", "queueRoot"):
@@ -1662,9 +1662,9 @@ def queue_root_for(session_dir: Path, hook_input: dict[str, Any] | None = None) 
         raise ValueError("hook queue_root aliases conflict")
     if supplied_values:
         supplied_root = Path(supplied_values[0]).expanduser()
-        if supplied_root.is_symlink() or supplied_root.resolve() != trusted_root:
+        if supplied_root.is_symlink() or supplied_root.resolve() != canonical_root:
             raise ValueError("hook queue_root does not match the trusted queue root")
-    return trusted_root
+    return canonical_root
 
 
 def queue_component_errors(value: str, field_name: str) -> list[str]:
@@ -7040,7 +7040,7 @@ def micro_fast_path_task_id(session_id: str, hook_input: dict[str, Any]) -> str:
     if explicit:
         return explicit
     prompt = hook_prompt_text(hook_input)
-    digest = hashlib.sha1(f"{session_id}\n{prompt}".encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(f"{session_id}\n{prompt}".encode("utf-8")).hexdigest()[:12]
     return f"MICRO-{safe_id(session_id)}-{digest}"
 
 
@@ -21859,7 +21859,7 @@ def role_agent_step_once(*, runtime: str, state_root: Path, hook_input: dict[str
         state,
         hook_input,
         session_id,
-        trusted_default=os.environ.get("ITB_ORGANIZATION_INSTANCE_ID") or "",
+        canonical_default=os.environ.get("ITB_ORGANIZATION_INSTANCE_ID") or "",
     )
     role_id = normalize_cell(
         hook_input.get("role_id")
@@ -22278,7 +22278,7 @@ def resolve_organization_instance_id(
     hook_input: dict[str, Any],
     session_id: str,
     *,
-    trusted_default: str = "",
+    canonical_default: str = "",
 ) -> str:
     """Exact-bind organization aliases across persisted state and current input."""
     state_value, state_valid, state_present = exact_string_alias_from_sources(
@@ -22299,8 +22299,8 @@ def resolve_organization_instance_id(
         return state_value
     if hook_present:
         return hook_value
-    if trusted_default:
-        return trusted_default
+    if canonical_default:
+        return canonical_default
     return organization_id(session_id)
 
 
