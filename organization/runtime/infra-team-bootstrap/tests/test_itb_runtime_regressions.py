@@ -7415,20 +7415,23 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
             clock["now"] = 0.6
             raise FileNotFoundError(path)
 
-        with mock.patch.object(
-            builder.time,
-            "monotonic",
-            side_effect=lambda: clock["now"],
-        ), mock.patch.object(builder.time, "sleep"), mock.patch.object(
-            builder.os,
-            "scandir",
-            side_effect=disappearing_root,
-        ):
-            output = builder.queue_watch_wait_for_event(
-                queue_root=Path("/tmp/queue"),
-                timeout_seconds=0.5,
-                event_driven=True,
-            )
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_root = Path(tmp) / "queue"
+            queue_root.mkdir()
+            with mock.patch.object(
+                builder.time,
+                "monotonic",
+                side_effect=lambda: clock["now"],
+            ), mock.patch.object(builder.time, "sleep"), mock.patch.object(
+                builder.os,
+                "scandir",
+                side_effect=disappearing_root,
+            ):
+                output = builder.queue_watch_wait_for_event(
+                    queue_root=queue_root,
+                    timeout_seconds=0.5,
+                    event_driven=True,
+                )
 
         self.assertEqual(output["result"], "timeout")
         self.assertEqual(output["wait_result"], "timeout")

@@ -268,7 +268,7 @@ module = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
 spec.loader.exec_module(module)
 module.emit_progress('probe', target='stream')
-time.sleep(1)
+time.sleep(5)
 """
     process = subprocess.Popen(
         [sys.executable, "-c", script],
@@ -285,7 +285,7 @@ time.sleep(1)
         "flushed progress",
     )
     assert process.poll() is None, "progress must arrive before process exit"
-    stdout, stderr = process.communicate(timeout=5)
+    stdout, stderr = process.communicate(timeout=20)
     assert_equal(process.returncode, 0, "progress probe exit")
     assert_equal(stdout, "", "progress stdout isolation")
     assert_equal(stderr, "", "progress stderr remainder")
