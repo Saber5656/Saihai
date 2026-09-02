@@ -7175,34 +7175,43 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
 
     def test_queue_snapshot_returns_incomplete_on_iteration_or_metadata_error(self) -> None:
         builder = load_builder_module()
-        queue_root = Path("/tmp/queue")
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_root = Path(tmp) / "queue"
+            queue_root.mkdir()
 
-        class FailingEntry:
-            path = "/tmp/queue/failing"
+            class FailingEntry:
+                path = str(queue_root / "failing")
 
-            def stat(self, *, follow_symlinks: bool = True):
-                raise OSError("metadata failed")
+                def stat(self, *, follow_symlinks: bool = True):
+                    raise OSError("metadata failed")
 
-        with self.subTest(error="scan-open"), mock.patch.object(
-            builder.os,
-            "scandir",
-            side_effect=OSError("scan failed"),
-        ):
-            self.assertIsNone(builder.queue_watch_snapshot(queue_root))
+            with self.subTest(error="scan-open"), mock.patch.object(
+                builder.os,
+                "scandir",
+                side_effect=OSError("scan failed"),
+            ) as scandir_mock:
+                self.assertIsNone(builder.queue_watch_snapshot(queue_root))
+                scandir_mock.assert_called_once()
 
-        with self.subTest(error="iteration"), mock.patch.object(
-            builder.os,
-            "scandir",
-            return_value=ScandirStub(error=OSError("iteration failed")),
-        ):
-            self.assertIsNone(builder.queue_watch_snapshot(queue_root))
+            iteration_scanner = ScandirStub(error=OSError("iteration failed"))
+            with self.subTest(error="iteration"), mock.patch.object(
+                builder.os,
+                "scandir",
+                return_value=iteration_scanner,
+            ) as scandir_mock:
+                self.assertIsNone(builder.queue_watch_snapshot(queue_root))
+                scandir_mock.assert_called_once()
+                self.assertTrue(iteration_scanner.closed)
 
-        with self.subTest(error="metadata"), mock.patch.object(
-            builder.os,
-            "scandir",
-            return_value=ScandirStub([FailingEntry()]),
-        ):
-            self.assertIsNone(builder.queue_watch_snapshot(queue_root))
+            metadata_scanner = ScandirStub([FailingEntry()])
+            with self.subTest(error="metadata"), mock.patch.object(
+                builder.os,
+                "scandir",
+                return_value=metadata_scanner,
+            ) as scandir_mock:
+                self.assertIsNone(builder.queue_watch_snapshot(queue_root))
+                scandir_mock.assert_called_once()
+                self.assertTrue(metadata_scanner.closed)
 
     def test_queue_snapshot_skips_entries_that_vanish_during_scan(self) -> None:
         builder = load_builder_module()
@@ -7242,16 +7251,20 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
 
     def test_queue_snapshot_returns_incomplete_when_missing_root_scan_exhausts_deadline(self) -> None:
         builder = load_builder_module()
-        with mock.patch.object(
-            builder.time,
-            "monotonic",
-            side_effect=[0.0, 0.6],
-        ), mock.patch.object(
-            builder.os,
-            "scandir",
-            side_effect=FileNotFoundError("queue disappeared"),
-        ):
-            snapshot = builder.queue_watch_snapshot(Path("/tmp/queue"), deadline=0.5)
+        with tempfile.TemporaryDirectory() as tmp:
+            queue_root = Path(tmp) / "queue"
+            queue_root.mkdir()
+            with mock.patch.object(
+                builder.time,
+                "monotonic",
+                side_effect=[0.0, 0.6],
+            ), mock.patch.object(
+                builder.os,
+                "scandir",
+                side_effect=FileNotFoundError("queue disappeared"),
+            ) as scandir_mock:
+                snapshot = builder.queue_watch_snapshot(queue_root, deadline=0.5)
+                scandir_mock.assert_called_once()
 
         self.assertIsNone(snapshot)
 
