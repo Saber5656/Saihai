@@ -1,0 +1,252 @@
+{
+  "profile_version": "1",
+  "profile_id": "example-web",
+  "repository": "example/web",
+  "project_type": "web",
+  "runtimes": [
+    {
+      "name": "python",
+      "version": "3.11.9",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ],
+  "dependencies": {
+    "mode": "locked",
+    "reason": "Fixture dependency lock.",
+    "lockfiles": [
+      {
+        "path": "requirements.lock",
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    ]
+  },
+  "layers": {
+    "static": {
+      "required": true,
+      "reason": "Required representative coverage."
+    },
+    "unit": {
+      "required": true,
+      "reason": "Required representative coverage."
+    },
+    "feature": {
+      "required": true,
+      "reason": "Required representative coverage."
+    },
+    "e2e": {
+      "required": true,
+      "reason": "Required representative coverage."
+    },
+    "device": {
+      "required": false,
+      "reason": "Not applicable to this representative project; adoption must confirm."
+    }
+  },
+  "jobs": [
+    {
+      "id": "e2e",
+      "check_name": "delivery / e2e",
+      "layer": "e2e",
+      "required": true,
+      "runtime": "python",
+      "trust": "untrusted_pr",
+      "events": [
+        "pull_request",
+        "push",
+        "merge_group"
+      ],
+      "branches": [],
+      "source": "untrusted_head",
+      "permissions": {
+        "contents": "read"
+      },
+      "credentials": [],
+      "environment": null,
+      "actions": [
+        {
+          "repository": "actions/checkout",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "timeout_minutes": 10,
+      "concurrency": {
+        "group": "delivery-{repository}-{job}-{trust}-{ref}",
+        "cancel_in_progress": true
+      },
+      "cache": {
+        "enabled": false,
+        "namespace": "untrusted_pr",
+        "key": "deps-{trust}-{runtime_digest}-{lock_digest}",
+        "restore_keys": []
+      },
+      "evidence_retention_days": 14
+    },
+    {
+      "id": "feature",
+      "check_name": "delivery / feature",
+      "layer": "feature",
+      "required": true,
+      "runtime": "python",
+      "trust": "untrusted_pr",
+      "events": [
+        "pull_request",
+        "push",
+        "merge_group"
+      ],
+      "branches": [],
+      "source": "untrusted_head",
+      "permissions": {
+        "contents": "read"
+      },
+      "credentials": [],
+      "environment": null,
+      "actions": [
+        {
+          "repository": "actions/checkout",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "timeout_minutes": 10,
+      "concurrency": {
+        "group": "delivery-{repository}-{job}-{trust}-{ref}",
+        "cancel_in_progress": true
+      },
+      "cache": {
+        "enabled": false,
+        "namespace": "untrusted_pr",
+        "key": "deps-{trust}-{runtime_digest}-{lock_digest}",
+        "restore_keys": []
+      },
+      "evidence_retention_days": 14
+    },
+    {
+      "id": "static",
+      "check_name": "delivery / static",
+      "layer": "static",
+      "required": true,
+      "runtime": "python",
+      "trust": "untrusted_pr",
+      "events": [
+        "pull_request",
+        "push",
+        "merge_group"
+      ],
+      "branches": [],
+      "source": "untrusted_head",
+      "permissions": {
+        "contents": "read"
+      },
+      "credentials": [],
+      "environment": null,
+      "actions": [
+        {
+          "repository": "actions/checkout",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "timeout_minutes": 10,
+      "concurrency": {
+        "group": "delivery-{repository}-{job}-{trust}-{ref}",
+        "cancel_in_progress": true
+      },
+      "cache": {
+        "enabled": false,
+        "namespace": "untrusted_pr",
+        "key": "deps-{trust}-{runtime_digest}-{lock_digest}",
+        "restore_keys": []
+      },
+      "evidence_retention_days": 14
+    },
+    {
+      "id": "unit",
+      "check_name": "delivery / unit",
+      "layer": "unit",
+      "required": true,
+      "runtime": "python",
+      "trust": "untrusted_pr",
+      "events": [
+        "pull_request",
+        "push",
+        "merge_group"
+      ],
+      "branches": [],
+      "source": "untrusted_head",
+      "permissions": {
+        "contents": "read"
+      },
+      "credentials": [],
+      "environment": null,
+      "actions": [
+        {
+          "repository": "actions/checkout",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "timeout_minutes": 10,
+      "concurrency": {
+        "group": "delivery-{repository}-{job}-{trust}-{ref}",
+        "cancel_in_progress": true
+      },
+      "cache": {
+        "enabled": false,
+        "namespace": "untrusted_pr",
+        "key": "deps-{trust}-{runtime_digest}-{lock_digest}",
+        "restore_keys": []
+      },
+      "evidence_retention_days": 14
+    },
+    {
+      "id": "publish",
+      "check_name": "delivery / publish",
+      "layer": "publish",
+      "required": false,
+      "runtime": "python",
+      "trust": "privileged_publish",
+      "events": [
+        "workflow_dispatch"
+      ],
+      "branches": [
+        "main"
+      ],
+      "source": "verified_artifact",
+      "permissions": {
+        "contents": "write"
+      },
+      "credentials": [
+        "release-token"
+      ],
+      "environment": "release",
+      "actions": [
+        {
+          "repository": "actions/checkout",
+          "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "timeout_minutes": 10,
+      "concurrency": {
+        "group": "delivery-{repository}-{job}-{trust}-{ref}",
+        "cancel_in_progress": false
+      },
+      "cache": {
+        "enabled": false,
+        "namespace": "privileged_publish",
+        "key": "deps-{trust}-{runtime_digest}-{lock_digest}",
+        "restore_keys": []
+      },
+      "evidence_retention_days": 14
+    }
+  ],
+  "release": {
+    "owner": "example/release-team",
+    "targets": [
+      {
+        "name": "package",
+        "job": "publish"
+      }
+    ],
+    "rollback_prerequisites": [
+      "Retain and verify the previous immutable artifact.",
+      "Confirm the release owner can restore that artifact."
+    ]
+  }
+}
