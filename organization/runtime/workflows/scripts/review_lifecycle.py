@@ -85,7 +85,7 @@ def _finding(value: Any) -> bool:
 def validate_record(state: Any, *, run: dict[str, Any]) -> list[str]:
     """Reject corrupt durable state on both load and store, without side effects."""
     try:
-        _require(isinstance(state, dict) and set(state) == STATE_FIELDS, 'fields')
+        _require(isinstance(state, dict) and set(state) - {'intakes'} == STATE_FIELDS, 'fields')
         _require(state['version'] == '1', 'version')
         _require(state['run_id'] == run.get('run_id') and state['task_id'] == run.get('task_id'), 'identity')
         _require(_owner(state['owner']) == state['owner'], 'owner')
@@ -127,6 +127,8 @@ def validate_record(state: Any, *, run: dict[str, Any]) -> list[str]:
             _require(_snapshot(batch['snapshot']) and batch['status'] in {'reserved', 'failed', 'produced'}, 'batch_status')
             _require(_snapshot(batch['result_snapshot']) if batch['status'] == 'produced'
                      else batch['result_snapshot'] is None, 'batch_result')
+        if 'intakes' in state:
+            _validate_intakes(state)
         reserved = sum(b['status'] == 'reserved' for b in batches.values())
         _require(reserved <= 1 and (reserved == 1 if state['phase'] == 'repair' else
                                   reserved == 0 if state['phase'] != 'stopped' else True), 'active_batch')
@@ -287,3 +289,216 @@ def apply_event(state_root: Path, run_id: str, *, principal: dict[str, Any], eve
         if state != before:
             run_store.store_run(state_root, run, expected_current_state=run['run_state'])
         return copy.deepcopy(state)
+
+
+# U2 candidates are deliberately inert. Authenticated publisher/observer
+# receipts and the effective policy must be integrated separately in U3.
+INTAKE_FIELDS = {'repository', 'pr', 'bot', 'policy_version', 'trigger_mode', 'original_snapshot',
+                 'request_status', 'request_candidate', 'first_response_candidate',
+                 'later_response_candidates', 'authentication_status', 'policy_status'}
+CANDIDATE_IDENTITY = {'repository', 'pr', 'bot', 'policy_version', 'snapshot', 'request_id'}
+REQUEST_FIELDS = CANDIDATE_IDENTITY | {'trigger_mode'}
+RESPONSE_FIELDS = CANDIDATE_IDENTITY | {'response_id', 'outcome', 'findings'}
+CANDIDATE_FINDING_FIELDS = {'rule_id', 'path', 'anchor', 'severity', 'summary'}
+TRIGGER_MODES = {'manual', 'automatic_initial'}
+
+
+def intake_key(repository: str, pr: int, bot: str, policy_version: str) -> str:
+    _require(all(_text(v) for v in (repository, bot, policy_version))
+             and _integer(pr, 1, 2**53 - 1), 'invalid_intake_identity')
+    _require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository) is not None
+             and all(part not in {'.', '..'} for part in repository.split('/'))
+             and re.fullmatch(r'[A-Za-z0-9_.-]+(?:\[bot\])?', bot) is not None, 'invalid_intake_identity')
+    return _digest(dict(repository=repository.casefold(), pr=pr, bot=bot.casefold(), policy_version=policy_version))
+
+
+def _candidate_matches(candidate: Any, intake: dict[str, Any], *, response: bool, later: bool = False) -> bool:
+    if not isinstance(candidate, dict) or set(candidate) != (RESPONSE_FIELDS if response else REQUEST_FIELDS):
+        return False
+    if not (_integer(candidate['pr'], 1, 2**53 - 1) and _text(candidate['request_id'])
+            and _snapshot(candidate['snapshot'])):
+        return False
+    if not all(candidate[k] == intake[k] for k in ('repository', 'pr', 'bot', 'policy_version')):
+        return False
+    original = intake['original_snapshot']
+    snapshot = candidate['snapshot']
+    if not all(snapshot[k] == original[k] for k in ('repository', 'base')):
+        return False
+    if not later and snapshot != original:
+        return False
+    if not response:
+        return candidate['trigger_mode'] == intake['trigger_mode']
+    request = intake['request_candidate']
+    if not request or candidate['request_id'] != request['request_id'] or not _text(candidate['response_id']):
+        return False
+    findings = candidate['findings']
+    if not isinstance(findings, list) or len(findings) > 256:
+        return False
+    if candidate['outcome'] not in ('no_findings', 'findings'):
+        return False
+    if (candidate['outcome'] == 'no_findings') != (len(findings) == 0):
+        return False
+    return all(isinstance(row, dict) and set(row) == CANDIDATE_FINDING_FIELDS
+               and all(_text(row[k]) for k in ('rule_id', 'anchor', 'summary'))
+               and _relative(row['path']) and isinstance(row['severity'], str)
+               and row['severity'] in SEVERITIES for row in findings)
+
+
+def _response_identity(candidate: dict[str, Any]) -> str:
+    return _digest({k: v for k, v in candidate.items() if k != 'response_id'})
+
+
+def _validate_intakes(state: dict[str, Any]) -> None:
+    intakes = state['intakes']
+    _require(isinstance(intakes, dict) and len(intakes) <= 16, 'intakes')
+    for key, intake in intakes.items():
+        _require(isinstance(intake, dict) and set(intake) == INTAKE_FIELDS, 'intake_fields')
+        _require(key == intake_key(*(intake[k] for k in ('repository', 'pr', 'bot', 'policy_version'))), 'intake_key')
+        _require(_snapshot(intake['original_snapshot'])
+                 and all(intake['original_snapshot'][k] == state['original_snapshot'][k]
+                         for k in ('repository', 'base')), 'intake_snapshot')
+        _require(intake['repository'] == intake['original_snapshot']['repository'], 'intake_repository')
+        _require(isinstance(intake['trigger_mode'], str) and intake['trigger_mode'] in TRIGGER_MODES, 'trigger_mode')
+        _require(intake['authentication_status'] == 'integration_pending'
+                 and intake['policy_status'] == 'inactive', 'intake_authority_forbidden')
+        status = intake['request_status']
+        _require(status in ('planned', 'unknown', 'observed'), 'request_status')
+        _require(_candidate_matches(intake['request_candidate'], intake, response=False) if status == 'observed'
+                 else intake['request_candidate'] is None, 'request_candidate')
+        first = intake['first_response_candidate']
+        _require(first is None or status == 'observed'
+                 and _candidate_matches(first, intake, response=True), 'first_response_candidate')
+        later = intake['later_response_candidates']
+        _require(isinstance(later, list) and len(later) <= 32 and (first is not None or not later), 'later_candidates')
+        _require(all(_candidate_matches(row, intake, response=True, later=True) for row in later), 'later_candidate')
+        identities = [_response_identity(row) for row in later]
+        _require(len(set(identities)) == len(identities)
+                 and (first is None or _response_identity(first) not in identities), 'duplicate_response_candidate')
+
+
+def _existing_intake_owner(state_root: Path, key: str) -> str | None:
+    """Complete private run scan under the caller's host lock; never skip errors.
+
+    Do not use load_run here: its corrupt-JSON quarantine is useful for normal
+    loading but must not remove a potential owner from the next lookup.
+    Quarantine/error records themselves make ownership completeness unknown.
+    """
+    paths = run_store.list_private_artifacts(state_root / 'runs')
+    _require(len(paths) <= 10000, 'intake_owner_lookup_incomplete')
+    owner = None
+    for path in paths:
+        _require(path.suffix == '.json' and not run_store.RESERVED_ARTIFACT_SUFFIX_RE.search(path.stem),
+                 'intake_owner_lookup_incomplete')
+        run = run_store.read_json(path)
+        _require(not run_store.validate_run_record(run) and run.get('run_id') == path.stem,
+                 'intake_owner_lookup_incomplete')
+        if key in run.get('review_lifecycle', {}).get('intakes', {}):
+            _require(owner is None, 'duplicate_intake_owner_records')
+            owner = run['run_id']
+    return owner
+
+
+def prepare_intake(state_root: Path, run_id: str, *, principal: dict[str, Any], pr: int,
+                   bot: str, policy_version: str, trigger_mode: str) -> dict[str, Any]:
+    """Record a unique inactive intake plan; returns no outbound execution grant."""
+    owner = _owner(principal)
+    _require(isinstance(trigger_mode, str) and trigger_mode in TRIGGER_MODES, 'invalid_trigger_mode')
+    with run_lock.hold_global_lock(state_root, operation='review_intake_prepare', run_id=run_id, principal=owner):
+        run = run_store.load_run(state_root, run_id)
+        state = run.get('review_lifecycle')
+        _require(state is not None, 'lifecycle_not_initialized')
+        _live(run, owner, state)
+        key = intake_key(state['snapshot']['repository'], pr, bot, policy_version)
+        existing_owner = _existing_intake_owner(state_root, key)
+        _require(existing_owner in (None, run_id), 'intake_owned_by_other_run')
+        intakes = state.setdefault('intakes', {})
+        if key in intakes:
+            _require(intakes[key]['trigger_mode'] == trigger_mode, 'trigger_mode_conflict')
+            return copy.deepcopy(intakes[key])
+        _require(len(intakes) < 16, 'intake_capacity_exhausted')
+        intake = dict(repository=state['snapshot']['repository'], pr=pr, bot=bot,
+                      policy_version=policy_version, trigger_mode=trigger_mode,
+                      original_snapshot=copy.deepcopy(state['snapshot']), request_status='planned',
+                      request_candidate=None, first_response_candidate=None, later_response_candidates=[],
+                      authentication_status='integration_pending', policy_status='inactive')
+        intakes[key] = intake
+        run_store.store_run(state_root, run, expected_current_state=run['run_state'])
+        return copy.deepcopy(intake)
+
+
+def record_intake_candidate(state_root: Path, run_id: str, *, principal: dict[str, Any],
+                            event: dict[str, Any]) -> dict[str, Any]:
+    """Store typed observations only. No authentication or acceptance is inferred."""
+    owner = _owner(principal)
+    _require(isinstance(event, dict), 'invalid_intake_event')
+    kind = event.get('kind')
+    _require(kind in ('delivery_unknown', 'request_observed', 'response_observed', 'later_response_observed'),
+             'unsupported_intake_event')
+    fields = {'kind', 'intake_key'} | (set() if kind == 'delivery_unknown' else {'candidate'})
+    _require(set(event) == fields and isinstance(event['intake_key'], str), 'invalid_intake_event')
+    with run_lock.hold_global_lock(state_root, operation='review_intake_candidate', run_id=run_id, principal=owner):
+        run = run_store.load_run(state_root, run_id)
+        state = run.get('review_lifecycle')
+        _require(state is not None, 'lifecycle_not_initialized')
+        _live(run, owner, state)
+        key = event['intake_key']
+        _require(_existing_intake_owner(state_root, key) == run_id, 'intake_owner_unknown')
+        intake = state.get('intakes', {}).get(key)
+        _require(intake is not None, 'intake_not_initialized')
+        before = copy.deepcopy(intake)
+        if kind == 'delivery_unknown':
+            if intake['request_status'] == 'planned':
+                intake['request_status'] = 'unknown'
+        elif kind == 'request_observed':
+            candidate = event['candidate']
+            _require(_candidate_matches(candidate, intake, response=False), 'invalid_request_candidate')
+            _require(intake['request_candidate'] is None or intake['request_candidate'] == candidate,
+                     'request_candidate_conflict')
+            intake['request_candidate'] = copy.deepcopy(candidate)
+            intake['request_status'] = 'observed'
+        else:
+            candidate = event['candidate']
+            later = kind == 'later_response_observed'
+            _require(intake['request_status'] == 'observed'
+                     and _candidate_matches(candidate, intake, response=True, later=later), 'invalid_response_candidate')
+            first = intake['first_response_candidate']
+            if not later:
+                _require(first is None or _response_identity(first) == _response_identity(candidate), 'baseline_immutable')
+                if first is None:
+                    intake['first_response_candidate'] = copy.deepcopy(candidate)
+            else:
+                _require(first is not None, 'baseline_missing')
+                candidates = intake['later_response_candidates']
+                seen = {_response_identity(row) for row in [first, *candidates]}
+                if _response_identity(candidate) not in seen:
+                    _require(len(candidates) < 32, 'later_candidate_capacity_exhausted')
+                    candidates.append(copy.deepcopy(candidate))
+        if before != intake:
+            run_store.store_run(state_root, run, expected_current_state=run['run_state'])
+        return copy.deepcopy(intake)
+
+
+def validate_intake_policy_plan(plan: Any) -> list[str]:
+    """Validate a prepared example, not an effective policy or settings receipt."""
+    fields = {'version', 'status', 'repositories', 'producer_contract', 'settings_readback',
+              'prerequisites', 'bots', 'preserved_gates'}
+    try:
+        _require(isinstance(plan, dict) and set(plan) == fields, 'policy_plan_fields')
+        _require(plan['version'] == 'review-phase-v1' and plan['status'] == 'inactive'
+                 and plan['producer_contract'] == 'integration_pending' and plan['settings_readback'] == 'pending',
+                 'inactive_plan_required')
+        _require(isinstance(plan['repositories'], list)
+                 and sorted(plan['repositories']) == ['Saber5656/Saihai', 'Saber5656/dotfiles', 'Saber5656/skills'], 'repositories')
+        _require(plan['prerequisites'] == ['dotfiles#11', 'skills#41', 'Saihai#128', 'Saihai#141'], 'prerequisites')
+        _require(plan['preserved_gates'] == 'current_effective_policy_until_verified_transition', 'preserved_gates')
+        bots = plan['bots']
+        _require(isinstance(bots, list) and 1 <= len(bots) <= 16, 'bots')
+        for bot in bots:
+            _require(isinstance(bot, dict) and set(bot) == {'bot', 'trigger_mode', 'automatic_on_open', 'automatic_on_push'}, 'bot_plan')
+            _require(_text(bot['bot']) and bot['trigger_mode'] in TRIGGER_MODES
+                     and type(bot['automatic_on_open']) is bool and bot['automatic_on_push'] is False, 'bot_plan_controls')
+            _require(bot['automatic_on_open'] == (bot['trigger_mode'] == 'automatic_initial'), 'duplicate_initial_trigger')
+        _require(len({bot['bot'] for bot in bots}) == len(bots), 'duplicate_bot_plan')
+    except (ReviewLifecycleError, TypeError, KeyError, ValueError) as exc:
+        return [f'intake_policy_plan_invalid:{exc}']
+    return []

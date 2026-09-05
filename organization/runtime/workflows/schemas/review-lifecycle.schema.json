@@ -306,6 +306,16 @@
     },
     "integration_status": {
       "const": "integration_pending"
+    },
+    "intakes": {
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": {
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/intake"
+      }
     }
   },
   "required": [
@@ -329,5 +339,308 @@
     "stop_reason",
     "integration_status"
   ],
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "requestCandidate": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "pr": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "bot": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "snapshot": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "base": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "head": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "repository",
+            "base",
+            "head"
+          ],
+          "additionalProperties": false
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "trigger_mode": {
+          "enum": [
+            "manual",
+            "automatic_initial"
+          ]
+        }
+      },
+      "required": [
+        "repository",
+        "pr",
+        "bot",
+        "policy_version",
+        "snapshot",
+        "request_id",
+        "trigger_mode"
+      ],
+      "additionalProperties": false
+    },
+    "responseCandidate": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "pr": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "bot": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "snapshot": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "base": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "head": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "repository",
+            "base",
+            "head"
+          ],
+          "additionalProperties": false
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "response_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "outcome": {
+          "enum": [
+            "no_findings",
+            "findings"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"
+              },
+              "anchor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "severity": {
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              }
+            },
+            "required": [
+              "rule_id",
+              "path",
+              "anchor",
+              "severity",
+              "summary"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "repository",
+        "pr",
+        "bot",
+        "policy_version",
+        "snapshot",
+        "request_id",
+        "response_id",
+        "outcome",
+        "findings"
+      ],
+      "additionalProperties": false
+    },
+    "intake": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "pr": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "bot": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "trigger_mode": {
+          "enum": [
+            "manual",
+            "automatic_initial"
+          ]
+        },
+        "original_snapshot": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "base": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "head": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "repository",
+            "base",
+            "head"
+          ],
+          "additionalProperties": false
+        },
+        "request_status": {
+          "enum": [
+            "planned",
+            "unknown",
+            "observed"
+          ]
+        },
+        "request_candidate": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/requestCandidate"
+            }
+          ]
+        },
+        "first_response_candidate": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/responseCandidate"
+            }
+          ]
+        },
+        "later_response_candidates": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/responseCandidate"
+          }
+        },
+        "authentication_status": {
+          "const": "integration_pending"
+        },
+        "policy_status": {
+          "const": "inactive"
+        }
+      },
+      "required": [
+        "repository",
+        "pr",
+        "bot",
+        "policy_version",
+        "trigger_mode",
+        "original_snapshot",
+        "request_status",
+        "request_candidate",
+        "first_response_candidate",
+        "later_response_candidates",
+        "authentication_status",
+        "policy_status"
+      ],
+      "additionalProperties": false
+    }
+  }
 }

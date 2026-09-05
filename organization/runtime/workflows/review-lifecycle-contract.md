@@ -60,8 +60,8 @@ as data and never read or executed by this module.
 
 ## Subsequent units and effective policy
 
-U2 will bind logical Bot intake to PR/Bot/policy identity and preserve its original
-snapshot. U3 must connect authenticated report/evidence validation to this API
+U2 binds inactive Bot intake candidates to PR/Bot/policy identity and preserves
+the original snapshot, as described below. U3 must connect authenticated report/evidence validation to this API
 and implement validated obligation discharge and subsequent publication stages.
 There is intentionally no `validation_passed` event accepting a caller boolean.
 Current `report_gate` remains single-step and templates are unchanged in U1.
@@ -73,3 +73,81 @@ transition through dotfiles#11, skills#41, Saihai#128 and #141 is verified. Bot
 configuration changes, provider calls, publication, merge and post-merge gates
 are outside U1. A migration must preserve the same durable owner/budget and must
 not turn old Bot evidence into current-snapshot acceptance.
+
+## U2: inactive logical Bot intake candidates
+
+`prepare_intake` and `record_intake_candidate` add an optional `intakes` ledger
+without changing existing U1 required fields or repair counters. A logical key
+uses repository, PR number, configured Bot and policy version. Repository/Bot
+case is normalized for that key; head, delivery ID and run ID are excluded. The
+host must resolve the configured Bot identity consistently; this module does
+not infer aliases or authenticate an actor from a display name. The first
+preparation freezes the then-current snapshot. Later repair heads do not reset it.
+
+Under the same host lock, preparation scans the existing private run records for
+that key. Another owning run, including an expired or terminal run, cannot be
+silently replaced. Invalid, unreadable, quarantined, diagnostic, or unexpected
+artifacts make lookup incomplete and prevent preparation/observation. Scans use
+private read helpers without quarantining a possible owner out of the next scan.
+No independent index/store or garbage collection is added. The scan is capped
+at 10,000 artifacts; oversized state stops instead of guessing that no owner
+exists. Each run holds at most 16 logical intakes and each baseline at most 32
+later candidates. Capacity errors preserve the prior saved state.
+
+| Internal event | Stored result | Deliberate limit |
+| --- | --- | --- |
+| `prepare_intake` | One inactive logical plan and original snapshot | Not a request reservation, send instruction or permission |
+| `delivery_unknown` | Unknown delivery retained across resume | Cannot reset to planned or request another run |
+| `request_observed` | Immutable typed request candidate | Reconciliation remains unauthenticated until U3 |
+| `response_observed` | Immutable first response candidate | Neither no-findings nor findings is an acceptance proof |
+| `later_response_observed` | Separate bounded later candidates | Must be routed to genuine-blocker triage by U3, not dropped or treated as a retrigger |
+
+Candidate mappings have exact fields. They carry repository/PR/Bot/policy,
+request identity and snapshot; responses additionally carry response identity,
+no-findings/findings outcome and bounded typed findings. Arbitrary reactions,
+silence, error, timeout, wrong identity and stale initial snapshot cannot be
+stored as a qualifying response candidate. Extra `verified` or permission flags
+are rejected. Candidate shape validation is not producer authentication.
+Original candidate IDs are retained; semantically identical response delivery
+with a different response ID is a no-op. Conflicting first candidates cannot
+overwrite the baseline. Later snapshots must retain its repository/base.
+
+The APIs never execute outbound requests, move U1 phases, resolve findings or
+reset its budget. `authentication_status` stays `integration_pending` and
+`policy_status` stays `inactive`; no event can change those constants. A real
+GitHub publisher/observer receipt producer is not yet connected. Consequently,
+these candidates cannot satisfy a required Bot gate or prove successful delivery.
+
+### Prepared phase-policy example
+
+`profiles/review-phase-policy-v1.example.json` describes the desired trigger
+plan only. The three repository names are scoped targets for a separately
+approved settings executor; inclusion is not authority to mutate them. The Bot
+names are configured logical labels, not proof of authenticated GitHub actors.
+Manual initial mode excludes automatic-on-open and all modes exclude automatic
+push retriggers. Automatic-initial mode observes the initial automatic request
+instead of also asking for a manual one. The plan validator rejects conflicting
+modes and only accepts inactive/pending status.
+
+These controls are abstract desired behavior, not asserted provider-specific
+setting names or observed effective settings. Current CodeRabbit controls remain
+unknown, and a Codex inheritance read-back alone does not establish adoption.
+The real executor must bind supported controls, preimage, authority, verification,
+read-back and recovery to the scoped version before the transition can activate.
+The example retains the current effective gates and lists dotfiles#11, skills#41,
+Saihai#128 and #141 prerequisites. Nothing reads this example as active runtime
+policy. Unsupported controls or an absent authenticated producer stay pending.
+
+### U3 handoff obligations
+
+U3 must authenticate request/result receipts through the existing host boundary,
+validate the effective policy version and bind current-snapshot quality evidence
+before accepting anything. It must triage later unsolicited genuine blockers
+under the same owner/budget and distinguish initial Bot evidence from current
+repair acceptance. This unit's offline fixtures prove none of those runtime facts.
+
+Carry review note `S136-U1-NOTE-01`: malformed principal input can raise an
+internal exception. The authenticated consumer must convert malformed input and
+producer/API errors into a bounded blocked/stop result with no saved mutation or
+execution grant; it must never synthesize an authenticated principal. This is a
+required U3 connection contract, not a reason to relax current gates in U2.
