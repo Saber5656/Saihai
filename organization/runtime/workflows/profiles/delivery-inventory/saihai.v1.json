@@ -3,7 +3,7 @@
   "repository": "Saber5656/Saihai",
   "source_digests": {
     ".github/workflows/codeql.yml": "e338b79ae6d2f5f23db254a2b385c0bc7c575142f2849c2f8c78fd8e20b759fc",
-    ".github/workflows/validate.yml": "1e675691f35af2767e8a6e4996a788a7d80a122fb7aa070743ea9306b63b4364"
+    ".github/workflows/validate.yml": "a891467d2461ee91cd3bac7bf01eabfd0ca3cff1535b11638283d6fb73ac634f"
   },
   "jobs": [
     {
@@ -161,7 +161,16 @@
                 "main"
               ]
             },
-            "pull_request": null
+            "pull_request": null,
+            "merge_group": {
+              "types": [
+                "checks_requested"
+              ]
+            }
+          },
+          "concurrency": {
+            "group": "${{ github.repository }}-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}",
+            "cancel-in-progress": false
           },
           "permissions": {
             "contents": "read"
@@ -181,11 +190,7 @@
               }
             },
             {
-              "name": "Install locked validation dependency in isolation",
-              "run": "python3 -m venv \"$RUNNER_TEMP/delivery-venv\"\n\"$RUNNER_TEMP/delivery-venv/bin/python3\" -m pip install --require-hashes --only-binary=:all: --no-deps -r .github/requirements-delivery.lock\n"
-            },
-            {
-              "name": "Run validation suite",
+              "name": "Run validation with verified native toolchain",
               "env": {
                 "SAIHAI_ROOT": "${{ github.workspace }}",
                 "AGENTS_VAULT_ROOT": "${{ runner.temp }}/agents-vault",
@@ -197,7 +202,18 @@
                 "DEV_WORKTREES_ROOT": "${{ runner.temp }}/worktrees",
                 "TASK_WORKTREE_ROOT": "${{ runner.temp }}/worktrees"
               },
-              "run": "mkdir -p \"$AGENTS_VAULT_ROOT\" \"$USER_VAULT_ROOT\" \"$DEV_WORKTREES_ROOT\"\n\"$RUNNER_TEMP/delivery-venv/bin/python3\" scripts/validate_all.py\n"
+              "run": "mkdir -p \"$AGENTS_VAULT_ROOT\" \"$USER_VAULT_ROOT\" \"$DEV_WORKTREES_ROOT\"\npython3 scripts/verify_delivery_toolchain.py --run full --output \"$RUNNER_TEMP/delivery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\"\n"
+            },
+            {
+              "name": "Retain bounded validation evidence",
+              "if": "always()",
+              "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+              "with": {
+                "name": "delivery-${{ github.run_id }}-${{ github.run_attempt }}",
+                "path": "${{ runner.temp }}/delivery-${{ github.run_id }}-${{ github.run_attempt }}/receipt.json\n${{ runner.temp }}/delivery-${{ github.run_id }}-${{ github.run_attempt }}/validation.json\n",
+                "retention-days": 14,
+                "if-no-files-found": "error"
+              }
             }
           ]
         }
@@ -205,6 +221,7 @@
     }
   ],
   "lock_digests": {
-    ".github/requirements-delivery.lock": "93a7e075703f062c614f47f65cc290fef319ec03ecc3bcba97685170d883151c"
+    ".github/requirements-delivery.lock": "93a7e075703f062c614f47f65cc290fef319ec03ecc3bcba97685170d883151c",
+    ".github/delivery-toolchain.lock.json": "805c029f4cd1939d82f511140b4d158a77075deb0da8285632bf1048a76769e8"
   }
 }

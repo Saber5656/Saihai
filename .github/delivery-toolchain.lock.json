@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "python": {
+    "Darwin-arm64": {
+      "version": "3.11.16",
+      "machine": "arm64",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16%2B20260901-aarch64-apple-darwin-install_only.tar.gz",
+      "sha256": "50424fa409e8ae84b82a3052522f64695b47dff2158b70bb7358e0ebd6c085c9",
+      "size": 27087450,
+      "interpreter": "python/bin/python3.11"
+    },
+    "Linux-x86_64": {
+      "version": "3.11.16",
+      "machine": "x86_64",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16%2B20260901-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "faa0758583a63f14c5eee516af82738403b59c13edda6fc0a21d953febd89eed",
+      "size": 48910466,
+      "interpreter": "python/bin/python3.11"
+    }
+  },
+  "dependency_lock": {
+    "path": ".github/requirements-delivery.lock",
+    "sha256": "93a7e075703f062c614f47f65cc290fef319ec03ecc3bcba97685170d883151c"
+  },
+  "cache": "disabled",
+  "policy_status": "not_adopted"
+}

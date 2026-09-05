@@ -419,7 +419,8 @@ def _expression_gaps(value: Any, path: str, matrix_keys: set[str]) -> list[str]:
     remaining = value
     for match in re.finditer(r"\$\{\{(.*?)\}\}", value, re.DOTALL):
         expression = match[1].strip()
-        if expression not in {"github.workspace", "runner.temp"} | {"matrix." + key for key in matrix_keys}:
+        if expression not in {"github.workspace", "runner.temp", "github.repository", "github.workflow",
+                              "github.event_name", "github.ref", "github.run_id", "github.run_attempt", "always()"} | {"matrix." + key for key in matrix_keys}:
             return [path + ":unsupported_expression"]
         remaining = remaining.replace(match[0], "")
     return [path + ":unsupported_expression"] if "${{" in remaining else []

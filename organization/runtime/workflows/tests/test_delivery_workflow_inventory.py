@@ -303,11 +303,21 @@ class InventoryTests(unittest.TestCase):
                        "b8bb0864c5a28024fac8a632c443c87c5aa6f215c0b126c449ae1a150412f31d"):
             self.assertIn(digest, lock)
         workflow = (REPO / ".github/workflows/validate.yml").read_text()
-        self.assertIn("--require-hashes --only-binary=:all:", workflow)
-        self.assertIn("python3 -m venv", workflow)
-        self.assertIn('"$RUNNER_TEMP/delivery-venv/bin/python3" scripts/validate_all.py', workflow)
+        self.assertIn("scripts/verify_delivery_toolchain.py --run full", workflow)
+        helper = (REPO / "scripts/verify_delivery_toolchain.py").read_text()
+        self.assertIn("--require-hashes", helper)
+        self.assertIn("--only-binary=:all:", helper)
         self.assertEqual(yaml.__version__, "6.0.3")
         self.assertEqual(sys.version_info[:2], (3, 11))
+
+    def test_fixed_ci_context_syntax_never_evaluates_arbitrary_expressions(self):
+        for expression in ("github.repository", "github.workflow", "github.event_name", "github.ref", "github.run_id", "github.run_attempt", "always()"):
+            self.assertEqual(inventory._expression_gaps("${{ " + expression + " }}", "test", set()), [])
+        for expression in ("github.run_attempts", "always(1)", "always() || true", "fromJSON(inputs.x)", "secrets.TOKEN", "github.event.pull_request.head.repo.fork"):
+            self.assertTrue(inventory._expression_gaps("${{ " + expression + " }}", "test", set()))
+        result = self.report()
+        self.assertFalse(result["authorizes_execution"])
+        self.assertEqual(result["readiness"], "blocked")
 
     def test_existing_itb_optional_yaml_path_remains_native_and_fallback_works(self):
         builder = REPO / "organization/runtime/infra-team-bootstrap/scripts/itb_bootstrap_builder.py"

@@ -252,3 +252,43 @@ map `validate` and both CodeQL language cells and still expose floating runtime,
 missing concurrency/merge-group support, missing bounded evidence retention,
 unverified CodeQL bundle/cache behavior, and missing authoritative policy.
 These limitations are not waived or considered completion of #144.
+
+
+## U2B1 native CPython consumer
+
+The repository-owned `.github/delivery-toolchain.lock.json` declares separate immutable
+CPython 3.11.16 artifacts for Darwin arm64 and Linux x86_64/glibc. These are different
+bytes and different host platforms under a common contract. The lock is not required-check
+policy and does not grant execution or waive missing CI evidence.
+
+Run `python3 scripts/verify_delivery_toolchain.py --run full --output /absolute/new-attempt`
+with the normal catalog environment available. The output directory must not exist. Bootstrap
+Python only fetches/verifies; the archive interpreter creates a new private venv, installs the
+hash-locked dependency and runs both focused suites and the repository full suite. No previous
+venv/cache/PATH interpreter is used as fallback. Unsupported native platforms fail closed.
+Python bootstrap must supply `tarfile.data_filter`; there is no legacy extraction fallback.
+
+Acquisition accepts only the declared upstream tool/platform URLs, bounded bytes/time and
+exact size/SHA256 before extraction. Extraction uses a new private directory, the data filter,
+member/path/expanded-size budgets, explicit file/link validation and directory-fd traversal
+that refuses symlinks. Links are created last and must target declared internal regular files
+or directories; chains, outward links, duplicate/colliding entries and special files fail.
+Failure leaves a failed attempt receipt, never an installed success marker or a fallback.
+
+`receipt.json` records lock and selected-artifact digests, target file/mode/patch identity,
+bootstrap versus consumer interpreter, version/architecture, host/CI image observations,
+dependency lock, each stage's command/time/exit and log digest. Full validation and its
+identity checks must finish before status becomes success. Nonzero exits, timeout and
+cancellation remain failed attempts. A new attempt never overwrites an earlier attempt.
+Only receipt.json and the allowlisted validation.json are uploaded by the pinned artifact
+action, for 14 days; raw stage logs and the private runtime are excluded. A successful full
+summary keeps reported case counts as reported; historical custom-run counts are not added.
+
+The validate workflow retains its existing jobs/events/action SHAs and adds merge_group,
+non-cancelling event/ref-scoped concurrency and attempt-specific evidence. `setup-python`
+remains bootstrap only. Inventory syntax support for the fixed CI context references and
+`always()` is not evaluation or confirmation of runtime context. Conservative floating-runtime
+and policy gaps remain until an authenticated consumer adopts actual receipts; source text alone
+does not establish execution. Darwin success is never Linux success. CodeQL local analysis and
+remote scanning upload remain `local_unavailable` / `remote_pending` until independently
+executed. U2B2 CodeQL connection, U3, #128 policy and #140 consumer adoption remain pending.
