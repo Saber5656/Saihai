@@ -1,0 +1,210 @@
+{
+  "inventory_version": "1",
+  "repository": "Saber5656/Saihai",
+  "source_digests": {
+    ".github/workflows/codeql.yml": "e338b79ae6d2f5f23db254a2b385c0bc7c575142f2849c2f8c78fd8e20b759fc",
+    ".github/workflows/validate.yml": "1e675691f35af2767e8a6e4996a788a7d80a122fb7aa070743ea9306b63b4364"
+  },
+  "jobs": [
+    {
+      "cell_id": ".github/workflows/codeql.yml::analyze::{\"language\":\"actions\"}",
+      "workflow_path": ".github/workflows/codeql.yml",
+      "job_id": "analyze",
+      "matrix": {
+        "language": "actions"
+      },
+      "check_name": "Analyze (actions)",
+      "contract": {
+        "workflow": {
+          "name": "CodeQL",
+          "on": {
+            "push": {
+              "branches": [
+                "main"
+              ]
+            },
+            "pull_request": {
+              "branches": [
+                "main"
+              ]
+            },
+            "schedule": [
+              {
+                "cron": "17 3 * * 1"
+              }
+            ],
+            "workflow_dispatch": null
+          },
+          "permissions": {
+            "contents": "read",
+            "security-events": "write"
+          }
+        },
+        "job": {
+          "name": "Analyze (${{ matrix.language }})",
+          "runs-on": "ubuntu-latest",
+          "timeout-minutes": 15,
+          "strategy": {
+            "fail-fast": false,
+            "matrix": {
+              "language": [
+                "actions",
+                "python"
+              ]
+            }
+          },
+          "steps": [
+            {
+              "name": "Checkout repository",
+              "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+            },
+            {
+              "name": "Initialize CodeQL",
+              "uses": "github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
+              "with": {
+                "languages": "${{ matrix.language }}"
+              }
+            },
+            {
+              "name": "Perform CodeQL analysis",
+              "uses": "github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
+              "with": {
+                "category": "/language:${{ matrix.language }}"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "cell_id": ".github/workflows/codeql.yml::analyze::{\"language\":\"python\"}",
+      "workflow_path": ".github/workflows/codeql.yml",
+      "job_id": "analyze",
+      "matrix": {
+        "language": "python"
+      },
+      "check_name": "Analyze (python)",
+      "contract": {
+        "workflow": {
+          "name": "CodeQL",
+          "on": {
+            "push": {
+              "branches": [
+                "main"
+              ]
+            },
+            "pull_request": {
+              "branches": [
+                "main"
+              ]
+            },
+            "schedule": [
+              {
+                "cron": "17 3 * * 1"
+              }
+            ],
+            "workflow_dispatch": null
+          },
+          "permissions": {
+            "contents": "read",
+            "security-events": "write"
+          }
+        },
+        "job": {
+          "name": "Analyze (${{ matrix.language }})",
+          "runs-on": "ubuntu-latest",
+          "timeout-minutes": 15,
+          "strategy": {
+            "fail-fast": false,
+            "matrix": {
+              "language": [
+                "actions",
+                "python"
+              ]
+            }
+          },
+          "steps": [
+            {
+              "name": "Checkout repository",
+              "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+            },
+            {
+              "name": "Initialize CodeQL",
+              "uses": "github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
+              "with": {
+                "languages": "${{ matrix.language }}"
+              }
+            },
+            {
+              "name": "Perform CodeQL analysis",
+              "uses": "github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
+              "with": {
+                "category": "/language:${{ matrix.language }}"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "cell_id": ".github/workflows/validate.yml::validate::{}",
+      "workflow_path": ".github/workflows/validate.yml",
+      "job_id": "validate",
+      "matrix": {},
+      "check_name": "validate",
+      "contract": {
+        "workflow": {
+          "name": "validate",
+          "on": {
+            "push": {
+              "branches": [
+                "main"
+              ]
+            },
+            "pull_request": null
+          },
+          "permissions": {
+            "contents": "read"
+          }
+        },
+        "job": {
+          "runs-on": "ubuntu-latest",
+          "timeout-minutes": 10,
+          "steps": [
+            {
+              "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+            },
+            {
+              "uses": "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+              "with": {
+                "python-version": "3.11"
+              }
+            },
+            {
+              "name": "Install locked validation dependency in isolation",
+              "run": "python3 -m venv \"$RUNNER_TEMP/delivery-venv\"\n\"$RUNNER_TEMP/delivery-venv/bin/python3\" -m pip install --require-hashes --only-binary=:all: --no-deps -r .github/requirements-delivery.lock\n"
+            },
+            {
+              "name": "Run validation suite",
+              "env": {
+                "SAIHAI_ROOT": "${{ github.workspace }}",
+                "AGENTS_VAULT_ROOT": "${{ runner.temp }}/agents-vault",
+                "USER_VAULT_ROOT": "${{ runner.temp }}/user-vault",
+                "SKILLS_REPO_ROOT": "${{ github.workspace }}",
+                "SKILLS_ROOT": "${{ github.workspace }}/organization/roles",
+                "DOTFILES_ROOT": "${{ github.workspace }}",
+                "DEV_ROOT": "${{ runner.temp }}",
+                "DEV_WORKTREES_ROOT": "${{ runner.temp }}/worktrees",
+                "TASK_WORKTREE_ROOT": "${{ runner.temp }}/worktrees"
+              },
+              "run": "mkdir -p \"$AGENTS_VAULT_ROOT\" \"$USER_VAULT_ROOT\" \"$DEV_WORKTREES_ROOT\"\n\"$RUNNER_TEMP/delivery-venv/bin/python3\" scripts/validate_all.py\n"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "lock_digests": {
+    ".github/requirements-delivery.lock": "93a7e075703f062c614f47f65cc290fef319ec03ecc3bcba97685170d883151c"
+  }
+}

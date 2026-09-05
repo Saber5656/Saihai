@@ -133,3 +133,122 @@ pre-PR execution/snapshot gate or #128's authoritative current-identity merge
 checks. Those consumers must not treat this configuration receipt as a run
 result or merge authorization. Real adoption producers, workflow alignment,
 remote CI and device evidence remain pending until independently established.
+
+## Actual workflow inventory (U2A)
+
+`scripts/delivery_workflow_inventory.py` parses actual `.github/workflows/*.yml`
+and `*.yaml` sources and produces a content-bound inventory. The repository
+snapshot is `profiles/delivery-inventory/saihai.v1.json`. It records what the
+reviewed workflows say, including their unresolved limitations; it does not
+make the observed jobs authoritative required checks or adopt a delivery policy.
+This inventory supplements the configuration-only profile interface above.
+Flaky attempt evidence remains a separate unit.
+
+### Local validation setup
+
+Use CPython 3.11 in an isolated environment. The lock contains only the official
+PyYAML 6.0.3 wheels for macOS 11+ arm64 and Linux glibc x86_64. Other platforms
+are not implicitly supported by this lock. Do not substitute an unhashed wheel,
+source distribution, global installation or different interpreter on failure.
+
+```sh
+python3.11 -m venv /tmp/saihai-delivery-venv
+/tmp/saihai-delivery-venv/bin/python3 -m pip install --require-hashes --only-binary=:all: --no-deps -r .github/requirements-delivery.lock
+/tmp/saihai-delivery-venv/bin/python3 scripts/validate_all.py
+```
+
+Choose a fresh task-owned temporary directory. CI uses the same lock in its
+runner temporary directory and invokes the isolated interpreter for the full
+suite. Package integrity and exact Python build/OS integrity are different:
+U2A pins the parsing dependency, but the existing `ubuntu-latest` runner and
+Python `3.11` selection are still reported as floating. No immutable runtime
+acceptance follows from this setup. Actual toolchain alignment remains U2B.
+
+The dependency also enables the existing ITB optional PyYAML path. The new
+loader changes only a private `SafeLoader` subclass; global YAML resolution
+and the existing ITB fallback remain unchanged and have regression coverage.
+Metadata and hashes originate from [PyPI](https://pypi.org/project/PyYAML/6.0.3/).
+Hash enforcement and binary-only installs follow
+[pip's secure installation contract](https://pip.pypa.io/en/stable/topics/secure-installs/).
+
+### Producer and consumers
+
+| Interface | Contract |
+|---|---|
+| `parse_workflow(raw)` | Bounded UTF-8 YAML/JSON text to mapping; reject duplicate keys, explicit tags, anchors/aliases, non-JSON values and resource exhaustion |
+| `observe_workflows(sources)` | Map of workflow path to exact source text; returns parsing status, source hashes, every expanded cell, errors and quality gaps |
+| `audit_inventory(...)` | Compare actual sources/locks with an expected inventory and bind the result to repository/head/base/event/policy assertion |
+| `audit_repository(root, expected, event_context, target, policy_snapshot=None)` | Discover both workflow extensions from the actual checkout, including unexpected files, and read declared lock content; reject symlinks |
+| `applicability(row, context)` | `applicable`, `not_applicable`, or `unknown` with reason and source reference; never a test outcome |
+
+The closed expected inventory has `inventory_version: "1"`, `repository`,
+`source_digests`, `jobs`, and `lock_digests`. Each cell has `cell_id`,
+`workflow_path`, `job_id`, `matrix`, `check_name`, and `contract`. The contract
+retains the complete workflow context and job declaration: commands/actions,
+runtime, matrix, services, environment/defaults, working directory, dependencies
+between jobs, conditions, permissions and resource settings. Source, lock and
+cell differences are checked in both directions. Comment-only source changes
+also invalidate the source identity. Workflow fields cannot disappear because
+the expected inventory omitted them. Unknown fields/expressions remain visible.
+
+`cell_id` binds workflow/job/matrix values; it is not the policy's status-check
+context. Resolvable matrix names are only candidate check names. A policy-named
+check must map uniquely, and a required check that does not trigger stays a gap.
+Matrices support bounded scalar axes and include/exclude rows; unsupported
+dynamic matrices fail closed. Conditions requiring prior job results, complex
+branch patterns, path filters and missing event-action evidence remain unknown.
+PR applicability uses the base branch; push uses its own branch.
+
+`target` contains `repository`, `head_sha`, and `base_sha`. `event_context`
+contains `event`, `ref`, `base_ref`, boolean `fork`, and nullable `action`.
+An optional policy assertion contains `policy_version: "1"`, `repository`,
+and `required_checks`. Its digest identifies the assertion but its status is
+always `unverified`; `approved` flags are rejected. Missing policy is explicitly
+`authoritative_policy_missing`. An independently authenticated producer owned
+by #128/the repository policy authority must establish adoption. This module
+does not invent that authority from PR observations or its own snapshot.
+
+The result separates `parsing`, structural `parity`, `drift`, quality `gaps`,
+per-cell applicability/execution state, and content/binding digests. Even exact
+structural parity can have blocked readiness. `authorizes_execution` is always
+false and `readiness` is blocked until downstream trusted gates establish what
+is still missing. #140 consumes the actual inventory and identity to run final
+local checks; #128 consumes candidate mappings against authenticated required
+checks and current remote results. Neither may treat an inventory receipt as
+a successful run, provider approval, waiver, or merge authorization.
+
+Structural errors (including malformed steps, runner lists, permission enums,
+defaults, concurrency, service containers and event filter types) make
+`parsing: invalid`. Unresolved expression/name semantics are explicitly listed
+in `unknowns` and make parsing unknown. This does not depend on words embedded
+in quality-gap messages. Such cells keep unknown applicability/execution state,
+even if an expected snapshot repeats the malformed declaration. Conversely,
+a missing immutable runtime or concurrency setting is an operational gap in
+an otherwise structurally valid workflow; it cannot establish readiness.
+Only the documented mapping forms of permissions and unparameterized manual
+dispatch are supported. Future or unsupported forms fail closed instead of
+being treated as adopted contracts.
+
+CodeQL cells are hybrid: local analysis requires a verified CodeQL bundle and
+executor, while code-scanning upload requires the remote service. An unavailable
+local executor is not reclassified as a genuinely remote-only test. Neither
+component ran merely because the parser found its action. Ordinary command
+jobs are locally reproducible only after matching their runtime, dependencies,
+services and environment; their returned execution state is `not_run`.
+
+### Actual checkout diagnostic
+
+```sh
+/tmp/saihai-delivery-venv/bin/python3 organization/runtime/workflows/scripts/delivery_workflow_inventory.py \
+  --repository-root . \
+  --expected organization/runtime/workflows/profiles/delivery-inventory/saihai.v1.json \
+  --head "$(git rev-parse HEAD)" --base "$(git rev-parse HEAD^)"
+```
+
+Report mode exits zero when parsing and structural parity checks succeed;
+this is diagnostic execution, **not delivery readiness**. `--check` fails while
+any adoption/quality gate remains unestablished. The current real workflows
+map `validate` and both CodeQL language cells and still expose floating runtime,
+missing concurrency/merge-group support, missing bounded evidence retention,
+unverified CodeQL bundle/cache behavior, and missing authoritative policy.
+These limitations are not waived or considered completion of #144.

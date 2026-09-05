@@ -15,6 +15,11 @@ the ATV name for historical artifacts and compatibility aliases.
 Saihai uses only the Python 3.10+ standard library for normal operation. No
 `pip install` step is required.
 
+Repository delivery validation additionally uses Python 3.11 and a hash-locked
+PyYAML wheel in an isolated environment. Follow the
+[delivery validation setup](organization/runtime/workflows/delivery-contract.md#local-validation-setup)
+before running the full repository suite; normal operation stays unchanged.
+
 ## Release
 
 Release history and the merged pull requests included in v0.1.0 are recorded

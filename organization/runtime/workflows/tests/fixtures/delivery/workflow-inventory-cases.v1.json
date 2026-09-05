@@ -1,0 +1,31 @@
+{
+  "fixture_version": "1",
+  "workflow": "name: Fixture\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n  merge_group:\npermissions:\n  contents: read\nenv:\n  GLOBAL: yes\njobs:\n  test:\n    name: Test (${{ matrix.python }}, ${{ matrix.os }})\n    runs-on: ${{ matrix.os }}\n    timeout-minutes: 10\n    strategy:\n      matrix:\n        python: [\"3.11\", \"3.12\"]\n        os: [linux, macos]\n        exclude:\n          - python: \"3.12\"\n            os: macos\n        include:\n          - python: \"3.13\"\n            os: linux\n    permissions:\n      contents: read\n    defaults:\n      run:\n        shell: bash\n    services:\n      db:\n        image: postgres@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n    steps:\n      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n      - run: |\n          python -m unittest\n        env:\n          SEED: \"42\"\n        working-directory: src\n",
+  "expected_cells": [
+    {
+      "python": "3.11",
+      "os": "linux"
+    },
+    {
+      "python": "3.11",
+      "os": "macos"
+    },
+    {
+      "python": "3.12",
+      "os": "linux"
+    },
+    {
+      "python": "3.13",
+      "os": "linux"
+    }
+  ],
+  "invalid_yaml": [
+    "on: push\non: pull_request\n",
+    "x: &anchor value\ny: *anchor\n",
+    "x: !!python/object:danger {}\n",
+    "x: !!str safe\n",
+    "{a: 1, a: 2}",
+    "[1, 2]",
+    "x: .nan\n"
+  ]
+}
