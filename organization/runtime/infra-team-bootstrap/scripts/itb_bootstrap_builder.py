@@ -7918,9 +7918,10 @@ def gtc_scaffold_task_detail_text(
     organization_instance_id: str,
     queue_root: Path,
     missing_fields: list[str],
+    ledger_artifact: dict[str, Any],
 ) -> str:
     ledger = gtc_requirement_ledger(envelope)
-    ledger_json = json.dumps(ledger, ensure_ascii=False, indent=2).replace("`", "\\u0060")
+    pending_count = sum(value != "selected" for value in ledger["unit_dispositions"].values())
     unit = first_task_unit(envelope)
     main_team = normalize_cell(unit.get("main_team")) or normalize_cell(envelope.get("main_team")) or "gate"
     assignee = normalize_cell(unit.get("assignee")) or normalize_cell(envelope.get("assignee")) or "teams-project-manager"
@@ -7990,9 +7991,15 @@ Local intake accounting only. Trusted requirement updates, execution authorizati
 worker/diff/review/commit binding and durable host-writer acceptance remain integration_pending.
 Unselected units are pending observations; no Task or Issue creation is asserted.
 
-```json
-{ledger_json}
-```
+| Field | Value |
+|---|---|
+| Requirements Version | {markdown_table_cell(ledger["requirements_version"])} |
+| Selected Unit | {markdown_table_cell(ledger["selected_unit_id"])} |
+| Selected Status | {markdown_table_cell(status)} |
+| Other Units | {pending_count} pending; full dispositions in artifact |
+| Ledger | [requirement-ledger.json](requirement-ledger.json) |
+| Ledger SHA256 | {ledger_artifact["sha256"]} |
+| Persistence | {ledger_artifact["state"]}; host ACK integration_pending |
 
 ## Request Summary
 
@@ -8193,9 +8200,32 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         project_root = vault_root / "01-Projects" / project_name
         task_dir = project_root / f"{task_id}-{slug}"
         task_detail_path = task_dir / "task.md"
-        if task_detail_path.exists():
+        if task_detail_path.exists() or task_detail_path.is_symlink():
             reason = f"Task Detail already exists; requirement update integration_pending: {task_detail_path}"
             return {"decision": "block", "reason": reason, "gtcScaffold": {"result": "blocked", "task_detail_path": str(task_detail_path)}}
+
+        ledger_path = task_dir / "requirement-ledger.json"
+        # Keep this generated artifact in the existing canonical task directory.
+        # The Vault lock serializes this writer; no host ACK is inferred here.
+        relative_dir = task_dir.relative_to(vault_root)
+        if ".." in relative_dir.parts:
+            raise ValueError("requirement_ledger.path_escape")
+        cursor = vault_root
+        for component in relative_dir.parts:
+            cursor = cursor / component
+            if cursor.is_symlink():
+                raise ValueError("requirement_ledger.symlink_parent")
+        if ledger_path.exists() or ledger_path.is_symlink():
+            raise ValueError("requirement_ledger.existing_artifact")
+        ledger_text = json.dumps(ledger, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ledger_bytes = ledger_text.encode("utf-8")
+        ledger_artifact = {
+            "path": str(ledger_path),
+            "relative_path": "requirement-ledger.json",
+            "sha256": hashlib.sha256(ledger_bytes).hexdigest(),
+            "state": "planned" if dry_run else "local_persisted",
+            "host_ack": "integration_pending",
+        }
 
         task_text = gtc_scaffold_task_detail_text(
             task_id=task_id,
@@ -8210,6 +8240,7 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
             organization_instance_id=organization_instance_id,
             queue_root=queue_root,
             missing_fields=missing_fields,
+            ledger_artifact=ledger_artifact,
         )
         detail_link = task_detail_wikilink(vault_root, task_detail_path)
         index_path = vault_root / "00-Inbox&Tasks" / "Task-Index.md"
@@ -8220,7 +8251,13 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         kanban_line = f"- [[{detail_link}|{task_id} {title}]]"
 
         if not dry_run:
+            atomic_write_text(ledger_path, ledger_text)
+            if ledger_path.is_symlink() or ledger_path.read_bytes() != ledger_bytes:
+                raise ValueError("requirement_ledger.readback_mismatch")
             atomic_write_text(task_detail_path, task_text)
+            if (ledger_path.is_symlink() or ledger_path.read_bytes() != ledger_bytes
+                    or task_detail_path.is_symlink() or task_detail_path.read_bytes() != task_text.encode("utf-8")):
+                raise ValueError("requirement_ledger.reference_readback_mismatch")
             index_changed = append_unique_markdown_line(index_path, index_line)
             kanban_changed = ensure_kanban_entry(kanban_path, gtc_kanban_section_for_status(status), kanban_line)
             active_output = active_task_output(
@@ -8239,6 +8276,12 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         else:
             index_changed = False
             kanban_changed = False
+    except (OSError, ValueError) as exc:
+        # Partial artifacts remain available for diagnosis; never overwrite on retry.
+        return {"decision": "block", "reason": "requirement ledger persistence blocked",
+                "gtcScaffold": {"result": "blocked", "persistence": "recording_pending",
+                                "host_ack": "integration_pending",
+                                "errors": [f"requirement_ledger.persistence:{type(exc).__name__}:{exc}"]}}
     finally:
         if vault_lock_owner:
             release_queue_lock(vault_lock_path)
@@ -8249,7 +8292,7 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         errors, warnings = validate_task_flow_artifact(task_detail_path, "pre_execution")
     if envelope_errors:
         warnings.extend(envelope_errors)
-    result = "scaffolded_triage" if status == "triage" else "scaffolded"
+    result = "planned" if dry_run else "scaffolded_triage" if status == "triage" else "scaffolded"
     if errors:
         result = "scaffolded_with_validation_errors"
     payload = {
@@ -8272,6 +8315,7 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         "source_ref": source_ref,
         "missing_envelope_fields": missing_fields,
         "requirement_ledger": ledger,
+        "requirement_ledger_artifact": ledger_artifact,
         "validation_errors": errors,
         "validation_warnings": warnings,
         "dry_run": dry_run,

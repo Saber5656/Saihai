@@ -547,7 +547,8 @@ class RequirementLedgerTest(unittest.TestCase):
             self.assertEqual(ledger["unit_dispositions"], {"A": "pending", "B": "selected"})
             self.assertEqual(ledger["task_units"][0]["binding"], {"status": "pending"})
             text = Path(result["gtcScaffold"]["task_detail_path"]).read_text()
-            self.assertIn('"requirement_id": "R-A"', text)
+            artifact_text = Path(result["gtcScaffold"]["requirement_ledger_artifact"]["path"]).read_text()
+            self.assertIn('"requirement_id": "R-A"', artifact_text)
             self.assertIn('| Scope In | B |', text)
             self.assertIn('| Done Criteria | accept B |', text)
             self.assertIn('integration_pending', text)
@@ -562,6 +563,118 @@ class RequirementLedgerTest(unittest.TestCase):
             second = self.scaffold(env, root, update_existing=True)
             self.assertEqual(second["decision"], "block")
             self.assertEqual(detail.read_bytes(), before)
+
+
+class RequirementArtifactTest(unittest.TestCase):
+    envelope = RequirementLedgerTest.envelope
+
+    def setUp(self):
+        self.builder = load_builder_module()
+
+    def scaffold(self, envelope, root, **extra):
+        self.builder.session_start_metadata_output(runtime="codex", state_root=root / "state",
+            hook_input={"session_id": "ledger-test", "cwd": str(root), "source": "startup"})
+        return RequirementLedgerTest.scaffold(self, envelope, root, **extra)
+
+    def test_long_ledger_has_lossless_artifact_and_thin_final_lint(self):
+        import copy
+        import hashlib
+        env = self.envelope()
+        for i in range(100):
+            unit = copy.deepcopy(env["task_units"][0]); unit["unit_id"] = "unit-" + str(i)
+            unit["requirement_ids"] = ["R-" + str(i)]; env["task_units"].append(unit)
+            env["requirements"].append({"requirement_id": "R-" + str(i), "text": "requirement " + str(i)})
+        env["requirements_history"] = [{"version": str(i), "findings": ["retained " + str(i)]} for i in range(500)]
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.scaffold(env, Path(tmp)); self.assertNotEqual(result.get("decision"), "block")
+            payload = result["gtcScaffold"]; artifact = payload["requirement_ledger_artifact"]
+            raw = Path(artifact["path"]).read_bytes(); expected = self.builder.gtc_requirement_ledger(env)
+            self.assertEqual(json.loads(raw), expected)
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), artifact["sha256"])
+            self.assertEqual(artifact["state"], "local_persisted")
+            self.assertEqual(artifact["host_ack"], "integration_pending")
+            detail = Path(payload["task_detail_path"]).read_text()
+            self.assertIn("requirement-ledger.json", detail); self.assertIn(artifact["sha256"], detail)
+            self.assertIn("| Selected Unit | B |", detail)
+            self.assertNotIn('"requirements_history"', detail)
+            self.assertEqual(self.builder.task_detail_line_lint(detail, "pre_final_response"), ([], []))
+            self.assertLessEqual(len(detail.splitlines()), 220)
+
+    def test_dry_run_reports_planned_reference_and_no_vault_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); payload = self.scaffold(self.envelope(), root, dry_run=True)["gtcScaffold"]
+            self.assertEqual(payload["result"], "planned")
+            self.assertEqual(payload["requirement_ledger_artifact"]["state"], "planned")
+            self.assertIn("planned", payload["preview"])
+            self.assertFalse((root / "vault").exists())
+
+    def test_artifact_failure_and_readback_mismatch_block_before_task_detail(self):
+        for mode in ["failure", "mismatch"]:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); original = self.builder.atomic_write_text
+                def writer(path, text):
+                    if path.name == "requirement-ledger.json":
+                        if mode == "failure": raise OSError("fixture failure")
+                        text = "{}"
+                    original(path, text)
+                with mock.patch.object(self.builder, "atomic_write_text", side_effect=writer):
+                    result = self.scaffold(self.envelope(), root)
+                self.assertEqual(result.get("decision"), "block")
+                self.assertIn("requirement_ledger", result["gtcScaffold"]["errors"][0])
+                self.assertFalse(list((root / "vault").rglob("task.md")))
+                self.assertFalse((root / "vault" / "00-Inbox&Tasks").exists())
+
+    def test_existing_artifact_and_symlink_are_preserved(self):
+        for symlink in [False, True]:
+            with self.subTest(symlink=symlink), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); directory = root / "vault/01-Projects/AI-Agent-Organization/TSK-9138-b"
+                directory.mkdir(parents=True); artifact = directory / "requirement-ledger.json"
+                if symlink: artifact.symlink_to(root / "absent")
+                else: artifact.write_text("preserved")
+                result = self.scaffold(self.envelope(), root)
+                self.assertEqual(result.get("decision"), "block")
+                self.assertFalse((directory / "task.md").exists())
+                if symlink: self.assertTrue(artifact.is_symlink())
+                else: self.assertEqual(artifact.read_text(), "preserved")
+
+    def test_late_artifact_drift_blocks_before_index_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); original = self.builder.atomic_write_text
+            def writer(path, text):
+                original(path, text)
+                if path.name == "task.md": (path.parent / "requirement-ledger.json").write_text("{}")
+            with mock.patch.object(self.builder, "atomic_write_text", side_effect=writer):
+                result = self.scaffold(self.envelope(), root)
+            self.assertEqual(result.get("decision"), "block")
+            self.assertFalse((root / "vault" / "00-Inbox&Tasks").exists())
+
+    def test_artifact_rejects_escaped_or_symlinked_task_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self.scaffold(self.envelope(), root, project="../../escape")
+            self.assertEqual(result.get("decision"), "block")
+            self.assertFalse((root / "escape").exists())
+            outside = root / "outside"; outside.mkdir()
+            projects = root / "vault/01-Projects"; projects.mkdir(parents=True)
+            (projects / "AI-Agent-Organization").symlink_to(outside, target_is_directory=True)
+            result = self.scaffold(self.envelope(), root)
+            self.assertEqual(result.get("decision"), "block")
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_task_detail_write_failure_preserves_ledger_without_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); original = self.builder.atomic_write_text
+            def writer(path, text):
+                if path.name == "task.md": raise OSError("fixture task failure")
+                original(path, text)
+            with mock.patch.object(self.builder, "atomic_write_text", side_effect=writer):
+                result = self.scaffold(self.envelope(), root)
+            self.assertEqual(result.get("decision"), "block")
+            files = list((root / "vault").rglob("requirement-ledger.json")); self.assertEqual(len(files), 1)
+            before = files[0].read_bytes()
+            resumed = self.scaffold(self.envelope(), root)
+            self.assertEqual(resumed.get("decision"), "block")
+            self.assertEqual(files[0].read_bytes(), before)
 
 if __name__ == "__main__":
     unittest.main()
