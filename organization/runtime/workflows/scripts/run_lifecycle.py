@@ -25,7 +25,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "created": {"step_queued", "waiting_human", "aborted"},
     "step_queued": {"waiting_provider", "waiting_human", "aborted"},
     "waiting_provider": {"step_queued", "validating", "waiting_human", "failed", "aborted"},
-    "validating": {"complete", "failed", "waiting_human", "aborted"},
+    "validating": {"step_queued", "complete", "failed", "waiting_human", "aborted"},
     "waiting_human": {"step_queued", "failed", "aborted"},
     "remediating": {"step_queued", "failed", "aborted"},
     "complete": set(),
@@ -181,8 +181,15 @@ def transition_run(
     terminal_reason: str | None = None,
     expected_current_state: str | None = None,
     run: dict[str, Any] | None = None,
+    persist: bool = True,
+    report_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Advance a run through the canonical lifecycle table and persist it."""
+    """Advance a run; locked callers may batch in-memory transitions into one store.
+
+    With persist=False the caller must retain the same run object and global
+    lock, then persist once with the original expected_current_state. Report
+    binding is included in the signed transition, never read from provider input.
+    """
 
     assert_execution_principal(principal)
     run = run if run is not None else run_store.load_run(state_root, run_id)
@@ -214,6 +221,8 @@ def transition_run(
         "run_id": effective_run_id,
         "artifact_refs": _normalized_artifact_refs(artifact_refs),
     }
+    if report_binding is not None:
+        record["report_binding"] = report_binding
     record["signature"] = sign_transition(
         state_root=state_root,
         principal=principal,
@@ -229,11 +238,12 @@ def transition_run(
             "reason": terminal_reason or reason_class,
         }
 
-    run_store.store_run(
-        state_root,
-        run,
-        expected_current_state=expected_current_state or from_state,
-    )
+    if persist:
+        run_store.store_run(
+            state_root,
+            run,
+            expected_current_state=expected_current_state or from_state,
+        )
     return record
 
 
