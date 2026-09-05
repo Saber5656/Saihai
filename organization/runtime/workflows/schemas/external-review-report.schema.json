@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sahai.local/schemas/workflows/external-review-report.schema.json",
   "title": "External Review Report",
-  "description": "Authoritative typed report for single_step_external_review. Provider stdout/transcript is signal only.",
+  "description": "Authoritative typed readonly review report. Provider stdout/transcript is signal only.",
   "type": "object",
   "required": [
     "report_version",
@@ -31,7 +31,10 @@
       "type": "string"
     },
     "workflow_id": {
-      "const": "single_step_external_review"
+      "enum": [
+        "single_step_external_review",
+        "readonly_review_chain"
+      ]
     },
     "step_id": {
       "const": "review"

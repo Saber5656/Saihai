@@ -126,8 +126,8 @@ def write_unknown_role_fixture(repo_root: Path) -> tuple[Path, Path, Path, Path]
 def test_active_templates_resolve_all_roles() -> None:
     result = validator.validate_template_roles()
     assert result["decision"] == "ok", result["errors"]
-    assert result["active_template_count"] == 6
-    assert result["checked_step_count"] == 21
+    assert result["active_template_count"] == 7
+    assert result["checked_step_count"] == 24
 
 
 def test_unknown_role_fails_with_typed_step_errors() -> None:

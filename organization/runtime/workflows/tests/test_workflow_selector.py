@@ -115,7 +115,7 @@ def run_facade_raw(*args: str) -> subprocess.CompletedProcess[str]:
 def test_contract_validation() -> None:
     contracts = selector.validate_contracts()
     assert_equal(contracts["decision"], "ok", f"contracts errors: {contracts['errors']}")
-    assert_equal(contracts["workflow_contracts"]["template_count"], 6, "template count")
+    assert_equal(contracts["workflow_contracts"]["template_count"], 7, "template count")
     expected_schemas = [
         "activation-envelope.schema.json",
         "agent-integration-assurance.schema.json",
@@ -136,6 +136,7 @@ def test_contract_validation() -> None:
         "provider-adapter-capability.schema.json",
         "provider-evidence.schema.json",
         "publication-result.schema.json",
+        "readonly-final-evidence-report.schema.json",
         "research-report.schema.json",
         "scoped-worker-capability.schema.json",
         "scoped-worker-result.schema.json",
@@ -161,6 +162,7 @@ def test_registry_gate_profiles_and_active_templates() -> None:
             "publication_required",
             "policy_or_permission_change",
             "security_sensitive_change",
+            "readonly_review_chain",
         ],
         "active workflow ids",
     )
