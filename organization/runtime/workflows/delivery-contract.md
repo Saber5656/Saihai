@@ -292,3 +292,51 @@ and policy gaps remain until an authenticated consumer adopts actual receipts; s
 does not establish execution. Darwin success is never Linux success. CodeQL local analysis and
 remote scanning upload remain `local_unavailable` / `remote_pending` until independently
 executed. U2B2 CodeQL connection, U3, #128 policy and #140 consumer adoption remain pending.
+
+
+## U2B2 CodeQL bundle consumer and observation boundaries
+
+The common toolchain lock also fixes CodeQL bundle 2.26.0 Linux64/macOS64 URLs, exact
+compressed sizes and SHA256. CodeQL uses independent 1536MiB download, 300-second wall,
+200000-member/16GiB actual decompression/1024-byte path and 180-second scan budgets.
+A separately terminated worker bounds even blocking decompression; every regular member
+is read and hashed. Normalized duplicate paths, traversal, special/sparse files, conflicting
+parents and unresolved/escaping links are refused. Python's 64MiB limit stays unchanged.
+
+The fixed CLI phases are `--codeql-phase acquire|probe|observe --bundle linux64|osx64
+--language actions|python --output /absolute/new-attempt`. Acquire creates the attempt and
+writes its running receipt before work. Only after exact byte/hash and streamed manifest
+verification does it expose bundle.tar.gz to pinned init.tools. Partial files never become
+verified inputs. `--fetch-only` is acquisition only: it allows a host/artifact mismatch without
+extracting or executing CodeQL, and cannot be used for probe/observe. A fetch on Darwin
+is not Linux runtime validation. Phase receipts never grant authority or adopt policy.
+
+Pinned init executes CodeQL BEFORE publishing its path/version outputs. Consequently the
+pre-init archive verification is the first execution boundary; post-init probe is an additional
+check of the installed bundle and its use before analysis. Its output path must have the
+expected fresh UUID/bundle layout under runner.temp. All immutable installed members,
+including wrapper, JRE launcher, JARs and native libraries, must match the verified archive
+manifest, with no extra files. Version/path strings alone are insufficient. Only then is the
+fixed shell-free `codeql version --format=json` command invoked, with bounded output/time
+and loader/JVM configuration suppression. No existing tool/cache/PATH fallback is allowed.
+Private directory and rechecks do not provide atomic custody against a compromised runner
+or arbitrary hostile same-UID writer; upstream tar extraction is not replaced by this helper.
+
+Exactly five init/analyze step-output expressions are recognized as syntax. Their values pass
+through fixed environment keys and quoted helper arguments; expressions are never inserted
+into shell script bodies or treated as trusted producer fields. Existing events, both language
+cells, action SHAs, queries/models/category and analyze service upload defaults are preserved.
+TRAP/dependency caching inputs are explicitly false; other internal cache behavior remains
+unverified. security-events write is limited to the analyze job. No privileged event or token
+workaround is introduced.
+
+Each phase binds target, workflow, lock, artifact, language, run ID/attempt and previous
+integrity references. Observer cannot replace missing/failed/cancelled/timed-out phases with
+success. Bounded SARIF summary and sarif-id/action outcomes are observations only; the
+`authenticated_service_state` remains remote_pending and `policy_status` not_adopted until
+#128/#140 bind authenticated CI context. A zero-result SARIF is not a zero-test proof.
+Additional upload-artifact retains only the three explicit phase JSON receipts for 14 days;
+it excludes archive/manifest/runtime/raw logs/environment/full SARIF. This does not disable
+the pre-existing CodeQL SARIF/database service upload. always() cannot guarantee retention
+on hard runner failure; missing final receipts remain blockers. Linux init/analysis/service
+execution and full Issue acceptance remain pending until real authorized CI evidence exists.

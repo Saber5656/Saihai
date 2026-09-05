@@ -12,6 +12,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,6 +153,208 @@ class ToolchainTests(unittest.TestCase):
         for forbidden in ['continue-on-error', '|| true', 'pull_request_target', 'security-events: write', '**/*']:
             self.assertNotIn(forbidden, workflow)
         self.assertIn('receipt.json', workflow); self.assertIn('validation.json', workflow)
+
+
+class CodeQLContractTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def bundle(self, entries=None):
+        path = self.root / 'codeql.tar.gz'
+        entries = entries or [('codeql/codeql', b'wrapper'), ('codeql/jre/bin/java', b'java'), ('codeql/tools/a.jar', b'jar')]
+        with tarfile.open(path, 'w:gz') as tar:
+            for name, data in entries:
+                member = tarfile.TarInfo(name); member.size = len(data); member.mode = 0o644
+                tar.addfile(member, io.BytesIO(data))
+        return path
+
+    def test_closed_bundle_and_python_bounds(self):
+        lock = tool.load_lock(ROOT)
+        self.assertEqual(tool.codeql_select(lock, 'linux64')['size'], 822687033)
+        self.assertEqual(tool.MAX_DOWNLOAD, 64 * 1024 * 1024)
+        for key in ('unknown', 'latest', '../linux64'):
+            with self.assertRaises(tool.ContractError): tool.codeql_select(lock, key)
+        bad = copy.deepcopy(lock); bad['codeql']['linux64']['size'] = True
+        with self.assertRaises(tool.ContractError): tool.validate_lock(bad)
+
+    def test_real_stream_scan_and_installed_all_members(self):
+        archive = self.bundle(); manifest = tool.scan_codeql_archive(archive)
+        installed = self.root / 'installed'; installed.mkdir()
+        with tarfile.open(archive) as tar: tar.extractall(installed, filter='data')
+        tool.verify_codeql_installation(installed / 'codeql', manifest)
+        for member in ('jre/bin/java', 'tools/a.jar', 'codeql'):
+            path = installed / 'codeql' / member; original = path.read_bytes(); path.write_bytes(b'changed')
+            with self.assertRaises(tool.ContractError): tool.verify_codeql_installation(installed / 'codeql', manifest)
+            path.write_bytes(original)
+        (installed / 'codeql' / 'extra').write_bytes(b'loadable')
+        with self.assertRaises(tool.ContractError): tool.verify_codeql_installation(installed / 'codeql', manifest)
+
+    def test_archive_names_and_actual_read_budgets(self):
+        for name in ('../outside', '/outside', 'codeql/../escape', 'codeql/a\n', 'codeql/a/../b'):
+            archive = self.bundle([(name, b'x')])
+            with self.assertRaises(tool.ContractError): tool.scan_codeql_archive(archive)
+        archive = self.bundle([('codeql/a', b'a'), ('codeql/a', b'b')])
+        with self.assertRaises(tool.ContractError): tool.scan_codeql_archive(archive)
+        archive = self.bundle()
+        with patch.object(tool, 'CODEQL_EXPANDED_LIMIT', 1):
+            with self.assertRaises(tool.ContractError): tool.scan_codeql_archive(archive)
+        with patch.object(tool, 'CODEQL_MEMBER_LIMIT', 1):
+            with self.assertRaises(tool.ContractError): tool.scan_codeql_archive(archive)
+
+    def test_bounded_json_duplicate_fields_and_non_json_observation(self):
+        path = self.root / 'state.json'; path.write_text('{"x":1,"x":2}')
+        with self.assertRaises(tool.ContractError): tool.read_codeql_json(path)
+        for value in ('a\n', 'a\r', 'x;' + chr(36) + '(echo bad)', 'x' * 4097):
+            with self.assertRaises(tool.ContractError): tool.codeql_text(value)
+
+    def test_probe_rejects_bad_chain_before_invocation(self):
+        with patch.object(tool, 'bounded_codeql_command') as command:
+            with self.assertRaises(tool.ContractError):
+                tool.codeql_probe(self.root, 'linux64', 'python', '/tmp/arbitrary', '2.26.0', 'success')
+            command.assert_not_called()
+
+    def test_real_probe_chain_and_tampered_jre_block_command(self):
+        # Synthetic repository/bundle and host; only the external CodeQL process is mocked.
+        archive = self.bundle(); sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+        repo = self.root / 'repo'; (repo / '.github/workflows').mkdir(parents=True)
+        for name in ('validate', 'codeql'): (repo / '.github/workflows' / (name + '.yml')).write_text('name: synthetic')
+        lock = tool.load_lock(ROOT); lock['codeql']['linux64'].update(size=archive.stat().st_size, sha256=sha)
+        (repo / '.github/delivery-toolchain.lock.json').write_text(json.dumps(lock))
+        for command in (['git', 'init', '-q'], ['git', 'add', '.'], ['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture']):
+            subprocess.run(command, cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        attempt = self.root / 'attempt'; attempt.mkdir()
+        (attempt / 'bundle.tar.gz').write_bytes(archive.read_bytes())
+        manifest = tool.scan_codeql_archive(archive); (attempt / 'manifest.json').write_text(json.dumps(manifest))
+        temp = (self.root / 'runner-temp').resolve(); extraction = temp / '11111111-1111-1111-1111-111111111111'; extraction.mkdir(parents=True)
+        with tarfile.open(archive) as tar: tar.extractall(extraction, filter='data')
+        codeql = extraction / 'codeql/codeql'
+        registry = dict(tool.CODEQL_BUNDLES, linux64=(archive.stat().st_size, sha))
+        with patch.object(tool, 'ROOT', repo), patch.object(tool, 'CODEQL_BUNDLES', registry), patch.object(tool.platform, 'system', return_value='Linux'), patch.object(tool.platform, 'machine', return_value='x86_64'), patch.object(tool.platform, 'libc_ver', return_value=('glibc', '2.35')), patch.dict(os.environ, {'RUNNER_TEMP': str(temp), 'GITHUB_RUN_ID': '5', 'GITHUB_RUN_ATTEMPT': '1'}, clear=True):
+            binding = tool.codeql_binding('linux64', 'python', attempt)
+            acquired = {'phase': 'acquire', 'start': '2026-09-05T00:00:00+00:00', 'end': '2026-09-05T00:00:01+00:00',
+                        'status': 'acquisition_verified', 'exit': 0, 'mode': 'ci-consumer', 'authorizes_execution': False,
+                        'policy_status': 'not_adopted', 'runnable_here': True, 'host': {'system': 'Linux', 'machine': 'x86_64'},
+                        'runtime': 'not_run', 'analysis': 'not_run', 'authenticated_service_state': 'remote_pending',
+                        'binding': binding, 'manifest_sha256': hashlib.sha256((attempt / 'manifest.json').read_bytes()).hexdigest()}
+            tool.codeql_write(attempt / 'receipt-acquire.json', acquired)
+            with patch.object(tool, 'bounded_codeql_command', return_value={'version': '2.26.0'}) as command:
+                args = SimpleNamespace(output=attempt, codeql_phase='probe', bundle='linux64', language='python', fetch_only=False,
+                                       codeql_path=str(codeql), codeql_version='2.26.0', init_outcome='success', analysis_outcome='', sarif_id='')
+                self.assertEqual(tool.codeql_phase(args), 0)
+                result = json.loads((attempt / 'receipt-probe.json').read_text())
+                self.assertEqual(result['version'], '2.26.0'); command.assert_called_once()
+            # Consumed phase records have closed types, values and nested shapes.
+            for field, value in [('host', {'system': False, 'machine': []}),
+                                 ('host', {'system': 'Linux', 'machine': 'x86_64', 'approved': True}),
+                                 ('host', {'system': 'Darwin', 'machine': 'x86_64'}),
+                                 ('runtime', {'approved': True}), ('runtime', 'observed_result'),
+                                 ('analysis', False), ('analysis', 'success'), ('runnable_here', False)]:
+                with self.subTest(acquire_field=field, value=value):
+                    bad = copy.deepcopy(acquired); bad[field] = value
+                    tool.codeql_write(attempt / 'receipt-acquire.json', bad)
+                    with self.assertRaises(tool.ContractError): tool.codeql_chain(attempt, 'linux64', 'python')
+            tool.codeql_write(attempt / 'receipt-acquire.json', acquired)
+            for field, value in [('version', '2.25.0'), ('version_document_sha256', True),
+                                 ('installation_verification_sha256', 'invalid'), ('command_exit', False),
+                                 ('command_start', 'bad'), ('command_end', '2000-01-01T00:00:00+00:00'),
+                                 ('command', [str(codeql), 'version']), ('authorizes_execution', 0), ('codeql_path', '')]:
+                with self.subTest(probe_field=field):
+                    bad = copy.deepcopy(result); bad[field] = value
+                    with self.assertRaises(tool.ContractError): tool.validate_codeql_phase_fields(bad)
+            bad = copy.deepcopy(result); bad['codeql_path'] = ''; bad['command'] = ['', 'version', '--format=json']
+            with self.assertRaises(tool.ContractError): tool.validate_codeql_phase_fields(bad)
+            args.codeql_phase = 'observe'; args.sarif_id = 'synthetic-request'
+            for outcome in ('failure', 'cancelled', 'skipped', 'timed_out', 'unknown'):
+                args.analysis_outcome = outcome
+                self.assertEqual(tool.codeql_phase(args), 1)
+                observation = json.loads((attempt / 'receipt-observe.json').read_text())
+                self.assertEqual(observation['status'], 'failure')
+                self.assertFalse(observation['authorizes_execution'])
+                self.assertEqual(observation['authenticated_service_state'], 'remote_pending')
+                with self.assertRaises(tool.ContractError): tool.codeql_phase(args)
+                (attempt / 'receipt-observe.json').unlink()  # separate synthetic case, not production replay
+            (attempt / 'results').mkdir(); (attempt / 'results/python.sarif').write_text(json.dumps({'version': '2.1.0', 'runs': [{'results': []}]}))
+            args.analysis_outcome = 'success'
+            proof_path = attempt / 'installed-verification.json'; proof = proof_path.read_bytes()
+            proof_path.write_text('{"verified": 1}')
+            bad = copy.deepcopy(result); bad['installation_verification_sha256'] = hashlib.sha256(proof_path.read_bytes()).hexdigest()
+            tool.codeql_write(attempt / 'receipt-probe.json', bad)
+            self.assertEqual(tool.codeql_phase(args), 1)
+            (attempt / 'receipt-observe.json').unlink()
+            proof_path.write_bytes(proof); tool.codeql_write(attempt / 'receipt-probe.json', result)
+            self.assertEqual(tool.codeql_phase(args), 0)
+            observation = json.loads((attempt / 'receipt-observe.json').read_text())
+            self.assertEqual(observation['status'], 'observation_recorded')
+            self.assertFalse(observation['authorizes_execution'])
+            self.assertEqual(observation['authenticated_service_state'], 'remote_pending')
+            (attempt / 'installed-verification.json').unlink()
+            outside = temp.parent / 'outside' / extraction.name; outside.mkdir(parents=True)
+            with tarfile.open(archive) as tar: tar.extractall(outside, filter='data')
+            (temp / 'linked').symlink_to(outside.parent, target_is_directory=True)
+            for bad_path in (str(temp / '..' / 'outside' / extraction.name / 'codeql/codeql'),
+                             str(outside / 'codeql/codeql'),
+                             str(temp / 'linked' / extraction.name / 'codeql/codeql'),
+                             str(extraction) + '/./codeql/codeql',
+                             str(temp / ('-' * 36) / 'codeql/codeql')):
+                with self.subTest(init_path=bad_path), patch.object(tool, 'bounded_codeql_command') as command:
+                    with self.assertRaises(tool.ContractError): tool.codeql_probe(attempt, 'linux64', 'python', bad_path, '2.26.0', 'success')
+                    command.assert_not_called()
+                if (attempt / 'installed-verification.json').exists(): (attempt / 'installed-verification.json').unlink()
+            for member in ['jre/bin/java', 'tools/a.jar', 'codeql']:
+                member_path = extraction / 'codeql' / member; original = member_path.read_bytes(); member_path.write_bytes(b'changed')
+                with patch.object(tool, 'bounded_codeql_command') as command:
+                    with self.assertRaises(tool.ContractError): tool.codeql_probe(attempt, 'linux64', 'python', str(codeql), '2.26.0', 'success')
+                    command.assert_not_called()
+                if (attempt / 'installed-verification.json').exists(): (attempt / 'installed-verification.json').unlink()
+                member_path.write_bytes(original)
+            for bad_path, version, outcome in [(str(codeql) + chr(10), '2.26.0', 'success'), ('/usr/bin/true', '2.26.0', 'success'), ('relative', '2.26.0', 'success'), (str(codeql), '2.25.0', 'success'), (str(codeql), '2.26.0', 'failure')]:
+                with patch.object(tool, 'bounded_codeql_command') as command:
+                    with self.assertRaises(tool.ContractError): tool.codeql_probe(attempt, 'linux64', 'python', bad_path, version, outcome)
+                    command.assert_not_called()
+            for field in ('lock_digest', 'workflow_digest', 'language', 'run_id', 'run_attempt'):
+                bad = copy.deepcopy(acquired); bad['binding'][field] = 'wrong'
+                tool.codeql_write(attempt / 'receipt-acquire.json', bad)
+                with patch.object(tool, 'bounded_codeql_command') as command:
+                    with self.assertRaises(tool.ContractError): tool.codeql_probe(attempt, 'linux64', 'python', str(codeql), '2.26.0', 'success')
+                    command.assert_not_called()
+            for field, value in [('status', 'failure'), ('authorizes_execution', True), ('exit', False), ('mode', 'fetch-only'), ('runnable_here', 'yes')]:
+                bad = copy.deepcopy(acquired); bad[field] = value; tool.codeql_write(attempt / 'receipt-acquire.json', bad)
+                with self.assertRaises(tool.ContractError): tool.codeql_chain(attempt, 'linux64', 'python')
+
+    def test_codeql_download_transport_size_hash_and_http_failures(self):
+        selected = dict(tool.codeql_select(tool.load_lock(ROOT), 'linux64'), size=3, sha256=hashlib.sha256(b'abc').hexdigest())
+        class Response(io.BytesIO):
+            status = 200
+            headers = {}
+        for index, content in enumerate((b'ab', b'abcd', b'xyz')):
+            with patch.object(tool, 'open_download', return_value=Response(content)):
+                with self.assertRaises(tool.ContractError): tool.codeql_download(selected, self.root / ('bad-' + str(index)))
+        response = Response(b'abc'); response.status = 403
+        with patch.object(tool, 'open_download', return_value=response):
+            with self.assertRaises(tool.ContractError): tool.codeql_download(selected, self.root / 'http-failure')
+
+    def test_codeql_worker_hard_deadline_kills_blocked_parser(self):
+        class Child:
+            pid = 123456789
+            calls = 0
+            def wait(inner, timeout=None):
+                inner.calls += 1
+                if timeout is not None: raise subprocess.TimeoutExpired('synthetic', timeout)
+                return -9
+        with patch.object(tool.subprocess, 'Popen', return_value=Child()), patch.object(tool.os, 'killpg') as kill:
+            with self.assertRaises(tool.ContractError): tool.run_codeql_worker('scan', self.root / 'archive', self.root / 'manifest')
+            kill.assert_called_once()
+
+    def test_unknown_failure_observations_never_become_service_success(self):
+        for status in ('failure', 'skipped', 'cancelled', 'timed_out', 'unknown', ''):
+            observation = tool.codeql_observations(status, 'some-id', None)
+            self.assertNotEqual(observation['analysis'], 'observed_result')
+            self.assertEqual(observation['authenticated_service_state'], 'remote_pending')
+            self.assertFalse(observation['authorizes_execution'])
+        observation = tool.codeql_observations('success', 'id', {'sha256': 'a' * 64, 'runs': 1, 'results': 0})
+        self.assertEqual(observation['authenticated_service_state'], 'remote_pending')
+        self.assertFalse(observation['authorizes_execution'])
 
 
 if __name__ == '__main__': unittest.main()

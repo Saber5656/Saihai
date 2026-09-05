@@ -2,7 +2,7 @@
   "inventory_version": "1",
   "repository": "Saber5656/Saihai",
   "source_digests": {
-    ".github/workflows/codeql.yml": "e338b79ae6d2f5f23db254a2b385c0bc7c575142f2849c2f8c78fd8e20b759fc",
+    ".github/workflows/codeql.yml": "c448662803d346e45567f38f3e31f4db79fc9c66df54b5b5fea801c89920e49e",
     ".github/workflows/validate.yml": "a891467d2461ee91cd3bac7bf01eabfd0ca3cff1535b11638283d6fb73ac634f"
   },
   "jobs": [
@@ -33,14 +33,26 @@
                 "cron": "17 3 * * 1"
               }
             ],
-            "workflow_dispatch": null
+            "workflow_dispatch": null,
+            "merge_group": {
+              "types": [
+                "checks_requested"
+              ]
+            }
+          },
+          "concurrency": {
+            "group": "${{ github.repository }}-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}",
+            "cancel-in-progress": false
           },
           "permissions": {
-            "contents": "read",
-            "security-events": "write"
+            "contents": "read"
           }
         },
         "job": {
+          "permissions": {
+            "contents": "read",
+            "security-events": "write"
+          },
           "name": "Analyze (${{ matrix.language }})",
           "runs-on": "ubuntu-latest",
           "timeout-minutes": 15,
@@ -59,17 +71,62 @@
               "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
             },
             {
+              "name": "Acquire and verify fixed CodeQL bundle",
+              "env": {
+                "LANGUAGE": "${{ matrix.language }}"
+              },
+              "run": "python3 scripts/verify_delivery_toolchain.py --codeql-phase acquire --bundle linux64 --language \"$LANGUAGE\" --output \"$RUNNER_TEMP/codeql-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$LANGUAGE\"\n"
+            },
+            {
               "name": "Initialize CodeQL",
+              "id": "codeql-init",
               "uses": "github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
               "with": {
-                "languages": "${{ matrix.language }}"
+                "languages": "${{ matrix.language }}",
+                "tools": "${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/bundle.tar.gz",
+                "trap-caching": "false",
+                "dependency-caching": "false"
               }
             },
             {
+              "name": "Verify initialized bundle and actual CLI version",
+              "env": {
+                "LANGUAGE": "${{ matrix.language }}",
+                "CODEQL_PATH": "${{ steps.codeql-init.outputs.codeql-path }}",
+                "CODEQL_VERSION": "${{ steps.codeql-init.outputs.codeql-version }}",
+                "INIT_OUTCOME": "${{ steps.codeql-init.outcome }}"
+              },
+              "run": "python3 scripts/verify_delivery_toolchain.py --codeql-phase probe --bundle linux64 --language \"$LANGUAGE\" --output \"$RUNNER_TEMP/codeql-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$LANGUAGE\" --codeql-path \"$CODEQL_PATH\" --codeql-version \"$CODEQL_VERSION\" --init-outcome \"$INIT_OUTCOME\"\n"
+            },
+            {
               "name": "Perform CodeQL analysis",
+              "id": "codeql-analysis",
               "uses": "github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
               "with": {
-                "category": "/language:${{ matrix.language }}"
+                "category": "/language:${{ matrix.language }}",
+                "output": "${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/results"
+              }
+            },
+            {
+              "name": "Record separate analysis and service observations",
+              "if": "always()",
+              "env": {
+                "LANGUAGE": "${{ matrix.language }}",
+                "INIT_OUTCOME": "${{ steps.codeql-init.outcome }}",
+                "ANALYSIS_OUTCOME": "${{ steps.codeql-analysis.outcome }}",
+                "SARIF_ID": "${{ steps.codeql-analysis.outputs.sarif-id }}"
+              },
+              "run": "python3 scripts/verify_delivery_toolchain.py --codeql-phase observe --bundle linux64 --language \"$LANGUAGE\" --output \"$RUNNER_TEMP/codeql-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$LANGUAGE\" --init-outcome \"$INIT_OUTCOME\" --analysis-outcome \"$ANALYSIS_OUTCOME\" --sarif-id \"$SARIF_ID\"\n"
+            },
+            {
+              "name": "Retain bounded CodeQL phase receipts",
+              "if": "always()",
+              "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+              "with": {
+                "name": "codeql-receipts-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}",
+                "path": "${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/receipt-acquire.json\n${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/receipt-probe.json\n${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/receipt-observe.json\n",
+                "retention-days": 14,
+                "if-no-files-found": "error"
               }
             }
           ]
@@ -103,14 +160,26 @@
                 "cron": "17 3 * * 1"
               }
             ],
-            "workflow_dispatch": null
+            "workflow_dispatch": null,
+            "merge_group": {
+              "types": [
+                "checks_requested"
+              ]
+            }
+          },
+          "concurrency": {
+            "group": "${{ github.repository }}-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}",
+            "cancel-in-progress": false
           },
           "permissions": {
-            "contents": "read",
-            "security-events": "write"
+            "contents": "read"
           }
         },
         "job": {
+          "permissions": {
+            "contents": "read",
+            "security-events": "write"
+          },
           "name": "Analyze (${{ matrix.language }})",
           "runs-on": "ubuntu-latest",
           "timeout-minutes": 15,
@@ -129,17 +198,62 @@
               "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
             },
             {
+              "name": "Acquire and verify fixed CodeQL bundle",
+              "env": {
+                "LANGUAGE": "${{ matrix.language }}"
+              },
+              "run": "python3 scripts/verify_delivery_toolchain.py --codeql-phase acquire --bundle linux64 --language \"$LANGUAGE\" --output \"$RUNNER_TEMP/codeql-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$LANGUAGE\"\n"
+            },
+            {
               "name": "Initialize CodeQL",
+              "id": "codeql-init",
               "uses": "github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
               "with": {
-                "languages": "${{ matrix.language }}"
+                "languages": "${{ matrix.language }}",
+                "tools": "${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/bundle.tar.gz",
+                "trap-caching": "false",
+                "dependency-caching": "false"
               }
             },
             {
+              "name": "Verify initialized bundle and actual CLI version",
+              "env": {
+                "LANGUAGE": "${{ matrix.language }}",
+                "CODEQL_PATH": "${{ steps.codeql-init.outputs.codeql-path }}",
+                "CODEQL_VERSION": "${{ steps.codeql-init.outputs.codeql-version }}",
+                "INIT_OUTCOME": "${{ steps.codeql-init.outcome }}"
+              },
+              "run": "python3 scripts/verify_delivery_toolchain.py --codeql-phase probe --bundle linux64 --language \"$LANGUAGE\" --output \"$RUNNER_TEMP/codeql-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$LANGUAGE\" --codeql-path \"$CODEQL_PATH\" --codeql-version \"$CODEQL_VERSION\" --init-outcome \"$INIT_OUTCOME\"\n"
+            },
+            {
               "name": "Perform CodeQL analysis",
+              "id": "codeql-analysis",
               "uses": "github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9",
               "with": {
-                "category": "/language:${{ matrix.language }}"
+                "category": "/language:${{ matrix.language }}",
+                "output": "${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/results"
+              }
+            },
+            {
+              "name": "Record separate analysis and service observations",
+              "if": "always()",
+              "env": {
+                "LANGUAGE": "${{ matrix.language }}",
+                "INIT_OUTCOME": "${{ steps.codeql-init.outcome }}",
+                "ANALYSIS_OUTCOME": "${{ steps.codeql-analysis.outcome }}",
+                "SARIF_ID": "${{ steps.codeql-analysis.outputs.sarif-id }}"
+              },
+              "run": "python3 scripts/verify_delivery_toolchain.py --codeql-phase observe --bundle linux64 --language \"$LANGUAGE\" --output \"$RUNNER_TEMP/codeql-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$LANGUAGE\" --init-outcome \"$INIT_OUTCOME\" --analysis-outcome \"$ANALYSIS_OUTCOME\" --sarif-id \"$SARIF_ID\"\n"
+            },
+            {
+              "name": "Retain bounded CodeQL phase receipts",
+              "if": "always()",
+              "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+              "with": {
+                "name": "codeql-receipts-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}",
+                "path": "${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/receipt-acquire.json\n${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/receipt-probe.json\n${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/receipt-observe.json\n",
+                "retention-days": 14,
+                "if-no-files-found": "error"
               }
             }
           ]
@@ -222,6 +336,6 @@
   ],
   "lock_digests": {
     ".github/requirements-delivery.lock": "93a7e075703f062c614f47f65cc290fef319ec03ecc3bcba97685170d883151c",
-    ".github/delivery-toolchain.lock.json": "805c029f4cd1939d82f511140b4d158a77075deb0da8285632bf1048a76769e8"
+    ".github/delivery-toolchain.lock.json": "fd2dff638267f4e7ae17e3b2d38e6612367fb2dd2eebbcf63a3adc6cb646ece6"
   }
 }

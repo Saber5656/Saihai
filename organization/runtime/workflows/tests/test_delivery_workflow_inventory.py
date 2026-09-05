@@ -258,7 +258,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual([(x["job_id"], x["matrix"]) for x in result["jobs"]],
                          [("analyze", {"language": "actions"}), ("analyze", {"language": "python"}), ("validate", {})])
         text = json.dumps(result["gaps"])
-        for marker in ("floating_runtime", "missing_concurrency", "evidence_retention_unset", "merge_group_missing", "authoritative_policy_missing"):
+        for marker in ("floating_runtime", "codeql_bundle_integrity_unverified", "codeql_implicit_cache_unverified", "authoritative_policy_missing"):
             self.assertIn(marker, text)
         self.assertEqual(result["readiness"], "blocked")
         self.assertFalse(result["authorizes_execution"])
@@ -311,9 +311,9 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(sys.version_info[:2], (3, 11))
 
     def test_fixed_ci_context_syntax_never_evaluates_arbitrary_expressions(self):
-        for expression in ("github.repository", "github.workflow", "github.event_name", "github.ref", "github.run_id", "github.run_attempt", "always()"):
+        for expression in ("github.repository", "github.workflow", "github.event_name", "github.ref", "github.run_id", "github.run_attempt", "always()", "steps.codeql-init.outputs.codeql-path", "steps.codeql-init.outputs.codeql-version", "steps.codeql-init.outcome", "steps.codeql-analysis.outcome", "steps.codeql-analysis.outputs.sarif-id"):
             self.assertEqual(inventory._expression_gaps("${{ " + expression + " }}", "test", set()), [])
-        for expression in ("github.run_attempts", "always(1)", "always() || true", "fromJSON(inputs.x)", "secrets.TOKEN", "github.event.pull_request.head.repo.fork"):
+        for expression in ("github.run_attempts", "always(1)", "always() || true", "fromJSON(inputs.x)", "secrets.TOKEN", "github.event.pull_request.head.repo.fork", "steps.other.outputs.codeql-path", "steps.codeql-init.outputs.codeql-path || true", "steps.codeql-analysis.outputs.sarif_id"):
             self.assertTrue(inventory._expression_gaps("${{ " + expression + " }}", "test", set()))
         result = self.report()
         self.assertFalse(result["authorizes_execution"])
