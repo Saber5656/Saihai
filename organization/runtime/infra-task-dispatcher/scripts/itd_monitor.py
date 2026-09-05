@@ -22,6 +22,11 @@ SAIHAI_CHECKOUT_ROOT = Path(__file__).resolve().parents[4]
 if str(SAIHAI_CHECKOUT_ROOT) not in sys.path:
     sys.path.insert(0, str(SAIHAI_CHECKOUT_ROOT))
 from directory_paths import load_environment, validate_vault  # noqa: E402
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from task_discovery import (  # noqa: E402
+    PASSIVE_STATES, TASK_ID_RE, discover_tasks, parse_frontmatter, path_identity,
+)
 
 ENV_DIAGNOSTICS = load_environment(checkout_root=SAIHAI_CHECKOUT_ROOT, require_catalog=True)
 
@@ -67,7 +72,8 @@ def run(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
         stderr=subprocess.PIPE,
         check=False,
     )
-    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    # Porcelain status has significant leading spaces (e.g. " M report.md").
+    return proc.returncode, proc.stdout.rstrip("\r\n"), proc.stderr.strip()
 
 
 def sha256_text(value: str) -> str:
@@ -132,6 +138,18 @@ def build_snapshot(roots: list[Path], report: Path) -> dict[str, Any]:
             continue
         seen.add(key)
         repos[key] = {k: v for k, v in snap.items() if k != "status_lines"}
+        discovery = discover_tasks(root, excluded_paths=(report,))
+        task_inputs = discovery["inputs"]
+        for name in ("00-Inbox&Tasks/Task-Index.md", "00-Inbox&Tasks/Kanban.md"):
+            path = root / name
+            if path.is_file() and not path.is_symlink():
+                task_inputs[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        repos[key]["task_inputs"] = task_inputs
+        repos[key]["task_states"] = {task_id: record["status"] for task_id, record in discovery["tasks"].items()}
+        repos[key]["task_discovery_problems"] = [
+            {**item, "paths": [rel_or_abs(path, root) for path in item["paths"]]}
+            for item in discovery["problems"]
+        ]
     digest = sha256_text(json.dumps(repos, sort_keys=True, ensure_ascii=False))
     return {"version": 1, "digest": digest, "repos": repos}
 
@@ -150,25 +168,7 @@ def read_previous_snapshot(report: Path) -> dict[str, Any] | None:
 
 
 def task_files(agents_vault: Path) -> list[Path]:
-    project_root = agents_vault / "01-Projects"
-    if not project_root.exists():
-        return []
-    return sorted(project_root.rglob("TSK-*.md"))
-
-
-def parse_frontmatter(text: str) -> dict[str, str]:
-    if not text.startswith("---"):
-        return {}
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return {}
-    out: dict[str, str] = {}
-    for line in parts[1].splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        out[key.strip()] = value.strip().strip('"')
-    return out
+    return sorted(record["path"] for record in discover_tasks(agents_vault)["tasks"].values())
 
 
 def parse_task_index(agents_vault: Path) -> dict[str, str]:
@@ -181,22 +181,53 @@ def parse_task_index(agents_vault: Path) -> dict[str, str]:
             continue
         cells = [cell.strip() for cell in line.strip("|").split("|")]
         if len(cells) >= 5:
-            index[cells[0]] = cells[4]
+            if TASK_ID_RE.fullmatch(cells[0]):
+                index[cells[0]] = "projection_ambiguous" if cells[0] in index else cells[4]
     return index
 
 
-def parse_kanban(agents_vault: Path) -> dict[str, str]:
+def parse_kanban(agents_vault: Path, *, discovery: dict[str, Any] | None = None) -> dict[str, str]:
     path = agents_vault / "00-Inbox&Tasks/Kanban.md"
     if not path.exists():
         return {}
+    discovery = discovery if discovery is not None else discover_tasks(agents_vault)
+    target_ids: dict[str, str] = {}
+    for task_id, record in discovery["tasks"].items():
+        target = record["path"].relative_to(agents_vault).with_suffix("").as_posix()
+        target_ids[target] = task_id
+        target_ids[target.removeprefix("01-Projects/")] = task_id
+
+    def text_ids(text: str) -> set[str]:
+        return {path_identity(token) for token in re.findall(r"(?<![A-Za-z0-9_-])TSK-[A-Za-z0-9_-]+", text)} - {""}
+
     current = ""
     out: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith("## "):
             current = line.removeprefix("## ").strip()
             continue
-        for task_id in re.findall(r"TSK-\d{4}", line):
-            out[task_id] = current
+        row_ids = text_ids(re.sub(r"\[\[[^\]\n]+\]\]", "", line))
+        conflicting_ids: set[str] = set()
+        for link in re.findall(r"\[\[([^\]\n]+)\]\]", line):
+            target, _, alias = link.partition("|")
+            target = target.split("#", 1)[0].removesuffix(".md")
+            alias_ids = text_ids(alias)
+            canonical_id = target_ids.get(target)
+            if canonical_id:
+                row_ids.add(canonical_id)
+                if alias_ids and alias_ids != {canonical_id}:
+                    conflicting_ids.add(canonical_id)
+            elif alias_ids:
+                row_ids.update(alias_ids)
+            else:
+                # Only the target filename/immediate task folder is a path ID;
+                # ancestor task folders describe containment, not row ownership.
+                target_path = Path(target)
+                inferred = path_identity(target_path.parent.name if target_path.name == "task" else target_path.name)
+                if inferred:
+                    row_ids.add(inferred)
+        for task_id in sorted(row_ids):
+            out[task_id] = "projection_ambiguous" if task_id in out or task_id in conflicting_ids else current
     return out
 
 
@@ -209,7 +240,11 @@ def kanban_section_for(status: str) -> str:
         "domain_review": "Review",
         "independent_review": "Review",
         "waiting_human": "Waiting Human",
-        "blocked": "Waiting Human",
+        "blocked": "Blocked",
+        "state_unverified": "Blocked",
+        "waiting_runtime": "Blocked",
+        "waiting_quality": "Review",
+        **{state: "Deferred" for state in PASSIVE_STATES},
         "done": "Done",
         "archived": "Done",
     }.get(status, "")
@@ -270,15 +305,21 @@ def collect_git_findings(roots: list[Path], report: Path) -> list[dict[str, Any]
 
 def collect_gate_findings(agents_vault: Path) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
+    discovery = discover_tasks(agents_vault)
     index = parse_task_index(agents_vault)
-    kanban = parse_kanban(agents_vault)
+    kanban = parse_kanban(agents_vault, discovery=discovery)
 
-    for path in task_files(agents_vault):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        meta = parse_frontmatter(text)
-        task_id = meta.get("task_id") or path.name.split("-", 2)[0] + "-" + path.name.split("-", 2)[1]
-        status = meta.get("status", "")
+    for issue in discovery["problems"]:
+        findings.append(finding(issue["event_type"], "P0", "Task identity requires reconciliation",
+                                issue["reason"] + ": " + issue["task_id"],
+                                [rel_or_abs(path, agents_vault) for path in issue["paths"]]))
+
+    for task_id, record in discovery["tasks"].items():
+        path, text, meta, status = record["path"], record["text"], record["meta"], record["status"]
         rel = rel_or_abs(path, agents_vault)
+        if status == "state_unverified":
+            findings.append(finding("task_state_unverified", "P1", f"Task state requires evidence: {task_id}",
+                                    "recorded_status=" + record["recorded_status"], [rel]))
 
         if status and index.get(task_id) and index[task_id] != status:
             findings.append(
@@ -303,7 +344,7 @@ def collect_gate_findings(agents_vault: Path) -> list[dict[str, Any]]:
                 )
             )
 
-        if status not in {"done", "archived"}:
+        if status not in {"done", "archived", "state_unverified"} | PASSIVE_STATES:
             required = [
                 "gate_intake_envelope_created",
                 "task_detail_created_or_updated",
