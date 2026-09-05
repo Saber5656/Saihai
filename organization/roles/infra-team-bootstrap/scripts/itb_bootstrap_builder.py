@@ -11110,6 +11110,12 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             return {"decision": "block", "reason": "codex command not found"}
         cwd = str(hook_input.get("cwd") or state.get("cwd") or os.getcwd())
         command = codex_activation_command(row, prompt, cwd)
+        activation_request_id = normalize_cell(
+            hook_input.get("request_id") or hook_input.get("requestId")
+        ) or f"req-{uuid.uuid4().hex}"
+        transcript_dir = session_dir / "provider-exec" / safe_id(agent_id)
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = transcript_dir / f"activation-{uuid.uuid4().hex}.jsonl"
         started = time.monotonic()
         completed = run_command_with_bounded_output(
             command,
@@ -11118,6 +11124,12 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             stderr_limit_bytes=CODEX_STDERR_MAX_BYTES,
         )
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        transcript_path.write_text(completed.stdout, encoding="utf-8")
+        activation_evidence = {
+            "request_id": activation_request_id,
+            "transcript_path": str(transcript_path),
+            "transcript_sha256": hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest(),
+        }
         output_rejection_type, output_rejection_reason = codex_bounded_output_rejection(completed)
         if output_rejection_type:
             reset_response_evidence(
@@ -11149,7 +11161,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     extra={"output_rejection_type": output_rejection_type},
                 ),
             )
-            return {"decision": "block", "reason": output_rejection_reason}
+            return {"decision": "block", "reason": output_rejection_reason, "evidence": activation_evidence}
         if completed.returncode != 0:
             process_note = bounded_provider_process_note(completed) or "codex provider process failed"
             reset_response_evidence(
@@ -11180,7 +11192,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     duration_api_ms=elapsed_ms,
                 ),
             )
-            return {"decision": "block", "reason": process_note}
+            return {"decision": "block", "reason": process_note, "evidence": activation_evidence}
 
         codex_parse_error = ""
         try:
@@ -11203,7 +11215,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
         )
         duration_api_ms = codex_duration_api_ms if codex_duration_api_ms is not None else elapsed_ms
         provider_session_id = str_from_nested(codex_result, [("session_id",), ("sessionId",)])
-        request_id = str_from_nested(codex_result, [("request_id",), ("requestId",)])
+        request_id = activation_request_id
         effective_model = (
             str_from_nested(codex_result, [("model",), ("effective_model",), ("effectiveModel",)])
             or row.get("intended_model", "")
@@ -11252,6 +11264,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             return {
                 "decision": "block",
                 "reason": codex_parse_error or "codex provider activation produced no inference evidence",
+                "evidence": activation_evidence,
             }
 
         row["activation_status"] = "response_active"
@@ -11293,6 +11306,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 extra={
                     "provider_session_id": provider_session_id,
                     "stdout_result_present": bool(result_text),
+                    **activation_evidence,
                 },
             ),
         )
@@ -11301,6 +11315,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 "hookEventName": "ProviderActivation",
                 "additionalContext": f"Codex provider activation complete for `{agent_id}` with `{effective_model}`.",
             },
+            "evidence": activation_evidence,
             "activation": {
                 "agent_id": agent_id,
                 "provider": "openai",
@@ -11310,6 +11325,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "usage_source": "codex_exec_json",
+                "response": result_text,
             },
         }
     if provider_runtime != ("claude_cli", "claude"):
