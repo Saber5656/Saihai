@@ -1961,8 +1961,99 @@ def test_execution_authority_schemas_match_exact_runtime_normalizers() -> None:
             )
 
 
+def store_consistently_signed_order(state_root: Path, order: dict) -> Path:
+    """Test authority only: preserve integrity while testing semantic refusal."""
+    order["work_order_authority"]["signature"] = None
+    order["work_order_authority"]["signature"] = frontdoor.sign_transition(
+        state_root=state_root,
+        principal=order["work_order_authority"]["issuer_principal"],
+        transition="issue_work_order",
+        subject={"unsigned_work_order_digest": executor.sha256_digest(order)},
+    )
+    order_path = state_root / "work-orders" / order["run_id"] / f"{order['step_id']}.json"
+    snapshot = work_order_builder.snapshot_path(state_root, order["run_id"], order["step_id"], 1)
+    payload = json.loads(snapshot.read_text(encoding="utf-8"))
+    payload.update(work_order=order, work_order_digest=executor.sha256_digest(order))
+    executor.run_store.atomic_write_json(order_path, order)
+    executor.run_store.atomic_write_json(snapshot, payload)
+    executor.verify_work_order_signature(state_root, order)
+    return snapshot
+
+
+def test_signed_legacy_role_order_is_rejected() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        repo = create_repo(root)
+        state_root = root / "state"
+        _, drained = create_approved_code_change(state_root, user_prompt="bounded change", worker_repo=repo)
+        legacy = copy.deepcopy(drained["work_order"])
+        for field in ("role_definition_path", "role_definition_digest", "role_contract"):
+            legacy.pop(field, None)
+        store_consistently_signed_order(state_root, legacy)
+        try:
+            executor.load_frozen_work_order(state_root, run_id=legacy["run_id"], step_id=legacy["step_id"])
+        except executor.ScopedWorkerError as exc:
+            assert_equal(exc.reason_class, "role_definition_binding_missing", "legacy role refusal")
+        else:
+            raise AssertionError("validly signed legacy role order was accepted")
+
+
+def test_frozen_role_binding_semantics_and_zero_reader() -> None:
+    from unittest.mock import patch
+    import role_definition as roles
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        repo = create_repo(root)
+        role_file = root / "role-source/organization/roles/tech-backend/skill.md"
+        role_file.parent.mkdir(parents=True)
+        role_file.write_text("# Fixture role\nResponsibilities, boundaries, and output.\n")
+        state_root = root / "state"
+        with patch.object(roles, "REPO_ROOT", root / "role-source"):
+            _, drained = create_approved_code_change(state_root, user_prompt="bounded change", worker_repo=repo)
+        original = drained["work_order"]
+        snapshot = work_order_builder.snapshot_path(state_root, original["run_id"], original["step_id"], 1)
+        order_path = snapshot.parent / "implement.json"
+        before = (snapshot.read_bytes(), order_path.read_bytes())
+        role_file.write_text("current role changed after drain")
+        role_file.unlink()
+        with patch.object(roles, "load_role_definition", side_effect=AssertionError("consumer reread")) as reader:
+            result = executor.verify_frozen_work_order(state_root, run_id=original["run_id"], step_id=original["step_id"], expected_run_states={"step_queued"})
+            assert_equal(result, (original, executor.sha256_digest(original), snapshot), "unchanged frozen return")
+            assert_equal((snapshot.read_bytes(), order_path.read_bytes()), before, "no snapshot rewrite")
+            assert_equal(reader.call_count, 0, "zero role reads")
+        mutations = []
+        for field in ("role_definition_path", "role_definition_digest", "role_contract"):
+            mutations.append((field, "missing"))
+            mutations.extend((field, value) for value in (None, 3, ""))
+        mutations.extend([
+            ("role_definition_path", "organization/roles/../secret/skill.md"),
+            ("role_definition_digest", "sha256:" + "A" * 64),
+            ("role_definition_digest", "sha256:" + "0" * 64),
+            ("role_contract", "substituted body"),
+            ("to_role", "../escape"),
+            ("instruction", "substituted instruction"),
+            ("instruction", original["instruction"] + "trailing injection"),
+            ("instruction", original["instruction"] + original["instruction"]),
+        ])
+        for field, value in mutations:
+            order = copy.deepcopy(original)
+            if value == "missing":
+                order.pop(field)
+            else:
+                order[field] = value
+            store_consistently_signed_order(state_root, order)
+            try:
+                executor.load_frozen_work_order(state_root, run_id=order["run_id"], step_id=order["step_id"])
+            except executor.ScopedWorkerError as exc:
+                assert exc.reason_class.startswith("role_definition_"), (field, value, exc.reason_class)
+            else:
+                raise AssertionError(f"signed semantic tamper accepted: {field}")
+
+
 def main() -> None:
     tests = [
+        test_signed_legacy_role_order_is_rejected,
+        test_frozen_role_binding_semantics_and_zero_reader,
         test_typed_request_to_redacted_result_e2e,
         test_main_agent_and_arbitrary_inputs_are_rejected,
         test_tamper_expiry_replay_and_binding_checks,

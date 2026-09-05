@@ -1556,6 +1556,13 @@ def test_drain_blocks_invalid_existing_work_order() -> None:
                 "runner_claim": {"claim_state": "unclaimed", "lease_expires_at": None},
             },
         }
+        # Keep this fixture focused on its empty context_refs, rather than
+        # allowing newly required role fields to mask that existing regression.
+        invalid_order["to_role"] = "tech-reviewer"
+        invalid_order.update(work_order_builder.role_definition.load_role_definition("tech-reviewer"))
+        invalid_order["instruction"] = work_order_builder.role_definition.instruction_for(
+            invalid_order["instruction"], invalid_order
+        )
         invalid_path = order_dir / "review.json"
         invalid_path.write_text(json.dumps(invalid_order, ensure_ascii=False) + "\n", encoding="utf-8")
         invalid_path.chmod(0o600)
@@ -5076,8 +5083,32 @@ def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
             raise AssertionError("bridge should reject child-thread/raw tool smuggling")
 
 
+def test_missing_role_drain_is_typed_and_creates_no_artifacts() -> None:
+    from unittest.mock import patch
+    import role_definition as roles
+    frontdoor_module = load_server_module().frontdoor
+    for variant in ("missing-directory", "missing-file", "renamed-file"):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            state_root = root / "state"
+            create_approved_run(state_root, request_id="req-role-missing", run_id="run-role-missing")
+            role_folder = root / "roles-source/organization/roles/tech-reviewer"
+            if variant != "missing-directory":
+                role_folder.mkdir(parents=True)
+            if variant == "renamed-file":
+                (role_folder / "renamed.md").write_text("renamed contract")
+            with patch.object(roles, "REPO_ROOT", root / "roles-source"):
+                result = frontdoor_module.drain_run(state_root=state_root, run_id="run-role-missing")
+            assert_equal(result["reason"], "work_order_invalid", "typed missing role drain")
+            assert_equal(result["workflow_run"]["run_state"], "waiting_human", "missing role human gate")
+            assert "role_definition_unavailable" in json.dumps(result)
+            for category in ("work-orders", "adapter-requests", "provider-evidence"):
+                assert not list((state_root / category).rglob("*.json")), category
+
+
 def main() -> None:
     tests = [
+        test_missing_role_drain_is_typed_and_creates_no_artifacts,
         test_channel_token_permissions_are_private,
         test_state_root_is_fixed_by_host_configuration,
         test_state_root_catalog_is_loaded_only_from_primary_checkout,

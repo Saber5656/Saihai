@@ -35,6 +35,7 @@ import run_lifecycle  # noqa: E402
 import run_store  # noqa: E402
 import safe_paths  # noqa: E402
 import work_order_builder  # noqa: E402
+import role_definition  # noqa: E402
 import host_state_root  # noqa: E402
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
@@ -1364,6 +1365,10 @@ def verify_frozen_work_order(
     if run.get("run_state") not in expected_run_states or run.get("activation", {}).get("activation_status") != "approved":
         raise ScopedWorkerError("work_order_not_executable")
     verify_work_order_signature(state_root, work_order)
+    try:
+        role_definition.validate_role_binding(work_order)
+    except role_definition.RoleDefinitionError as exc:
+        raise ScopedWorkerError(str(exc)) from None
     return work_order, digest, snapshot_path
 
 

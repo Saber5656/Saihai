@@ -12,6 +12,7 @@ from typing import Any
 
 import run_store
 import safe_paths
+import role_definition
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 WORK_ORDER_SCHEMA_PATH = WORKFLOW_ROOT / "schemas/work-order.schema.json"
@@ -27,6 +28,9 @@ REQUIRED_WORK_ORDER_FIELDS = [
     "to_role",
     "assignment_role",
     "instruction",
+    "role_definition_path",
+    "role_definition_digest",
+    "role_contract",
     "expected_output",
     "context_refs",
     "context_scope",
@@ -430,6 +434,11 @@ def _unbound_work_order_errors(work_order: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _base_instruction(template: dict[str, Any], step: dict[str, Any]) -> str:
+    return (f"{template['purpose']} Step '{step['id']}' ({step['assignment_role']}): "
+            f"follow the input work order contract and produce {step['output_contract']}.")
+
+
 def build_work_order(
     *,
     run: dict[str, Any],
@@ -450,7 +459,13 @@ def build_work_order(
     provider_route = step.get("provider_route") if isinstance(step.get("provider_route"), dict) else {}
     external_provider_allowed = provider_route.get("adapter_kind") == "external_provider"
     context_refs = [_normalized_context_ref(item) for item in resolved_refs if isinstance(item, dict)]
+    try:
+        role_binding = role_definition.load_role_definition(step["role"])
+        instruction = role_definition.instruction_for(_base_instruction(template, step), role_binding)
+    except role_definition.RoleDefinitionError as exc:
+        raise WorkOrderError(str(exc)) from None
     work_order = {
+        **role_binding,
         "work_order_version": "1",
         "task_id": run["task_id"],
         "request_id": run["request_id"],
@@ -460,10 +475,7 @@ def build_work_order(
         "from_role": "frontdoor",
         "to_role": str(step["role"]),
         "assignment_role": str(step["assignment_role"]),
-        "instruction": (
-            f"{template['purpose']} Step '{step_id}' ({step['assignment_role']}): "
-            f"follow the input work order contract and produce {step['output_contract']}."
-        ),
+        "instruction": instruction,
         "expected_output": str(step["output_contract"]),
         "context_refs": context_refs,
         "context_scope": _context_scope_for_step(run=run, request_record=request_record, step=step),
@@ -562,6 +574,15 @@ def validate_work_order(
         return errors
     errors.extend(validate_against_work_order_schema(work_order))
     errors.extend(_forbidden_raw_transcript_paths(work_order))
+    try:
+        role_definition.validate_role_binding(work_order)
+        if work_order.get("to_role") != step.get("role"):
+            errors.append("role_definition_step_mismatch")
+        expected_instruction = role_definition.instruction_for(_base_instruction(template, step), work_order)
+        if work_order.get("instruction") != expected_instruction:
+            errors.append("role_definition_instruction_invalid")
+    except role_definition.RoleDefinitionError as exc:
+        errors.append(str(exc))
 
     if work_order.get("work_order_version") != "1":
         errors.append("work_order_version must be '1'")

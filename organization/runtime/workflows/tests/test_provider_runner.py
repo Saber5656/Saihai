@@ -1756,8 +1756,122 @@ def test_request_artifact_paths_are_recomputed_and_confined() -> None:
             raise AssertionError("symlinked report root must be rejected")
 
 
+def legacy_role_fixture(state_root: Path, run_id: str, request: dict | None = None) -> None:
+    """Build a coherent historical fixture, not a signature-corruption test."""
+    import frontdoor_orchestrator as frontdoor
+    worker = provider_runner.scoped_worker_executor
+    order_path = provider_runner.work_order_path(state_root, run_id, "review")
+    order = json.loads(order_path.read_text())
+    for field in ("role_definition_path", "role_definition_digest", "role_contract"):
+        order.pop(field, None)
+    order["instruction"] = order["instruction"].split("\n\n<SAIHAI_FROZEN_ROLE_CONTRACT>")[0]
+    order["work_order_authority"]["signature"] = None
+    order["work_order_authority"]["signature"] = frontdoor.sign_transition(
+        state_root=state_root, principal=order["work_order_authority"]["issuer_principal"],
+        transition="issue_work_order", subject={"unsigned_work_order_digest": worker.sha256_digest(order)},
+    )
+    digest = worker.sha256_digest(order)
+    snapshot_path = work_order_builder.snapshot_path(state_root, run_id, "review", 1)
+    snapshot = json.loads(snapshot_path.read_text())
+    snapshot.update(work_order=order, work_order_digest=digest)
+    run_store.atomic_write_json(order_path, order)
+    run_store.atomic_write_json(snapshot_path, snapshot)
+    worker.verify_work_order_signature(state_root, order)
+    run = run_store.load_run(state_root, run_id)
+    execution = run.get("provider_execution")
+    if not isinstance(execution, dict):
+        return
+    request_path = provider_runner.adapter_request_path(state_root, run_id, "review", execution["adapter_id"])
+    request_value = request if request is not None else json.loads(request_path.read_text())
+    request_value.update(work_order_digest=digest, instruction=order["instruction"])
+    request_value["authority"]["work_order_signature"] = order["work_order_authority"]["signature"]
+    request_value.pop("adapter_request_digest")
+    request_digest = "sha256:" + provider_runner.stable_digest(request_value)
+    request_value["adapter_request_digest"] = request_digest
+    run_store.atomic_write_json(request_path, request_value)
+    execution.update(work_order_digest=digest, adapter_request_digest=request_digest)
+    run_store.store_run(state_root, run, expected_current_state="waiting_provider")
+    journal_path, _ = provider_runner.provider_attempt_paths(state_root, run_id, execution["attempt_id"])
+    if journal_path.exists():
+        journal = json.loads(journal_path.read_text())
+        journal.update(work_order_digest=digest, adapter_request_digest=request_digest)
+        run_store.atomic_write_json(journal_path, journal)
+
+
+def test_provider_rejects_signed_legacy_role_at_initial_and_precall(phases=("initial", "precall")) -> None:
+    from unittest.mock import patch
+    for phase in phases:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            state_root = Path(raw_tmp)
+            run_id = "run-role-" + phase
+            prepare_run(state_root, request_id="req-role-" + phase, run_id=run_id)
+            original_authorize = provider_runner.authorize_provider_dispatch
+            def legacy_then_authorize(**kwargs):
+                legacy_role_fixture(state_root, run_id, kwargs["request"])
+                return original_authorize(**kwargs)
+            if phase == "initial":
+                legacy_role_fixture(state_root, run_id)
+            hook = legacy_then_authorize if phase == "precall" else original_authorize
+            with patch.object(provider_runner, "authorize_provider_dispatch", side_effect=hook), patch.object(
+                provider_runner, "execute_provider", side_effect=AssertionError("legacy role provider invoked")
+            ) as invoke:
+                result = provider_runner.run_provider(state_root=state_root, run_id=run_id, fake_provider_mode="success", principal={"principal_type": "harness_runner", "principal_id": "role-test", "authn_method": "local_test"})
+            assert_equal(invoke.call_count, 0, phase + " invoke zero")
+            assert_equal(result["decision"], "blocked", phase + " blocked")
+            expected = "role_definition_binding_missing" if phase == "initial" else "provider_unavailable"
+            assert_equal(result["reason"], expected, phase + " typed reason")
+            if phase == "initial":
+                assert not list((state_root / "adapter-requests").rglob("*.json"))
+            else:
+                assert "role_definition_binding_missing" in json.dumps(result)
+            assert result["workflow_run"]["run_state"] != "complete"
+            assert not list((state_root / "reports").rglob("*.json"))
+
+
+def test_provider_recovery_rejects_signed_legacy_role_without_promotion() -> None:
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        run_id = "run-role-recovery"
+        prepare_run(state_root, request_id="req-role-recovery", run_id=run_id)
+        original_store = run_store.store_run
+        original_execute = provider_runner.execute_provider
+        original_write = provider_runner.private_atomic_write_json
+        def crash_after_journal(root, path, candidate):
+            original_write(root, path, candidate)
+            if candidate.get("attempt_result_version") == "1":
+                raise RuntimeError("role fixture crash before promotion")
+        with patch.object(provider_runner, "private_atomic_write_json", side_effect=crash_after_journal), patch.object(
+            provider_runner, "execute_provider", wraps=original_execute
+        ) as first_invoke:
+            try:
+                provider_runner.run_provider(state_root=state_root, run_id=run_id, fake_provider_mode="success", principal={"principal_type": "harness_runner", "principal_id": "role-test", "authn_method": "local_test"})
+            except RuntimeError as exc:
+                assert_equal(str(exc), "role fixture crash before promotion", "crash boundary")
+            else:
+                raise AssertionError("expected completed-attempt crash")
+            assert_equal(first_invoke.call_count, 1, "pre-crash invocation")
+        legacy_role_fixture(state_root, run_id)
+        run = run_store.load_run(state_root, run_id)
+        run["provider_execution"]["lease"]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
+        original_store(state_root, run, expected_current_state="waiting_provider")
+        canonical = [provider_runner.provider_report_path(state_root, run_id, "review"),
+                     provider_runner.provider_evidence_path(state_root, run_id, "review"),
+                     provider_runner.provider_transcript_path(state_root, run_id, "review")]
+        assert all(not path.exists() for path in canonical), "crash precedes canonical output"
+        with patch.object(provider_runner, "execute_provider", side_effect=AssertionError("recovery reinvoked")) as again:
+            result = provider_runner.run_provider(state_root=state_root, run_id=run_id, fake_provider_mode="success", principal={"principal_type": "harness_runner", "principal_id": "role-test", "authn_method": "local_test"})
+        assert_equal(again.call_count, 0, "recovery invocation zero")
+        assert_equal(result["decision"], "blocked", "legacy recovery blocked")
+        assert_equal(result["reason"], provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH, "recovery outer reason")
+        assert result["workflow_run"]["run_state"] != "complete"
+        assert all(not path.exists() for path in canonical), "no legacy promotion"
+
+
 if __name__ == "__main__":
     tests = (
+        test_provider_rejects_signed_legacy_role_at_initial_and_precall,
+        test_provider_recovery_rejects_signed_legacy_role_without_promotion,
         test_fake_provider_success_completes_with_normalized_evidence,
         test_fake_provider_model_mismatch_waits_for_human_without_accepting_report,
         test_fake_provider_missing_effective_model_waits_for_human,

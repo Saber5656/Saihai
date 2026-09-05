@@ -518,8 +518,117 @@ def test_snapshot_path_rejects_symlinked_work_order_root() -> None:
             raise AssertionError("symlinked work-order root must be rejected")
 
 
+def test_role_definition_exact_bytes_are_bound() -> None:
+    import hashlib
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        order = build(Path(raw_tmp))
+        role_path = f"organization/roles/{step()['role']}/skill.md"
+        raw = (ROOT / role_path).read_bytes()
+        assert_equal(order.get("role_definition_digest"), "sha256:" + hashlib.sha256(raw).hexdigest(), "raw role digest")
+        assert_equal(order.get("role_contract", "").encode("utf-8"), raw, "full role bytes")
+        assert_equal(order.get("role_definition_path"), role_path, "canonical role path")
+        assert raw.decode("utf-8") in order["instruction"]
+
+
+def test_role_reader_and_binding_negatives() -> None:
+    import copy
+    import os
+    import role_definition as roles
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        folder = root / "organization/roles/tech-reviewer"
+        folder.mkdir(parents=True)
+        path = folder / "skill.md"
+        def expect(reason, call):
+            try:
+                call()
+            except roles.RoleDefinitionError as exc:
+                assert_equal(str(exc), reason, "typed role error")
+            else:
+                raise AssertionError(f"expected {reason}")
+        with patch.object(roles, "REPO_ROOT", root):
+            expect("role_definition_unavailable", lambda: roles.load_role_definition("tech-reviewer"))
+            for role_id in ("../outside", "a/b", "a\\b", "", None, 3):
+                expect("role_definition_id_invalid", lambda: roles.load_role_definition(role_id))
+            for raw, reason in ((b"", "role_definition_empty"), (b"\xff", "role_definition_encoding_invalid"),
+                                (b"x" * 65537, "role_definition_too_large")):
+                path.write_bytes(raw)
+                expect(reason, lambda: roles.load_role_definition("tech-reviewer"))
+            path.unlink()
+            path.mkdir()
+            expect("role_definition_unsafe_path", lambda: roles.load_role_definition("tech-reviewer"))
+            path.rmdir()
+            os.mkfifo(path)
+            expect("role_definition_unsafe_path", lambda: roles.load_role_definition("tech-reviewer"))
+            path.unlink()
+            outside = root / "outside"
+            outside.write_text("external must not be read")
+            path.symlink_to(outside)
+            expect("role_definition_unsafe_path", lambda: roles.load_role_definition("tech-reviewer"))
+            path.unlink()
+            folder.rmdir()
+            folder.symlink_to(root)
+            expect("role_definition_unsafe_path", lambda: roles.load_role_definition("tech-reviewer"))
+            folder.unlink()
+            folder.mkdir()
+            path.write_bytes("責務\r\n全文\n".encode())
+            with patch.object(roles, "_read_bytes", side_effect=PermissionError("private detail")):
+                expect("role_definition_read_failed", lambda: roles.load_role_definition("tech-reviewer"))
+            binding = roles.load_role_definition("tech-reviewer")
+            assert_equal(binding["role_contract"].encode(), path.read_bytes(), "CRLF round trip")
+            order = build(root)
+            for field in ("to_role", "role_definition_path", "role_definition_digest", "role_contract", "instruction"):
+                for value in (None, 3, "bad", ""):
+                    changed = copy.deepcopy(order)
+                    changed[field] = value
+                    errors = work_order_builder.validate_work_order(changed, template=template(), step=step(), state_root=root)
+                    assert errors, (field, value)
+            oversized = copy.deepcopy(template())
+            oversized["purpose"] = "x" * 65536
+            try:
+                build(root, template=oversized)
+            except work_order_builder.WorkOrderError as exc:
+                assert_equal(str(exc), "role_definition_instruction_invalid", "finished byte limit")
+            else:
+                raise AssertionError("oversized completed instruction accepted")
+
+
+def test_role_all_template_steps_and_reader_drift() -> None:
+    import hashlib
+    import role_definition as roles
+    for path in sorted((ROOT / "organization/runtime/workflows/templates").glob("*.yaml")):
+        tpl = json.loads(path.read_text())
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            for stp in tpl["steps"]:
+                order = build(Path(raw_tmp), template=tpl, step=stp)
+                raw = (ROOT / order["role_definition_path"]).read_bytes()
+                assert_equal(order["role_definition_digest"], "sha256:" + hashlib.sha256(raw).hexdigest(), stp["id"])
+                roles.validate_role_binding(order)
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        path = root / "organization/roles/tech-reviewer/skill.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("original")
+        original = roles._read_bytes
+        def drift(fd):
+            data = original(fd)
+            path.write_text("changed!")
+            return data
+        with patch.object(roles, "REPO_ROOT", root), patch.object(roles, "_read_bytes", side_effect=drift) as reader:
+            try:
+                roles.load_role_definition("tech-reviewer")
+            except roles.RoleDefinitionError as exc:
+                assert_equal(str(exc), "role_definition_changed", "read identity drift")
+            else:
+                raise AssertionError("role drift accepted")
+            assert_equal(reader.call_count, 1, "one bounded read")
+
+
 def main() -> None:
     tests = [
+        test_role_definition_exact_bytes_are_bound,
+        test_role_reader_and_binding_negatives,
+        test_role_all_template_steps_and_reader_drift,
         test_build_valid_p0_order,
         test_frontend_request_binding_is_all_or_nothing,
         test_unbound_readonly_empty_or_absent_digest_is_valid,

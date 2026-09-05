@@ -15,6 +15,9 @@
     "to_role",
     "assignment_role",
     "instruction",
+    "role_definition_path",
+    "role_definition_digest",
+    "role_contract",
     "expected_output",
     "context_refs",
     "context_scope",
@@ -30,6 +33,12 @@
     "work_order_authority"
   ],
   "properties": {
+    "role_definition_path": {
+      "type": "string",
+      "pattern": "^organization/roles/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/skill\\.md$"
+    },
+    "role_definition_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "role_contract": {"type": "string", "minLength": 1, "maxLength": 65536},
     "work_order_version": {
       "const": "1"
     },
