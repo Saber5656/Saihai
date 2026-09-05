@@ -137,6 +137,7 @@ def test_contract_validation() -> None:
         "provider-evidence.schema.json",
         "publication-result.schema.json",
         "research-report.schema.json",
+        "review-lifecycle.schema.json",
         "scoped-worker-capability.schema.json",
         "scoped-worker-result.schema.json",
         "security-review-report.schema.json",

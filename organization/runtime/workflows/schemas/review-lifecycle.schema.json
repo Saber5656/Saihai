@@ -1,0 +1,333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sahai.local/schemas/workflows/review-lifecycle.schema.json",
+  "title": "Bounded host-owned review lifecycle",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "1"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "owner": {
+      "type": "object",
+      "properties": {
+        "principal_type": {
+          "enum": [
+            "human_operator",
+            "manual_operator",
+            "harness_runner",
+            "orchestrator_start"
+          ]
+        },
+        "principal_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "authn_method": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "principal_type",
+        "principal_id",
+        "authn_method"
+      ],
+      "additionalProperties": false
+    },
+    "activation_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "original_snapshot": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "repository",
+        "base",
+        "head"
+      ],
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "repository",
+        "base",
+        "head"
+      ],
+      "additionalProperties": false
+    },
+    "max_repairs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "same_blocker_limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2
+    },
+    "no_progress_limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2
+    },
+    "repair_rounds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "same_blocker_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "no_progress": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "last_blockers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "findings": {
+      "type": "object",
+      "maxProperties": 256,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"
+          },
+          "anchor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "task_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "mandatory": {
+            "type": "boolean"
+          },
+          "severity": {
+            "enum": [
+              "critical",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "evidence_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "disposition": {
+            "enum": [
+              "repair",
+              "defer",
+              "stop"
+            ]
+          }
+        },
+        "required": [
+          "rule_id",
+          "path",
+          "anchor",
+          "task_id",
+          "mandatory",
+          "severity",
+          "evidence_ref",
+          "disposition"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "batches": {
+      "type": "object",
+      "maxProperties": 5,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "findings": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "snapshot": {
+            "type": "object",
+            "properties": {
+              "repository": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "base": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              },
+              "head": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            },
+            "required": [
+              "repository",
+              "base",
+              "head"
+            ],
+            "additionalProperties": false
+          },
+          "status": {
+            "enum": [
+              "reserved",
+              "failed",
+              "produced"
+            ]
+          },
+          "result_snapshot": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "repository": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048
+                  },
+                  "base": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40}$"
+                  },
+                  "head": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{40}$"
+                  }
+                },
+                "required": [
+                  "repository",
+                  "base",
+                  "head"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "findings",
+          "snapshot",
+          "status",
+          "result_snapshot"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "phase": {
+      "enum": [
+        "triage",
+        "repair",
+        "current_snapshot_validation",
+        "stopped"
+      ]
+    },
+    "stop_reason": {
+      "enum": [
+        null,
+        "incidental_mandatory",
+        "outside_scope",
+        "contradictory_finding",
+        "same_blocker_cap",
+        "no_progress_cap",
+        "repair_budget_exhausted"
+      ]
+    },
+    "integration_status": {
+      "const": "integration_pending"
+    }
+  },
+  "required": [
+    "version",
+    "run_id",
+    "task_id",
+    "owner",
+    "activation_digest",
+    "original_snapshot",
+    "snapshot",
+    "max_repairs",
+    "same_blocker_limit",
+    "no_progress_limit",
+    "repair_rounds",
+    "same_blocker_count",
+    "no_progress",
+    "last_blockers",
+    "findings",
+    "batches",
+    "phase",
+    "stop_reason",
+    "integration_status"
+  ],
+  "additionalProperties": false
+}
