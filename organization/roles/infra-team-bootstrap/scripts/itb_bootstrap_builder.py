@@ -6350,12 +6350,30 @@ approval_required: false
 approval_reason: "none"
 workflow_mode: {workflow_mode}
 risk_tier: {risk_tier}
+scope_contract_version: 1
+requirements_version: "[intake snapshot version; not approval]"
+selection_requirements_version: "[same intake snapshot version]"
+requirements:
+  - requirement_id: R-1
+    text: "[requirement text; enumerate every requirement]"
+requirements_history: []
+selected_unit_id: "[explicitly selected unit_id]"
 task_units:
   - unit_id: unit-1
     title: "..."
     main_team: gate
     assignee: gate-task-creator
     priority: P0
+    repository: "[target repository]"
+    binding:
+      status: pending
+    requirement_ids: ["R-1"]
+    scope:
+      in: ["..."]
+      out: ["..."]
+    deliverables: ["..."]
+    allowed_paths: ["[proposed change path; not capability]"]
+    depends_on: []
     done_criteria: ["..."]
 routing_hint: "teams-project-manager"
 review_requirements: ["domain_review", "independent_review"]
@@ -6494,45 +6512,9 @@ def gate_entry_response_is_repairable(response: str) -> bool:
 def normalize_gate_entry_response(response: str, user_prompt: str) -> tuple[str, bool, list[str]]:
     if not validate_gate_entry_response(response):
         return response.strip(), False, []
-    if not gate_entry_response_is_repairable(response):
-        return response.strip(), False, ["provider response is not repairable as Gate Intake Envelope"]
-    title = compact_title(user_prompt, fallback="Gate intake")
-    repaired = f"""envelope_version: "2"
-source_type: human_prompt
-original_request: |
-{yaml_block(user_prompt)}
-intent_summary: "{title}"
-desired_outcome:
-  deliverables: ["Task Detail and Project Manager Handoff"]
-  done_criteria: ["gate-task-creator can create the task without reinterpreting the human prompt"]
-scope:
-  in: ["Normalize and create Gate task artifacts"]
-  out: ["Perform specialist task work in gate-prompt-formatter"]
-approval_required: false
-approval_reason: "none"
-workflow_mode: strict_flow
-risk_tier: normal
-task_units:
-  - unit_id: unit-1
-    title: "{title}"
-    main_team: gate
-    assignee: gate-task-creator
-    priority: P0
-    done_criteria: ["Task Detail is created and handed off to teams-project-manager"]
-routing_hint: "teams-project-manager"
-review_requirements: ["domain_review", "independent_review"]
-vault_update_targets: ["Agents-Vault"]
-missing_information: []
-risks: []
-handoff_notes:
-  gate-task-creator: "Use original_request as source of truth; provider returned a partial envelope fragment."
-improvement_log:
-  - "adapter_repaired_partial_gate_intake_envelope"
-provider_fragment: |
-{yaml_block(response)}
-"""
-    repair_errors = validate_gate_entry_response(repaired)
-    return repaired.strip(), True, repair_errors
+    # A partial formatter response cannot establish omitted user requirements.
+    # Preserve it for diagnostics; never invent a replacement task unit.
+    return response.strip(), False, ["incomplete Gate Intake Envelope requires a complete producer response"]
 
 
 GTC_ENVELOPE_REQUIRED_FIELDS = (
@@ -6663,13 +6645,131 @@ def nested_list_field(envelope: dict[str, Any], key: str, nested_key: str) -> li
     return []
 
 
-def first_task_unit(envelope: dict[str, Any]) -> dict[str, Any]:
+def gtc_unit_ledger_errors(envelope: dict[str, Any]) -> list[str]:
+    """Validate local accounting only; envelope declarations confer no authority."""
+    errors: list[str] = []
+    try:
+        # Optional YAML parsing may yield dates, non-string keys or aliases.
+        # Reject values that cannot be recorded losslessly as finite JSON.
+        if json.loads(json.dumps(envelope, allow_nan=False)) != envelope:
+            return ["requirement_ledger.json_value"]
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return ["requirement_ledger.json_value"]
+
+    def text(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    def strings(value: Any, *, empty: bool = False) -> bool:
+        return (isinstance(value, list) and (empty or bool(value))
+                and all(text(item) for item in value) and len(set(value)) == len(value))
+
+    if type(envelope.get("scope_contract_version")) is not int or envelope["scope_contract_version"] != 1:
+        errors.append("scope_contract_version")
+    version = envelope.get("requirements_version")
+    if not text(version):
+        errors.append("requirements_version")
+    if envelope.get("selection_requirements_version") != version or not text(version):
+        errors.append("selection_requirements_version")
+    if not isinstance(envelope.get("requirements_history"), list):
+        errors.append("requirements_history")
+    requirements = envelope.get("requirements")
+    requirement_ids: set[str] = set()
+    if not isinstance(requirements, list) or not requirements:
+        errors.append("requirements")
+    else:
+        for index, requirement in enumerate(requirements):
+            if not isinstance(requirement, dict):
+                errors.append(f"requirements[{index}]")
+                continue
+            identifier = requirement.get("requirement_id")
+            if not text(identifier) or identifier in requirement_ids or not text(requirement.get("text")):
+                errors.append(f"requirements[{index}]")
+            elif text(identifier):
+                requirement_ids.add(identifier)
     units = envelope.get("task_units")
-    if isinstance(units, list):
-        for unit in units:
-            if isinstance(unit, dict):
-                return dict(unit)
-    return {}
+    if not isinstance(units, list) or not units:
+        return errors + ["task_units"]
+    unit_ids: set[str] = set()
+    covered: set[str] = set()
+    dependencies: dict[str, list[str]] = {}
+    for index, unit in enumerate(units):
+        prefix = f"task_units[{index}]"
+        if not isinstance(unit, dict):
+            errors.append(prefix)
+            continue
+        identifier = unit.get("unit_id")
+        for field in ("unit_id", "title", "main_team", "assignee", "repository"):
+            if not text(unit.get(field)):
+                errors.append(f"{prefix}.{field}")
+        if text(identifier):
+            if identifier in unit_ids:
+                errors.append(f"{prefix}.unit_id.duplicate")
+            unit_ids.add(identifier)
+        scope = unit.get("scope")
+        for field in ("in", "out"):
+            if not isinstance(scope, dict) or not strings(scope.get(field)):
+                errors.append(f"{prefix}.scope.{field}")
+        for field in ("deliverables", "done_criteria", "allowed_paths", "requirement_ids", "depends_on"):
+            if not strings(unit.get(field), empty=field == "depends_on"):
+                errors.append(f"{prefix}.{field}")
+        refs = unit.get("requirement_ids")
+        if strings(refs):
+            covered.update(refs)
+            if set(refs) - requirement_ids:
+                errors.append(f"{prefix}.requirement_ids.unknown")
+        deps = unit.get("depends_on")
+        if text(identifier) and strings(deps, empty=True):
+            dependencies[identifier] = deps
+        binding = unit.get("binding")
+        # Existing bindings are observations, not proof that their targets exist.
+        if not isinstance(binding, dict) or binding.get("status") not in ("pending", "existing"):
+            errors.append(f"{prefix}.binding")
+        elif binding["status"] == "existing" and any(not text(binding.get(key)) for key in ("task_id", "issue")):
+            errors.append(f"{prefix}.binding")
+    if requirement_ids - covered:
+        errors.append("requirements.uncovered")
+    for identifier, deps in dependencies.items():
+        if set(deps) - unit_ids:
+            errors.append(f"task_units.{identifier}.depends_on.unknown")
+    # Iterative topological removal avoids recursive traversal of untrusted input.
+    remaining = dict(dependencies)
+    while remaining:
+        roots = {key for key, deps in remaining.items() if not set(deps) & remaining.keys()}
+        if not roots:
+            errors.append("task_units.depends_on.cycle")
+            break
+        remaining = {key: deps for key, deps in remaining.items() if key not in roots}
+    selected = envelope.get("selected_unit_id")
+    if not text(selected) or selected not in unit_ids:
+        errors.append("selected_unit_id")
+    elif dependencies.get(selected):
+        # No trusted prerequisite-completion producer is connected in U1.
+        errors.append("selected_unit_id.prerequisite_integration_pending")
+    return list(dict.fromkeys(errors))
+
+
+def first_task_unit(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility name: return only an explicitly selected, validated unit."""
+    if gtc_missing_envelope_fields(envelope):
+        return {}
+    return next(dict(unit) for unit in envelope["task_units"]
+                if unit["unit_id"] == envelope["selected_unit_id"])
+
+
+def gtc_requirement_ledger(envelope: dict[str, Any]) -> dict[str, Any]:
+    errors = gtc_missing_envelope_fields(envelope)
+    if errors:
+        raise ValueError("invalid requirement ledger: " + ", ".join(errors))
+    # Retain the entire source snapshot, including history/non-goals/unknown fields.
+    ledger = json.loads(json.dumps(envelope))
+    ledger["integration_status"] = "integration_pending"
+    ledger["authority"] = "unverified_intake_observation"
+    ledger["unit_dispositions"] = {
+        unit["unit_id"]: ("selected" if unit["unit_id"] == envelope["selected_unit_id"]
+                          else "dependency_pending" if unit["depends_on"] else "pending")
+        for unit in envelope["task_units"]
+    }
+    return ledger
 
 
 def gtc_missing_envelope_fields(envelope: dict[str, Any]) -> list[str]:
@@ -6690,10 +6790,13 @@ def gtc_missing_envelope_fields(envelope: dict[str, Any]) -> list[str]:
         for field in ("in", "out"):
             if not list_field_values(scope.get(field)):
                 missing.append(f"scope.{field}")
+    missing.extend(gtc_unit_ledger_errors(envelope))
     return list(dict.fromkeys(missing))
 
 
 def gtc_initial_status(envelope: dict[str, Any], missing_fields: list[str], hook_input: dict[str, Any]) -> str:
+    if missing_fields:
+        return "triage"
     explicit = normalized_publication_value(hook_input.get("status") or hook_input.get("initial_status") or hook_input.get("initialStatus"))
     if explicit in {"ready", "waiting_human", "blocked", "triage", "in_progress"}:
         return explicit
@@ -7816,15 +7919,17 @@ def gtc_scaffold_task_detail_text(
     queue_root: Path,
     missing_fields: list[str],
 ) -> str:
+    ledger = gtc_requirement_ledger(envelope)
+    ledger_json = json.dumps(ledger, ensure_ascii=False, indent=2).replace("`", "\\u0060")
     unit = first_task_unit(envelope)
     main_team = normalize_cell(unit.get("main_team")) or normalize_cell(envelope.get("main_team")) or "gate"
     assignee = normalize_cell(unit.get("assignee")) or normalize_cell(envelope.get("assignee")) or "teams-project-manager"
     routing_director = gtc_routing_director_for_team(main_team, assignee)
     original_request = normalize_cell(envelope.get("original_request")) or "(missing original_request)"
-    deliverables = nested_list_field(envelope, "desired_outcome", "deliverables")
-    done_criteria = nested_list_field(envelope, "desired_outcome", "done_criteria")
-    scope_in = nested_list_field(envelope, "scope", "in")
-    scope_out = nested_list_field(envelope, "scope", "out")
+    deliverables = list_field_values(unit.get("deliverables"))
+    done_criteria = list_field_values(unit.get("done_criteria"))
+    scope_in = nested_list_field(unit, "scope", "in")
+    scope_out = nested_list_field(unit, "scope", "out")
     review_requirements = list_field_values(envelope.get("review_requirements"))
     vault_updates = list_field_values(envelope.get("vault_update_targets"))
     missing_information = list_field_values(envelope.get("missing_information")) + missing_fields
@@ -7878,6 +7983,16 @@ requires_human_approval: {str(truthy_input(envelope.get("approval_required"))).l
 | Requires Human Approval | {str(truthy_input(envelope.get("approval_required"))).lower()} |
 | Workflow Mode | {markdown_table_cell(workflow_mode)} |
 | Risk Tier | {markdown_table_cell(risk_tier)} |
+
+## Requirement Ledger
+
+Local intake accounting only. Trusted requirement updates, execution authorization,
+worker/diff/review/commit binding and durable host-writer acceptance remain integration_pending.
+Unselected units are pending observations; no Task or Issue creation is asserted.
+
+```json
+{ledger_json}
+```
 
 ## Request Summary
 
@@ -8024,6 +8139,13 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
     if not envelope:
         return {"decision": "block", "reason": "; ".join(envelope_errors), "gtcScaffold": {"result": "blocked", "errors": envelope_errors}}
 
+    missing_fields = gtc_missing_envelope_fields(envelope)
+    if envelope_errors or missing_fields:
+        return {"decision": "block", "reason": "invalid requirement ledger",
+                "gtcScaffold": {"result": "blocked", "errors": envelope_errors,
+                                "missing_envelope_fields": missing_fields}}
+    ledger = gtc_requirement_ledger(envelope)
+
     vault_lock_resource_id = f"gtc-scaffold-vault:{resolved_path(vault_root)}"
     vault_lock_path = shared_lock_path(state_root, vault_lock_resource_id)
     vault_lock_owner: dict[str, Any] = {}
@@ -8071,8 +8193,8 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         project_root = vault_root / "01-Projects" / project_name
         task_dir = project_root / f"{task_id}-{slug}"
         task_detail_path = task_dir / "task.md"
-        if task_detail_path.exists() and not truthy_input(hook_input.get("update_existing") or hook_input.get("updateExisting")):
-            reason = f"Task Detail already exists: {task_detail_path}"
+        if task_detail_path.exists():
+            reason = f"Task Detail already exists; requirement update integration_pending: {task_detail_path}"
             return {"decision": "block", "reason": reason, "gtcScaffold": {"result": "blocked", "task_detail_path": str(task_detail_path)}}
 
         task_text = gtc_scaffold_task_detail_text(
@@ -8149,6 +8271,7 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         "active_task": active_output.get("activeTask") if isinstance(active_output, dict) else {},
         "source_ref": source_ref,
         "missing_envelope_fields": missing_fields,
+        "requirement_ledger": ledger,
         "validation_errors": errors,
         "validation_warnings": warnings,
         "dry_run": dry_run,

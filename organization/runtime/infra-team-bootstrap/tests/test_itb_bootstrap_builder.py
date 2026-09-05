@@ -425,5 +425,143 @@ class ItbHeadlessHookResetTest(unittest.TestCase):
         self.assertEqual(blockers, [])
 
 
+
+class RequirementLedgerTest(unittest.TestCase):
+    def setUp(self):
+        self.builder = load_builder_module()
+
+    def envelope(self):
+        return {
+            "envelope_version": "2", "source_type": "human_prompt",
+            "original_request": "A and B", "intent_summary": "Both units",
+            "desired_outcome": {"deliverables": ["A", "B"], "done_criteria": ["both"]},
+            "scope": {"in": ["A", "B"], "out": ["unrelated"]},
+            "approval_required": False, "workflow_mode": "strict_flow",
+            "routing_hint": "teams-project-manager", "review_requirements": ["independent"],
+            "vault_update_targets": ["Agents-Vault"], "scope_contract_version": 1,
+            "requirements_version": "v1", "selection_requirements_version": "v1",
+            "requirements": [{"requirement_id": "R-A", "text": "A"}, {"requirement_id": "R-B", "text": "B"}],
+            "requirements_history": [], "selected_unit_id": "B",
+            "task_units": [{"unit_id": key, "title": key, "main_team": "tech",
+                "assignee": "tech-backend", "repository": "Saber5656/Saihai",
+                "binding": {"status": "pending"}, "requirement_ids": ["R-" + key],
+                "scope": {"in": [key], "out": ["unrelated " + key]},
+                "deliverables": [key], "done_criteria": ["accept " + key],
+                "allowed_paths": ["src/" + key + ".py"], "depends_on": []} for key in ["A", "B"]],
+        }
+
+    def scaffold(self, envelope, root, **extra):
+        return self.builder.gtc_scaffold_output(runtime="codex", state_root=root / "state",
+            hook_input={"session_id": "ledger-test", "vault_root": str(root / "vault"),
+                "task_id": "TSK-9138", "gate_intake_envelope": envelope, **extra})
+
+    def test_valid_ledger_selects_b(self):
+        env = self.envelope()
+        self.assertEqual(self.builder.gtc_missing_envelope_fields(env), [])
+        self.assertEqual(self.builder.first_task_unit(env)["unit_id"], "B")
+
+    def test_all_units_validated_before_any_vault_write_even_ready(self):
+        for mutate in [lambda e: e["task_units"][0].pop("scope"),
+                       lambda e: e["task_units"].append("invalid"),
+                       lambda e: e["task_units"][1].update(unit_id="A"),
+                       lambda e: e["task_units"][1].update(scope={"in": ["B"], "out": []})]:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as tmp:
+                env = self.envelope(); mutate(env); root = Path(tmp)
+                result = self.scaffold(env, root, status="ready")
+                self.assertEqual(result["decision"], "block")
+                self.assertFalse((root / "vault" / "01-Projects").exists())
+                self.assertFalse((root / "vault" / "00-Inbox&Tasks").exists())
+
+    def test_selection_and_version_fail_closed(self):
+        for field, value in [("selected_unit_id", ""), ("selected_unit_id", "absent"),
+                             ("selection_requirements_version", "old"), ("requirements_version", "")]:
+            with self.subTest(field=field, value=value):
+                env = self.envelope(); env[field] = value
+                self.assertTrue(self.builder.gtc_missing_envelope_fields(env))
+                self.assertEqual(self.builder.first_task_unit(env), {})
+
+    def test_coverage_and_dependencies(self):
+        mutations = [lambda e: e["requirements"].append({"requirement_id": "R-C", "text": "C"}),
+            lambda e: e["task_units"][1].update(requirement_ids=["unknown"]),
+            lambda e: e["task_units"][1].update(depends_on=["unknown"]),
+            lambda e: e["task_units"][1].update(depends_on=["A"]),
+            lambda e: e["task_units"][0].update(depends_on=["A"]),
+            lambda e: e["requirements"].append({"requirement_id": "R-A", "text": "duplicate"})]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                env = self.envelope(); mutate(env)
+                self.assertTrue(self.builder.gtc_missing_envelope_fields(env))
+
+    def test_malformed_binding_and_unit_fields_are_rejected(self):
+        for field, value in [("binding", {"status": []}), ("unit_id", []),
+                             ("requirement_ids", [{}]), ("depends_on", [False]),
+                             ("allowed_paths", "src/B.py")]:
+            with self.subTest(field=field):
+                env = self.envelope(); env["task_units"][1][field] = value
+                self.assertTrue(self.builder.gtc_missing_envelope_fields(env))
+
+    def test_snapshot_retains_history_additions_non_goals_and_dependency_pending(self):
+        env = self.envelope()
+        env["requirements_version"] = env["selection_requirements_version"] = "v3"
+        env["requirements_history"] = [{"version": "v1", "requirements": ["A", "B"]},
+            {"version": "v2", "operation": "add", "requirement": "C"},
+            {"version": "v3", "operation": "replace", "requirement": "B"}]
+        env["requirements"].append({"requirement_id": "R-C", "text": "C"})
+        env["task_units"][0]["requirement_ids"].append("R-C")
+        env["task_units"][0]["depends_on"] = ["B"]
+        env["earlier_findings"] = ["finding-1"]
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = self.scaffold(env, Path(tmp))["gtcScaffold"]
+            ledger = payload["requirement_ledger"]
+            for field in ["requirements_history", "requirements", "task_units", "scope", "earlier_findings"]:
+                self.assertEqual(ledger[field], env[field])
+            self.assertEqual(ledger["unit_dispositions"]["A"], "dependency_pending")
+
+    def test_non_json_history_is_structurally_blocked_before_writes(self):
+        import datetime
+        for value in [datetime.date(2026, 9, 5), {1: "numeric key"}, ("tuple",), float("nan")]:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                env = self.envelope(); env["requirements_history"] = [{"observation": value}]
+                self.assertIn("requirement_ledger.json_value", self.builder.gtc_missing_envelope_fields(env))
+                result = self.scaffold(env, Path(tmp), status="ready")
+                self.assertEqual(result["decision"], "block")
+                self.assertFalse((Path(tmp) / "vault" / "01-Projects").exists())
+
+    def test_initial_status_cannot_override_invalidity(self):
+        self.assertEqual(self.builder.gtc_initial_status(self.envelope(), ["task_units"], {"status": "ready"}), "triage")
+
+    def test_partial_repair_does_not_invent_units(self):
+        raw = "routing_hint: teams-project-manager\nassignee: tech-backend"
+        normalized, repaired, errors = self.builder.normalize_gate_entry_response(raw, "A and B")
+        self.assertFalse(repaired)
+        self.assertEqual(normalized, raw)
+        self.assertTrue(errors)
+
+    def test_real_scaffold_preserves_every_unit_without_claiming_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self.envelope(); result = self.scaffold(env, Path(tmp))
+            ledger = result["gtcScaffold"]["requirement_ledger"]
+            self.assertEqual(ledger["integration_status"], "integration_pending")
+            self.assertEqual(ledger["requirements_version"], "v1")
+            self.assertEqual([u["unit_id"] for u in ledger["task_units"]], ["A", "B"])
+            self.assertEqual(ledger["unit_dispositions"], {"A": "pending", "B": "selected"})
+            self.assertEqual(ledger["task_units"][0]["binding"], {"status": "pending"})
+            text = Path(result["gtcScaffold"]["task_detail_path"]).read_text()
+            self.assertIn('"requirement_id": "R-A"', text)
+            self.assertIn('| Scope In | B |', text)
+            self.assertIn('| Done Criteria | accept B |', text)
+            self.assertIn('integration_pending', text)
+
+    def test_replacement_cannot_drop_prior_ledger_on_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); env = self.envelope()
+            first = self.scaffold(env, root)
+            detail = Path(first["gtcScaffold"]["task_detail_path"]); before = detail.read_bytes()
+            env["requirements_version"] = env["selection_requirements_version"] = "v2"
+            env["task_units"] = env["task_units"][1:]; env["requirements"] = env["requirements"][1:]
+            second = self.scaffold(env, root, update_existing=True)
+            self.assertEqual(second["decision"], "block")
+            self.assertEqual(detail.read_bytes(), before)
+
 if __name__ == "__main__":
     unittest.main()
