@@ -1,4 +1,4 @@
 reviews:
   auto_review:
-    enabled: true
+    enabled: false
     auto_incremental_review: false
