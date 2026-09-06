@@ -175,6 +175,38 @@ class CanonicalMonitorTests(unittest.TestCase):
         self.assertFalse(self.discover()["tasks"])
         self.assertEqual(self.discover()["problems"][0]["event_type"], "task_identity_ambiguous")
 
+    def test_task_prefixed_notes_are_not_conventional_authorities(self):
+        self.task("Project/TSK-1234-example/task.md", "TSK-1234", "ready")
+        notes = []
+        for name in ("task-notes.md", "task_summary.md", "task.design.md", "task notes.md"):
+            notes.append(self.write("01-Projects/Project/TSK-1234-example/" + name,
+                                    "# Supporting notes\nNo task authority metadata.\n"))
+        result = self.discover()
+        self.assertEqual(set(result["tasks"]), {"TSK-1234"})
+        self.assertFalse(result["problems"])
+        self.assertTrue(all(str(p.relative_to(self.vault)) not in result["inputs"] for p in notes))
+
+    def test_task_copy_suffixes_still_quarantine_authorities(self):
+        for i, name in enumerate(("task 2.md", "task (copy).md", "task (Conflicted Copy 2026).md")):
+            with self.subTest(name=name):
+                task_id = f"TSK-20260905-copy{i}"
+                folder = f"Project/{task_id}/"
+                self.task(folder + "task.md", task_id, "ready")
+                self.task(folder + name, task_id, "ready")
+                result = self.discover()
+                self.assertNotIn(task_id, result["tasks"])
+                self.assertTrue(any(p["task_id"] == task_id and p["event_type"] == "task_identity_ambiguous"
+                                    for p in result["problems"]))
+
+    def test_task_prefixed_document_with_explicit_type_remains_authoritative(self):
+        self.task("Project/task-summary.md", "TSK-1234", "ready", "type: task-detail\n")
+        self.assertEqual(set(self.discover()["tasks"]), {"TSK-1234"})
+        self.write("01-Projects/Project/task-notes.md",
+                   "---\ntype: task-detail\ntask_id: TSK-1234\nstatus: ready\nstatus: done\n---\n")
+        result = self.discover()
+        self.assertFalse(result["tasks"])
+        self.assertTrue(result["problems"])
+
     def test_invalid_canonical_folder_does_not_gain_authority_from_frontmatter(self):
         self.task("Project/TSK-12345/task.md", "TSK-1234")
         self.assertFalse(self.discover()["tasks"])

@@ -167,7 +167,8 @@ def discover_tasks(agents_vault: Path, *, now: dt.datetime | None = None,
             path = base / filename
             if filename in task_links or path in excluded_paths or path.suffix.lower() != ".md":
                 continue
-            conventional = filename.startswith("TSK-") or bool(re.fullmatch(r"task(?:[ ._-].*)?\.md", filename))
+            conventional = filename.startswith("TSK-") or bool(re.fullmatch(
+                r"task(?: \d+| \([^)]*(?:copy|conflict)[^)]*\))?\.md", filename, re.IGNORECASE))
             path_name = path.stem if filename.startswith("TSK-") else path.parent.name
             implied_id = path_identity(path_name)
             if path.is_symlink():
