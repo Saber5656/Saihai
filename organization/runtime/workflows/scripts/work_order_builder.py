@@ -414,6 +414,45 @@ def _context_scope_for_step(
     return scope
 
 
+def _readonly_chain_provider_allowed(
+    run: dict[str, Any], template: dict[str, Any], step: dict[str, Any],
+) -> bool:
+    """Enable only the two bounded provider contracts of the readonly chain."""
+    expected = {
+        "research": ("contents-researcher", "observer", "research_report"),
+        "review": ("tech-reviewer", "reviewer", "external_review_report"),
+    }
+    step_id = step.get("id")
+    if (run.get("workflow_id") != "readonly_review_chain"
+            or template.get("workflow_id") != "readonly_review_chain"
+            or template.get("safety_class") != "readonly"
+            or run.get("current_step") != step_id
+            or step_id not in expected
+            or step.get("permission_mode") != "readonly"
+            or (step.get("role"), step.get("assignment_role"), step.get("output_contract"))
+            != expected[step_id]):
+        return False
+    route = step.get("provider_route")
+    if not isinstance(route, dict) or any(
+        route.get(key) != value for key, value in {
+            "adapter_kind": "bounded_provider",
+            "runner_authority": "write_report_only",
+            "transition_authority": "harness_engine",
+        }.items()
+    ):
+        return False
+    activation = run.get("activation")
+    scope = activation.get("activation_scope") if isinstance(activation, dict) else None
+    if not isinstance(scope, dict):
+        return False
+    for ops in (step.get("allowed_ops"), scope.get("allowed_ops")):
+        if (not isinstance(ops, dict)
+                or set(ops) != {"edit", "commit", "push", "network"}
+                or any(value is not False for value in ops.values())):
+            return False
+    return True
+
+
 def _unbound_work_order_errors(work_order: dict[str, Any]) -> list[str]:
     """Unbound artifacts carry only readonly scope, never a worker plan."""
     scope = work_order.get("activation_scope")
@@ -449,6 +488,8 @@ def build_work_order(
     step_id = str(step["id"])
     provider_route = step.get("provider_route") if isinstance(step.get("provider_route"), dict) else {}
     external_provider_allowed = provider_route.get("adapter_kind") == "external_provider"
+    if "readonly_review_chain" in (run.get("workflow_id"), template.get("workflow_id")):
+        external_provider_allowed = _readonly_chain_provider_allowed(run, template, step)
     context_refs = [_normalized_context_ref(item) for item in resolved_refs if isinstance(item, dict)]
     work_order = {
         "work_order_version": "1",

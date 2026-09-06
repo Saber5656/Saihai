@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sahai.local/schemas/workflows/research-report.schema.json",
-  "title": "Research Only Report",
+  "title": "Read-only Research Report",
   "type": "object",
   "required": [
     "report_version",
@@ -17,7 +17,10 @@
       "const": "1"
     },
     "workflow_id": {
-      "const": "research_only"
+      "enum": [
+        "research_only",
+        "readonly_review_chain"
+      ]
     },
     "result": {
       "type": "string",
@@ -65,7 +68,29 @@
     },
     "no_diff_completion": {
       "const": true
+    },
+    "step_id": {
+      "const": "research"
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "workflow_id": {
+            "const": "readonly_review_chain"
+          }
+        },
+        "required": [
+          "workflow_id"
+        ]
+      },
+      "then": {
+        "required": [
+          "step_id"
+        ]
+      }
+    }
+  ]
 }

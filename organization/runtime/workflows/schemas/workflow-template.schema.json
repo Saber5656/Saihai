@@ -249,6 +249,30 @@
           },
           "transitions": {
             "type": "array"
+          },
+          "allowed_ops": {
+            "type": "object",
+            "required": [
+              "edit",
+              "commit",
+              "push",
+              "network"
+            ],
+            "properties": {
+              "edit": {
+                "type": "boolean"
+              },
+              "commit": {
+                "type": "boolean"
+              },
+              "push": {
+                "type": "boolean"
+              },
+              "network": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false
@@ -264,5 +288,66 @@
       }
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "workflow_id": {
+            "const": "readonly_review_chain"
+          }
+        },
+        "required": [
+          "workflow_id"
+        ]
+      },
+      "then": {
+        "properties": {
+          "safety_class": {
+            "const": "readonly"
+          },
+          "steps": {
+            "items": {
+              "required": [
+                "allowed_ops"
+              ],
+              "properties": {
+                "permission_mode": {
+                  "const": "readonly"
+                },
+                "allowed_ops": {
+                  "type": "object",
+                  "required": [
+                    "edit",
+                    "commit",
+                    "push",
+                    "network"
+                  ],
+                  "properties": {
+                    "edit": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "commit": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "push": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "network": {
+                      "type": "boolean",
+                      "const": false
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }
