@@ -464,11 +464,14 @@ def resume_run(
             if review_action == 'stopped':
                 return {'schema_version': 1, 'decision': 'blocked', 'resumed': False,
                         'next_action': 'stopped', 'review_action': review_action, 'workflow_run': run}
+            step_actions = {'implement': 'derive_scoped_worker_capability', 'review': 'run_provider',
+                            'qa': 'run_provider', 'final_evidence': 'validate_report'}
+            current_step = run['current_step']
+            if current_step not in step_actions:
+                raise LifecycleError('standard_step_invalid', ['unsupported standard step'])
             import work_order_builder
-            snapshot = work_order_builder.snapshot_path(state_root, run_id, run['current_step'], run['iteration'])
-            action = 'drain' if not snapshot.exists() else {
-                'implement': 'derive_scoped_worker_capability', 'review': 'run_provider',
-                'qa': 'run_provider', 'final_evidence': 'validate_report'}[run['current_step']]
+            snapshot = work_order_builder.snapshot_path(state_root, run_id, current_step, run['iteration'])
+            action = 'drain' if not snapshot.exists() else step_actions[current_step]
             return {'schema_version':1, 'decision':'ok', 'resumed':False, 'next_action':action,
                     'review_action':review_lifecycle.next_review_action(run), 'workflow_run':run}
         if run_state in {"step_queued", "validating"} and run.get("review_lifecycle", {}).get("resolution_flow"):
