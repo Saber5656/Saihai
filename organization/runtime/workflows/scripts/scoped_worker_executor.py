@@ -2277,6 +2277,8 @@ def validate_live_run_authority(
             return
         raise ScopedWorkerError("worker_run_state_missing")
     run = run_store.load_run(state_root, safe_run_id)
+    if review_lifecycle.next_review_action(run) == 'stopped':
+        raise ScopedWorkerError('review_lifecycle_stopped')
     if (
         run.get("task_id") != capability.get("task_id")
         or run.get("workflow_id") != "standard_code_change"

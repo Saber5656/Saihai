@@ -460,6 +460,10 @@ def resume_run(
                 "workflow_run": run,
             }
         if run_state == 'step_queued' and run.get('workflow_id') == 'standard_code_change':
+            review_action = review_lifecycle.next_review_action(run)
+            if review_action == 'stopped':
+                return {'schema_version': 1, 'decision': 'blocked', 'resumed': False,
+                        'next_action': 'stopped', 'review_action': review_action, 'workflow_run': run}
             import work_order_builder
             snapshot = work_order_builder.snapshot_path(state_root, run_id, run['current_step'], run['iteration'])
             action = 'drain' if not snapshot.exists() else {
