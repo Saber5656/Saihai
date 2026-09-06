@@ -196,6 +196,36 @@ class CanonicalMonitorTests(unittest.TestCase):
         (project / "linked").symlink_to(outside.parent, target_is_directory=True)
         self.assertFalse(self.discover()["tasks"])
 
+    def test_task_shaped_symlink_directory_is_reported_without_a_winner(self):
+        self.task("readable/task.md", "TSK-1234", "ready")
+        outside = self.write("outside/task.md", "---\ntask_id: TSK-1234\nstatus: ready\n---\n")
+        link = self.vault / "01-Projects/TSK-1234-copy"
+        before = monitor.build_snapshot([self.vault], self.vault / "report.md")
+        link.symlink_to(outside.parent, target_is_directory=True)
+        result = self.discover()
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["tasks"])
+        self.assertTrue(any(link in p["paths"] for p in result["problems"]))
+        self.assertIn(str(link.relative_to(self.vault)), result["inputs"])
+        after = monitor.build_snapshot([self.vault], self.vault / "report.md")
+        self.assertNotEqual(before["digest"], after["digest"])
+        self.assertEqual(after["digest"], monitor.build_snapshot([self.vault], self.vault / "report.md")["digest"])
+        self.assertTrue(link.is_symlink())
+        self.assertTrue(outside.is_file())
+
+    def test_dangling_task_directory_link_is_visible_but_ordinary_link_is_excluded(self):
+        self.task("readable/task.md", "TSK-1234", "ready")
+        project = self.vault / "01-Projects"
+        (project / "ordinary-link").symlink_to(self.vault / "missing", target_is_directory=True)
+        self.assertEqual(set(self.discover()["tasks"]), {"TSK-1234"})
+        link = project / "TSK-9999-missing"
+        link.symlink_to(self.vault / "missing", target_is_directory=True)
+        result = self.discover()
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["tasks"])
+        self.assertTrue(any(link in p["paths"] for p in result["problems"]))
+        self.assertIn(str(link.relative_to(self.vault)), result["inputs"])
+
     def test_date_id_in_kanban_is_not_truncated(self):
         self.write("00-Inbox&Tasks/Kanban.md", "## In Progress\n- [ ] [[Project/task|TSK-20260905-example]]\n")
         self.assertEqual(monitor.parse_kanban(self.vault), {"TSK-20260905-example": "In Progress"})

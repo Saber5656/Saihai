@@ -153,10 +153,19 @@ def discover_tasks(agents_vault: Path, *, now: dt.datetime | None = None,
         return result
     for directory, dirs, files in os.walk(project_root, followlinks=False, onerror=traversal_error):
         base = Path(directory)
+        # Broken directory links appear in files, so inspect both inventories
+        # before filtering extensions. Never inspect the link target for identity.
+        task_links = {name for name in dirs + files
+                      if name.startswith("TSK-") and (base / name).is_symlink()}
+        for name in sorted(task_links):
+            path = base / name
+            result["complete"] = False
+            problem("task_discovery_incomplete", [path], "symlink_task_input", path_identity(path.stem))
+            result["inputs"][str(path.relative_to(agents_vault))] = "symlink_task_input"
         dirs[:] = sorted(d for d in dirs if d not in {".git", ".obsidian"} and not (base / d).is_symlink())
         for filename in sorted(files):
             path = base / filename
-            if path in excluded_paths or path.suffix.lower() != ".md":
+            if filename in task_links or path in excluded_paths or path.suffix.lower() != ".md":
                 continue
             conventional = filename.startswith("TSK-") or bool(re.fullmatch(r"task(?:[ ._-].*)?\.md", filename))
             path_name = path.stem if filename.startswith("TSK-") else path.parent.name
