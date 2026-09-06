@@ -62,3 +62,41 @@ managed-domain isolation. The host runs Git/GitHub using existing authentication
 GitHub native protection enforces the configured publication policy. Live startup
 and local sandbox probes complement fixture tests; synthetic GitHub fixtures do
 not by themselves prove a real end-to-end task.
+
+## Repair a failed validation without replaying the worker
+
+```text
+python3.11 scripts/saihai.py usage repair-validation --authorization /absolute/original-authority.json --state-root /absolute/private-state
+```
+
+This host entry requires the original authority and an actual failed validation
+receipt. The current dirty tree and binary diff must exactly match that receipt;
+HEAD, branch, scope, runtime digest, and validation commands remain bound to the
+original task. It creates a new `original-execution-id-repair-N` directory and
+exclusive claim. The worker receives the retained task result and only the
+validation repair instruction. It cannot replay the original execution or widen
+its write scope. Each consecutive identical failure permits at most five repairs.
+An interrupted repair without a failed validation receipt requires inspection;
+it is not blindly spawned again.
+
+Failed validation retains private diagnostic JSON, bounded to the last 16 KiB
+of each output stream, with a digest in the receipt. Repair input explicitly
+labels this output untrusted. Older digest-only receipts are preserved; the host
+re-observes the same failed tree with the same validation plan to obtain a
+separate `repair-diagnostic-validation.json` and diagnostic artifact.
+
+The original directory's `validation-repair.json` is the host continuation:
+`original_authorization_digest`, `execution_id` (the current child), `status`,
+`attempt`, `cause`, and `same_cause_retries`. Readers show the original intake but
+follow this current execution reference for process, validation, outcome and
+report. A `running` or `failed` continuation must never make the old failed
+receipt look successful. A `validated` continuation identifies a child whose
+real validation passed. `usage advance` accepts the original authority and
+publishes that child's report, retaining publication state in the original
+directory. Original claims and validation receipts remain unchanged.
+
+The optional `--repair-instruction` supplies up to 8 KiB of explicit host guidance
+within the existing task scope; it cannot alter authority or allowed paths.
+The monotonically increasing `attempt` is separate from `same_cause_retries`;
+a changed failure cause resets only the consecutive counter. Validation timings
+and the private execution directory are normalized out of the cause identity.

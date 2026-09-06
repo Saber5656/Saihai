@@ -6365,6 +6365,15 @@ def run_trusted_local(*, request: dict[str, Any], authorization: Any, state_root
         raise FrontdoorError(str(exc)) from exc
 
 
+
+def repair_trusted_local_validation(*, authorization: Any, state_root: Path, repair_instruction: str = "") -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        return trusted_local_executor.repair_validation(authorization, state_root, repair_instruction=repair_instruction)
+    except (trusted_local_executor.TrustedLocalError, trusted_local_executor.publication.PublicationError) as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
 def advance_trusted_local(*, authorization: Any, state_root: Path) -> dict[str, Any]:
     import trusted_local_executor
     try:
