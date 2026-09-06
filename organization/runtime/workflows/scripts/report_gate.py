@@ -1350,7 +1350,8 @@ def _gate_chain_report(state_root: Path, run: dict[str, Any], actor: dict[str, A
             raise ReportGateError("step_attempt_mismatch")
         step = steps[list(CHAIN_CONTRACTS).index(sid)]
         order, bindings = _chain_order_binding(state_root, run, template, step, run["iteration"])
-        if run_lifecycle.provider_claim_is_live(run, order):
+        execution = run.get("provider_execution")
+        if (not isinstance(execution, dict) or execution.get("step_id") == sid) and run_lifecycle.provider_claim_is_live(run, order):
             raise ReportGateError("provider_in_flight")
         report = read_json(path)
         if report.get("step_id") != sid or report.get("workflow_id") != CHAIN_ID:

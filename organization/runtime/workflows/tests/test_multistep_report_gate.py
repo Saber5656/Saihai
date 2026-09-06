@@ -13,7 +13,7 @@ from pathlib import Path
 from test_frontdoor_orchestrator import (
     external_review_classification,
     load_payload,
-    run_frontdoor,
+    run_frontdoor as _run_frontdoor,
     external_review_report,
 )
 import report_gate
@@ -24,6 +24,33 @@ import work_order_builder
 import run_lifecycle
 import run_lock
 import scoped_worker_executor
+
+
+def run_frontdoor(*args, **kwargs):
+    # Consumer tests own a fake host. Production deliberately blocks activation
+    # until the real chain runtime exists; substitute only that readiness result,
+    # not approvals, provider claims, signatures or gate-owned state transitions.
+    import test_frontdoor_orchestrator as fixture
+    readiness = """
+import workflow_selector as selector
+original_candidate = selector.validate_workflow_candidate
+def fake_host_candidate(workflow_id, classification, registry=None):
+    result = original_candidate(workflow_id, classification, registry)
+    if workflow_id != "readonly_review_chain" or result.get("reason") != "readonly_chain_runtime_unavailable":
+        return result
+    template = selector.load_template(workflow_id, registry)
+    gates = selector.required_gates_for_candidate(template, classification, False)
+    required = selector.required_artifacts_for_candidate(template, classification, False, gates)
+    if not required.issubset(set(classification.get("expected_artifacts") or [])):
+        return result
+    return selector.selected_workflow(workflow_id, template["initial_step"], [],
+        safety_class=template["safety_class"], required_safety=selector.required_safety_class(classification),
+        publication_gate_required=False, required_gates=gates)
+selector.validate_workflow_candidate = fake_host_candidate
+"""
+    wrapper = fixture.FRONTDOOR_TEST_WRAPPER.replace("frontdoor.main()", readiness + "\nfrontdoor.main()")
+    with mock.patch.object(fixture, "FRONTDOOR_TEST_WRAPPER", wrapper):
+        return _run_frontdoor(*args, **kwargs)
 
 
 class MultistepReportGateTests(unittest.TestCase):
@@ -263,6 +290,20 @@ class MultistepReportGateTests(unittest.TestCase):
             self.assertEqual("duplicate_step_report", rejected["reason"])
             self.assertEqual(run, run_store.load_run(root, "run-chain"))
 
+
+    def test_final_evidence_ignores_completed_previous_claim(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            self.advance_to(root, "final_evidence")
+            run = run_store.load_run(root, "run-chain")
+            # Match run_provider's post-gate completion bookkeeping. This changes
+            # only retained provider metadata, never the gate-owned step/history.
+            run["provider_execution"]["phase"] = "completed"
+            run["provider_execution"]["lease"]["lease_expires_at"] = "2099-01-01T00:00:00+00:00"
+            run_store.store_run(root, run, expected_current_state="step_queued")
+            result = self.submit(root, self.fake_produce(root))
+            self.assertEqual("ok", result["decision"], result)
+            self.assertEqual("complete", result["workflow_run"]["run_state"])
 
     def advance_to(self, root, target):
         self.setup_chain(root)
