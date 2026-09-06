@@ -767,7 +767,9 @@ repeat that pair for review, passing the same `--state-root` and `--run-id` as i
 the examples above. Drain creates each order; run-provider executes only that
 step and the gate advances it. A final drain creates the `final_evidence` work order; the provider
 runner rejects that harness-only step. Two provider successes do not complete
-the run. The deterministic final-evidence producer (#111) remains separate.
+the run. After that final drain, execute `workflow-frontdoor run-harness-gate --run-id <run-id>` through
+`configure_organization.py`
+with the same state root to generate and validate the deterministic final report.
 Canonical filenames retain the existing `<step>-external-review-report.json`
 suffix even for the research schema.
 
@@ -983,3 +985,40 @@ provider transcript content.
 | tmux worker | The adapter schema can represent it, but there is no execution path in P0. |
 | Viewer-side mutation controls | The implemented workflow viewer is deliberately read-only. |
 | deploy/push/PR automation | Publication requires a separate gate. |
+
+### Deterministic readonly final evidence
+
+`python3 scripts/configure_organization.py workflow-frontdoor --state-root <state-root> run-harness-gate --run-id <run-id>`
+executes the queued `readonly_review_chain.final_evidence` step after research
+and review have been accepted. It uses no provider or LLM. The existing approved
+activation, signed orders, snapshots, signed acceptances/transitions, provider
+requests, normalized evidence, transcripts and attempt journals are rechecked.
+Research must have `findings`, review must have `pass`, and both reports must
+still satisfy their schemas and bounded evidence contracts.
+
+The producer creates the canonical final report with deterministic JSON bytes,
+then releases its lock before the report gate independently rechecks the current
+chain and commits `final_evidence_valid`. The request's terminal status is then
+synchronized. A completed previous review lease is recognized only when it
+matches the verified accepted review attempt; live current claims remain blocked.
+
+The CLI accepts the existing principal arguments but no report body, report path,
+model, schema, force or skip overrides. It requires an existing private signing
+key and does not provision or repair credentials. Missing/unsafe keys, unsupported
+workflow/route/schema contracts (including publication gates and code/policy final
+contracts), drift, conflicting reports and lock contention return typed `blocked`
+results with exit status 2. Unsupported gates produce no completion report.
+
+If execution stops after the report is durably created but before gate acceptance,
+rerun the same command: all inputs are checked again and only identical report
+bytes are reused. Partial, different or unsafe files are never overwritten.
+After acceptance, replay returns `duplicate_step_report`; inspect the existing
+run through `workflow-frontdoor task-view` rather than treating replay as a new success.
+
+`test_harness_gate_executor.py` runs the actual #108 runner with offline provider
+results for research and review, followed by this final producer and gate. This
+proves the local readonly chain, not a live external-provider execution, Vault
+writer acknowledgement, PR/merge readiness or installed-runtime acceptance.
+`verify-completion` remains a terminal consumer with its own supported contracts;
+it is not called before producing the final report. Frozen-role integration is
+a separate acceptance surface, not an extra prerequisite for this readonly unit.

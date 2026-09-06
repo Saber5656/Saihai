@@ -1313,6 +1313,89 @@ def _chain_prior_acceptances(state_root: Path, run: dict[str, Any], template: di
     return accepted
 
 
+def _chain_report_errors(state_root: Path, run: dict[str, Any], order: dict[str, Any],
+                         report: dict[str, Any], sid: str) -> list[str]:
+    schema_name = CHAIN_CONTRACTS[sid][1]
+    schema = json.loads((workflow_selector.SCHEMA_ROOT / schema_name).read_text())
+    errors = work_order_builder._validate_schema_fragment(report, schema, "$")
+    errors += _scope_violation_errors(report, run=run, state_root=state_root)
+    if sid in {"research", "final_evidence"} and report.get("no_diff_completion") is not True:
+        errors.append("no_diff_completion must be boolean true")
+    if sid == "research":
+        allowed_refs = {ref["value"] for ref in order["context_refs"]}
+        sources = report.get("source_refs")
+        if not isinstance(sources, list) or any(not isinstance(ref, str) or ref not in allowed_refs for ref in sources):
+            errors.append("source_refs outside bounded work order")
+        findings = report.get("findings")
+        if isinstance(findings, list):
+            for finding in findings:
+                if isinstance(finding, dict) and isinstance(finding.get("evidence_refs"), list):
+                    if any(not isinstance(ref, str) or ref not in allowed_refs for ref in finding["evidence_refs"]):
+                        errors.append("finding evidence outside bounded work order")
+    if sid == "review":
+        errors += validate_external_review_report(report, run=run, work_order=order, state_root=state_root)
+        authority = report.get("authority") if isinstance(report.get("authority"), dict) else {}
+        if authority.get("stdout_is_signal_only") is not True or authority.get("raw_transcript_shared") is not False:
+            errors.append("review authority must contain strict booleans")
+    return errors
+
+
+def require_existing_signing_key(state_root: Path, principal: dict[str, Any]) -> None:
+    """Read-only guard: never create or repair a signing credential."""
+    try:
+        key = run_store.read_bytes(run_lifecycle.signing_key_path(state_root, principal))
+        if not key.strip():
+            raise ReportGateError("signing_key_unavailable")
+    except (run_store.RunStoreError, OSError) as exc:
+        raise ReportGateError("signing_key_unavailable") from exc
+
+
+def _chain_claim_is_live(run: dict[str, Any], order: dict[str, Any],
+                         verified_prior: list[dict[str, Any]]) -> bool:
+    execution = run.get("provider_execution", {})
+    # #108 retains the completed review lease. Only a verified accepted attempt
+    # can establish that it belongs to the previous step, not this final order.
+    if (order.get("step_id") == "final_evidence" and verified_prior
+            and execution.get("phase") == "completed"
+            and execution.get("step_id") == verified_prior[-1].get("step_id") == "review"
+            and execution.get("attempt_id") == verified_prior[-1].get("attempt_id")
+            and execution.get("adapter_request_digest") == verified_prior[-1].get("adapter_request_digest")):
+        run = {k: v for k, v in run.items() if k != "provider_execution"}
+    return run_lifecycle.provider_claim_is_live(run, order)
+
+
+def verify_readonly_final_inputs(state_root: Path, *, run: dict[str, Any],
+                                 template: dict[str, Any]) -> dict[str, Any]:
+    """Reverify the signed artifact chain under the caller's global lock.
+
+    Artifact checks are shared with the report gate and completion validation;
+    producer-only queued-state checks belong to the executor.
+    """
+    steps = _chain_contract(template, run)
+    if run.get("workflow_id") != CHAIN_ID or run.get("current_step") != "final_evidence":
+        raise ReportGateError("unsupported_step_contract")
+    prior = _chain_prior_acceptances(state_root, run, template, steps)
+    if [p["step_id"] for p in prior] != ["research", "review"]:
+        raise ReportGateError("prior_acceptance_invalid")
+    for step, accepted in zip(steps, prior):
+        sid = step["id"]
+        order, _ = _chain_order_binding(state_root, run, template, step, accepted["iteration"])
+        report = read_json(Path(accepted["report_path"]))
+        expected = "findings" if sid == "research" else "pass"
+        if report.get("result") != expected or accepted.get("result") != expected:
+            raise ReportGateError("prior_result_not_passed")
+        errors = _chain_report_errors(state_root, run, order, report, sid)
+        if errors:
+            raise ReportGateError("prior_report_invalid: " + "; ".join(errors))
+    if type(run.get("iteration")) is not int or run["iteration"] < 1:
+        raise ReportGateError("step_attempt_mismatch")
+    order, bindings = _chain_order_binding(state_root, run, template, steps[-1], run["iteration"])
+    if _chain_claim_is_live(run, order, prior):
+        raise ReportGateError("provider_in_flight")
+    return {"prior_acceptances": prior, "work_order_binding": bindings,
+            "report_path": str(report_path(state_root, run["run_id"], "final_evidence"))}
+
+
 def _chain_rejection(state_root: Path, run: dict[str, Any], actor: dict[str, Any], reason: str) -> dict[str, Any]:
     artifact = write_rejection_artifact(state_root=state_root, run_id=run["run_id"], step_id=run["current_step"],
         payload={"rejection_version": "1", "run_id": run["run_id"], "step_id": run["current_step"],
@@ -1350,7 +1433,7 @@ def _gate_chain_report(state_root: Path, run: dict[str, Any], actor: dict[str, A
             raise ReportGateError("step_attempt_mismatch")
         step = steps[list(CHAIN_CONTRACTS).index(sid)]
         order, bindings = _chain_order_binding(state_root, run, template, step, run["iteration"])
-        if run_lifecycle.provider_claim_is_live(run, order):
+        if _chain_claim_is_live(run, order, prior):
             raise ReportGateError("provider_in_flight")
         report = read_json(path)
         if report.get("step_id") != sid or report.get("workflow_id") != CHAIN_ID:
@@ -1358,29 +1441,12 @@ def _gate_chain_report(state_root: Path, run: dict[str, Any], actor: dict[str, A
                 raise ReportGateError("duplicate_step_report")
             raise ReportGateError("step_report_mismatch")
         _, schema_name, success_event, failure_event = CHAIN_CONTRACTS[sid]
-        schema = json.loads((workflow_selector.SCHEMA_ROOT / schema_name).read_text())
-        errors = work_order_builder._validate_schema_fragment(report, schema, "$")
-        errors += _scope_violation_errors(report, run=run, state_root=state_root)
-        if sid in {"research", "final_evidence"} and report.get("no_diff_completion") is not True:
-            errors.append("no_diff_completion must be boolean true")
+        errors = _chain_report_errors(state_root, run, order, report, sid)
         if sid != "final_evidence":
             bindings.update(_chain_provider_binding(state_root, run, order, bindings))
-        if sid == "research":
-            allowed_refs = {ref["value"] for ref in order["context_refs"]}
-            sources = report.get("source_refs")
-            if not isinstance(sources, list) or any(not isinstance(ref, str) or ref not in allowed_refs for ref in sources):
-                errors.append("source_refs outside bounded work order")
-            findings = report.get("findings")
-            if isinstance(findings, list):
-                for finding in findings:
-                    if isinstance(finding, dict) and isinstance(finding.get("evidence_refs"), list):
-                        if any(not isinstance(ref, str) or ref not in allowed_refs for ref in finding["evidence_refs"]):
-                            errors.append("finding evidence outside bounded work order")
-        if sid == "review":
-            errors += validate_external_review_report(report, run=run, work_order=order, state_root=state_root)
-            authority = report.get("authority") if isinstance(report.get("authority"), dict) else {}
-            if authority.get("stdout_is_signal_only") is not True or authority.get("raw_transcript_shared") is not False:
-                errors.append("review authority must contain strict booleans")
+        else:
+            require_existing_signing_key(state_root, actor)
+            verify_readonly_final_inputs(state_root, run=run, template=template)
         if sid == "final_evidence":
             if len(prior) != 2:
                 errors.append("prior_acceptance_invalid")

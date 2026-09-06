@@ -33,6 +33,7 @@ import run_lock
 import run_lifecycle
 import completion_gate
 import report_gate
+import harness_gate_executor
 import task_state_bridge
 import work_order_builder
 import workflow_selector
@@ -5584,6 +5585,17 @@ def validate_report(
     return payload
 
 
+def run_harness_gate(*, state_root: Path, run_id: str,
+                     principal: dict[str, Any] | None = None) -> dict[str, Any]:
+    actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
+    payload = harness_gate_executor.execute_harness_gate(
+        state_root=state_root, run_id=run_id, principal=actor)
+    if payload.get("validated") is True or payload.get("reason") == "duplicate_step_report":
+        synchronize_terminal_request(state_root=state_root, run_id=run_id, principal=actor,
+                                     operation="run_harness_gate_terminal_request_sync")
+    return payload
+
+
 def run_provider(
     *,
     state_root: Path,
@@ -6222,6 +6234,12 @@ def parser() -> argparse.ArgumentParser:
     report.add_argument("--principal-id", default="local-harness")
     report.add_argument("--authn-method", default="local_cli")
 
+    harness_gate_parser = sub.add_parser("run-harness-gate")
+    harness_gate_parser.add_argument("--run-id", required=True)
+    harness_gate_parser.add_argument("--principal-type", default="harness_runner")
+    harness_gate_parser.add_argument("--principal-id", default="local-harness")
+    harness_gate_parser.add_argument("--authn-method", default="local_cli")
+
     run_provider_parser = sub.add_parser("run-provider")
     run_provider_parser.add_argument("--run-id", required=True)
     run_provider_parser.add_argument("--adapter-id", default=provider_runner.DEFAULT_ADAPTER_ID)
@@ -6429,6 +6447,11 @@ def main() -> None:
                 state_root=state_root,
                 run_id=args.run_id,
                 report_path_arg=args.report_path,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
+            )
+        elif args.command == "run-harness-gate":
+            payload = run_harness_gate(
+                state_root=state_root, run_id=args.run_id,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "run-provider":
