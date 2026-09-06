@@ -130,28 +130,30 @@ def git_snapshot(root: Path, report: Path) -> dict[str, Any]:
 
 def build_snapshot(roots: list[Path], report: Path) -> dict[str, Any]:
     repos: dict[str, Any] = {}
-    seen: set[str] = set()
-    for root in roots:
+    for root in sorted(set(roots), key=str):
         snap = git_snapshot(root, report)
         key = snap.get("root", str(root))
-        if key in seen:
-            continue
-        seen.add(key)
-        repos[key] = {k: v for k, v in snap.items() if k != "status_lines"}
+        if key not in repos:
+            repos[key] = {k: v for k, v in snap.items() if k != "status_lines"}
+            repos[key]["task_roots"] = {}
+        # Git metadata is shared, but each configured root owns a separate
+        # namespace for its relative input paths and Task Detail identities.
+        root_snapshot: dict[str, Any] = {}
+        repos[key]["task_roots"][str(root.absolute())] = root_snapshot
         discovery = discover_tasks(root, excluded_paths=(report,))
         task_inputs = discovery["inputs"]
         for name in ("00-Inbox&Tasks/Task-Index.md", "00-Inbox&Tasks/Kanban.md"):
             path = root / name
             if path.is_file() and not path.is_symlink():
                 task_inputs[name] = hashlib.sha256(path.read_bytes()).hexdigest()
-        repos[key]["task_inputs"] = task_inputs
-        repos[key]["task_states"] = {task_id: record["status"] for task_id, record in discovery["tasks"].items()}
-        repos[key]["task_discovery_problems"] = [
+        root_snapshot["task_inputs"] = task_inputs
+        root_snapshot["task_states"] = {task_id: record["status"] for task_id, record in discovery["tasks"].items()}
+        root_snapshot["task_discovery_problems"] = [
             {**item, "paths": [rel_or_abs(path, root) for path in item["paths"]]}
             for item in discovery["problems"]
         ]
     digest = sha256_text(json.dumps(repos, sort_keys=True, ensure_ascii=False))
-    return {"version": 1, "digest": digest, "repos": repos}
+    return {"version": 2, "digest": digest, "repos": repos}
 
 
 def read_previous_snapshot(report: Path) -> dict[str, Any] | None:

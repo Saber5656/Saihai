@@ -356,6 +356,38 @@ class CanonicalMonitorTests(unittest.TestCase):
             after = monitor.build_snapshot([self.vault], report)
         self.assertNotEqual(before["digest"], after["digest"])
 
+    def test_shared_repository_snapshots_every_configured_root(self):
+        first, second = self.vault / "a", self.vault / "b"
+        text = "---\ntask_id: TSK-1234\nstatus: ready\n---\n"
+        tasks = [self.write(f"{name}/01-Projects/Project/task.md", text) for name in ("a", "b")]
+        projection = self.write("b/00-Inbox&Tasks/Kanban.md", "## Ready\n- TSK-1234\n")
+        git = ["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-C", str(self.vault)]
+        for args in (["init", "-q"], ["add", "a", "b"],
+                     ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "roots"]):
+            subprocess.run(git + args, check=True, capture_output=True, text=True)
+        for task in tasks:
+            task.write_text(text + "initial dirty content\n")
+        projection.write_text(projection.read_text() + "initial dirty projection\n")
+        report = self.vault / "report.md"
+        roots = [first, second]
+        before_status = monitor.git_snapshot(first, report)["status_lines"]
+        before = monitor.build_snapshot(roots, report)
+        tasks[1].write_text(text + "different second root content\n")
+        second_changed = monitor.build_snapshot(roots, report)
+        self.assertNotEqual(before["digest"], second_changed["digest"])
+        tasks[0].write_text(text + "different first root content\n")
+        first_changed = monitor.build_snapshot(roots, report)
+        self.assertNotEqual(second_changed["digest"], first_changed["digest"])
+        projection.write_text("## Ready\n- TSK-1234\nchanged projection\n")
+        projection_changed = monitor.build_snapshot(roots, report)
+        self.assertNotEqual(first_changed["digest"], projection_changed["digest"])
+        self.assertEqual(before_status, monitor.git_snapshot(first, report)["status_lines"])
+        self.assertEqual(projection_changed["digest"], monitor.build_snapshot([second, first, second], report)["digest"])
+        self.assertEqual(len(projection_changed["repos"]), 1)
+        root_records = next(iter(projection_changed["repos"].values()))["task_roots"]
+        self.assertEqual(set(root_records), {str(first.absolute()), str(second.absolute())})
+        self.assertTrue(all(record["task_states"] == {"TSK-1234": "ready"} for record in root_records.values()))
+
     def test_report_self_update_is_not_a_task_or_snapshot_change(self):
         self.task("Project/TSK-20260905-example/task.md", status="deferred")
         report = self.vault / "01-Projects/TSK-9999-report.md"
