@@ -414,6 +414,22 @@ def _context_scope_for_step(
     return scope
 
 
+def _unbound_work_order_errors(work_order: dict[str, Any]) -> list[str]:
+    """Unbound artifacts carry only readonly scope, never a worker plan."""
+    scope = work_order.get("activation_scope")
+    ops = scope.get("allowed_ops") if isinstance(scope, dict) else None
+    errors = []
+    if (
+        work_order.get("permission_mode") != "readonly"
+        or not isinstance(ops, dict)
+        or any(ops.get(op) is not False for op in ("edit", "commit", "push", "network"))
+    ):
+        errors.append("unbound_work_order_requires_readonly")
+    if "worker_execution_plan" in work_order:
+        errors.append("unbound_work_order_worker_execution_plan_forbidden")
+    return errors
+
+
 def build_work_order(
     *,
     run: dict[str, Any],
@@ -471,8 +487,12 @@ def build_work_order(
     }
     owner_principal = request_record.get("owner_principal")
     checkout_identity_digest = request_record.get("checkout_identity_digest")
-    if owner_principal is not None or checkout_identity_digest is not None:
-        if not isinstance(owner_principal, dict) or not isinstance(checkout_identity_digest, str):
+    if owner_principal is not None or checkout_identity_digest not in (None, ""):
+        if (
+            not isinstance(owner_principal, dict)
+            or not isinstance(checkout_identity_digest, str)
+            or not checkout_identity_digest
+        ):
             raise WorkOrderError("frontend_request_binding_incomplete")
         work_order["frontend_request_binding"] = {
             "owner_principal": {
@@ -490,6 +510,13 @@ def build_work_order(
         work_order["projection_binding"] = projection_binding_from_request_record(
             request_binding_source
         )
+    else:
+        unbound_candidate = dict(work_order)
+        if worker_execution_plan is not None:
+            unbound_candidate["worker_execution_plan"] = worker_execution_plan
+        unbound_errors = _unbound_work_order_errors(unbound_candidate)
+        if unbound_errors:
+            raise WorkOrderError(unbound_errors[0])
     launch_session_identity = request_record.get("launch_session_identity")
     launch_session_digest = request_record.get("launch_session_digest")
     if launch_session_identity is not None or launch_session_digest:
@@ -652,6 +679,8 @@ def validate_work_order(
                 errors.append("projection_binding_mismatch")
     elif projection_binding is not None:
         errors.append("projection_binding_requires_frontend_request_binding")
+    else:
+        errors.extend(_unbound_work_order_errors(work_order))
 
     worker_plan = work_order.get("worker_execution_plan")
     if worker_plan is not None and (
