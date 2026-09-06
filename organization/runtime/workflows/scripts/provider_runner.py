@@ -503,14 +503,15 @@ def validate_work_order_for_runner(
     run: dict[str, Any] | None = None,
 ) -> list[str]:
     errors: list[str] = []
-    if work_order.get("workflow_id") != "single_step_external_review":
-        errors.append("only single_step_external_review is supported")
-    if work_order.get("step_id") != "review":
+    standard = work_order.get('workflow_id') == 'standard_code_change' and work_order.get('step_id') in {'review', 'qa'}
+    if work_order.get("workflow_id") != "single_step_external_review" and not standard:
+        errors.append("only single_step_external_review or standard readonly review/qa is supported")
+    if work_order.get("step_id") != "review" and not standard:
         errors.append("only review step is supported")
     if work_order.get("permission_mode") != "readonly":
         errors.append("permission_mode must be readonly")
-    if work_order.get("external_provider_allowed") is not True:
-        errors.append("external_provider_allowed must be true")
+    if work_order.get("external_provider_allowed") is not (False if standard else True):
+        errors.append("provider route does not match template")
     if not isinstance(work_order.get("intended_model"), str) or not work_order.get("intended_model"):
         errors.append("intended_model must be non-empty string")
     if not isinstance(work_order.get("provider_adapter_id"), str) or not work_order.get(
@@ -521,6 +522,10 @@ def validate_work_order_for_runner(
         errors.append("effective_model_policy unsupported")
     allowed_ops = ((work_order.get("activation_scope") or {}).get("allowed_ops") or {})
     for op in ("edit", "commit", "push", "network"):
+        if op == 'edit' and standard:
+            if allowed_ops.get(op) is not True:
+                errors.append('standard activation requires existing edit approval')
+            continue
         if allowed_ops.get(op) is not False:
             errors.append(f"activation_scope.allowed_ops.{op} must be false")
     if (work_order.get("context_scope") or {}).get("raw_transcript_sharing") != "forbidden":
@@ -604,7 +609,16 @@ def adapter_request(
     evidence_path = provider_evidence_path(state_root, run_id, step_id)
     transcript_path = provider_transcript_path(state_root, run_id, step_id)
     report_path = provider_report_path(state_root, run_id, step_id)
-    context_snapshot = load_verified_context_snapshot(work_order.get("context_refs"))
+    if run.get('workflow_id') == 'standard_code_change':
+        try:
+            context_snapshot = scoped_worker_executor.load_completed_review_context(state_root, run)
+        except scoped_worker_executor.ScopedWorkerError as exc:
+            raise ProviderRunnerError(exc.reason_class) from exc
+        expected = [dict(type='repo_file', value=row['path'], size_bytes=row['size_bytes'], digest=row['sha256']) for row in context_snapshot]
+        if work_order.get('context_refs') != expected:
+            raise ProviderRunnerError('review_context_work_order_mismatch')
+    else:
+        context_snapshot = load_verified_context_snapshot(work_order.get("context_refs"))
     context_snapshot_digest = "sha256:" + stable_digest(context_snapshot)
     context_json = json.dumps(context_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     context_bytes = context_json.encode("utf-8")
@@ -948,7 +962,8 @@ def authorize_provider_dispatch(
         supplied_digest = str(request_copy.pop("adapter_request_digest", ""))
         if supplied_digest != "sha256:" + stable_digest(request_copy):
             raise ProviderRunnerError("adapter_request_digest_mismatch")
-        current_context = load_verified_context_snapshot(request.get("context_refs"))
+        current_context = (scoped_worker_executor.load_completed_review_context(state_root, run)
+            if run.get('workflow_id') == 'standard_code_change' else load_verified_context_snapshot(request.get("context_refs")))
         if "sha256:" + stable_digest(current_context) != execution.get("context_snapshot_digest"):
             raise ProviderRunnerError("context_snapshot_digest_mismatch")
         frozen_binding = request.get("execution_binding")
@@ -1038,7 +1053,7 @@ def fake_provider_report(
     }
     if mode == "missing_effective_model":
         provider_evidence.pop("effective_model")
-    return {
+    report = {
         "report_version": "1",
         "report_id": f"report-{request['run_id']}",
         "request_id": request["request_id"],
@@ -1055,6 +1070,25 @@ def fake_provider_report(
             "raw_transcript_shared": False,
         },
     }
+    if request['workflow_id'] == 'standard_code_change':
+        paths = [ref['value'] for ref in request['context_refs']]
+        for finding in findings:
+            finding['evidence_refs'] = paths[:1]
+        report.update(result='blocked' if mode == 'blocked' else 'complete',
+            code_diff={'paths': paths, 'summary': 'Fixture bounded change'},
+            review={'status': 'changes_requested' if mode == 'findings' else 'approved',
+                    'findings': findings, 'evidence_refs': [request['evidence_path']]},
+            validation={'status': 'passed' if request['step_id'] == 'qa' and mode != 'blocked' else 'not_run',
+                        'evidence_refs': [request['evidence_path']]},
+            final_evidence={'refs': [request['evidence_path']]})
+        report.pop('findings')
+        if 'original_findings_only' in request['instruction']:
+            binding = json.loads(request['instruction'].split('\n')[-1])['binding']
+            report['review']['findings'] = []
+            report['resolution'] = {'binding': binding, 'results': {fid: {
+                'status': 'unresolved' if mode == 'findings' else 'resolved', 'evidence_refs': paths[:1]}
+                for fid in binding['finding_ids']}}
+    return report
 
 
 def execute_provider(

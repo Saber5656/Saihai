@@ -18,7 +18,7 @@ import run_lock
 import run_store
 
 HOST_TYPES = {'human_operator', 'manual_operator', 'harness_runner', 'orchestrator_start'}
-PHASES = {'triage', 'repair', 'current_snapshot_validation', 'stopped'}
+PHASES = {'triage', 'repair', 'current_snapshot_validation', 'merge_preflight', 'stopped'}
 SEVERITIES = {'critical', 'high', 'medium', 'low'}
 STATE_FIELDS = {'version', 'run_id', 'task_id', 'owner', 'activation_digest', 'original_snapshot',
                 'snapshot', 'max_repairs', 'same_blocker_limit', 'no_progress_limit', 'repair_rounds',
@@ -26,7 +26,7 @@ STATE_FIELDS = {'version', 'run_id', 'task_id', 'owner', 'activation_digest', 'o
                 'phase', 'stop_reason', 'integration_status'}
 FINDING_FIELDS = {'rule_id', 'path', 'anchor', 'task_id', 'mandatory', 'severity', 'evidence_ref'}
 STOP_REASONS = {'incidental_mandatory', 'outside_scope', 'contradictory_finding',
-                'same_blocker_cap', 'no_progress_cap', 'repair_budget_exhausted'}
+                'same_blocker_cap', 'no_progress_cap', 'repair_budget_exhausted', 'late_blocking_finding', 'activation_step_budget_exhausted'}
 
 
 class ReviewLifecycleError(RuntimeError):
@@ -56,6 +56,8 @@ def _relative(value: Any) -> bool:
 
 
 def _snapshot(value: Any) -> bool:
+    if isinstance(value, dict) and set(value) == {'kind', 'work_order_digest', 'context_digest'}:
+        return value['kind'] == 'work_order' and all(isinstance(value[k], str) and re.fullmatch(r'[a-f0-9]{64}', value[k]) for k in ('work_order_digest', 'context_digest'))
     return (isinstance(value, dict) and set(value) == {'repository', 'base', 'head'}
             and _text(value['repository']) and all(isinstance(value[k], str)
             and re.fullmatch(r'[0-9a-f]{40}', value[k]) for k in ('base', 'head')))
@@ -85,15 +87,14 @@ def _finding(value: Any) -> bool:
 def validate_record(state: Any, *, run: dict[str, Any]) -> list[str]:
     """Reject corrupt durable state on both load and store, without side effects."""
     try:
-        _require(isinstance(state, dict) and set(state) - {'intakes', 'conflict_candidates'} == STATE_FIELDS, 'fields')
+        _require(isinstance(state, dict) and set(state) - {'intakes', 'conflict_candidates', 'resolution_flow'} == STATE_FIELDS, 'fields')
         _require(state['version'] == '1', 'version')
         _require(state['run_id'] == run.get('run_id') and state['task_id'] == run.get('task_id'), 'identity')
         _require(_owner(state['owner']) == state['owner'], 'owner')
         _require(isinstance(state['activation_digest'], str)
                  and re.fullmatch(r'[0-9a-f]{64}', state['activation_digest']) is not None, 'activation_digest')
         _require(_snapshot(state['snapshot']) and _snapshot(state['original_snapshot']), 'snapshot')
-        _require(all(state['snapshot'][k] == state['original_snapshot'][k]
-                     for k in ('repository', 'base')), 'snapshot_scope')
+        _require(_same_snapshot_scope(state['snapshot'], state['original_snapshot']), 'snapshot_scope')
         _require(_integer(state['max_repairs'], 1, 5), 'max_repairs')
         for key in ('same_blocker_limit', 'no_progress_limit'):
             _require(_integer(state[key], 1, 2), key)
@@ -127,6 +128,8 @@ def validate_record(state: Any, *, run: dict[str, Any]) -> list[str]:
             _require(_snapshot(batch['snapshot']) and batch['status'] in {'reserved', 'failed', 'produced'}, 'batch_status')
             _require(_snapshot(batch['result_snapshot']) if batch['status'] == 'produced'
                      else batch['result_snapshot'] is None, 'batch_result')
+        if 'resolution_flow' in state:
+            _validate_resolution_flow(state)
         if 'conflict_candidates' in state:
             _validate_conflicts(state, run)
         if 'intakes' in state:
@@ -176,6 +179,8 @@ def initialize(state_root: Path, run_id: str, *, principal: dict[str, Any], snap
                      same_blocker_limit=same_blocker_limit, no_progress_limit=no_progress_limit,
                      repair_rounds=0, same_blocker_count=0, no_progress=0, last_blockers=[],
                      findings={}, batches={}, phase='triage', stop_reason=None, integration_status='integration_pending')
+        state['resolution_flow'] = dict(version='1', pr=None, policy=state['activation_digest'],
+                                        finding_ids={}, initial=None, verifications=[])
         run['review_lifecycle'] = state
         run_store.store_run(state_root, run, expected_current_state=run['run_state'])
         return copy.deepcopy(state)
@@ -193,7 +198,7 @@ def _stop(state: dict[str, Any], reason: str) -> None:
 def _in_scope(path: str, run: dict[str, Any]) -> bool:
     scope = run['activation']['activation_scope']
     return scope.get('allowed_ops', {}).get('edit') is True and any(
-        _relative(root) and (path == root or PurePosixPath(root) in PurePosixPath(path).parents)
+        (root == '.' or _relative(root)) and (root == '.' or path == root or PurePosixPath(root) in PurePosixPath(path).parents)
         for root in scope.get('allowed_paths', []))
 
 
@@ -204,6 +209,10 @@ def _triage(state: dict[str, Any], run: dict[str, Any], rows: Any) -> None:
         row = {k: v for k, v in raw.items() if k != 'external_id'}
         _require(_finding(row), 'invalid_finding')
         key = _key(row)
+        flow = state.get('resolution_flow')
+        if flow and flow['initial'] is not None and row['mandatory'] and (
+                key not in flow['finding_ids'].values() or not state['findings'].get(key, {}).get('mandatory')):
+            _stop(state, 'late_blocking_finding')
         previous = state['findings'].get(key)
         if previous:
             if previous['task_id'] != row['task_id']:
@@ -223,6 +232,10 @@ def _triage(state: dict[str, Any], run: dict[str, Any], rows: Any) -> None:
         else:
             row['disposition'] = 'repair'
         state['findings'][key] = row
+        if flow and flow['initial'] is None:
+            fid = raw.get('external_id', key)
+            _require(_text(fid) and flow['finding_ids'].get(fid, key) == key, 'finding_id_conflict')
+            flow['finding_ids'][fid] = key
     _require(len(state['findings']) <= 256, 'finding_capacity_exhausted')
 
 
@@ -253,7 +266,9 @@ def apply_event(state_root: Path, run_id: str, *, principal: dict[str, Any], eve
                 if batch is None:
                     _require(state['phase'] == 'triage', 'repair_phase_blocked')
                     _require(state['repair_rounds'] < state['max_repairs'], 'repair_budget_exhausted')
-                    targets = sorted(k for k, row in state['findings'].items() if row['disposition'] == 'repair')
+                    resolved = resolved_keys(state)
+                    targets = sorted(k for k, row in state['findings'].items()
+                                     if row['disposition'] == 'repair' and k not in resolved)
                     _require(bool(targets), 'no_authorized_repair_targets')
                     _require(all(_in_scope(state['findings'][k]['path'], run) for k in targets), 'outside_scope')
                     state['repair_rounds'] += 1
@@ -271,8 +286,8 @@ def apply_event(state_root: Path, run_id: str, *, principal: dict[str, Any], eve
                     batch['status'] = desired
                     if desired == 'produced':
                         snapshot = event['snapshot']
-                        _require(_snapshot(snapshot) and snapshot['head'] != state['snapshot']['head']
-                                 and all(snapshot[k] == state['snapshot'][k] for k in ('repository', 'base')),
+                        _require(_snapshot(snapshot) and snapshot != state['snapshot']
+                                 and _same_snapshot_scope(snapshot, state['snapshot']),
                                  'repair_snapshot_invalid')
                         batch['result_snapshot'] = copy.deepcopy(snapshot)
                         state['snapshot'] = copy.deepcopy(snapshot)
@@ -342,6 +357,7 @@ def _validate_conflicts(state: dict[str, Any], run: dict[str, Any]) -> None:
 
 
 def _record_conflict(state: dict[str, Any], run: dict[str, Any], candidate: Any) -> None:
+    _require('repository' in state['snapshot'], 'github_snapshot_required')
     _require(_conflict_matches(candidate, state, run), 'invalid_conflict_candidate')
     key = _conflict_key(candidate)
     rows = state.get('conflict_candidates', {})
@@ -480,6 +496,7 @@ def prepare_intake(state_root: Path, run_id: str, *, principal: dict[str, Any], 
         state = run.get('review_lifecycle')
         _require(state is not None, 'lifecycle_not_initialized')
         _live(run, owner, state)
+        _require('repository' in state['snapshot'], 'github_snapshot_required')
         key = intake_key(state['snapshot']['repository'], pr, bot, policy_version)
         existing_owner = _existing_intake_owner(state_root, key)
         _require(existing_owner in (None, run_id), 'intake_owned_by_other_run')
@@ -709,3 +726,290 @@ def validate_intake_policy_plan(plan: Any) -> list[str]:
     except (ReviewLifecycleError, TypeError, KeyError, ValueError) as exc:
         return [f'intake_policy_plan_invalid:{exc}']
     return []
+
+
+# Opt-in internal harness consumer. Provider authentication stays in report_gate;
+# these helpers operate on the same locked run and never create a transport grant.
+def _validate_resolution_flow(state: dict[str, Any]) -> None:
+    flow = state['resolution_flow']
+    _require(isinstance(flow, dict) and set(flow) - {'qa'} == {'version', 'pr', 'policy', 'finding_ids', 'initial', 'verifications'}, 'resolution_fields')
+    _require(flow['version'] == '1' and (flow['pr'] is None or _integer(flow['pr'], 1, 2**31-1)) and _text(flow['policy']), 'resolution_identity')
+    ids = flow['finding_ids']
+    _require(isinstance(ids, dict) and len(ids) <= 256 and all(_text(k) and v in state['findings'] for k, v in ids.items()), 'resolution_ids')
+    _require(all(key in ids.values() or not row['mandatory'] or state['phase'] == 'stopped' for key, row in state['findings'].items()), 'resolution_finding_coverage')
+    initial = flow['initial']
+    if initial is not None:
+        _require(isinstance(initial, dict) and set(initial) == {'report_id', 'report_ref', 'digest', 'snapshot', 'provider_evidence', 'findings'}, 'initial_fields')
+        _require(all(_text(initial[k]) for k in ('report_id', 'report_ref', 'digest')), 'initial_reference')
+        _require(re.fullmatch(r'sha256:[0-9a-f]{64}', initial['digest']) is not None, 'initial_digest')
+        _require(initial['snapshot'] == state['original_snapshot'] and isinstance(initial['provider_evidence'], dict), 'initial_identity')
+        _require(isinstance(initial['findings'], list) and len(initial['findings']) == len(ids) and {f['finding_id'] for f in initial['findings']} == set(ids), 'initial_ids')
+    if 'qa' in flow:
+        qa = flow['qa']
+        _require(isinstance(qa, dict) and set(qa) == {'report_ref', 'digest', 'snapshot'}
+                 and _text(qa['report_ref']) and re.fullmatch(r'sha256:[a-f0-9]{64}', qa['digest'])
+                 and qa['snapshot'] == state['snapshot'] and state['phase'] == 'merge_preflight', 'qa_receipt')
+    records = flow['verifications']
+    _require(isinstance(records, list) and len(records) <= state['max_repairs'], 'resolution_capacity')
+    _require(initial is not None or not records, 'resolution_without_initial')
+    seen = set()
+    for record in records:
+        _require(isinstance(record, dict) and set(record) == {'binding', 'results', 'report_id', 'report_ref', 'digest', 'provider_evidence'}, 'verification_fields')
+        binding = record['binding']
+        _require(isinstance(binding, dict) and set(binding) == {'mode', 'original_review', 'snapshot', 'batch_id', 'finding_ids', 'pr', 'policy'}, 'verification_binding')
+        _require(binding['mode'] == 'original_findings_only' and binding['original_review'] == initial['digest'] and binding['finding_ids'] == sorted(ids), 'verification_original')
+        _require(binding['pr'] == flow['pr'] and binding['policy'] == flow['policy'], 'verification_policy')
+        batch = state['batches'].get(binding['batch_id'])
+        _require(batch is not None and batch['status'] == 'produced' and batch['result_snapshot'] == binding['snapshot'], 'verification_batch')
+        _require(binding['batch_id'] not in seen, 'duplicate_verification')
+        seen.add(binding['batch_id'])
+        _validate_resolution_results(record['results'], ids)
+        _require(all(_text(record[k]) for k in ('report_id', 'report_ref', 'digest')) and re.fullmatch(r'sha256:[0-9a-f]{64}', record['digest']) is not None and isinstance(record['provider_evidence'], dict), 'verification_receipt')
+    if state['phase'] == 'merge_preflight':
+        _require(initial is not None and not unresolved_keys(state) and not state.get('conflict_candidates'), 'premature_preflight')
+        _require(state['snapshot'] == state['original_snapshot'] or bool(records) and records[-1]['binding']['snapshot'] == state['snapshot'], 'preflight_stale')
+
+
+def enable_resolution_flow(state_root: Path, run_id: str, *, principal: dict[str, Any],
+                           pr: int, policy: str, finding_ids: dict[str, str]) -> dict[str, Any]:
+    """Bind host-triaged semantic obligations to original stored report finding IDs.
+
+    Enable before accepting the initial stored report. This does not request a
+    review, accept the report, or authenticate its provider.
+    """
+    owner = _owner(principal)
+    with run_lock.hold_global_lock(state_root, operation='resolution_enable', run_id=run_id, principal=owner):
+        run = run_store.load_run(state_root, run_id)
+        state = run.get('review_lifecycle')
+        _require(state is not None, 'lifecycle_not_initialized')
+        _live(run, owner, state)
+        proposed = dict(version='1', pr=pr, policy=policy, finding_ids=copy.deepcopy(finding_ids), initial=None, verifications=[])
+        if 'resolution_flow' in state and state['resolution_flow']['pr'] is not None:
+            old = state['resolution_flow']
+            _require(all(old[k] == proposed[k] for k in ('version', 'pr', 'policy', 'finding_ids')), 'resolution_enable_conflict')
+            return copy.deepcopy(state)
+        _require(state['phase'] == 'triage' and state['repair_rounds'] == 0
+                 and state.get('resolution_flow', {}).get('initial') is None, 'resolution_enable_phase')
+        state['resolution_flow'] = proposed
+        _validate_resolution_flow(state)
+        run_store.store_run(state_root, run, expected_current_state=run['run_state'])
+        return copy.deepcopy(state)
+
+
+def resolved_keys(state: dict[str, Any]) -> set[str]:
+    flow = state.get('resolution_flow')
+    if not flow or not flow['verifications']:
+        return set()
+    rows = flow['verifications'][-1]['results']
+    # Every alias of a semantic finding must be resolved.
+    return {key for key in flow['finding_ids'].values() if all(
+        rows[fid]['status'] == 'resolved' for fid, value in flow['finding_ids'].items() if value == key)}
+
+
+def unresolved_keys(state: dict[str, Any]) -> set[str]:
+    return {key for key, row in state['findings'].items() if row['disposition'] == 'repair'} - resolved_keys(state)
+
+
+def next_review_action(run: dict[str, Any]) -> str | None:
+    state = run.get('review_lifecycle')
+    if not state:
+        return None
+    if 'resolution_flow' not in state:
+        return 'wait_initial_review_evidence'
+    errors = validate_record(state, run=run)
+    _require(not errors, 'resolution_state_invalid')
+    if state['phase'] == 'stopped' or run.get('run_state') in run_store.TERMINAL_RUN_STATES:
+        return 'stopped'
+    if state.get('conflict_candidates'):
+        return 'wait_validation'
+    flow = state['resolution_flow']
+    if flow['initial'] is None:
+        return 'initial_review' if state['repair_rounds'] == 0 and state['snapshot'] == state['original_snapshot'] else 'wait_initial_review_evidence'
+    if state['phase'] == 'repair':
+        return 'repair_original_findings'
+    if state['phase'] == 'current_snapshot_validation':
+        return 'verify_original_findings'
+    if unresolved_keys(state):
+        return 'repair_original_findings'
+    return 'merge_preflight'
+
+
+def resolution_binding(run: dict[str, Any]) -> dict[str, Any]:
+    state = run['review_lifecycle']
+    flow = state['resolution_flow']
+    _require(next_review_action(run) == 'verify_original_findings', 'resolution_not_requested')
+    batches = [(key, b) for key, b in state['batches'].items() if b['status'] == 'produced' and b['result_snapshot'] == state['snapshot']]
+    _require(len(batches) == 1, 'resolution_batch_missing')
+    return dict(mode='original_findings_only', original_review=flow['initial']['digest'],
+                snapshot=copy.deepcopy(state['snapshot']), batch_id=batches[0][0],
+                finding_ids=sorted(flow['finding_ids']), pr=flow['pr'], policy=flow['policy'])
+
+
+def initial_review_instruction(run: dict[str, Any]) -> str:
+    state = run['review_lifecycle']
+    flow = state['resolution_flow']
+    return 'Perform the initial review once for this immutable scope: ' + json.dumps(
+        {'snapshot': state['original_snapshot'], 'pr': flow['pr'], 'policy': flow['policy']},
+        sort_keys=True, separators=(',', ':'))
+
+
+def resolution_instruction(run: dict[str, Any]) -> str:
+    binding = resolution_binding(run)
+    initial = run['review_lifecycle']['resolution_flow']['initial']
+    return ('Verify only whether each original finding is resolved by the specified repair. '
+            'Do not perform a new general review or introduce additional finding IDs. '
+            'Return a resolution object containing binding and results keyed by exactly these IDs; '
+            'each result has status resolved or unresolved and nonempty evidence_refs. '
+            'Do not grant merge authority. Original stored report: ' + initial['report_ref'] + '\n'
+            + json.dumps({'binding': binding, 'original_findings': initial['findings']}, sort_keys=True, separators=(',', ':')))
+
+
+def _validate_resolution_results(results: Any, ids: dict[str, str]) -> None:
+    _require(isinstance(results, dict) and set(results) == set(ids), 'resolution_result_ids')
+    for row in results.values():
+        _require(isinstance(row, dict) and set(row) == {'status', 'evidence_refs'} and row['status'] in {'resolved', 'unresolved'}, 'resolution_result_status')
+        _require(isinstance(row['evidence_refs'], list) and 0 < len(row['evidence_refs']) <= 32 and all(_text(ref) for ref in row['evidence_refs']), 'resolution_result_evidence')
+
+
+def consume_gated_report(run: dict[str, Any], report: dict[str, Any], *, work_order: dict[str, Any],
+                         report_ref: str, digest: str) -> None:
+    """Called only by report_gate AFTER its existing provider-evidence checks.
+
+    Mutates the caller's locked run; persistence and transition stay atomic at
+    that boundary. A report body cannot call this function or waive any gate.
+    """
+    state = run['review_lifecycle']
+    flow = state['resolution_flow']
+    _require(state['phase'] != 'stopped' and not state.get('conflict_candidates'), 'resolution_blocked')
+    _require(report['result'] in {'pass', 'findings'}, 'resolution_report_failed')
+    receipt = dict(report_id=report['report_id'], report_ref=report_ref, digest=digest,
+                   provider_evidence=copy.deepcopy(report['provider_evidence']))
+    if flow['initial'] is None:
+        _require('resolution' not in report and state['snapshot'] == state['original_snapshot']
+                 and (work_order.get('instruction') == initial_review_instruction(run)
+                      or state['original_snapshot'].get('kind') == 'work_order'
+                      and state['original_snapshot'] == work_order_identity(work_order)), 'initial_review_identity')
+        ids = [f['finding_id'] for f in report['findings']]
+        _require(len(ids) == len(set(ids)) and set(ids) == set(flow['finding_ids']), 'initial_finding_ids')
+        _require(not ids or report['result'] == 'findings', 'initial_result_mismatch')
+        flow['initial'] = dict(receipt, snapshot=copy.deepcopy(state['original_snapshot']), findings=copy.deepcopy(report['findings']))
+        if not unresolved_keys(state):
+            state['phase'] = 'merge_preflight'
+        return
+    if flow['initial']['digest'] == digest and flow['initial']['report_id'] == report['report_id']:
+        return  # Original receipt replay is historical only; it cannot advance a repaired tree.
+    # Once sealed, a broad report cannot replace the original or advance state.
+    resolution = report.get('resolution')
+    _require(isinstance(resolution, dict) and set(resolution) == {'binding', 'results'}, 'resolution_required')
+    for old in flow['verifications']:
+        if old['digest'] == digest:
+            _require(old['binding'] == resolution['binding'] and old['results'] == resolution['results'], 'resolution_replay_conflict')
+            return
+    binding = resolution_binding(run)
+    _require(work_order.get('instruction') == resolution_instruction(run) and resolution['binding'] == binding, 'resolution_identity_mismatch')
+    _validate_resolution_results(resolution['results'], flow['finding_ids'])
+    _require(report['findings'] == [], 'resolution_new_findings_forbidden')
+    _require(report['result'] == 'pass', 'resolution_report_failed')
+    flow['verifications'].append(dict(receipt, binding=binding, results=copy.deepcopy(resolution['results'])))
+    remaining = sorted(unresolved_keys(state))
+    if not remaining:
+        state['phase'] = 'merge_preflight'
+    else:
+        state['same_blocker_count'] = state['same_blocker_count'] + 1 if remaining == state['last_blockers'] else 1
+        state['no_progress'] = state['no_progress'] + 1 if remaining == state['batches'][binding['batch_id']]['findings'] else 0
+        state['last_blockers'] = remaining
+        state['phase'] = 'triage'
+        if state['same_blocker_count'] >= state['same_blocker_limit']:
+            _stop(state, 'same_blocker_cap')
+        elif state['no_progress'] >= state['no_progress_limit']:
+            _stop(state, 'no_progress_cap')
+        elif state['repair_rounds'] >= state['max_repairs']:
+            _stop(state, 'repair_budget_exhausted')
+
+
+
+def _same_snapshot_scope(current: dict[str, Any], original: dict[str, Any]) -> bool:
+    if current.get('kind') == 'work_order' or original.get('kind') == 'work_order':
+        return current.get('kind') == original.get('kind') == 'work_order'
+    return all(current[k] == original[k] for k in ('repository', 'base'))
+
+
+def work_order_identity(work_order: dict[str, Any]) -> dict[str, str]:
+    """Internal identity only. Never reinterpret these digests as Git commits."""
+    return dict(kind='work_order', work_order_digest=_digest(work_order),
+                context_digest=_digest({'context_refs': work_order['context_refs'],
+                                        'context_scope': work_order['context_scope']}))
+
+
+def start_from_gated_findings(run: dict[str, Any], report: dict[str, Any], *,
+                             work_order: dict[str, Any], principal: dict[str, Any]) -> bool:
+    """Actual report-gate entry, under its existing lock and evidence checks.
+
+    Only a pre-existing editable activation can enter a repair flow. Unsupported
+    or unbound finding paths cannot manufacture an edit scope. Current external
+    review templates are readonly; that supported use remains a single step.
+    """
+    if run.get('review_lifecycle') is not None or (report.get('result') != 'findings'
+            and not (run.get('workflow_id') == 'standard_code_change' and report.get('result') == 'pass')):
+        return False
+    scope = run['activation']['activation_scope']
+    if scope.get('allowed_ops', {}).get('edit') is not True:
+        return False
+    _require(work_order.get('activation_scope') == scope, 'work_order_scope_mismatch')
+    owner = _owner(principal)
+    _live(run, owner)
+    refs = {ref.get('value') for ref in work_order.get('context_refs', [])
+            if isinstance(ref, dict) and ref.get('type') == 'repo_file' and _relative(ref.get('value'))}
+    rows = []
+    for finding in report['findings']:
+        paths = [ref for ref in finding['evidence_refs'] if ref in refs and _in_scope(ref, run)]
+        _require(len(set(paths)) == 1, 'finding_path_binding_required')
+        _require(finding['status'] in {'open', 'informational'}, 'initial_disposition_requires_host_triage')
+        rows.append(dict(external_id=finding['finding_id'], rule_id=finding['finding_id'],
+            path=paths[0], anchor=finding['finding_id'], task_id=run['task_id'],
+            mandatory=finding['status'] == 'open', severity='low' if finding['severity'] == 'info' else finding['severity'],
+            evidence_ref=finding['evidence_refs'][0]))
+    snapshot = work_order_identity(work_order)
+    state = dict(version='1', run_id=run['run_id'], task_id=run['task_id'], owner=owner,
+        activation_digest=_digest(run['activation']), original_snapshot=copy.deepcopy(snapshot), snapshot=snapshot,
+        max_repairs=5, same_blocker_limit=2, no_progress_limit=2, repair_rounds=0,
+        same_blocker_count=0, no_progress=0, last_blockers=[], findings={}, batches={},
+        phase='triage', stop_reason=None, integration_status='integration_pending')
+    state['resolution_flow'] = dict(version='1', pr=None, policy=state['activation_digest'],
+                                   finding_ids={}, initial=None, verifications=[])
+    _triage(state, run, rows)
+    run['review_lifecycle'] = state
+    return True
+
+
+
+def reserve_followup_repair(run: dict[str, Any]) -> str:
+    state = run['review_lifecycle']
+    _require(state['phase'] == 'triage' and state['repair_rounds'] < state['max_repairs'], 'repair_budget_exhausted')
+    targets = sorted(unresolved_keys(state))
+    _require(targets and all(_in_scope(state['findings'][key]['path'], run) for key in targets), 'outside_scope')
+    batch_id = 'resolution-repair-' + str(state['repair_rounds'] + 1)
+    _require(batch_id not in state['batches'], 'batch_conflict')
+    state['repair_rounds'] += 1
+    state['phase'] = 'repair'
+    state['batches'][batch_id] = dict(findings=targets, snapshot=copy.deepcopy(state['snapshot']), status='reserved', result_snapshot=None)
+    return batch_id
+
+
+def record_gated_repair_result(run: dict[str, Any], snapshot: dict[str, str]) -> None:
+    state = run['review_lifecycle']
+    _require(state['phase'] == 'repair' and _snapshot(snapshot), 'repair_phase_blocked')
+    batches = [b for b in state['batches'].values() if b['status'] == 'reserved']
+    _require(len(batches) == 1 and _same_snapshot_scope(snapshot, state['snapshot']) and snapshot != state['snapshot'], 'repair_snapshot_invalid')
+    batches[0]['status'], batches[0]['result_snapshot'] = 'produced', copy.deepcopy(snapshot)
+    state['snapshot'], state['phase'] = copy.deepcopy(snapshot), 'current_snapshot_validation'
+
+
+
+def repair_instruction(run: dict[str, Any]) -> str:
+    state = run['review_lifecycle']
+    _require(state['phase'] == 'repair', 'repair_not_reserved')
+    keys = unresolved_keys(state)
+    return ('Repair only these unresolved original findings within the existing allowed paths. '
+            'Do not perform a new review or change execution permissions. ' + json.dumps(
+                {key: state['findings'][key] for key in sorted(keys)}, sort_keys=True))

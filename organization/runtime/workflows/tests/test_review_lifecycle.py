@@ -310,7 +310,7 @@ class ReviewLifecycleTests(unittest.TestCase):
         schema = json.loads((root / 'review-lifecycle.schema.json').read_text())
         run_schema = json.loads((root / 'workflow-run.schema.json').read_text())
         self.assertEqual(run_schema['properties']['review_lifecycle']['$ref'], 'review-lifecycle.schema.json')
-        self.assertEqual(set(schema['required']), set(self.start()))
+        self.assertEqual(set(schema['required']) | {'resolution_flow'}, set(self.start()))
         self.assertFalse(schema['additionalProperties'])
 
     def test_expired_activation_blocks_initialization_and_live_reservation(self):
@@ -333,6 +333,101 @@ class ReviewLifecycleTests(unittest.TestCase):
             with self.assertRaises(lifecycle.ReviewLifecycleError):
                 self.event('reserve_repair', batch_id='batch-1')
         self.assertEqual(lifecycle.observe(self.root, self.run['run_id'])['repair_rounds'], 0)
+
+    def enable_flow(self, count=1):
+        self.start()
+        self.event('findings', findings=[finding(str(i)) for i in range(count)])
+        state = lifecycle.observe(self.root, self.run['run_id'])
+        ids = {f'F-{i}': key for i, key in enumerate(sorted(state['findings']))}
+        lifecycle.enable_resolution_flow(self.root, self.run['run_id'], principal=OWNER,
+                                         pr=136, policy='resolution-v1', finding_ids=ids)
+        return ids
+
+    def gated(self, report, instruction=None):
+        run = run_store.load_run(self.root, self.run['run_id'])
+        instruction = instruction or (lifecycle.initial_review_instruction(run) if run['review_lifecycle']['resolution_flow']['initial'] is None else lifecycle.resolution_instruction(run))
+        lifecycle.consume_gated_report(run, report, work_order={'instruction': instruction},
+            report_ref='reports/sealed.json', digest='sha256:' + lifecycle._digest(report))
+        run_store.store_run(self.root, run)
+        return run
+
+    def seal(self, ids):
+        return self.gated({'report_id': 'initial', 'provider_evidence': {}, 'result': 'findings' if ids else 'pass',
+                          'findings': [{'finding_id': fid, 'summary': 'original issue'} for fid in ids]})
+
+    def produced(self, batch='fix-1', head='c'):
+        self.event('reserve_repair', batch_id=batch)
+        self.event('repair_produced', batch_id=batch, snapshot=dict(SNAPSHOT, head=head*40))
+        return run_store.load_run(self.root, self.run['run_id'])
+
+    def resolution(self, run, unresolved=()):
+        ids = run['review_lifecycle']['resolution_flow']['finding_ids']
+        return dict(report_id='resolution-' + str(run['review_lifecycle']['repair_rounds']), provider_evidence={}, result='pass', findings=[],
+            resolution={'binding': lifecycle.resolution_binding(run), 'results': {
+                fid: {'status': 'unresolved' if fid in unresolved else 'resolved', 'evidence_refs': ['src/app.py']} for fid in ids}})
+
+    def test_resolution_once_then_preflight_without_new_initial_review(self):
+        ids = self.enable_flow()
+        original = self.seal(ids)['review_lifecycle']['resolution_flow']['initial']
+        run = self.produced()
+        self.assertEqual(lifecycle.next_review_action(run), 'verify_original_findings')
+        instruction = lifecycle.resolution_instruction(run)
+        report = self.resolution(run)
+        done = self.gated(report)
+        self.assertEqual(lifecycle.next_review_action(done), 'merge_preflight')
+        self.assertEqual(done['review_lifecycle']['resolution_flow']['initial'], original)
+        self.assertEqual(self.gated(report, instruction)['review_lifecycle'], done['review_lifecycle'])
+        self.assertEqual(done['review_lifecycle']['repair_rounds'], 1)
+
+    def test_unresolved_only_is_repaired_and_budget_retained(self):
+        ids = self.enable_flow(2)
+        self.seal(ids)
+        run = self.produced()
+        remaining = sorted(ids)[0]
+        run = self.gated(self.resolution(run, [remaining]))
+        self.assertEqual(lifecycle.next_review_action(run), 'repair_original_findings')
+        state = self.event('reserve_repair', batch_id='fix-2')
+        self.assertEqual(state['batches']['fix-2']['findings'], [ids[remaining]])
+        self.assertEqual(state['repair_rounds'], 2)
+
+    def test_resolution_rejects_missing_extra_stale_and_full_review(self):
+        ids = self.enable_flow()
+        self.seal(ids)
+        run = self.produced()
+        good = self.resolution(run)
+        bads = []
+        missing = copy.deepcopy(good); missing['resolution']['results'] = {}; bads.append(missing)
+        extra = copy.deepcopy(good); extra['resolution']['results']['NEW'] = {'status':'resolved','evidence_refs':['x']}; bads.append(extra)
+        stale = copy.deepcopy(good); stale['resolution']['binding']['snapshot'] = SNAPSHOT; bads.append(stale)
+        wrong = copy.deepcopy(good); wrong['resolution']['binding']['original_review'] = 'sha256:'+'0'*64; bads.append(wrong)
+        broad = copy.deepcopy(good); del broad['resolution']; bads.append(broad)
+        negative = copy.deepcopy(good); negative['result'] = 'blocked'; bads.append(negative)
+        for report in bads:
+            with self.subTest(report=report), self.assertRaises(lifecycle.ReviewLifecycleError):
+                self.gated(report)
+        self.assertEqual(run_store.load_run(self.root, self.run['run_id'])['review_lifecycle'], run['review_lifecycle'])
+
+    def test_resolution_same_blocker_stops_without_reset(self):
+        ids = self.enable_flow()
+        self.seal(ids)
+        for n, head in [(1,'c'),(2,'d')]:
+            run = self.produced('fix-'+str(n), head)
+            run = self.gated(self.resolution(run, ids))
+        self.assertEqual(lifecycle.next_review_action(run), 'stopped')
+        self.assertEqual(run['review_lifecycle']['repair_rounds'], 2)
+
+    def test_resolution_empty_initial_report_advances_only_after_seal(self):
+        ids = self.enable_flow(0)
+        run = run_store.load_run(self.root, self.run['run_id'])
+        self.assertEqual(lifecycle.next_review_action(run), 'initial_review')
+        run = self.seal(ids)
+        self.assertEqual(lifecycle.next_review_action(run), 'merge_preflight')
+
+    def test_late_mandatory_finding_blocks_without_new_review(self):
+        ids = self.enable_flow()
+        self.seal(ids)
+        state = self.event('findings', findings=[finding('late')])
+        self.assertEqual(state['stop_reason'], 'late_blocking_finding')
 
     def test_readonly_observe_does_not_mutate_persisted_state(self):
         self.start()

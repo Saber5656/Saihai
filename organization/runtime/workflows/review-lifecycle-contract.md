@@ -285,3 +285,81 @@ immutability; stale snapshots; durable corruption; restart/duplicate delivery;
 existing configured initial result reuse without a second request. Focused tests
 live in `tests/test_review_intake.py`. This unit is not actual fallback runtime
 acceptance, publication readiness, or completion of Issue #136.
+
+## Original-finding resolution flow (Issue #136 follow-up)
+
+A repair lifecycle keeps one immutable initial typed review. `report_gate` retains
+its report ID, canonical JSON digest, stored report reference, provider evidence,
+original identity, and original finding IDs. A later report cannot replace it.
+The ordinary single-step review without a repair lifecycle remains compatible.
+
+After `repair_produced`, the existing `resume_run` returns
+`verify_original_findings`. The existing work-order builder emits a bounded
+instruction containing the original findings and their IDs, original report
+reference/digest, repair batch, and current immutable identity. It does not
+emit another broad review. The verifier returns a `resolution` object with
+exactly `binding` and `results`; every original ID must have a `resolved` or
+`unresolved` status and nonempty evidence references. Missing/additional IDs,
+changed identity/policy, a general report in place of the bounded report, or
+negative/invalid provider outcomes cannot advance the flow. Existing provider
+and normalized evidence checks still precede the resolution consumer.
+
+Unresolved original obligations alone are reserved for further repair. Runtime
+repair, same-blocker, and no-progress limits remain bounded across restarts.
+An unsolicited mandatory finding can block the flow but cannot schedule a new
+broad review. Older lifecycle records lacking initial review evidence remain
+at `wait_initial_review_evidence`; they are not silently treated as an initial
+review request. Original review replay is historical evidence only and does
+not resolve findings on a changed tree.
+
+All required original findings resolved selects `merge_preflight`, the entry
+for existing validation and publication gates, **not** merge readiness or
+merge authority. The run remains `validating` and is neither completed nor
+moved to an artificial human wait. CI, native protection, unresolved threads,
+policy checks, and current identity validation must still pass downstream.
+No quality receipt, GitHub transport, publication backend, signing key, or
+execution permission is fabricated by these changes. The internal action
+selection/typed-report path and live GitHub integration are separate claims;
+GitHub integration remains pending.
+
+
+Internal review identity may use `kind=work_order` with actual work-order and
+context digests. These are never Git repository/base/head values, and GitHub
+intake/conflict operations reject this identity variant. The gated initial
+finding consumer can start tracking only under an already editable activation,
+with finding evidence paths bound to approved work-order context paths.
+
+The standard code-change path now starts tracking at the actual typed report
+gate after the existing scoped executor has completed implementation. The
+executor freezes bounded code context and records its integrity digest. The
+frontdoor builds each new iteration with the existing issuer; old iteration
+snapshots remain immutable. The provider runner rechecks the completed worker
+evidence and current task tree before delivering that context to the existing
+readonly reviewer/QA route. It never gives those steps edit, commit, push, or
+network permission. A changed task tree invalidates the saved context.
+
+`standard_code_change` uses `code_change_report` throughout its readonly steps.
+Its envelope is bound to the actual run, step, frozen work order, registered
+provider/model, and normalized evidence. Initial review findings start the
+resolution flow automatically. Repairs use the existing signed scoped worker
+capability; verification uses the same review role with a bounded instruction.
+All original required findings resolved advances to QA, and successful QA
+allows the final harness evidence gate. Failed, stale, malformed, missing-ID,
+extra-ID, or unresolved verification cannot advance to QA. Final evidence
+completion is not publication or merge authorization.
+
+New activations have a six-step budget: implement, initial review, one repair,
+original-finding verification, QA, final evidence. An already approved four-step
+activation keeps four; if the required sequence exceeds it, the harness returns
+`activation_step_budget_exhausted`. Neither retries nor a restart increase the
+approved budget. The separate repair/same-blocker/no-progress caps still apply.
+Normal readonly single-step external reviews retain their previous behavior.
+
+The root `.coderabbit.yaml` keeps `reviews.auto_review.enabled: true` and sets
+`auto_incremental_review: false`. This preserves the initial eligible PR review
+and prevents automatic reviews after subsequent pushes. The harness must not
+replace those disabled automatic reviews with manual full-review requests.
+This follows the [CodeRabbit automatic review controls documentation](https://docs.coderabbit.ai/configuration/auto-review)
+(checked 2026-09-07 JST). CI, unresolved native threads, and branch protection
+remain independent gates. This setting does not authenticate any quota
+observation, grant publication authority, or prove a live provider run.

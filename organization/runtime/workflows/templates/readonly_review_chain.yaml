@@ -1,9 +1,9 @@
 {
   "workflow_template_version": "1",
-  "workflow_id": "standard_code_change",
+  "workflow_id": "readonly_review_chain",
   "lifecycle_status": "active",
-  "purpose": "Perform ordinary bounded implementation work with review, QA, and final evidence, but without commit, push, or PR publication.",
-  "safety_class": "standard",
+  "purpose": "Read-only research followed by independent review and deterministic final evidence validation. Declares contracts for later multi-step executors; does not commission them.",
+  "safety_class": "readonly",
   "publication_gate": {
     "supported": false,
     "required_by_default": false
@@ -15,7 +15,7 @@
     ],
     "exit": [
       "exit.typed_report_valid",
-      "exit.code_change_evidence_complete",
+      "exit.research_evidence_complete",
       "exit.final_evidence_complete"
     ]
   },
@@ -23,11 +23,11 @@
     "entry.activation_approved",
     "entry.work_order_valid",
     "exit.typed_report_valid",
-    "exit.code_change_evidence_complete",
+    "exit.research_evidence_complete",
     "exit.final_evidence_complete"
   ],
-  "initial_step": "implement",
-  "max_steps": 6,
+  "initial_step": "research",
+  "max_steps": 3,
   "scheduler": {
     "mode": "invocation-drain",
     "state_persistence": "durable_state",
@@ -41,7 +41,6 @@
     ],
     "signals_only": [
       "stdout",
-      "tmux_pane_output",
       "provider_transcript"
     ]
   },
@@ -54,33 +53,43 @@
     "capability_schema": "organization/runtime/workflows/schemas/provider-adapter-capability.schema.json",
     "allowed_transports": [
       "headless_cli",
-      "tmux_interactive",
       "codex_exec"
     ],
-    "default_transport": "codex_exec"
+    "default_transport": "headless_cli"
   },
   "output_contracts": {
-    "code_change_report": {
-      "schema_path": "organization/runtime/workflows/schemas/code-change-report.schema.json",
+    "research_report": {
+      "schema_path": "organization/runtime/workflows/schemas/research-report.schema.json",
+      "required": true,
+      "canonical": true
+    },
+    "external_review_report": {
+      "schema_path": "organization/runtime/workflows/schemas/external-review-report.schema.json",
+      "required": true,
+      "canonical": true
+    },
+    "final_evidence": {
+      "schema_path": "organization/runtime/workflows/schemas/readonly-final-evidence-report.schema.json",
       "required": true,
       "canonical": true
     }
   },
   "steps": [
     {
-      "id": "implement",
-      "role": "tech-backend",
-      "assignment_role": "implementer",
-      "permission_mode": "edit",
+      "id": "research",
+      "role": "contents-researcher",
+      "assignment_role": "observer",
+      "permission_mode": "readonly",
       "provider_route": {
         "adapter_kind": "bounded_provider",
-        "runner_authority": "allowed_paths_only",
+        "runner_authority": "write_report_only",
         "transition_authority": "harness_engine"
       },
       "input_contract": "work_order",
-      "output_contract": "code_change_report",
+      "output_contract": "research_report",
       "context_scope": {
         "allowed_modes": [
+          "refs_only",
           "selected_snapshot",
           "diff_summary"
         ],
@@ -89,21 +98,35 @@
       },
       "quality_gates": [
         {
-          "gate": "diff_scope_gate",
-          "requires": "code_diff"
+          "gate": "source_refs_gate",
+          "requires": "source_refs"
+        },
+        {
+          "gate": "uncertainty_gate",
+          "requires": "uncertainty"
+        },
+        {
+          "gate": "no_diff_gate",
+          "requires": "no_diff_completion"
         }
       ],
       "transitions": [
         {
-          "on": "implementation_complete",
+          "on": "research_complete",
           "to": "review"
         },
         {
-          "on": "scope_violation",
-          "to": "waiting_human",
-          "reason_class": "scope_violation"
+          "on": "report_invalid",
+          "to": "blocked",
+          "reason_class": "invalid_report"
         }
-      ]
+      ],
+      "allowed_ops": {
+        "edit": false,
+        "commit": false,
+        "push": false,
+        "network": false
+      }
     },
     {
       "id": "review",
@@ -116,56 +139,59 @@
         "transition_authority": "harness_engine"
       },
       "input_contract": "work_order",
-      "output_contract": "code_change_report",
+      "output_contract": "external_review_report",
+      "context_scope": {
+        "allowed_modes": [
+          "refs_only",
+          "selected_snapshot",
+          "diff_summary"
+        ],
+        "raw_transcript_sharing": "forbidden",
+        "promotion_rule": "typed_report_refs_only"
+      },
       "quality_gates": [
         {
-          "gate": "review_gate",
-          "requires": "review"
+          "gate": "schema_gate",
+          "requires": "external_review_report"
+        },
+        {
+          "gate": "provider_evidence_gate",
+          "requires": [
+            "provider_session_id",
+            "request_id",
+            "intended_model",
+            "effective_model",
+            "transcript_path",
+            "evidence_path"
+          ]
+        },
+        {
+          "gate": "context_scope_gate",
+          "forbids": [
+            "secrets",
+            "unbounded_repo_dump",
+            "unbounded_vault_dump",
+            "raw_transcript_broadcast"
+          ]
         }
       ],
       "transitions": [
         {
           "on": "review_complete",
-          "to": "qa"
+          "to": "final_evidence"
         },
         {
-          "on": "changes_requested",
-          "to": "implement",
-          "reason_class": "repair_original_findings"
+          "on": "review_blocked",
+          "to": "blocked",
+          "reason_class": "review_not_passed"
         }
       ],
-      "resolution_policy": {
-        "initial_review_limit": 1,
-        "after_repair": "original_findings_only",
-        "on_all_resolved": "qa",
-        "on_unresolved": "implement",
-        "budget_source": "approved_activation"
+      "allowed_ops": {
+        "edit": false,
+        "commit": false,
+        "push": false,
+        "network": false
       }
-    },
-    {
-      "id": "qa",
-      "role": "tech-tester",
-      "assignment_role": "qa",
-      "permission_mode": "readonly",
-      "provider_route": {
-        "adapter_kind": "bounded_provider",
-        "runner_authority": "write_report_only",
-        "transition_authority": "harness_engine"
-      },
-      "input_contract": "work_order",
-      "output_contract": "code_change_report",
-      "quality_gates": [
-        {
-          "gate": "validation_gate",
-          "requires": "validation"
-        }
-      ],
-      "transitions": [
-        {
-          "on": "qa_complete",
-          "to": "final_evidence"
-        }
-      ]
     },
     {
       "id": "final_evidence",
@@ -178,11 +204,11 @@
         "transition_authority": "harness_engine"
       },
       "input_contract": "work_order",
-      "output_contract": "code_change_report",
+      "output_contract": "final_evidence",
       "quality_gates": [
         {
           "gate": "final_evidence_gate",
-          "requires": "final_evidence"
+          "requires": "evidence_refs"
         }
       ],
       "transitions": [
@@ -195,7 +221,13 @@
           "to": "blocked",
           "reason_class": "missing_final_evidence"
         }
-      ]
+      ],
+      "allowed_ops": {
+        "edit": false,
+        "commit": false,
+        "push": false,
+        "network": false
+      }
     }
   ],
   "terminal_states": [
