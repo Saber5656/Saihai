@@ -151,6 +151,57 @@ internal exception. The authenticated consumer must convert malformed input and
 producer/API errors into a bounded blocked/stop result with no saved mutation or
 execution grant; it must never synthesize an authenticated principal. This is a
 required U3 connection contract, not a reason to relax current gates in U2.
+# Pure observation adapter — classification only
+
+`scripts/review_observation_adapter.py` exposes the pure function
+`classify_observation(raw_json, expected=...)`. It reads no files, calls no
+provider, stores no lifecycle state and returns no execution/acceptance grant.
+Inputs are caller-supplied JSON bytes, not authenticated transport receipts.
+`expected` contains repository, PR, base, head and nullable provider request ref;
+it is a comparison target and does not confer authority.
+
+The versioned classifier checks numeric actor IDs `136622811` (CodeRabbit) and
+`199175422` (ChatGPT Codex connector), exact login and Bot type. These checks
+recognize metadata, not the authenticity of the JSON. Authentication status
+always remains `integration_pending`, even for a lexical `candidate_match`.
+
+The CodeRabbit grammar recognizes only the generated top-level quota warning
+stanza or the exact rate-limited command reply observed on PR154. General errors,
+HTTP 429 alone, skipped reviews, quoted examples, duplicate/mixed review sections
+and unknown grammar do not qualify. Parsed provider Run ID/command hash is a
+`request_ref` candidate; it is not falsely labeled the GitHub manual-trigger
+comment ID. Parsed base/head remain absent when the provider reply omits them.
+
+ChatGPT review observations use review ID, structured state and `commit_id`.
+Summary comments and reactions are not review results. COMMENTED, APPROVED and
+negative states are preserved without conversion to gate success. Historical
+base/request identity is not invented from the current PR. Unresolved findings
+are not cleared; the input body remains represented by its exact raw digest.
+
+Each bounded input (maximum 1 MiB) produces a raw digest and, when metadata is
+valid, an observation key incorporating resource URL, actor ID, observation ID,
+provider updated/submitted timestamp and digest. Changed content or timestamp
+is therefore a different observation. Duplicate JSON keys/malformed metadata
+are rejected into pending. Missing or mismatched resource/request/snapshot
+identity remains pending. Resource URL must identify the expected repository,
+PR and comment/review ID. No authenticated loader is implemented here.
+
+The current dependency audit found **no verified existing #133 authenticated
+GitHub receipt loader or actual review transport API**. Existing provider-runner
+context verification and external-review report validation do not supply this
+quota/GitHub contract. Proposed publication runtime is not installed and #128's
+backend singleton is not evidence of an active production backend. These are
+unimplemented dependencies, not operational APIs this adapter can call.
+Transport authority remains #133; readiness is #128; skills41 owns its entry
+contract. The causal executor connection remains pending, including mechanical
+path-scope enforcement. No authority, waiver, key generation or budget reset is
+introduced to bridge these gaps.
+
+Tests cover actor spoofing, restrictive grammar, negative states, timestamp/raw
+identity, resource/request/snapshot mismatch and bounded malformed input.
+Replaying actual saved PR154/155 observations validates classification only:
+it is not actual fallback dispatch, conflict resolution, or runtime deployment.
+
 # U3 B — causal conflict candidates (integration pending)
 
 `conflict_observed` records a host-owned candidate for a base change caused by

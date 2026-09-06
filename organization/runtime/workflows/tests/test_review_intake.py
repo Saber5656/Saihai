@@ -388,5 +388,137 @@ class ReviewIntakeTests(unittest.TestCase):
         self.assertEqual(plan['settings_readback'],'pending')
 
 
+class ObservationAdapterTests(unittest.TestCase):
+    def setUp(self):
+        import review_observation_adapter
+        self.adapter = review_observation_adapter
+        self.expected = dict(repository='Saber5656/Saihai', pr=154, base='a'*40,
+                             head='b'*40, request_ref='coderabbit-run:12345678-1234-1234-1234-123456789abc')
+
+    def quota_body(self):
+        return ('<!-- This is an auto-generated comment: summarize by coderabbit.ai -->\n'
+                '<!-- This is an auto-generated comment: rate limited by coderabbit.ai -->\n\n'
+                '> [!WARNING]\n> ## Review limit reached\n> \n'
+                '> **Run ID**: `12345678-1234-1234-1234-123456789abc`\n> \n'
+                '> Reviewing files that changed from the base of the PR and between '+ 'a'*40+' and '+'b'*40+'.\n'
+                '\n<!-- end of auto-generated comment: rate limited by coderabbit.ai -->')
+
+    def observation(self, **changes):
+        row=dict(id=10, user=dict(id=136622811,login='coderabbitai[bot]',type='Bot'),
+                 html_url='https://github.com/Saber5656/Saihai/pull/154#issuecomment-10',
+                 body=self.quota_body(), created_at='2026-09-06T07:00:00Z', updated_at='2026-09-06T07:01:00Z')
+        row.update(changes)
+        return row
+
+    def classify(self, row=None, expected=None):
+        raw=json.dumps(row if row is not None else self.observation()).encode()
+        return self.adapter.classify_observation(raw, expected=expected or self.expected)
+
+    def test_quota_is_pure_candidate_with_version_and_raw_digest(self):
+        row=self.observation();before=copy.deepcopy(row)
+        result=self.classify(row)
+        self.assertEqual(row,before)
+        self.assertEqual(result['classification'],'quota_candidate')
+        self.assertEqual(result['association_status'],'candidate_match')
+        self.assertEqual(result['authentication_status'],'integration_pending')
+        self.assertEqual(result['parser_version'],'github-review-observation-v1')
+        import hashlib
+        self.assertEqual(result['raw_digest'],hashlib.sha256(json.dumps(row).encode()).hexdigest())
+        self.assertEqual(result['provider'],'coderabbit')
+        self.assertFalse(any(key in result for key in ('grant','accepted','dispatch','merge_ready')))
+
+    def test_actor_numeric_id_login_and_type_must_all_match(self):
+        for actor in (dict(id=1,login='coderabbitai[bot]',type='Bot'),
+                      dict(id=136622811,login='someone',type='Bot'),
+                      dict(id=136622811,login='coderabbitai[bot]',type='User'),
+                      dict(id=True,login='coderabbitai[bot]',type='Bot')):
+            with self.subTest(actor=actor):
+                result=self.classify(self.observation(user=actor))
+                self.assertNotEqual(result['classification'],'quota_candidate')
+                self.assertIn('actor_mismatch',result['pending_reasons'])
+
+    def test_quoted_spoof_general_error_skip_and_ambiguous_grammar_are_not_quota(self):
+        body=self.quota_body()
+        for value in ('Review rate limited.','HTTP 429','timeout','skipped',
+                      '```\n'+body+'\n```','User example:\n'+body,
+                      body+'\n'+body,body+'\n<!-- recent_review_start -->',
+                      body.replace('> **Run ID**', '> Review finished.\n> **Run ID**'),
+                      body.replace('> **Run ID**', '> Unexpected transport error. No usage limit was reached.\n> **Run ID**'),
+                      body.replace('> **Run ID**', '> Review skipped because the pull request is closed.\n> **Run ID**'),
+                      body+'\n\n<!-- tips_start -->\nReview finished. No actionable comments were generated.\n<!-- tips_end -->',
+                      body.replace('Review limit reached','Unexpected error')):
+            with self.subTest(value=value[:30]):
+                self.assertNotEqual(self.classify(self.observation(body=value))['classification'],'quota_candidate')
+
+    def test_command_reply_grammar_does_not_invent_snapshot(self):
+        body=('<!-- This is an auto-generated reply by CodeRabbit -->\n'
+              '<!-- CodeRabbit review command invocation: v2:'+'c'*64+' -->\n'
+              '<details>\n<summary>⚠️ Action not completed</summary>\n\nReview rate limited.\n\n'
+              '> Note: CodeRabbit is an incremental review system and does not re-review already reviewed commits. '
+              'This command is applicable only when automatic reviews are paused.\n\n</details>')
+        result=self.classify(self.observation(body=body))
+        self.assertEqual(result['classification'],'quota_candidate')
+        self.assertEqual(result['association_status'],'pending')
+        self.assertIsNone(result['snapshot']['base'])
+        self.assertIn('base_missing',result['pending_reasons'])
+        self.assertNotEqual(self.classify(self.observation(body=body.replace('Review rate limited.','Review finished.')))['classification'],'quota_candidate')
+
+    def test_request_and_snapshot_mismatch_remain_pending(self):
+        for field,value in [('request_ref','other'),('base','c'*40),('head','d'*40)]:
+            result=self.classify(expected=dict(self.expected,**{field:value}))
+            self.assertEqual(result['classification'],'quota_candidate')
+            self.assertEqual(result['association_status'],'pending')
+            self.assertIn(field+'_mismatch',result['pending_reasons'])
+        result=self.classify(expected=dict(self.expected,request_ref=None))
+        self.assertIn('expected_request_ref_missing',result['pending_reasons'])
+
+    def test_repository_pr_and_url_spoof_are_pending(self):
+        for url in ('https://github.com/Other/Repo/pull/154#issuecomment-10',
+                    'https://github.com/Saber5656/Saihai/pull/155#issuecomment-10',
+                    'https://evil.example/Saber5656/Saihai/pull/154#issuecomment-10',
+                    'https://github.com/Saber5656/Saihai/pull/154#issuecomment-11'):
+            result=self.classify(self.observation(html_url=url))
+            self.assertEqual(result['association_status'],'pending')
+            self.assertIn('resource_identity_mismatch',result['pending_reasons'])
+
+    def test_real_review_identity_does_not_infer_pass_or_current_base(self):
+        row=self.observation(id=20,user=dict(id=199175422,login='chatgpt-codex-connector[bot]',type='Bot'),
+            html_url='https://github.com/Saber5656/Saihai/pull/154#pullrequestreview-20',
+            state='COMMENTED',commit_id='b'*40,submitted_at='2026-09-06T07:02:00Z')
+        result=self.classify(row)
+        self.assertEqual(result['classification'],'review_observed')
+        self.assertEqual(result['provider'],'chatgpt')
+        self.assertEqual(result['review_state'],'COMMENTED')
+        self.assertEqual(result['snapshot']['head'],'b'*40)
+        self.assertIsNone(result['snapshot']['base'])
+        self.assertIsNone(result['request_ref'])
+        self.assertEqual(result['association_status'],'pending')
+        result=self.classify(row,expected=dict(self.expected,head='d'*40))
+        self.assertIn('head_mismatch',result['pending_reasons'])
+
+    def test_summary_comment_is_not_review_result_and_negative_state_is_retained(self):
+        actor=dict(id=199175422,login='chatgpt-codex-connector[bot]',type='Bot')
+        result=self.classify(self.observation(user=actor,body='Completed. No findings.'))
+        self.assertNotEqual(result['classification'],'review_observed')
+        row=self.observation(id=20,user=actor,state='CHANGES_REQUESTED',commit_id='b'*40,
+            html_url='https://github.com/Saber5656/Saihai/pull/154#pullrequestreview-20',submitted_at='2026-09-06T07:02:00Z')
+        self.assertEqual(self.classify(row)['review_state'],'CHANGES_REQUESTED')
+
+    def test_updated_content_has_distinct_observation_digest(self):
+        first=self.classify()
+        second=self.classify(self.observation(updated_at='2026-09-06T07:02:00Z'))
+        self.assertNotEqual(first['raw_digest'],second['raw_digest'])
+        self.assertNotEqual(first['observation_key'],second['observation_key'])
+        self.assertEqual(first,self.classify())
+
+    def test_malformed_input_is_bounded_and_never_classified_as_quota(self):
+        for raw in (b'{broken',b'[]',b'{"id":1,"id":2}',b'x'*(1024*1024+1)):
+            result=self.adapter.classify_observation(raw,expected=self.expected)
+            self.assertEqual(result['association_status'],'pending')
+            self.assertNotEqual(result['classification'],'quota_candidate')
+        for changes in ({'updated_at':'bad'},{'id':True},{'body':[]},{'user':None}):
+            self.assertNotEqual(self.classify(self.observation(**changes))['classification'],'quota_candidate')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
