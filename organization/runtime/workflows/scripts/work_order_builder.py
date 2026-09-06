@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import review_lifecycle
 import run_store
 import safe_paths
 
@@ -486,6 +487,13 @@ def build_work_order(
     worker_execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     step_id = str(step["id"])
+    review_action = review_lifecycle.next_review_action(run)
+    if review_action is not None:
+        allowed = {'review': {'initial_review', 'verify_original_findings'},
+                   'implement': {'repair_original_findings'}, 'qa': {'merge_preflight'},
+                   'final_evidence': {'merge_preflight'}}
+        if review_action not in allowed.get(step_id, set()):
+            raise WorkOrderError('review_work_order_not_requested:' + review_action)
     provider_route = step.get("provider_route") if isinstance(step.get("provider_route"), dict) else {}
     external_provider_allowed = provider_route.get("adapter_kind") == "external_provider"
     if "readonly_review_chain" in (run.get("workflow_id"), template.get("workflow_id")):
@@ -502,8 +510,8 @@ def build_work_order(
         "to_role": str(step["role"]),
         "assignment_role": str(step["assignment_role"]),
         "instruction": (
-            f"{template['purpose']} Step '{step_id}' ({step['assignment_role']}): "
-            f"follow the input work order contract and produce {step['output_contract']}."
+            (review_lifecycle.resolution_instruction(run) if step_id == "review" and review_action == "verify_original_findings" else review_lifecycle.initial_review_instruction(run) if step_id == "review" and review_action == "initial_review" else review_lifecycle.repair_instruction(run) if step_id == "implement" and review_action == "repair_original_findings" else f"{template['purpose']} Step '{step_id}' ({step['assignment_role']}): "
+            f"follow the input work order contract and produce {step['output_contract']}.")
         ),
         "expected_output": str(step["output_contract"]),
         "context_refs": context_refs,

@@ -649,12 +649,41 @@ def test_real_readonly_chain_blocks_admission_before_work_order() -> None:
         assert not list((root / 'work-orders').rglob('*.json'))
 
 
+def test_bounded_resolution_instruction_preserves_original_ids() -> None:
+    from test_review_lifecycle import ReviewLifecycleTests
+    fixture = ReviewLifecycleTests()
+    fixture.setUp()
+    try:
+        ids = fixture.enable_flow()
+        fixture.seal(ids)
+        run = fixture.produced()
+        tpl = standard_template()
+        stp = tpl['steps'][1]
+        request = request_record(request_id=run['request_id'], task_id=run['task_id'])
+        order = build(fixture.root, run=run, template=tpl, step=stp, request=request,
+                      report_path=str(work_order_builder.report_path(fixture.root, run['run_id'], stp['id'])))
+        errors = work_order_builder.validate_work_order(order, template=tpl, step=stp,
+            state_root=fixture.root, run=run)
+        assert errors == [], errors
+        assert order['expected_output'] == 'code_change_report'
+        assert stp['provider_route']['adapter_kind'] == 'bounded_provider'
+        assert 'original_findings_only' in order['instruction']
+        assert 'original issue' in order['instruction']
+        for fid in ids:
+            assert fid in order['instruction']
+        assert 'c'*40 in order['instruction']
+        assert order['permission_mode'] == 'readonly'
+    finally:
+        fixture.tearDown()
+
+
 def main() -> None:
     tests = [
         test_readonly_chain_provider_flags_match_existing_schema,
         test_readonly_chain_provider_flag_rejects_contract_drift,
         test_existing_bounded_routes_remain_unpermitted,
         test_real_readonly_chain_blocks_admission_before_work_order,
+        test_bounded_resolution_instruction_preserves_original_ids,
         test_build_valid_p0_order,
         test_frontend_request_binding_is_all_or_nothing,
         test_unbound_readonly_empty_or_absent_digest_is_valid,

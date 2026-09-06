@@ -138,6 +138,7 @@ def test_contract_validation() -> None:
         "publication-result.schema.json",
         "readonly-final-evidence-report.schema.json",
         "research-report.schema.json",
+        "review-lifecycle.schema.json",
         "scoped-worker-capability.schema.json",
         "scoped-worker-result.schema.json",
         "security-review-report.schema.json",
@@ -459,7 +460,7 @@ def test_activation_scope_follows_selected_template() -> None:
         {"edit": True, "commit": False, "push": False, "network": False},
         "code approved allowed ops",
     )
-    assert_equal(approved_code["activation_scope"]["step_budget"], 4, "code budget")
+    assert_equal(approved_code["activation_scope"]["step_budget"], 6, "code budget")
 
     approved_publication = selector.activation_envelope(
         typed_classification("publication"),

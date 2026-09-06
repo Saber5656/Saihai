@@ -4841,7 +4841,18 @@ def drain_run(
             run_id=run_id,
             principal=actor,
         ):
-            run = run_store.load_run(state_root, run_id)
+            try:
+                run = run_store.load_run(state_root, run_id)
+                if any(not isinstance(row, dict) for row in run['step_history']):
+                    raise run_store.RunStoreError('schema_invalid', ['step_history entries must be objects'])
+            except run_store.RunStoreError as exc:
+                if exc.reason_class != 'schema_invalid':
+                    raise
+                append_audit_event(state_root=state_root, event_type='drain_run', principal=actor,
+                    subject=subject, outcome='blocked',
+                    details={'reason': 'work_order_invalid', 'errors': exc.errors})
+                return {'schema_version': 1, 'decision': 'blocked', 'reason': 'work_order_invalid',
+                        'errors': exc.errors, 'run_path': str(path)}
             subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
             signature = assert_execution_principal(
                 state_root=state_root,
@@ -4907,7 +4918,9 @@ def drain_run(
             drained = False
             if not errors:
                 order_exists = state_file_exists(order_path)
-                if order_exists:
+                refresh_standard_order = (workflow_id == 'standard_code_change' and order_exists
+                    and not work_order_builder.snapshot_path(state_root, run_id, order_step_id, int(run['iteration'])).exists())
+                if order_exists and not refresh_standard_order:
                     work_order = read_json(order_path)
                 else:
                     try:
@@ -4931,7 +4944,7 @@ def drain_run(
                             run=run,
                         )
                     )
-                if not errors and not order_exists:
+                if not errors and (not order_exists or refresh_standard_order):
                     write_json(order_path, work_order)
                     drained = True
                 if not errors:
@@ -6058,6 +6071,12 @@ def build_work_order(
     issuer_principal: dict[str, Any],
 ) -> dict[str, Any]:
     resolved_refs = verified_context_refs_for_work_order(request_record)
+    if run.get('workflow_id') == 'standard_code_change' and any(
+            row.get('step_id') == 'implement' and row.get('status') == 'completed' for row in run.get('step_history', [])):
+        try:
+            resolved_refs = scoped_worker_executor.completed_review_context_refs(state_root, run)
+        except scoped_worker_executor.ScopedWorkerError as exc:
+            raise FrontdoorError(exc.reason_class) from exc
     if not isinstance(resolved_refs, list) or not resolved_refs:
         refs = run["activation"]["context_scope"]["refs"]
         resolved_refs = [{"type": "repo_file", "value": ref, "path": ref} for ref in refs]

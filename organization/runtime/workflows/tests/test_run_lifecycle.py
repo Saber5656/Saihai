@@ -646,9 +646,31 @@ def test_report_transitions_commit_together() -> None:
         assert_equal(stored["terminal"]["status"], None, "intermediate terminal unset")
 
 
+def test_resume_review_flow_never_reopens_initial_review_after_repair() -> None:
+    from test_review_lifecycle import ReviewLifecycleTests
+    import review_lifecycle as review
+    fixture = ReviewLifecycleTests()
+    fixture.setUp()
+    try:
+        ids = fixture.enable_flow()
+        fixture.seal(ids)
+        run = fixture.produced()
+        run['run_state'] = 'validating'
+        run['goal_state'] = 'active'
+        run_store.store_run(fixture.root, run)
+        owner = run['review_lifecycle']['owner']
+        result = run_lifecycle.resume_run(fixture.root, run['run_id'], principal=owner)
+        assert result['review_action'] == 'verify_original_findings', result
+        assert result['next_action'] == 'validate_report', result
+        assert result['workflow_run']['run_state'] == 'validating'
+    finally:
+        fixture.tearDown()
+
+
 def main() -> None:
     tests = [
         test_report_transitions_commit_together,
+        test_resume_review_flow_never_reopens_initial_review_after_repair,
         test_work_order_path_uses_confined_safe_constructor,
         test_work_order_path_rejects_traversal_and_unsafe_components,
         test_work_order_path_rejects_symlinked_namespace,

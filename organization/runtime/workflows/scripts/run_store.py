@@ -861,6 +861,10 @@ def validate_run_record(run: Any) -> list[str]:
         if run.get("run_state") in TERMINAL_RUN_STATES and not _non_empty_string(terminal.get("status")):
             errors.append("terminal_status_required_for_terminal_state")
 
+    if "review_lifecycle" in run:
+        import review_lifecycle
+        errors.extend(review_lifecycle.validate_record(run["review_lifecycle"], run=run))
+
     return errors
 
 

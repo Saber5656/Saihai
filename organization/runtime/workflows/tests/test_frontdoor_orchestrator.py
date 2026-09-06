@@ -5076,8 +5076,22 @@ def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
             raise AssertionError("bridge should reject child-thread/raw tool smuggling")
 
 
+def test_standard_same_iteration_drain_preserves_signed_order() -> None:
+    from test_scoped_worker_executor import create_repo, create_approved_code_change
+    import frontdoor_orchestrator as frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        state = root/'state'
+        _, first = create_approved_code_change(state, user_prompt='Bounded replay fixture', worker_repo=create_repo(root))
+        old = first['work_order']
+        replay = frontdoor.drain_run(state_root=state, run_id='run-scoped-e2e')
+        assert replay['work_order'] == old
+        assert replay['drained'] is False
+
+
 def main() -> None:
     tests = [
+        test_standard_same_iteration_drain_preserves_signed_order,
         test_channel_token_permissions_are_private,
         test_state_root_is_fixed_by_host_configuration,
         test_state_root_catalog_is_loaded_only_from_primary_checkout,
