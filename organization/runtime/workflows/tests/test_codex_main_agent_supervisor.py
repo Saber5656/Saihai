@@ -286,9 +286,11 @@ def main() -> None:
         test_standard_session_rejects_probe_argv,
         test_non_root_call_cannot_supervise,
     ]
+    completed = 0
     for test in tests:
         test()
-    print(f"codex main-agent supervisor tests passed: {len(tests)}")
+        completed += 1
+    print(json.dumps({"result": "pass", "cases": completed, "count_method": "completed_test_functions"}))
 
 
 if __name__ == "__main__":

@@ -719,9 +719,11 @@ def main() -> None:
         test_first_stale_snapshot_cannot_be_healed_by_matching_second_read,
         test_unavailable_first_or_second_live_snapshot_suppresses,
     ]
+    completed = 0
     for test in tests:
         test()
-    print(f"agent integration assurance tests passed: {len(tests)}")
+        completed += 1
+    print(json.dumps({"result": "pass", "cases": completed, "count_method": "completed_test_functions"}))
 
 
 if __name__ == "__main__":

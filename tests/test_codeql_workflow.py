@@ -99,7 +99,13 @@ def test_actual_codeql_consumer_order_and_observation_boundaries() -> None:
 
 
 if __name__ == "__main__":
-    test_advanced_codeql_contract()
-    test_local_model_pack_remains_discoverable()
-    test_actual_codeql_consumer_order_and_observation_boundaries()
-    print("test_codeql_workflow: ok (3 direct tests)")
+    tests = [
+        test_advanced_codeql_contract,
+        test_local_model_pack_remains_discoverable,
+        test_actual_codeql_consumer_order_and_observation_boundaries,
+    ]
+    completed = 0
+    for test in tests:
+        test()
+        completed += 1
+    print(json.dumps({"result": "pass", "cases": completed, "count_method": "completed_test_functions"}))

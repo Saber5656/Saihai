@@ -1521,9 +1521,11 @@ def main() -> None:
         test_attester_cli_has_no_root_override_or_key_material,
         test_activation_failure_rolls_back_and_identical_retry_recovers,
     ]
+    completed = 0
     for test in tests:
         test()
-    print(f"agent integration attester tests passed: {len(tests)}")
+        completed += 1
+    print(json.dumps({"result": "pass", "cases": completed, "count_method": "completed_test_functions"}))
 
 
 if __name__ == "__main__":
