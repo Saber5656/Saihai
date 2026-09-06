@@ -203,6 +203,108 @@ class ReviewLifecycleTests(unittest.TestCase):
         self.assertEqual(state['stop_reason'], 'no_progress_cap')
         self.assertEqual(state['repair_rounds'], 2)
 
+    def conflict(self, **overrides):
+        candidate = dict(cause='other_pr_merge', pr=136, merged_pr=135,
+            merge_sha='d'*40, old_snapshot=SNAPSHOT,
+            new_snapshot=dict(SNAPSHOT,base='d'*40,head='c'*40),
+            task_id=self.run['task_id'], owner=OWNER, branch='codex/issue-136',
+            paths=['src/app.py'], dirty_status='clean', evidence_ref='receipt/merge',
+            evidence_digest='e'*64)
+        candidate.update(overrides)
+        return candidate
+
+    def conflict_event(self, candidate=None):
+        return self.event('conflict_observed', candidate=candidate or self.conflict())
+
+    def test_conflict_candidate_invalidates_quality_without_authenticating_new_base(self):
+        self.start()
+        self.event('findings',findings=[finding()])
+        before=lifecycle.observe(self.root,self.run['run_id'])
+        result=self.conflict_event()
+        self.assertEqual(result['phase'],'current_snapshot_validation')
+        self.assertEqual(result['snapshot'],SNAPSHOT)
+        self.assertEqual(result['original_snapshot'],SNAPSHOT)
+        for field in ('owner','repair_rounds','same_blocker_count','no_progress','findings','batches'):
+            self.assertEqual(result[field],before[field])
+        row=next(iter(result['conflict_candidates'].values()))
+        self.assertEqual(row['proof_status'],'invalidated')
+        self.assertEqual(row['authentication_status'],'integration_pending')
+        self.assertEqual(row['candidate']['new_snapshot']['base'],'d'*40)
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.event('reserve_repair',batch_id='new')
+        for kind in ('conflict_authenticated','conflict_repair_authorized','validation_passed'):
+            with self.assertRaises(lifecycle.ReviewLifecycleError):
+                self.event(kind,candidate=self.conflict())
+
+    def test_conflict_duplicate_restart_and_evidence_conflict(self):
+        self.start()
+        first=self.conflict_event()
+        importlib.reload(lifecycle)
+        self.assertEqual(self.start(),first)
+        self.assertEqual(self.conflict_event(),first)
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.conflict_event(self.conflict(evidence_digest='f'*64))
+        self.assertEqual(lifecycle.observe(self.root,self.run['run_id']),first)
+
+    def test_conflict_rejects_dirty_scope_stale_cause_owner_and_fake_authority(self):
+        self.start()
+        before=lifecycle.observe(self.root,self.run['run_id'])
+        for change in ({'dirty_status':'dirty'},{'paths':['outside/file']},
+                       {'paths':['../src/app.py']},{'paths':[]},{'paths':['src/app.py','src/app.py']},
+                       {'cause':'base_rewrite'},{'merged_pr':136},{'pr':True},
+                       {'old_snapshot':dict(SNAPSHOT,head='f'*40)},
+                       {'new_snapshot':dict(SNAPSHOT,head='c'*40)},
+                       {'new_snapshot':dict(SNAPSHOT,base='d'*40)},
+                       {'merge_sha':'f'*40},{'task_id':'other'},
+                       {'owner':dict(OWNER,principal_id='other')},{'branch':'../main'},
+                       {'authenticated':True},{'evidence_digest':'bad'}):
+            with self.subTest(change=change), self.assertRaises(lifecycle.ReviewLifecycleError):
+                self.conflict_event(self.conflict(**change))
+        self.assertEqual(lifecycle.observe(self.root,self.run['run_id']),before)
+
+    def test_conflict_preserves_existing_budget_and_never_reopens_stopped_run(self):
+        self.start()
+        self.event('findings',findings=[finding()])
+        self.event('reserve_repair',batch_id='first')
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.conflict_event()
+        before=self.event('repair_failed',batch_id='first')
+        result=self.conflict_event()
+        for field in ('repair_rounds','same_blocker_count','no_progress','last_blockers','batches'):
+            self.assertEqual(result[field],before[field])
+        self.assertEqual(result['repair_rounds'],1)
+        self.event('findings',findings=[finding('incidental',task='other')])
+        self.assertEqual(self.conflict_event()['phase'],'stopped')
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.conflict_event(self.conflict(merged_pr=134))
+
+    def test_conflict_budget_exhaustion_and_ci_polling_do_not_reset(self):
+        self.start(max_repairs=1)
+        self.event('findings',findings=[finding()])
+        self.event('reserve_repair',batch_id='first')
+        self.event('repair_failed',batch_id='first')
+        before=lifecycle.observe(self.root,self.run['run_id'])
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.conflict_event()
+        self.assertEqual(self.event('ci_pending'),before)
+
+    def test_conflict_durable_corruption_and_capacity_are_bounded(self):
+        self.start()
+        self.conflict_event()
+        run=run_store.load_run(self.root,self.run['run_id'])
+        key=next(iter(run['review_lifecycle']['conflict_candidates']))
+        for field,value in [('authentication_status','verified'),('proof_status','passed')]:
+            bad=copy.deepcopy(run)
+            bad['review_lifecycle']['conflict_candidates'][key][field]=value
+            with self.assertRaises(run_store.RunStoreError):
+                run_store.store_run(self.root,bad)
+        for number in range(4):
+            self.conflict_event(self.conflict(merged_pr=130-number))
+        before=lifecycle.observe(self.root,self.run['run_id'])
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.conflict_event(self.conflict(merged_pr=120))
+        self.assertEqual(lifecycle.observe(self.root,self.run['run_id']),before)
+
     def test_schema_is_linked_and_covers_durable_fields(self):
         root = Path(__file__).resolve().parents[1] / 'schemas'
         schema = json.loads((root / 'review-lifecycle.schema.json').read_text())

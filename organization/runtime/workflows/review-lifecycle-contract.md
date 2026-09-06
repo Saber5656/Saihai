@@ -151,6 +151,47 @@ internal exception. The authenticated consumer must convert malformed input and
 producer/API errors into a bounded blocked/stop result with no saved mutation or
 execution grant; it must never synthesize an authenticated principal. This is a
 required U3 connection contract, not a reason to relax current gates in U2.
+# U3 B — causal conflict candidates (integration pending)
+
+`conflict_observed` records a host-owned candidate for a base change caused by
+another PR merge. It binds the owned PR, other merged PR, merge SHA, old/new
+repository/base/head, task, owner, branch, sorted in-scope path references and
+evidence reference/digest. The conservative candidate form requires the observed
+new base to be exactly that merge SHA; a subsequent base advance needs producer
+reconciliation. The old snapshot must be current on first observation. This is
+not proof that a merge or conflict actually occurred.
+
+Dirty, out-of-scope, stale, same-PR, owner/task mismatch, active repair, stopped or
+budget-exhausted observations cannot start a new candidate. The branch field is
+an immutable claimed identity within this task's candidate sequence; actual
+checkout/dirty/causal-merge verification is pending the existing producer and
+executor contract. No Git command, edit, push, merge, key creation or authority
+grant is performed by this API.
+
+An accepted candidate conservatively withholds quality readiness by moving to
+`current_snapshot_validation` and records `proof_status=invalidated`. Both the
+current snapshot and original Bot baseline remain unchanged: unverified new
+base/head data cannot become an authenticated snapshot. The candidate's
+`authentication_status` remains `integration_pending`. No validation-pass or
+conflict-authorized transition exists. A prior stopped state cannot be reopened
+by replaying an existing candidate. Existing findings and negative results remain.
+
+At most five immutable logical causal candidates are retained. Redelivery is
+idempotent; conflicting evidence for the same causal identity is rejected.
+Owner, branch, counters, limits and repair batches survive restart. Observation
+does not reserve or execute a repair and therefore does not spend a repair round.
+The future authenticated conflict executor must reserve from the same cumulative
+budget, preserve dirty work and both approved requirements, and obtain focused/
+full validation and independent role review for the changed identity before
+normal push. It must not create a fresh run to reset the budget or use force push.
+
+TDD acceptance covers causal identity, stale/dirty/scope/owner rejection,
+deduplication and conflicting evidence, cap/stopped preservation, unchanged
+budget/baseline, quality invalidation without fake authentication, durable
+corruption and bounded capacity. Tests are in `tests/test_review_lifecycle.py`.
+Actual conflict resolution and actual authenticated reviewer integration remain
+pending. Neither U3 A nor U3 B completes Issue #136 by itself.
+
 # U3 A — quota-only alternate candidates (integration pending)
 
 This unit adds host-owned bookkeeping only. It sends no request and does not

@@ -85,7 +85,7 @@ def _finding(value: Any) -> bool:
 def validate_record(state: Any, *, run: dict[str, Any]) -> list[str]:
     """Reject corrupt durable state on both load and store, without side effects."""
     try:
-        _require(isinstance(state, dict) and set(state) - {'intakes'} == STATE_FIELDS, 'fields')
+        _require(isinstance(state, dict) and set(state) - {'intakes', 'conflict_candidates'} == STATE_FIELDS, 'fields')
         _require(state['version'] == '1', 'version')
         _require(state['run_id'] == run.get('run_id') and state['task_id'] == run.get('task_id'), 'identity')
         _require(_owner(state['owner']) == state['owner'], 'owner')
@@ -127,6 +127,8 @@ def validate_record(state: Any, *, run: dict[str, Any]) -> list[str]:
             _require(_snapshot(batch['snapshot']) and batch['status'] in {'reserved', 'failed', 'produced'}, 'batch_status')
             _require(_snapshot(batch['result_snapshot']) if batch['status'] == 'produced'
                      else batch['result_snapshot'] is None, 'batch_result')
+        if 'conflict_candidates' in state:
+            _validate_conflicts(state, run)
         if 'intakes' in state:
             _validate_intakes(state)
         reserved = sum(b['status'] == 'reserved' for b in batches.values())
@@ -229,7 +231,8 @@ def apply_event(state_root: Path, run_id: str, *, principal: dict[str, Any], eve
     _require(isinstance(event, dict), 'invalid_event')
     fields = {'ci_pending': {'kind'}, 'findings': {'kind', 'findings'},
               'reserve_repair': {'kind', 'batch_id'}, 'repair_failed': {'kind', 'batch_id'},
-              'repair_produced': {'kind', 'batch_id', 'snapshot'}}
+              'repair_produced': {'kind', 'batch_id', 'snapshot'},
+              'conflict_observed': {'kind', 'candidate'}}
     kind = event.get('kind')
     _require(isinstance(kind, str) and kind in fields and set(event) == fields[kind], 'unsupported_event')
     with run_lock.hold_global_lock(state_root, operation='review_event', run_id=run_id, principal=owner):
@@ -238,7 +241,9 @@ def apply_event(state_root: Path, run_id: str, *, principal: dict[str, Any], eve
         _require(state is not None, 'lifecycle_not_initialized')
         _live(run, owner, state)
         before = copy.deepcopy(state)
-        if kind == 'findings':
+        if kind == 'conflict_observed':
+            _record_conflict(state, run, event['candidate'])
+        elif kind == 'findings':
             _triage(state, run, event['findings'])
         elif kind != 'ci_pending':
             batch_id = event['batch_id']
@@ -289,6 +294,71 @@ def apply_event(state_root: Path, run_id: str, *, principal: dict[str, Any], eve
         if state != before:
             run_store.store_run(state_root, run, expected_current_state=run['run_state'])
         return copy.deepcopy(state)
+
+
+CONFLICT_FIELDS = {'cause', 'pr', 'merged_pr', 'merge_sha', 'old_snapshot', 'new_snapshot',
+                   'task_id', 'owner', 'branch', 'paths', 'dirty_status', 'evidence_ref', 'evidence_digest'}
+
+
+def _conflict_key(candidate: dict[str, Any]) -> str:
+    return _digest({k: candidate[k] for k in ('pr', 'merged_pr', 'merge_sha', 'old_snapshot', 'new_snapshot')})
+
+
+def _conflict_matches(candidate: Any, state: dict[str, Any], run: dict[str, Any]) -> bool:
+    if not isinstance(candidate, dict) or set(candidate) != CONFLICT_FIELDS:
+        return False
+    old, new = candidate['old_snapshot'], candidate['new_snapshot']
+    paths = candidate['paths']
+    return (candidate['cause'] == 'other_pr_merge'
+            and _integer(candidate['pr'], 1, 2**53-1) and _integer(candidate['merged_pr'], 1, 2**53-1)
+            and candidate['pr'] != candidate['merged_pr'] and _snapshot(old) and _snapshot(new)
+            and old['repository'] == new['repository'] == state['original_snapshot']['repository']
+            and old['base'] == state['original_snapshot']['base']
+            and old['base'] != new['base'] and old['head'] != new['head']
+            and candidate['merge_sha'] == new['base']
+            and candidate['task_id'] == state['task_id'] and candidate['owner'] == state['owner']
+            and _relative(candidate['branch']) and candidate['dirty_status'] == 'clean'
+            and isinstance(paths, list) and 1 <= len(paths) <= 256
+            and all(_relative(path) and _in_scope(path, run) for path in paths)
+            and paths == sorted(set(paths)) and _text(candidate['evidence_ref'])
+            and isinstance(candidate['evidence_digest'], str)
+            and re.fullmatch(r'[0-9a-f]{64}', candidate['evidence_digest']) is not None)
+
+
+def _validate_conflicts(state: dict[str, Any], run: dict[str, Any]) -> None:
+    rows = state['conflict_candidates']
+    _require(isinstance(rows, dict) and 1 <= len(rows) <= 5, 'conflict_candidates')
+    _require(state['phase'] in ('current_snapshot_validation', 'stopped'), 'conflict_proof_not_invalidated')
+    identities = set()
+    for key, row in rows.items():
+        _require(isinstance(row, dict) and set(row) == {'candidate', 'proof_status', 'authentication_status'},
+                 'conflict_candidate_fields')
+        _require(row['proof_status'] == 'invalidated' and row['authentication_status'] == 'integration_pending',
+                 'conflict_authority_forbidden')
+        candidate = row['candidate']
+        _require(_conflict_matches(candidate, state, run) and key == _conflict_key(candidate), 'conflict_candidate')
+        identities.add((candidate['pr'], candidate['branch']))
+    _require(len(identities) == 1, 'conflict_owner_branch_changed')
+
+
+def _record_conflict(state: dict[str, Any], run: dict[str, Any], candidate: Any) -> None:
+    _require(_conflict_matches(candidate, state, run), 'invalid_conflict_candidate')
+    key = _conflict_key(candidate)
+    rows = state.get('conflict_candidates', {})
+    if key in rows:
+        _require(rows[key]['candidate'] == candidate, 'conflict_candidate_conflict')
+        return
+    _require(state['phase'] in ('triage', 'current_snapshot_validation'), 'conflict_phase_blocked')
+    _require(state['repair_rounds'] < state['max_repairs'], 'repair_budget_exhausted')
+    _require(candidate['old_snapshot'] == state['snapshot'], 'conflict_snapshot_stale')
+    _require(len(rows) < 5, 'conflict_candidate_capacity_exhausted')
+    _require(all((row['candidate']['pr'], row['candidate']['branch']) ==
+                 (candidate['pr'], candidate['branch']) for row in rows.values()), 'conflict_owner_branch_changed')
+    rows[key] = dict(candidate=copy.deepcopy(candidate), proof_status='invalidated',
+                     authentication_status='integration_pending')
+    state['conflict_candidates'] = rows
+    # Withhold readiness without promoting an unauthenticated new snapshot.
+    state['phase'] = 'current_snapshot_validation'
 
 
 # U2 candidates are deliberately inert. Authenticated publisher/observer
