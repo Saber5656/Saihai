@@ -1479,6 +1479,11 @@ def gate_report(
             run = run_store.load_run(state_root, run_id)
             if run.get("workflow_id") == CHAIN_ID:
                 result = _gate_chain_report(state_root, run, actor, report_path_arg)
+            elif run.get("workflow_id") != "single_step_external_review":
+                result = _chain_rejection(state_root, run, actor, "unsupported_step_contract")
+            else:
+                result = None
+            if result is not None:
                 link_status = record_run_link_status(state_root, result["workflow_run"])
                 append_audit_event(state_root=state_root, event_type="validate_report", principal=actor,
                     subject={"run_id": run_id, "request_id": run["request_id"]},
@@ -1486,8 +1491,6 @@ def gate_report(
                         "transition_artifact_path": result["transition_artifact_path"],
                         "rejection_artifact_path": result["rejection_artifact_path"]})
                 return result
-            if run.get("workflow_id") != "single_step_external_review":
-                return _chain_rejection(state_root, run, actor, "unsupported_step_contract")
             run_state = str(run.get("run_state") or "")
             subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
             signature = run_lifecycle.sign_transition(

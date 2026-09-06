@@ -305,6 +305,32 @@ class MultistepReportGateTests(unittest.TestCase):
             self.assertEqual("ok", result["decision"], result)
             self.assertEqual("complete", result["workflow_run"]["run_state"])
 
+    def test_unsupported_workflow_rejection_is_audited(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            self.setup_chain(root)
+            run = run_store.load_run(root, "run-chain")
+            # A schema-valid workflow unsupported by this gate; no report should
+            # be accepted or state advanced, but the attempted action is audited.
+            run["workflow_id"] = "research_only"
+            run_store.store_run(root, run, expected_current_state="step_queued")
+            audit_path = report_gate.state_paths(root)["audit"] / "events.jsonl"
+            before = [json.loads(line) for line in audit_path.read_text().splitlines()]
+            result = self.assert_rejected_without_acceptance(root)
+            self.assertEqual("unsupported_step_contract", result["reason"])
+            self.assertTrue(Path(result["rejection_artifact_path"]).is_file())
+            after = [json.loads(line) for line in audit_path.read_text().splitlines()]
+            events = [event for event in after[len(before):] if event["event_type"] == "validate_report"]
+            self.assertEqual(1, len(events), events)
+            event = events[0]
+            self.assertEqual("blocked", event["outcome"])
+            self.assertEqual({"run_id": "run-chain", "request_id": "req-chain"}, event["subject"])
+            self.assertEqual({"principal_type": "harness_runner", "principal_id": "local-harness",
+                              "authn_method": "local_cli"}, event["principal"])
+            self.assertEqual(result["reason"], event["details"]["reason"])
+            self.assertEqual(result["rejection_artifact_path"], event["details"]["rejection_artifact_path"])
+            self.assertIn("run_link", event["details"])
+
     def advance_to(self, root, target):
         self.setup_chain(root)
         for step in ("research", "review"):
