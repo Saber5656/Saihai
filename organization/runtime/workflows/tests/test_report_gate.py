@@ -790,7 +790,7 @@ def test_conditional_editable_gate_starts_tracking_and_bounded_resume() -> None:
         assert_equal(json.loads(Path(original_record['report_ref']).read_text()), original, 'archived original report')
         try:
             build(root, run=done['workflow_run'], report_path=adapter['report_path'])
-        except ValueError as exc:
+        except report_gate.work_order_builder.WorkOrderError as exc:
             assert 'review_work_order_not_requested' in str(exc)
         else:
             raise AssertionError('completed resolution must not build another general review')

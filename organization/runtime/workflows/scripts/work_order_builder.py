@@ -493,7 +493,7 @@ def build_work_order(
                    'implement': {'repair_original_findings'}, 'qa': {'merge_preflight'},
                    'final_evidence': {'merge_preflight'}}
         if review_action not in allowed.get(step_id, set()):
-            raise ValueError('review_work_order_not_requested:' + review_action)
+            raise WorkOrderError('review_work_order_not_requested:' + review_action)
     provider_route = step.get("provider_route") if isinstance(step.get("provider_route"), dict) else {}
     external_provider_allowed = provider_route.get("adapter_kind") == "external_provider"
     if "readonly_review_chain" in (run.get("workflow_id"), template.get("workflow_id")):
