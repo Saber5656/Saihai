@@ -2808,11 +2808,11 @@ def capture_review_context(capability: dict[str, Any], root: Path, changed: list
                 components = Path(relative).parts
                 parent_fd = os.dup(root_fd)
                 try:
-                    for component in components[:-1]:
-                        next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
-                        os.close(parent_fd)
-                        parent_fd = next_fd
                     try:
+                        for component in components[:-1]:
+                            next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+                            os.close(parent_fd)
+                            parent_fd = next_fd
                         fd = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
                     except FileNotFoundError:
                         result.append(dict(path=relative, size_bytes=0, sha256=sha256_digest('deleted'), content='', deleted=True))
