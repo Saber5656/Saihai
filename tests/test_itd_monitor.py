@@ -297,7 +297,21 @@ class CanonicalMonitorTests(unittest.TestCase):
         self.assertEqual(record["status"], "in_progress")
         findings = monitor.collect_gate_findings(self.vault)
         self.assertTrue(any(f["event_type"] == "kanban_desync" for f in findings))
-        self.assertNotIn("Waiting Human", monitor.kanban_section_for("blocked"))
+        self.assertEqual(record["recorded_status"], "in_progress")
+
+    def test_blocked_display_matches_contract_without_creating_human_decision(self):
+        task = self.task("Project/task.md", "TSK-1234", "blocked", "blocked_by: runtime_dependency\n")
+        index = self.write("00-Inbox&Tasks/Task-Index.md", "| TSK-1234 | task | owner | date | blocked |\n")
+        kanban = self.write("00-Inbox&Tasks/Kanban.md", "## Waiting Human\n- TSK-1234\n")
+        original = {path: path.read_bytes() for path in (task, index, kanban)}
+        self.assertEqual(monitor.kanban_section_for("blocked"), "Waiting Human")
+        record = self.discover()["tasks"]["TSK-1234"]
+        self.assertEqual(record["status"], "blocked")
+        self.assertEqual(record["recorded_status"], "blocked")
+        self.assertFalse(any(key.startswith("human_decision_") for key in record["meta"]))
+        findings = monitor.collect_gate_findings(self.vault)
+        self.assertFalse(any(f["event_type"] in {"kanban_desync", "task_state_unverified"} for f in findings))
+        self.assertEqual(original, {path: path.read_bytes() for path in original})
 
     def test_waiting_human_without_live_decision_is_unverified(self):
         self.task("Project/TSK-20260905-example/task.md", status="waiting_human",

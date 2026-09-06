@@ -269,7 +269,7 @@ def kanban_section_for(status: str) -> str:
         "domain_review": "Review",
         "independent_review": "Review",
         "waiting_human": "Waiting Human",
-        "blocked": "Blocked",
+        "blocked": "Waiting Human",
         "state_unverified": "Blocked",
         "waiting_runtime": "Blocked",
         "waiting_quality": "Review",
