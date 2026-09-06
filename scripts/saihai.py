@@ -334,6 +334,14 @@ def handle_usage_advance(frontdoor: Any, args: argparse.Namespace) -> dict[str, 
     return frontdoor.advance_trusted_local(authorization=authority, state_root=Path(args.state_root))
 
 
+def handle_usage_status(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        return trusted_local_executor.usage_status(args.execution_id, Path(args.state_root))
+    except trusted_local_executor.TrustedLocalError as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
+
+
 def build_usage_parser(sub: Any) -> None:
     parser = sub.add_parser('usage', help='explicit trusted-local execution and host publication')
     commands = parser.add_subparsers(dest='command', required=True)
@@ -346,6 +354,10 @@ def build_usage_parser(sub: Any) -> None:
     advance.add_argument('--authorization', required=True)
     advance.add_argument('--state-root', required=True)
     advance.set_defaults(handler=handle_usage_advance)
+    status = commands.add_parser('status', help='read saved trusted-local execution status')
+    status.add_argument('--execution-id', required=True)
+    status.add_argument('--state-root', required=True)
+    status.set_defaults(handler=handle_usage_status)
 
 
 def build_parser() -> argparse.ArgumentParser:
