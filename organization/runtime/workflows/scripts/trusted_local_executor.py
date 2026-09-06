@@ -5,12 +5,14 @@ Existing Codex authentication is used in place, never provisioned or copied.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 import dataclasses
 import json
 import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -291,6 +293,145 @@ def execute(request: dict, authorization: TrustedLocalAuthorization, state_root:
                 pass
         raise TrustedLocalError(reason) from exc
 
+
+def usage_status(execution_id: str, state_root: Path) -> dict:
+    """Describe saved evidence only; never initialize state or advance a run.
+
+    Running means no terminal receipt has been saved, not verified process liveness.
+    Records can change during this read; the result is not an authorization receipt.
+    """
+    try:
+        run_store.validate_artifact_id(execution_id, 'execution_id')
+    except run_store.RunStoreError as exc:
+        raise TrustedLocalError('invalid_execution_id') from exc
+    # The host supplies the canonical private root; never walk its ancestors.
+    root = Path(state_root)
+    if not root.is_absolute() or '..' in root.parts:
+        raise TrustedLocalError('status_state_root_invalid')
+    directory = root / 'trusted-local' / execution_id
+    with ExitStack() as opened:
+        def open_directory(path: str | Path, parent: int | None = None) -> int:
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                opened.callback(os.close, fd)
+                metadata = os.fstat(fd)
+                if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
+                        or stat.S_IMODE(metadata.st_mode) != 0o700):
+                    raise TrustedLocalError('status_directory_not_private')
+                return fd
+            except FileNotFoundError as exc:
+                raise TrustedLocalError('unknown_execution_id: ' + execution_id) from exc
+            except OSError as exc:
+                raise TrustedLocalError('status_directory_unreadable') from exc
+
+        root_fd = open_directory(root)
+        trusted_fd = open_directory('trusted-local', root_fd)
+        execution_fd = open_directory(execution_id, trusted_fd)
+        present = set()
+
+        def read(name: str, *, required: bool = False, source: int = execution_fd) -> dict:
+            try:
+                # Reject FIFOs without blocking, and never follow artifact symlinks.
+                fd = os.open(name + '.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=source)
+            except FileNotFoundError as exc:
+                if required:
+                    raise TrustedLocalError('unknown_execution_id: ' + execution_id) from exc
+                return {}
+            except OSError as exc:
+                raise TrustedLocalError('status_record_unreadable: ' + name) from exc
+            try:
+                metadata = os.fstat(fd)
+                limit = 64 * 1024 * 1024
+                if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                        or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_size > limit):
+                    raise ValueError('record must be a bounded private regular file')
+                data = bytearray()
+                while len(data) <= limit:
+                    chunk = os.read(fd, min(65536, limit + 1 - len(data)))
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                if len(data) > limit:
+                    raise ValueError('record exceeds size limit')
+                value = json.loads(data)
+            except (OSError, ValueError, RecursionError) as exc:
+                raise TrustedLocalError('status_record_unreadable: ' + name) from exc
+            finally:
+                os.close(fd)
+            if not isinstance(value, dict):
+                raise TrustedLocalError('status_record_invalid: ' + name)
+            present.add((source, name))
+            return value
+
+        claim = read('claim', required=True)
+        activation = read('activation')
+        repair = read('validation-repair')
+        current_id = execution_id
+        if (execution_fd, 'validation-repair') in present:
+            try:
+                current_id = run_store.validate_artifact_id(repair.get('execution_id'), 'execution_id')
+            except run_store.RunStoreError as exc:
+                raise TrustedLocalError('status_record_invalid: validation-repair execution_id') from exc
+            if repair.get('status') not in ('running', 'failed', 'validated'):
+                raise TrustedLocalError('status_record_invalid: validation-repair status')
+        current_directory = directory.parent / current_id
+        current_fd = execution_fd if current_id == execution_id else open_directory(current_id, trusted_fd)
+        process = read('process', source=current_fd)
+        validation = read('validation', source=current_fd)
+        outcome = read('outcome', source=current_fd)
+        report = read('report', source=current_fd)
+        published = read('publication')
+        integration = read('integration')
+    execution = 'pending'
+    if activation:
+        execution = 'running'
+    if process:
+        execution = 'completed' if process.get('exit') == 0 and process.get('process_start_token') else 'failed'
+    if outcome.get('status') == 'blocked' and not process:
+        execution = 'blocked'
+    if repair.get('status') == 'failed' and not process and not outcome:
+        execution = 'failed'
+    validation_state = validation.get('status', 'pending')
+    publication_state = published.get('status', 'not_started')
+    next_action = 'wait for worker process evidence'
+    if not activation:
+        next_action = 'inspect intake activation evidence'
+    if execution == 'completed':
+        next_action = 'wait for host validation evidence'
+    if validation_state == 'passed':
+        next_action = 'usage advance with the host authorization and this state root'
+    if outcome.get('status') == 'blocked' or execution in {'failed', 'blocked'}:
+        next_action = 'inspect execution failure evidence and resolve the recorded reason'
+    if validation_state == 'failed':
+        next_action = 'fix validation failures recorded in validation.json and rerun host validation'
+    if published:
+        next_action = {
+            'complete': 'none',
+            'ci_pending': 'wait for required PR CI, then run usage advance',
+            'integrated_ci_pending': 'wait for integrated CI, then run usage advance',
+            'ci_failed': 'fix failing PR CI before running usage advance',
+            'integrated_ci_failed': 'fix failing integrated CI before running usage advance',
+        }.get(publication_state, 'inspect publication evidence, then run usage advance')
+    if integration.get('status') in {'running', 'retryable_worker', 'retryable_validation'}:
+        next_action = 'resume conflict integration with usage advance'
+    elif integration.get('status') in {'mutation_uncertain', 'requires_user_decision', 'same_conflict_retry_limit'}:
+        next_action = 'resolve the recorded integration blocker before running usage advance'
+    return {
+        'schema_version': 1, 'execution_id': execution_id, 'current_execution_id': current_id,
+        'profile': claim.get('profile', PROFILE), 'observation': 'saved_records',
+        'intake': {'status': activation.get('status', 'claimed')},
+        'execution': {'status': execution, 'reason': outcome.get('reason')},
+        'validation': {'status': validation_state},
+        'publication': {key: published[key] for key in
+                        ('status', 'pr', 'head', 'merge_commit', 'integrated_checks') if key in published}
+                       or {'status': publication_state},
+        'integration': {'status': integration.get('status', 'not_started')},
+        'validation_repair': {'status': repair.get('status', 'not_started')},
+        'report': {'status': report.get('result', 'not_available'),
+                   'path': str(current_directory / 'report.json') if report else None},
+        'next_action': next_action,
+    }
 
 
 def repair_validation(authorization: TrustedLocalAuthorization, state_root: Path, *, repair_instruction: str = '') -> dict:
