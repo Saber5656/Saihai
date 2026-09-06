@@ -352,7 +352,7 @@ def _validate_intakes(state: dict[str, Any]) -> None:
     intakes = state['intakes']
     _require(isinstance(intakes, dict) and len(intakes) <= 16, 'intakes')
     for key, intake in intakes.items():
-        _require(isinstance(intake, dict) and set(intake) == INTAKE_FIELDS, 'intake_fields')
+        _require(isinstance(intake, dict) and set(intake) - {'alternate'} == INTAKE_FIELDS, 'intake_fields')
         _require(key == intake_key(*(intake[k] for k in ('repository', 'pr', 'bot', 'policy_version'))), 'intake_key')
         _require(_snapshot(intake['original_snapshot'])
                  and all(intake['original_snapshot'][k] == state['original_snapshot'][k]
@@ -361,6 +361,8 @@ def _validate_intakes(state: dict[str, Any]) -> None:
         _require(isinstance(intake['trigger_mode'], str) and intake['trigger_mode'] in TRIGGER_MODES, 'trigger_mode')
         _require(intake['authentication_status'] == 'integration_pending'
                  and intake['policy_status'] == 'inactive', 'intake_authority_forbidden')
+        if 'alternate' in intake:
+            _validate_alternate(intake, state)
         status = intake['request_status']
         _require(status in ('planned', 'unknown', 'observed'), 'request_status')
         _require(_candidate_matches(intake['request_candidate'], intake, response=False) if status == 'observed'
@@ -432,9 +434,14 @@ def record_intake_candidate(state_root: Path, run_id: str, *, principal: dict[st
     owner = _owner(principal)
     _require(isinstance(event, dict), 'invalid_intake_event')
     kind = event.get('kind')
-    _require(kind in ('delivery_unknown', 'request_observed', 'response_observed', 'later_response_observed'),
+    _require(isinstance(kind, str) and kind in (
+        'delivery_unknown', 'request_observed', 'response_observed', 'later_response_observed',
+        'quota_observed', 'alternate_delivery_unknown', 'alternate_request_observed', 'alternate_response_observed',
+        'alternate_existing_intake_linked'),
              'unsupported_intake_event')
-    fields = {'kind', 'intake_key'} | (set() if kind == 'delivery_unknown' else {'candidate'})
+    fields = {'kind', 'intake_key'} | (set() if kind in ('delivery_unknown', 'alternate_delivery_unknown') else {'candidate'})
+    if kind == 'alternate_existing_intake_linked':
+        fields = {'kind', 'intake_key', 'source_intake_key'}
     _require(set(event) == fields and isinstance(event['intake_key'], str), 'invalid_intake_event')
     with run_lock.hold_global_lock(state_root, operation='review_intake_candidate', run_id=run_id, principal=owner):
         run = run_store.load_run(state_root, run_id)
@@ -446,7 +453,14 @@ def record_intake_candidate(state_root: Path, run_id: str, *, principal: dict[st
         intake = state.get('intakes', {}).get(key)
         _require(intake is not None, 'intake_not_initialized')
         before = copy.deepcopy(intake)
-        if kind == 'delivery_unknown':
+        if kind == 'alternate_request_observed':
+            for bot in ('chatgpt', 'codex'):
+                alternate_key = intake_key(intake['repository'], intake['pr'], bot, intake['policy_version'])
+                _require(_existing_intake_owner(state_root, alternate_key) is None,
+                         'existing_alternate_intake_requires_reconciliation')
+        if kind == 'quota_observed' or kind.startswith('alternate_'):
+            _record_alternate(intake, state, event)
+        elif kind == 'delivery_unknown':
             if intake['request_status'] == 'planned':
                 intake['request_status'] = 'unknown'
         elif kind == 'request_observed':
@@ -476,6 +490,129 @@ def record_intake_candidate(state_root: Path, run_id: str, *, principal: dict[st
         if before != intake:
             run_store.store_run(state_root, run, expected_current_state=run['run_state'])
         return copy.deepcopy(intake)
+
+
+QUOTA_FIELDS = CANDIDATE_IDENTITY | {'reason', 'issuer', 'evidence_ref', 'evidence_digest'}
+ALTERNATE_FIELDS = {'failure_candidate', 'request_status', 'request_candidate', 'response_candidate', 'status'}
+
+
+def _quota_matches(candidate: Any, intake: dict[str, Any]) -> bool:
+    # Issuer/evidence are unverified candidate metadata, never authentication.
+    if not isinstance(candidate, dict) or set(candidate) != QUOTA_FIELDS:
+        return False
+    request = intake['request_candidate']
+    return (intake['bot'].casefold() == 'coderabbitai' and request is not None
+            and all(candidate[k] == request[k] for k in CANDIDATE_IDENTITY)
+            and candidate['reason'] == 'usage_limit'
+            and all(_text(candidate[k]) for k in ('issuer', 'evidence_ref'))
+            and isinstance(candidate['evidence_digest'], str)
+            and re.fullmatch(r'[0-9a-f]{64}', candidate['evidence_digest']) is not None)
+
+
+def _alternate_intake(intake: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    return dict(intake, bot=request['bot'], trigger_mode=request['trigger_mode'],
+                original_snapshot=request['snapshot'], request_candidate=request)
+
+
+def _alternate_request_matches(candidate: Any, intake: dict[str, Any], *, linked: bool = False) -> bool:
+    if not isinstance(candidate, dict) or set(candidate) != REQUEST_FIELDS or not _snapshot(candidate['snapshot']):
+        return False
+    return ((linked or candidate['bot'] == 'chatgpt' and candidate['trigger_mode'] == 'manual')
+            and candidate['bot'] in ('chatgpt', 'codex')
+            and all(candidate['snapshot'][k] == intake['original_snapshot'][k] for k in ('repository', 'base'))
+            and candidate['request_id'] != intake['request_candidate']['request_id']
+            and _candidate_matches(candidate, _alternate_intake(intake, candidate), response=False))
+
+
+def _alternate_response_matches(candidate: Any, intake: dict[str, Any], request: Any) -> bool:
+    if request is None or not isinstance(candidate, dict) or set(candidate) != RESPONSE_FIELDS:
+        return False
+    if candidate['outcome'] in ('error', 'rejected'):
+        # Negative results are retained as negative, even if they carry findings.
+        shaped = dict(candidate, outcome='findings' if candidate['findings'] else 'no_findings')
+    else:
+        shaped = candidate
+    return _candidate_matches(shaped, _alternate_intake(intake, request), response=True)
+
+
+def _validate_alternate(intake: dict[str, Any], state: dict[str, Any]) -> None:
+    row = intake['alternate']
+    _require(isinstance(row, dict) and set(row) - {'source_intake_key'} == ALTERNATE_FIELDS, 'alternate_fields')
+    _require(row['status'] == 'integration_pending', 'alternate_authority_forbidden')
+    _require(_quota_matches(row['failure_candidate'], intake), 'quota_candidate')
+    _require(row['request_status'] in ('planned', 'unknown', 'observed'), 'alternate_request_status')
+    request = row['request_candidate']
+    _require(_alternate_request_matches(request, intake, linked='source_intake_key' in row) if row['request_status'] == 'observed'
+             else request is None, 'alternate_request_candidate')
+    if 'source_intake_key' in row:
+        source = _linked_intake(intake, state, row['source_intake_key'])
+        _require(request is not None and request == source['request_candidate'], 'alternate_source_request')
+        _require(row['response_candidate'] is None or row['response_candidate'] == source['first_response_candidate'],
+                 'alternate_source_response')
+    response = row['response_candidate']
+    _require(response is None or _alternate_response_matches(response, intake, request), 'alternate_response_candidate')
+
+
+
+def _same_alternate_scope(intake: dict[str, Any], source: dict[str, Any]) -> bool:
+    return (isinstance(source['bot'], str) and source['bot'].casefold() in ('chatgpt', 'codex')
+            and all(source[k] == intake[k] for k in ('repository', 'pr', 'policy_version')))
+
+
+def _linked_intake(intake: dict[str, Any], state: dict[str, Any], key: Any) -> dict[str, Any]:
+    _require(isinstance(key, str), 'invalid_alternate_source')
+    source = state['intakes'].get(key)
+    _require(source is not None and _same_alternate_scope(intake, source), 'invalid_alternate_source')
+    return source
+
+
+def _record_alternate(intake: dict[str, Any], state: dict[str, Any], event: dict[str, Any]) -> None:
+    kind = event['kind']
+    if kind == 'quota_observed':
+        candidate = event['candidate']
+        _require(_quota_matches(candidate, intake), 'invalid_quota_candidate')
+        if 'alternate' in intake:
+            _require(intake['alternate']['failure_candidate'] == candidate, 'quota_candidate_conflict')
+        else:
+            intake['alternate'] = dict(failure_candidate=copy.deepcopy(candidate), request_status='planned',
+                                       request_candidate=None, response_candidate=None, status='integration_pending')
+        return
+    row = intake.get('alternate')
+    _require(row is not None, 'quota_candidate_required')
+    if kind == 'alternate_existing_intake_linked':
+        source = _linked_intake(intake, state, event['source_intake_key'])
+        request = source['request_candidate']
+        _require(request is not None and source['first_response_candidate'] is not None, 'alternate_source_incomplete')
+        if row['request_candidate'] is not None:
+            _require(row.get('source_intake_key') == event['source_intake_key'], 'alternate_candidate_conflict')
+            return
+        _require(request['snapshot'] == state['snapshot'], 'alternate_snapshot_stale')
+        row.update(source_intake_key=event['source_intake_key'], request_status='observed',
+                   request_candidate=copy.deepcopy(request),
+                   response_candidate=copy.deepcopy(source['first_response_candidate']))
+        return
+    if kind == 'alternate_delivery_unknown':
+        if row['request_status'] == 'planned':
+            row['request_status'] = 'unknown'
+        return
+    _require('source_intake_key' not in row, 'alternate_existing_intake_linked')
+    candidate = event['candidate']
+    request_event = kind == 'alternate_request_observed'
+    _require(_alternate_request_matches(candidate, intake) if request_event else
+             _alternate_response_matches(candidate, intake, row['request_candidate']), 'invalid_alternate_candidate')
+    if request_event:
+        _require(not any(_same_alternate_scope(intake, source) for source in state['intakes'].values()),
+                 'existing_alternate_intake_requires_reconciliation')
+    slot = 'request_candidate' if request_event else 'response_candidate'
+    existing = row[slot]
+    if existing is not None:
+        _require(existing == candidate if request_event else
+                 _response_identity(existing) == _response_identity(candidate), 'alternate_candidate_conflict')
+        return  # Idempotent historical observation is not renewed current proof.
+    _require(candidate['snapshot'] == state['snapshot'], 'alternate_snapshot_stale')
+    row[slot] = copy.deepcopy(candidate)
+    if request_event:
+        row['request_status'] = 'observed'
 
 
 def validate_intake_policy_plan(plan: Any) -> list[str]:

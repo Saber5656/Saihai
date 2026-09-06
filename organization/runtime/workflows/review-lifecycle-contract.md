@@ -151,3 +151,45 @@ internal exception. The authenticated consumer must convert malformed input and
 producer/API errors into a bounded blocked/stop result with no saved mutation or
 execution grant; it must never synthesize an authenticated principal. This is a
 required U3 connection contract, not a reason to relax current gates in U2.
+# U3 A — quota-only alternate candidates (integration pending)
+
+This unit adds host-owned bookkeeping only. It sends no request and does not
+authenticate a Bot receipt, activate policy, accept a review, or waive a gate.
+The existing host boundary remains responsible for resolving principals. No
+caller-supplied authentication flag is accepted. Integration with the real
+producer and consumer remains pending under #133/#128.
+
+`quota_observed` stores a separate `usage_limit` failure candidate for an observed
+CodeRabbit request. Its repository, PR, Bot, policy, request and original snapshot
+must match. Issuer, evidence reference and digest are candidate metadata, not
+proof of authenticity. `usage_limit` is never a successful response outcome.
+Timeout, generic error, silence, skipped execution and HTTP 429 alone do not
+qualify. Only a future authenticated quota-only producer may authorize fallback.
+
+One optional `alternate` record per logical intake retains the immutable quota
+candidate, independent request/result identities and an unknown-delivery state.
+Its status always remains `integration_pending`; even a no-findings result is
+not acceptance. Errors and rejected results are retained and cannot be rewritten
+as success. Primary responses, later findings, task obligations, owner, repair
+budget, CI, GitHub protection and mandatory role/atomic merge gates are preserved.
+
+An existing configured ChatGPT intake (`chatgpt` or `codex` logical label) must be
+reconciled before any new alternate request observation. An observed initial
+request and result on the same PR/policy/current snapshot can be linked using
+`alternate_existing_intake_linked`. Linking sends nothing. Pending or cross-run
+intakes block new request observation; cross-run linking awaits producer
+integration. Labels alone never prove the provider. A new manual `chatgpt`
+candidate is allowed only when no such existing intake is found in the complete
+owner scan. This is record validation, not outbound permission.
+
+New request/result observations require the current snapshot. Historical duplicate
+observations remain idempotent without becoming renewed proof; original Bot
+baseline and alternate request are never rewritten after head changes. There is
+no resend/reset API. Result absence or stale identity cannot advance the lifecycle.
+
+TDD acceptance: exact quota versus generic failures/fake auth; missing request or
+result; separate alternate identity; primary finding preservation; negative-result
+immutability; stale snapshots; durable corruption; restart/duplicate delivery;
+existing configured initial result reuse without a second request. Focused tests
+live in `tests/test_review_intake.py`. This unit is not actual fallback runtime
+acceptance, publication readiness, or completion of Issue #136.

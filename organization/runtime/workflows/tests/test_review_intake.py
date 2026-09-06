@@ -226,6 +226,154 @@ class ReviewIntakeTests(unittest.TestCase):
         self.assertIn('intakes',schema['properties'])
         self.assertNotIn('intakes',schema['required'])
 
+    def quota(self, **overrides):
+        row = {k:v for k,v in self.request().items() if k != 'trigger_mode'}
+        row.update(reason='usage_limit', issuer='github-observer', evidence_ref='receipt/quota',
+                   evidence_digest='a'*64)
+        row.update(overrides)
+        return row
+
+    def alternate_request(self, **overrides):
+        row = self.request(bot='chatgpt', request_id='alternate-1')
+        row.update(overrides)
+        return row
+
+    def alternate_response(self, **overrides):
+        row = self.response(bot='chatgpt', request_id='alternate-1')
+        row.update(overrides)
+        return row
+
+    def quota_observed(self):
+        self.observed()
+        return self.event('quota_observed', candidate=self.quota())
+
+    def test_quota_is_failure_candidate_and_never_success_or_authority(self):
+        self.observed()
+        lifecycle.apply_event(self.root, self.run_id, principal=OWNER,
+                              event={'kind':'findings','findings':[finding()]})
+        before = lifecycle.observe(self.root, self.run_id)
+        result = self.event('quota_observed', candidate=self.quota())
+        self.assertEqual(result['alternate']['status'], 'integration_pending')
+        self.assertEqual(result['alternate']['failure_candidate']['reason'], 'usage_limit')
+        self.assertIsNone(result['first_response_candidate'])
+        after = lifecycle.observe(self.root, self.run_id)
+        for key in ('phase','findings','repair_rounds','owner','snapshot'):
+            self.assertEqual(after[key], before[key])
+        for kind in ('fallback_authorized','alternate_accepted','quota_verified'):
+            with self.assertRaises(lifecycle.ReviewLifecycleError):
+                self.event(kind, candidate=self.quota())
+
+    def test_quota_rejects_general_failure_wrong_identity_and_fake_auth(self):
+        self.observed()
+        for change in ({'reason':'timeout'},{'reason':'error'},{'reason':'skipped'},
+                       {'reason':'429'},{'issuer':''},{'verified':True},
+                       {'snapshot':dict(SNAPSHOT,head='c'*40)},{'pr':137},
+                       {'bot':'other'},{'request_id':'other'},{'evidence_digest':'bad'}):
+            with self.subTest(change=change), self.assertRaises(lifecycle.ReviewLifecycleError):
+                self.event('quota_observed', candidate=self.quota(**change))
+        self.assertNotIn('alternate', self.prepare())
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.event('response_observed', candidate=self.response(outcome='usage_limit'))
+
+    def test_alternate_requires_quota_then_separate_request_and_result(self):
+        self.observed()
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.event('alternate_request_observed', candidate=self.alternate_request())
+        self.event('quota_observed', candidate=self.quota())
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.event('alternate_response_observed', candidate=self.alternate_response())
+        self.event('alternate_request_observed', candidate=self.alternate_request())
+        result = self.event('alternate_response_observed', candidate=self.alternate_response())
+        self.assertEqual(result['request_candidate']['request_id'], 'request-1')
+        self.assertEqual(result['alternate']['request_candidate']['request_id'], 'alternate-1')
+        self.assertEqual(result['alternate']['status'], 'integration_pending')
+        self.assertEqual(result['authentication_status'], 'integration_pending')
+        self.assertEqual(lifecycle.observe(self.root,self.run_id)['phase'], 'triage')
+
+    def test_alternate_duplicates_restart_unknown_delivery_and_conflicts(self):
+        result = self.quota_observed()
+        self.assertEqual(self.event('quota_observed',candidate=self.quota()),result)
+        unknown = self.event('alternate_delivery_unknown')
+        self.assertEqual(unknown['alternate']['request_status'], 'unknown')
+        self.assertEqual(self.prepare(),unknown)
+        observed = self.event('alternate_request_observed',candidate=self.alternate_request())
+        self.assertEqual(self.event('alternate_delivery_unknown'), observed)
+        for kind,candidate in (
+            ('quota_observed',self.quota(evidence_digest='b'*64)),
+            ('alternate_request_observed',self.alternate_request(request_id='another'))):
+            with self.assertRaises(lifecycle.ReviewLifecycleError):
+                self.event(kind,candidate=candidate)
+        first=self.event('alternate_response_observed',candidate=self.alternate_response(outcome='error'))
+        self.assertEqual(self.event('alternate_response_observed',candidate=self.alternate_response(
+            outcome='error',response_id='redelivery')),first)
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.event('alternate_response_observed',candidate=self.alternate_response())
+
+    def test_alternate_negative_preserves_primary_findings_and_cannot_be_rewritten(self):
+        self.quota_observed()
+        row=dict(rule_id='r',path='src/app.py',anchor='main',severity='high',summary='blocking')
+        self.event('response_observed',candidate=self.response(outcome='findings',findings=[row]))
+        self.event('alternate_request_observed',candidate=self.alternate_request())
+        result=self.event('alternate_response_observed',candidate=self.alternate_response(outcome='rejected',findings=[row]))
+        self.assertEqual(result['first_response_candidate']['findings'],[row])
+        self.assertEqual(result['alternate']['response_candidate']['outcome'],'rejected')
+        self.assertEqual(result['alternate']['status'],'integration_pending')
+
+    def test_alternate_rejects_stale_result_and_wrong_request_snapshot(self):
+        self.quota_observed()
+        for change in ({'bot':'codex'},{'request_id':'request-1'},
+                       {'snapshot':dict(SNAPSHOT,head='c'*40)},{'verified':True}):
+            with self.assertRaises(lifecycle.ReviewLifecycleError):
+                self.event('alternate_request_observed',candidate=self.alternate_request(**change))
+        self.event('alternate_request_observed',candidate=self.alternate_request())
+        lifecycle.apply_event(self.root,self.run_id,principal=OWNER,event={'kind':'findings','findings':[finding()]})
+        lifecycle.apply_event(self.root,self.run_id,principal=OWNER,event={'kind':'reserve_repair','batch_id':'b'})
+        lifecycle.apply_event(self.root,self.run_id,principal=OWNER,event={
+            'kind':'repair_produced','batch_id':'b','snapshot':dict(SNAPSHOT,head='c'*40)})
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.event('alternate_response_observed',candidate=self.alternate_response())
+        self.assertEqual(self.prepare()['alternate']['request_candidate']['snapshot'],SNAPSHOT)
+
+    def test_alternate_corrupt_durable_authority_and_binding_rejected(self):
+        self.quota_observed()
+        run=run_store.load_run(self.root,self.run_id)
+        key=next(iter(run['review_lifecycle']['intakes']))
+        for change in ({'status':'accepted'},{'request_status':'observed'},
+                       {'failure_candidate':self.quota(reason='timeout')}):
+            bad=copy.deepcopy(run)
+            bad['review_lifecycle']['intakes'][key]['alternate'].update(change)
+            with self.assertRaises(run_store.RunStoreError):
+                run_store.store_run(self.root,bad)
+
+    def test_existing_configured_chatgpt_intake_is_reused_without_new_request(self):
+        self.quota_observed()
+        self.prepare(bot='codex',trigger_mode='automatic_initial')
+        key=lifecycle.intake_key(SNAPSHOT['repository'],136,'codex','phase-v1')
+        def source_event(kind,candidate):
+            return lifecycle.record_intake_candidate(self.root,self.run_id,principal=OWNER,
+                event=dict(kind=kind,intake_key=key,candidate=candidate))
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.event('alternate_request_observed',candidate=self.alternate_request())
+        request=self.request(bot='codex',request_id='existing-auto',trigger_mode='automatic_initial')
+        source_event('request_observed',request)
+        response=self.response(bot='codex',request_id='existing-auto')
+        source_event('response_observed',response)
+        result=self.event('alternate_existing_intake_linked',source_intake_key=key)
+        self.assertEqual(result['alternate']['request_candidate'],request)
+        self.assertEqual(result['alternate']['response_candidate'],response)
+        self.assertEqual(result['alternate']['source_intake_key'],key)
+        self.assertEqual(result['alternate']['status'],'integration_pending')
+        self.assertEqual(self.event('alternate_existing_intake_linked',source_intake_key=key),result)
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.event('alternate_request_observed',candidate=self.alternate_request())
+
+    def test_existing_alternate_wrong_pr_or_stale_identity_cannot_link(self):
+        self.quota_observed()
+        self.prepare(pr=137,bot='codex',trigger_mode='automatic_initial')
+        key=lifecycle.intake_key(SNAPSHOT['repository'],137,'codex','phase-v1')
+        with self.assertRaises(lifecycle.ReviewLifecycleError):
+            self.event('alternate_existing_intake_linked',source_intake_key=key)
+
     def test_policy_example_cannot_activate_and_rejects_auto_manual_conflict(self):
         path = Path(__file__).resolve().parents[1] / 'profiles/review-phase-policy-v1.example.json'
         plan = json.loads(path.read_text())

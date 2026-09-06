@@ -624,6 +624,9 @@
         },
         "policy_status": {
           "const": "inactive"
+        },
+        "alternate": {
+          "$ref": "#/$defs/alternate"
         }
       },
       "required": [
@@ -639,6 +642,263 @@
         "later_response_candidates",
         "authentication_status",
         "policy_status"
+      ],
+      "additionalProperties": false
+    },
+    "quotaCandidate": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "pr": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "bot": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "snapshot": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "base": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "head": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "repository",
+            "base",
+            "head"
+          ],
+          "additionalProperties": false
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "reason": {
+          "const": "usage_limit"
+        },
+        "issuer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "evidence_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "evidence_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "repository",
+        "pr",
+        "bot",
+        "policy_version",
+        "snapshot",
+        "request_id",
+        "reason",
+        "issuer",
+        "evidence_ref",
+        "evidence_digest"
+      ],
+      "additionalProperties": false
+    },
+    "alternateResponseCandidate": {
+      "type": "object",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "pr": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "bot": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "policy_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "snapshot": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "base": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "head": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "repository",
+            "base",
+            "head"
+          ],
+          "additionalProperties": false
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "response_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "outcome": {
+          "enum": [
+            "no_findings",
+            "findings",
+            "error",
+            "rejected"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"
+              },
+              "anchor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "severity": {
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              }
+            },
+            "required": [
+              "rule_id",
+              "path",
+              "anchor",
+              "severity",
+              "summary"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "repository",
+        "pr",
+        "bot",
+        "policy_version",
+        "snapshot",
+        "request_id",
+        "response_id",
+        "outcome",
+        "findings"
+      ],
+      "additionalProperties": false
+    },
+    "alternate": {
+      "type": "object",
+      "properties": {
+        "failure_candidate": {
+          "$ref": "#/$defs/quotaCandidate"
+        },
+        "request_status": {
+          "enum": [
+            "planned",
+            "unknown",
+            "observed"
+          ]
+        },
+        "request_candidate": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/requestCandidate"
+            }
+          ]
+        },
+        "response_candidate": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/alternateResponseCandidate"
+            }
+          ]
+        },
+        "status": {
+          "const": "integration_pending"
+        },
+        "source_intake_key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "failure_candidate",
+        "request_status",
+        "request_candidate",
+        "response_candidate",
+        "status"
       ],
       "additionalProperties": false
     }
