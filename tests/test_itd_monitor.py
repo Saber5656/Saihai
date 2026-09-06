@@ -421,6 +421,49 @@ class CanonicalMonitorTests(unittest.TestCase):
                     monitor.parse_kanban(self.vault)
                 self.assertEqual(healthy["digest"], monitor.build_snapshot([self.vault], report)["digest"])
 
+    def test_discovered_done_task_requires_both_projection_files_and_rows(self):
+        task = self.task("Project/task.md", "TSK-1234", "done")
+        task.write_text(task.read_text() + "## Reviews\nAccepted\n## Deliverables\nReady\n## Vault Updates\nRecorded\n")
+        findings = monitor.collect_gate_findings(self.vault)
+        self.assertEqual(len(findings), 2)
+        self.assertTrue(all(f["event_type"] == "projection_missing" for f in findings))
+        index = self.write("00-Inbox&Tasks/Task-Index.md", "# Index\n")
+        kanban = self.write("00-Inbox&Tasks/Kanban.md", "## Done\n")
+        findings = monitor.collect_gate_findings(self.vault)
+        self.assertEqual(len(findings), 2)
+        self.assertTrue(all(f["event_type"] == "projection_entry_missing" for f in findings))
+        index.write_text("| TSK-1234 | task | owner | date | done |\n")
+        findings = monitor.collect_gate_findings(self.vault)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["event_type"], "projection_entry_missing")
+        self.assertIn("00-Inbox&Tasks/Kanban.md", findings[0]["affected_paths"])
+        kanban.write_text("## Done\n- TSK-1234\n")
+        self.assertFalse(monitor.collect_gate_findings(self.vault))
+        archived = self.vault / "01-Projects/00_Archive/task.md"
+        archived.parent.mkdir()
+        task.rename(archived)
+        self.assertFalse(monitor.collect_gate_findings(self.vault))
+
+    def test_ambiguous_authorities_do_not_invent_missing_projection_entries(self):
+        self.task("Project/task.md", "TSK-1234", "archived")
+        self.task("Copy/task.md", "TSK-1234", "archived")
+        self.write("00-Inbox&Tasks/Task-Index.md", "# Index\n")
+        self.write("00-Inbox&Tasks/Kanban.md", "## Done\n")
+        findings = monitor.collect_gate_findings(self.vault)
+        self.assertTrue(any(f["event_type"] == "task_identity_ambiguous" for f in findings))
+        self.assertFalse(any(f["event_type"].startswith("projection_") for f in findings))
+
+    def test_unreadable_projection_is_not_reported_as_missing(self):
+        self.task("Project/task.md", "TSK-1234", "archived")
+        index = self.write("00-Inbox&Tasks/Task-Index.md", "")
+        index.write_bytes(b"\xff")
+        findings = monitor.collect_gate_findings(self.vault)
+        self.assertEqual(len(findings), 2)
+        missing = [f for f in findings if f["event_type"] == "projection_missing"]
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing[0]["affected_paths"], ["00-Inbox&Tasks/Kanban.md"])
+        self.assertEqual(sum(f["event_type"] == "projection_read_failed" for f in findings), 1)
+
     def test_projection_missing_and_disappeared_during_read_are_distinct(self):
         path = self.vault / "00-Inbox&Tasks/Kanban.md"
         self.assertEqual(monitor.read_projection(path)["status"], "missing")

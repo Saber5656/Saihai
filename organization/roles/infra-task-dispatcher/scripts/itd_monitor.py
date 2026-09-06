@@ -343,6 +343,10 @@ def collect_gate_findings(agents_vault: Path) -> list[dict[str, Any]]:
         if projection["status"] == "unreadable":
             findings.append(finding("projection_read_failed", "P1", f"Cannot read {name}",
                                     projection["error"], ["00-Inbox&Tasks/" + name]))
+        elif projection["status"] == "missing" and discovery["tasks"]:
+            findings.append(finding("projection_missing", "P1", f"Task projection file missing: {name}",
+                                    "Discovered Task Details require a synchronized projection",
+                                    ["00-Inbox&Tasks/" + name]))
 
     for issue in discovery["problems"]:
         findings.append(finding(issue["event_type"], "P0", "Task identity requires reconciliation",
@@ -368,6 +372,13 @@ def collect_gate_findings(agents_vault: Path) -> list[dict[str, Any]]:
             )
 
         expected_section = kanban_section_for(status)
+        for name, projection, entries, expected in (
+                ("Task-Index.md", index_input, index, status),
+                ("Kanban.md", kanban_input, kanban, expected_section)):
+            if expected and projection["status"] == "readable" and task_id not in entries:
+                findings.append(finding("projection_entry_missing", "P1", f"{name} entry missing: {task_id}",
+                                        f"Task Detail status={status}; expected projection={expected}",
+                                        [rel, "00-Inbox&Tasks/" + name]))
         if expected_section and kanban.get(task_id) and kanban[task_id] != expected_section:
             findings.append(
                 finding(
@@ -439,7 +450,8 @@ def collect_gate_findings(agents_vault: Path) -> list[dict[str, Any]]:
                 )
 
     for task_id, idx_status in index.items():
-        if kanban_input["status"] == "readable" and task_id not in kanban:
+        if (task_id not in discovery["tasks"] and kanban_input["status"] == "readable"
+                and task_id not in kanban):
             findings.append(
                 finding(
                     "kanban_desync",
