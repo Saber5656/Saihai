@@ -321,8 +321,16 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
         host = current.publication
         report = continuation['report']
         integrated_parent = continuation['integrated_parent']
-    result = publication.publish(report, host, Path(state_root) / 'publication', commands=commands,
-                                 integrated_parent=integrated_parent)
+    progress_path = directory / 'integration.json'
+    progress = run_store.read_json(progress_path) if progress_path.exists() else {}
+    if progress.get('status') in {'running', 'retryable_worker', 'retryable_validation', 'mutation_uncertain'}:
+        result = _integrate_conflict(authorization, current, directory, state_root,
+                                    {'head': progress['prior_head']}, commands or publication.Commands())
+    elif progress.get('status') in {'requires_user_decision', 'same_conflict_retry_limit'}:
+        result = progress
+    else:
+        result = publication.publish(report, host, Path(state_root) / 'publication', commands=commands,
+                                     integrated_parent=integrated_parent)
     if result['status'] == 'conflict_pending':
         result = _integrate_conflict(authorization, current, directory, state_root, result,
                                     commands or publication.Commands())
@@ -342,10 +350,21 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
                     raise TrustedLocalError('integrated_check_identity_mismatch')
                 if row['id'] > latest.get(row['name'], (-1, ''))[0]:
                     latest[row['name']] = (row['id'], row['conclusion'] if row['status'] == 'completed' else 'pending')
-        states = {name: latest.get(name, (-1, 'missing'))[1] for name in required}
+        status_pages = publication._json(cmd, root, 'api', '--paginate', '--slurp',
+            f'repos/{host.repository}/commits/{sha}/statuses?per_page=100')
+        statuses = {}
+        for page in status_pages:
+            for row in page:
+                if row['id'] > statuses.get(row['context'], (-1, ''))[0]:
+                    statuses[row['context']] = (row['id'], row['state'])
+        states = {name: latest.get(name, statuses.get(name, (-1, 'missing')))[1] for name in required}
+        # A same-name check run must not hide a failing or pending classic status.
+        for name in required & statuses.keys():
+            if statuses[name][1] != 'success':
+                states[name] = statuses[name][1]
         result = dict(result, merge_status='merged', integrated_checks=states,
                       status='complete' if all(s == 'success' for s in states.values()) else
-                      'integrated_ci_failed' if any(s in {'failure','cancelled','timed_out','action_required','skipped','neutral','stale'} for s in states.values()) else 'integrated_ci_pending')
+                      'integrated_ci_failed' if any(s in {'failure','error','cancelled','timed_out','action_required','skipped','neutral','stale'} for s in states.values()) else 'integrated_ci_pending')
     result['decision'] = 'blocked' if result['status'] in {'ci_failed','integrated_ci_failed','requires_user_decision','same_conflict_retry_limit','integration_reconciliation_required'} else 'ok'
     _save(directory / 'publication.json', result)
     return result

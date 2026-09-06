@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import host_publication_adapter as adapter
@@ -55,6 +56,27 @@ class FakeGitHub(adapter.Commands):
 
 
 class HostPublicationTests(unittest.TestCase):
+    def test_failed_gh_checks_json_is_persisted_as_ci_failed(self):
+        original=self.commands.run
+        def run(args,*,cwd,env=None):
+            if args[:3]==['gh','pr','checks']:
+                response=subprocess.CompletedProcess(args,1,b'[{"name":"ci","state":"FAILURE"}]',b'')
+                with patch.object(adapter.subprocess,'run',return_value=response):
+                    return adapter.Commands().run(args,cwd=cwd,env=env)
+            return original(args,cwd=cwd,env=env)
+        with patch.object(self.commands,'run',side_effect=run):
+            result=self.publish()
+        self.assertEqual(result['status'],'ci_failed')
+        self.assertIsNone(self.commands.merge_head)
+        self.assertTrue(any(json.loads(p.read_text()).get('status')=='ci_failed' for p in (self.root/'state').glob('*.json')))
+
+    def test_gh_failure_without_valid_check_rows_still_blocks(self):
+        for output in (b'',b'not json',b'{"message":"auth failed"}',b'[]',b'[{}]'):
+            response=subprocess.CompletedProcess([],1,output,b'private error')
+            with patch.object(adapter.subprocess,'run',return_value=response):
+                with self.assertRaisesRegex(adapter.PublicationError,'command_failed:gh'):
+                    adapter.Commands().run(['gh','pr','checks','9','--json','name,state'],cwd=self.repo)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

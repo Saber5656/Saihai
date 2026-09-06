@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 import test_trusted_local_executor as fixture
 from test_host_publication_adapter import FakeGitHub
@@ -71,6 +72,56 @@ class HostFlowTests(unittest.TestCase):
         self.assertEqual(sum(c[:3]==['gh','pr','create'] for c in self.commands.calls),1)
         self.assertFalse(any('--force' in c for c in self.commands.calls))
         self.assertTrue(any('/commits/'+'f'*40+'/check-runs?' in a for c in self.commands.calls for a in c))
+
+    def test_failed_worker_resumes_before_publisher_dirty_check(self):
+        local.execute(self.f.request,self.f.auth,self.f.state)
+        with patch.object(local,'_run_process',return_value=({'exit':1},b'')):
+            failed=local.advance_publication(self.f.auth,self.f.state,commands=self.commands)
+        self.assertEqual(failed['status'],'retryable_worker')
+        self.assertTrue(self.f.git('rev-parse','MERGE_HEAD'))
+        resumed=local.advance_publication(self.f.auth,self.f.state,commands=self.commands)
+        self.assertEqual(resumed['status'],'integration_validated',resumed)
+        self.assertEqual(sum(c[:2]==['git','fetch'] for c in self.commands.calls),1)
+
+    def test_failed_validation_resumes_before_republishing(self):
+        local.execute(self.f.request,self.f.auth,self.f.state)
+        with patch.object(local,'_validate',side_effect=local.TrustedLocalError('host_validation_failed')):
+            failed=local.advance_publication(self.f.auth,self.f.state,commands=self.commands)
+        self.assertEqual(failed['status'],'retryable_validation')
+        resumed=local.advance_publication(self.f.auth,self.f.state,commands=self.commands)
+        self.assertEqual(resumed['status'],'integration_validated',resumed)
+
+    def test_repeated_worker_failure_reaches_limit_without_republishing(self):
+        local.execute(self.f.request,self.f.auth,self.f.state)
+        with patch.object(local,'_run_process',return_value=({'exit':1},b'')):
+            for _ in range(5):
+                result=local.advance_publication(self.f.auth,self.f.state,commands=self.commands)
+                self.assertEqual(result['status'],'retryable_worker')
+            stopped=local.advance_publication(self.f.auth,self.f.state,commands=self.commands)
+        self.assertEqual(stopped['status'],'same_conflict_retry_limit')
+        self.assertEqual(stopped['decision'],'blocked')
+        again=local.advance_publication(self.f.auth,self.f.state,commands=self.commands)
+        self.assertEqual(again['status'],'same_conflict_retry_limit')
+        self.assertEqual(sum(c[:2]==['git','fetch'] for c in self.commands.calls),1)
+
+    def test_merge_sha_classic_status_latest_state_controls_completion(self):
+        local.execute(self.f.request,self.f.auth,self.f.state)
+        local.advance_publication(self.f.auth,self.f.state,commands=self.commands)
+        self.commands.conflict=False;self.commands.success=True
+        original_run=self.commands.run
+        status='pending'
+        def run(args,*,cwd,env=None):
+            if any('/commits/'+'f'*40+'/check-runs?' in a for a in args):
+                return b'[{"check_runs":[]}]'
+            if any('/commits/'+'f'*40+'/statuses?' in a for a in args):
+                return json.dumps([[{'id':90,'context':'ci','state':status}],
+                                   [{'id':2,'context':'ci','state':'success'}]]).encode()
+            return original_run(args,cwd=cwd,env=env)
+        with patch.object(self.commands,'run',side_effect=run):
+            for status,expected in [('pending','integrated_ci_pending'),('error','integrated_ci_failed'),
+                                    ('failure','integrated_ci_failed'),('success','complete')]:
+                result=local.advance_publication(self.f.auth,self.f.state,commands=self.commands)
+                self.assertEqual(result['status'],expected,result)
 
     def test_wrong_parent_cannot_admit_a_committed_report(self):
         result=local.execute(self.f.request,self.f.auth,self.f.state)

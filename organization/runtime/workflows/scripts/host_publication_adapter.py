@@ -58,9 +58,19 @@ class Commands:
                                     stderr=subprocess.PIPE, timeout=120, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise PublicationError('command_unavailable_or_uncertain') from exc
-        if result.returncode and not (args[:3] == ['gh', 'pr', 'checks'] and result.returncode == 8):
-            # Do not persist potentially credential-bearing stderr/remote URLs.
-            raise PublicationError('command_failed:' + args[0])
+        if result.returncode:
+            checks_output = False
+            if args[:3] == ['gh', 'pr', 'checks'] and result.returncode in {1, 8}:
+                try:
+                    rows = json.loads(result.stdout)
+                    checks_output = isinstance(rows, list) and bool(rows) and all(
+                        isinstance(row, dict) and isinstance(row.get('name'), str) and
+                        isinstance(row.get('state'), str) for row in rows)
+                except (ValueError, TypeError):
+                    pass
+            if not checks_output:
+                # Do not persist potentially credential-bearing stderr/remote URLs.
+                raise PublicationError('command_failed:' + args[0])
         return result.stdout
 
 
@@ -330,6 +340,8 @@ def publish(report: dict, authorization: HostAuthorization, state_root: Path,
         if not isinstance(native, list):
             raise PublicationError('native_check_inventory_invalid')
         required.update(row['name'] for row in native)
+        if any(row['state'] in {'FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'SKIPPED', 'NEUTRAL', 'STALE'} for row in native):
+            state.update(status='ci_failed'); _save(path, state); return state
         checks = _json(cmd, root, 'api', '--paginate', '--slurp', f'repos/{authorization.repository}/commits/{head}/check-runs?per_page=100')
         status_pages = _json(cmd, root, 'api', '--paginate', '--slurp', f'repos/{authorization.repository}/commits/{head}/statuses?per_page=100')
         latest: dict[str, tuple[int, str]] = {}
