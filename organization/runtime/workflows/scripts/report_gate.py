@@ -1928,7 +1928,7 @@ def standard_review_view(report: dict[str, Any]) -> dict[str, Any]:
     """Normalize structured findings, never normalize a provider failure to success."""
     return dict(report_id=report['report_id'], provider_evidence=report['provider_evidence'],
         result=('blocked' if report['result'] == 'blocked' else 'pass' if 'resolution' in report
-                or report['review']['status'] == 'approved' else 'findings'),
+                or report['review']['status'] == 'approved' and not report['review'].get('findings') else 'findings'),
         findings=report['review'].get('findings', []),
         **({'resolution': report['resolution']} if 'resolution' in report else {}))
 
