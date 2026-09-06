@@ -4841,7 +4841,18 @@ def drain_run(
             run_id=run_id,
             principal=actor,
         ):
-            run = run_store.load_run(state_root, run_id)
+            try:
+                run = run_store.load_run(state_root, run_id)
+                if any(not isinstance(row, dict) for row in run['step_history']):
+                    raise run_store.RunStoreError('schema_invalid', ['step_history entries must be objects'])
+            except run_store.RunStoreError as exc:
+                if exc.reason_class != 'schema_invalid':
+                    raise
+                append_audit_event(state_root=state_root, event_type='drain_run', principal=actor,
+                    subject=subject, outcome='blocked',
+                    details={'reason': 'work_order_invalid', 'errors': exc.errors})
+                return {'schema_version': 1, 'decision': 'blocked', 'reason': 'work_order_invalid',
+                        'errors': exc.errors, 'run_path': str(path)}
             subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
             signature = assert_execution_principal(
                 state_root=state_root,
