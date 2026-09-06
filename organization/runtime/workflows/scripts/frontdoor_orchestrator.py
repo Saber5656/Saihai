@@ -6356,6 +6356,23 @@ def parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_trusted_local(*, request: dict[str, Any], authorization: Any, state_root: Path) -> dict[str, Any]:
+    """Explicit usage-first host entry; no managed-worker attestation is implied."""
+    import trusted_local_executor
+    try:
+        return trusted_local_executor.execute(request, authorization, state_root)
+    except trusted_local_executor.TrustedLocalError as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
+def advance_trusted_local(*, authorization: Any, state_root: Path) -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        return trusted_local_executor.advance_publication(authorization, state_root)
+    except (trusted_local_executor.TrustedLocalError, trusted_local_executor.publication.PublicationError) as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
 def main() -> None:
     os.umask(0o077)
     args = parser().parse_args()
