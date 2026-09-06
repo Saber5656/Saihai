@@ -342,6 +342,16 @@ def handle_usage_status(frontdoor: Any, args: argparse.Namespace) -> dict[str, A
         raise frontdoor.FrontdoorError(str(exc)) from exc
 
 
+def handle_usage_repair_validation(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        authority = trusted_local_executor.load_host_authorization(Path(args.authorization))
+    except trusted_local_executor.TrustedLocalError as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
+    return frontdoor.repair_trusted_local_validation(authorization=authority, state_root=Path(args.state_root),
+                                                   repair_instruction=args.repair_instruction)
+
+
 def build_usage_parser(sub: Any) -> None:
     parser = sub.add_parser('usage', help='explicit trusted-local execution and host publication')
     commands = parser.add_subparsers(dest='command', required=True)
@@ -358,6 +368,11 @@ def build_usage_parser(sub: Any) -> None:
     status.add_argument('--execution-id', required=True)
     status.add_argument('--state-root', required=True)
     status.set_defaults(handler=handle_usage_status)
+    repair = commands.add_parser('repair-validation', help='repair a failed validation tree with a fresh execution')
+    repair.add_argument('--authorization', required=True)
+    repair.add_argument('--state-root', required=True)
+    repair.add_argument('--repair-instruction', default='', help='bounded host guidance within original task scope')
+    repair.set_defaults(handler=handle_usage_repair_validation)
 
 
 def build_parser() -> argparse.ArgumentParser:
