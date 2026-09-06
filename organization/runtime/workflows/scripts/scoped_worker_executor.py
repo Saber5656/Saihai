@@ -2833,6 +2833,10 @@ def capture_review_context(capability: dict[str, Any], root: Path, changed: list
             os.close(root_fd)
     except (OSError, ValueError, UnicodeDecodeError, NotImplementedError) as exc:
         raise ScopedWorkerError('review_context_unavailable') from exc
+    import provider_adapters
+    serialized = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    if len(serialized) > provider_adapters.MAX_CONTEXT_BYTES:
+        raise ScopedWorkerError('review_context_serialized_limit')
     return result
 
 
