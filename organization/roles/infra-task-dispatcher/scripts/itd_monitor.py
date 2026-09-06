@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -128,6 +129,29 @@ def git_snapshot(root: Path, report: Path) -> dict[str, Any]:
     }
 
 
+def read_projection(path: Path) -> dict[str, str]:
+    """Observe a projection without confusing missing input with failed reading."""
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return {"status": "missing"}
+    except OSError as exc:
+        return {"status": "unreadable", "error": type(exc).__name__}
+    if not stat.S_ISREG(mode):
+        return {"status": "unreadable", "error": "not_regular_file"}
+    try:
+        # Refuse a symlink swapped in after lstat and avoid blocking on a FIFO.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return {"status": "unreadable", "error": "not_regular_file"}
+            raw = stream.read()
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        return {"status": "unreadable", "error": type(exc).__name__}
+    return {"status": "readable", "text": text, "digest": hashlib.sha256(raw).hexdigest()}
+
+
 def build_snapshot(roots: list[Path], report: Path) -> dict[str, Any]:
     repos: dict[str, Any] = {}
     for root in sorted(set(roots), key=str):
@@ -143,9 +167,9 @@ def build_snapshot(roots: list[Path], report: Path) -> dict[str, Any]:
         discovery = discover_tasks(root, excluded_paths=(report,))
         task_inputs = discovery["inputs"]
         for name in ("00-Inbox&Tasks/Task-Index.md", "00-Inbox&Tasks/Kanban.md"):
-            path = root / name
-            if path.is_file() and not path.is_symlink():
-                task_inputs[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            projection = read_projection(root / name)
+            task_inputs[name] = projection.get("digest") or json.dumps(
+                projection, sort_keys=True, ensure_ascii=False)
         root_snapshot["task_inputs"] = task_inputs
         root_snapshot["task_states"] = {task_id: record["status"] for task_id, record in discovery["tasks"].items()}
         root_snapshot["task_discovery_problems"] = [
@@ -173,12 +197,13 @@ def task_files(agents_vault: Path) -> list[Path]:
     return sorted(record["path"] for record in discover_tasks(agents_vault)["tasks"].values())
 
 
-def parse_task_index(agents_vault: Path) -> dict[str, str]:
+def parse_task_index(agents_vault: Path, *, projection: dict[str, str] | None = None) -> dict[str, str]:
     path = agents_vault / "00-Inbox&Tasks/Task-Index.md"
-    if not path.exists():
+    projection = projection if projection is not None else read_projection(path)
+    if projection["status"] != "readable":
         return {}
     index: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in projection["text"].splitlines():
         if not line.startswith("| TSK-"):
             continue
         cells = [cell.strip() for cell in line.strip("|").split("|")]
@@ -188,9 +213,11 @@ def parse_task_index(agents_vault: Path) -> dict[str, str]:
     return index
 
 
-def parse_kanban(agents_vault: Path, *, discovery: dict[str, Any] | None = None) -> dict[str, str]:
+def parse_kanban(agents_vault: Path, *, discovery: dict[str, Any] | None = None,
+                 projection: dict[str, str] | None = None) -> dict[str, str]:
     path = agents_vault / "00-Inbox&Tasks/Kanban.md"
-    if not path.exists():
+    projection = projection if projection is not None else read_projection(path)
+    if projection["status"] != "readable":
         return {}
     discovery = discovery if discovery is not None else discover_tasks(agents_vault)
     target_ids: dict[str, str] = {}
@@ -204,7 +231,7 @@ def parse_kanban(agents_vault: Path, *, discovery: dict[str, Any] | None = None)
 
     current = ""
     out: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in projection["text"].splitlines():
         if line.startswith("## "):
             current = line.removeprefix("## ").strip()
             continue
@@ -308,8 +335,14 @@ def collect_git_findings(roots: list[Path], report: Path) -> list[dict[str, Any]
 def collect_gate_findings(agents_vault: Path) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     discovery = discover_tasks(agents_vault)
-    index = parse_task_index(agents_vault)
-    kanban = parse_kanban(agents_vault, discovery=discovery)
+    index_input = read_projection(agents_vault / "00-Inbox&Tasks/Task-Index.md")
+    kanban_input = read_projection(agents_vault / "00-Inbox&Tasks/Kanban.md")
+    index = parse_task_index(agents_vault, projection=index_input)
+    kanban = parse_kanban(agents_vault, discovery=discovery, projection=kanban_input)
+    for name, projection in (("Task-Index.md", index_input), ("Kanban.md", kanban_input)):
+        if projection["status"] == "unreadable":
+            findings.append(finding("projection_read_failed", "P1", f"Cannot read {name}",
+                                    projection["error"], ["00-Inbox&Tasks/" + name]))
 
     for issue in discovery["problems"]:
         findings.append(finding(issue["event_type"], "P0", "Task identity requires reconciliation",
@@ -406,7 +439,7 @@ def collect_gate_findings(agents_vault: Path) -> list[dict[str, Any]]:
                 )
 
     for task_id, idx_status in index.items():
-        if task_id not in kanban:
+        if kanban_input["status"] == "readable" and task_id not in kanban:
             findings.append(
                 finding(
                     "kanban_desync",

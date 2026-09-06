@@ -388,6 +388,75 @@ class CanonicalMonitorTests(unittest.TestCase):
         self.assertEqual(set(root_records), {str(first.absolute()), str(second.absolute())})
         self.assertTrue(all(record["task_states"] == {"TSK-1234": "ready"} for record in root_records.values()))
 
+    def test_projection_read_failures_are_reported_without_false_desync(self):
+        self.task("Project/task.md", "TSK-1234", "archived")
+        index = self.write("00-Inbox&Tasks/Task-Index.md", "| TSK-1234 | task | owner | date | archived |\n")
+        kanban = self.write("00-Inbox&Tasks/Kanban.md", "## Done\n- TSK-1234\n")
+        report = self.vault / "report.md"
+        healthy = monitor.build_snapshot([self.vault], report)
+        real_open, real_read = os.open, Path.read_bytes
+        for projection in (index, kanban):
+            with self.subTest(projection=projection.name):
+                def denied_open(path, *args, **kwargs):
+                    if Path(path) == projection:
+                        raise PermissionError(13, "denied", str(path))
+                    return real_open(path, *args, **kwargs)
+
+                def denied_read(path):
+                    if path == projection:
+                        raise PermissionError(13, "denied", str(path))
+                    return real_read(path)
+
+                with mock.patch.object(os, "open", side_effect=denied_open), \
+                        mock.patch.object(Path, "read_bytes", denied_read):
+                    failed = monitor.build_snapshot([self.vault], report)
+                    self.assertNotEqual(healthy["digest"], failed["digest"])
+                    self.assertEqual(failed["digest"], monitor.build_snapshot([self.vault], report)["digest"])
+                    findings = monitor.collect_gate_findings(self.vault)
+                    failures = [f for f in findings if f["event_type"] == "projection_read_failed"]
+                    self.assertEqual(len(failures), 1)
+                    self.assertEqual(failures[0]["affected_paths"], [str(projection.relative_to(self.vault))])
+                    self.assertFalse(any(f["event_type"] == "kanban_desync" for f in findings))
+                    monitor.parse_task_index(self.vault)
+                    monitor.parse_kanban(self.vault)
+                self.assertEqual(healthy["digest"], monitor.build_snapshot([self.vault], report)["digest"])
+
+    def test_projection_missing_and_disappeared_during_read_are_distinct(self):
+        path = self.vault / "00-Inbox&Tasks/Kanban.md"
+        self.assertEqual(monitor.read_projection(path)["status"], "missing")
+        self.write("00-Inbox&Tasks/Kanban.md", "## Ready\n")
+        with mock.patch.object(os, "open", side_effect=FileNotFoundError(2, "gone", str(path))):
+            result = monitor.read_projection(path)
+        self.assertEqual(result["status"], "unreadable")
+        self.assertEqual(result["error"], "FileNotFoundError")
+
+    def test_projection_invalid_utf8_and_symlink_are_unreadable(self):
+        path = self.write("00-Inbox&Tasks/Task-Index.md", "")
+        path.write_bytes(b"\xff")
+        self.assertEqual(monitor.read_projection(path)["status"], "unreadable")
+        self.assertEqual(monitor.read_projection(path)["error"], "UnicodeDecodeError")
+        target = self.write("outside/projection.md", "## Ready\n")
+        link = self.vault / "00-Inbox&Tasks/Kanban.md"
+        link.symlink_to(target)
+        with mock.patch.object(os, "open", side_effect=AssertionError("must not open symlink target")):
+            self.assertEqual(monitor.read_projection(link)["status"], "unreadable")
+        self.assertTrue(link.is_symlink())
+
+    def test_cli_persistent_projection_failure_is_reported_once(self):
+        self.task("Project/task.md", "TSK-1234", "archived")
+        projection = self.write("00-Inbox&Tasks/Kanban.md", "")
+        projection.write_bytes(b"\xff")
+        report = self.vault / "report.md"
+        command = ["itd_monitor.py", "--root", str(self.vault), "--report", str(report)]
+        with mock.patch.object(monitor, "AGENTS_VAULT", self.vault), \
+                mock.patch.object(monitor, "validate_vault"), \
+                mock.patch.object(sys, "argv", command), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(monitor.main(), 0)
+            first = report.read_bytes()
+            self.assertIn(b"projection_read_failed", first)
+            self.assertEqual(monitor.main(), 0)
+            self.assertEqual(first, report.read_bytes())
+
     def test_report_self_update_is_not_a_task_or_snapshot_change(self):
         self.task("Project/TSK-20260905-example/task.md", status="deferred")
         report = self.vault / "01-Projects/TSK-9999-report.md"
