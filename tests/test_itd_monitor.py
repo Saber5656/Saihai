@@ -128,15 +128,36 @@ class CanonicalMonitorTests(unittest.TestCase):
                     self.assertTrue(self.discover()["problems"])
 
     def test_sec02_unreadable_subtree_cannot_prove_unique_authority(self):
+        readable = self.task("readable/task.md", "TSK-1234", "ready")
+        hidden = self.task("unreadable/task.md", "TSK-1234", "ready").parent
+
+        def walk_with_denied_subtree(top, *, followlinks, onerror):
+            self.assertEqual(top, self.vault / "01-Projects")
+            self.assertFalse(followlinks)
+            yield str(readable.parent), [], [readable.name]
+            onerror(PermissionError(13, "Permission denied", str(hidden)))
+
+        with mock.patch("task_discovery.os.walk", side_effect=walk_with_denied_subtree):
+            result = self.discover()
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["tasks"])
+        self.assertTrue(any(p["event_type"] == "task_discovery_incomplete"
+                            and hidden in p["paths"] for p in result["problems"]))
+
+    def test_sec02_native_directory_denial_when_enforced(self):
         self.task("readable/task.md", "TSK-1234", "ready")
         hidden = self.task("unreadable/task.md", "TSK-1234", "ready").parent
         mode = hidden.stat().st_mode & 0o777
         try:
             hidden.chmod(0)
-            # An actual directory traversal must fail for this isolation test.
-            with self.assertRaises(PermissionError):
+            try:
                 list(hidden.iterdir())
+            except PermissionError:
+                pass
+            else:
+                self.skipTest("Current privileges bypass directory mode denial; deterministic traversal-error test still runs")
             result = self.discover()
+            self.assertFalse(result["complete"])
             self.assertFalse(result["tasks"])
             self.assertTrue(any(p["event_type"] == "task_discovery_incomplete" for p in result["problems"]))
         finally:
