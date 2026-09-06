@@ -2820,7 +2820,14 @@ def capture_review_context(capability: dict[str, Any], root: Path, changed: list
                     try:
                         if not stat.S_ISREG(os.fstat(fd).st_mode):
                             raise ScopedWorkerError('review_context_not_regular')
-                        data = os.read(fd, 262145)
+                        chunks, captured_bytes = [], 0
+                        while captured_bytes <= 262144:
+                            chunk = os.read(fd, min(65536, 262145 - captured_bytes))
+                            if not chunk:
+                                break
+                            chunks.append(chunk)
+                            captured_bytes += len(chunk)
+                        data = b''.join(chunks)
                     finally:
                         os.close(fd)
                 finally:
