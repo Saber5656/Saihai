@@ -4919,7 +4919,7 @@ def drain_run(
                             step=step,
                             issuer_principal=actor,
                         )
-                    except FrontdoorError as exc:
+                    except (FrontdoorError, work_order_builder.WorkOrderError) as exc:
                         errors.append(str(exc))
                 if not errors:
                     errors.extend(
