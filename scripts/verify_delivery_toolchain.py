@@ -12,6 +12,7 @@ import selectors
 import unicodedata
 import hashlib
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import platform
@@ -287,6 +288,133 @@ def child_environment():
     return env
 
 
+# Python validation projection only; independent of the larger CodeQL bounds.
+VALIDATION_JSON_LIMIT = 2 * 1024 * 1024
+SUITE_EVIDENCE_FIELDS = ('path', 'result', 'cases', 'command', 'cwd', 'started_at',
+                         'finished_at', 'exit_code', 'status', 'executed', 'failed',
+                         'skipped', 'unknown', 'count_method', 'duration_seconds')
+
+
+def validation_bytes(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > VALIDATION_JSON_LIMIT:
+        os.close(fd)
+        raise ContractError('invalid validation file bounds/type')
+    with os.fdopen(fd, 'rb') as stream:
+        data = stream.read(VALIDATION_JSON_LIMIT + 1)
+    if len(data) > VALIDATION_JSON_LIMIT: raise ContractError('validation byte budget')
+    return data
+
+
+def validation_document(path, expected_digest=None):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result: raise ContractError('duplicate validation key')
+            result[key] = value
+        return result
+    def check(value, depth=0):
+        if depth > 32: raise ContractError('validation depth budget')
+        if type(value) is dict:
+            for item in value.values(): check(item, depth + 1)
+        elif type(value) is list:
+            if len(value) > 1000: raise ContractError('validation item budget')
+            for item in value: check(item, depth + 1)
+        elif type(value) is float and not math.isfinite(value):
+            raise ContractError('nonfinite validation number')
+    try:
+        data = validation_bytes(path)
+        if expected_digest is not None and digest(data) != expected_digest:
+            raise ContractError('full validation log changed')
+        value = json.loads(data, object_pairs_hook=unique)
+        check(value)
+    except (ValueError, RecursionError, UnicodeError) as exc:
+        raise ContractError('invalid validation JSON') from exc
+    return value
+
+
+def sanitize_validation(result, python):
+    """Project current U0 metadata, never fill legacy/missing fields with success.
+
+    Version 1 of suite_evidence is additive to the original schema_version 1.
+    Old artifacts remain unchanged and lack this contract. This projection is
+    descriptive evidence, not authenticated execution or applicability policy.
+    """
+    if type(result) is not dict or type(result.get('schema_version')) is not int or result['schema_version'] != 1 or result.get('result') != 'pass' or result.get('compiled') is not True:
+        raise ContractError('invalid full validation result')
+    suites = result.get('suites')
+    if type(suites) is not list or not 1 <= len(suites) <= 1000:
+        raise ContractError('invalid validation suites')
+    public = {key: result[key] for key in ('schema_version', 'result', 'compiled')}
+    public.update(suite_evidence_version=1, suites=[])
+    seen = set()
+    for row in suites:
+        if type(row) is not dict or any(key not in row for key in SUITE_EVIDENCE_FIELDS):
+            raise ContractError('missing required suite evidence')
+        path = row['path']
+        if type(path) is not str or not re.fullmatch(r'(?:tests|organization/runtime/workflows/tests|organization/runtime/infra-team-bootstrap/tests|organization/roles/infra-team-bootstrap/tests)/test_[A-Za-z0-9_]+\.py', path) or path in seen:
+            raise ContractError('invalid/duplicate suite path')
+        if not (ROOT / path).is_file() or (ROOT / path).is_symlink():
+            raise ContractError('suite source unavailable')
+        seen.add(path)
+        if row['command'] != [str(python), str(ROOT / path)] or row['cwd'] != str(ROOT):
+            raise ContractError('suite command/cwd mismatch')
+        if row['result'] != 'pass' or row['status'] != 'passed' or type(row['exit_code']) is not int or row['exit_code'] != 0:
+            raise ContractError('suite did not pass')
+        if any(type(row[key]) is not int or row[key] < 0 for key in ('cases', 'executed', 'failed', 'skipped', 'unknown')):
+            raise ContractError('invalid suite counts')
+        if row['cases'] != row['executed'] or row['executed'] == 0 or any(row[key] for key in ('failed', 'skipped', 'unknown')):
+            raise ContractError('required work incomplete')
+        if row['count_method'] not in ('structured_result', 'completed_test_functions', 'unittest_summary'):
+            raise ContractError('unknown count method')
+        times = []
+        for key in ('started_at', 'finished_at'):
+            value = row[key]
+            if type(value) is not str or len(value) > 64: raise ContractError('invalid suite time')
+            try: parsed = datetime.fromisoformat(value)
+            except ValueError as exc: raise ContractError('invalid suite time') from exc
+            if parsed.tzinfo is None or parsed.utcoffset().total_seconds() != 0:
+                raise ContractError('suite time must be UTC')
+            times.append(parsed)
+        duration = row['duration_seconds']
+        if times[1] < times[0] or type(duration) not in (int, float) or not 0 <= duration <= 1e9:
+            raise ContractError('invalid suite duration/order')
+        # No stdout/stderr/environment/details or arbitrary additional payload.
+        public['suites'].append({key: row[key] for key in SUITE_EVIDENCE_FIELDS})
+    expected_contracts = [[str(python), 'organization/runtime/workflows/scripts/workflow_selector.py', 'validate-contracts'],
+                          [str(python), 'organization/runtime/workflows/scripts/template_role_validator.py']]
+    contracts = result.get('contracts')
+    if type(contracts) is not list or len(contracts) != len(expected_contracts):
+        raise ContractError('missing required contracts')
+    public['contracts'] = []
+    for row, command in zip(contracts, expected_contracts):
+        if type(row) is not dict or row.get('command') != command or row.get('result') != 'pass':
+            raise ContractError('contract did not pass or command mismatch')
+        public['contracts'].append({'command': command, 'result': row['result']})
+    return public
+
+
+def publish_validation(full_log, output, receipt, python):
+    stage = receipt['stages'][-1]
+    if stage.get('name') != 'full' or stage.get('status') != 'success' or type(stage.get('exit')) is not int or stage['exit'] != 0 or type(stage.get('log_sha256')) is not str or not re.fullmatch('[a-f0-9]{64}', stage['log_sha256']):
+        raise ContractError('missing successful full stage evidence')
+    public = sanitize_validation(validation_document(full_log, stage['log_sha256']), python)
+    data = (json.dumps(public, indent=2, allow_nan=False) + '\n').encode('utf-8')
+    if len(data) > VALIDATION_JSON_LIMIT: raise ContractError('public validation byte budget')
+    with (output / 'validation.json').open('xb') as stream: stream.write(data)
+    # This hashes exact published bytes, including formatting/newline, not full.log.
+    receipt['validation_result'] = {'path': 'validation.json', 'sha256': digest(data), 'bytes': len(data)}
+    save_receipt(output, receipt)
+
+
+def verify_validation_result(output, receipt):
+    binding = receipt['validation_result']
+    data = validation_bytes(output / 'validation.json')
+    if len(data) != binding['bytes'] or digest(data) != binding['sha256']:
+        raise ContractError('sanitized validation result changed')
+
+
 def execute(output, run):
     output.mkdir(mode=0o700)  # Attempt directory must not already exist.
     receipt = {'schema_version': 1, 'attempt': output.name, 'start': now(), 'status': 'running',
@@ -332,15 +460,10 @@ def execute(output, run):
         run_stage('focused-inventory', [str(python), '-B', 'organization/runtime/workflows/tests/test_delivery_workflow_inventory.py'], output, receipt, env, 180)
         if run == 'full':
             full_log = run_stage('full', [str(python), '-B', 'scripts/validate_all.py'], output, receipt, env, 900)
-            result = json.loads(full_log.read_text())
-            if result.get('result') != 'pass' or not result.get('suites'): raise ContractError('invalid full validation result')
-            # Deliberate allowlist: no raw output tails or arbitrary logs in uploaded JSON.
-            public = {k: result[k] for k in ('schema_version', 'result', 'compiled')}
-            public['suites'] = [{k: row[k] for k in ('path', 'result', 'cases')} for row in result['suites']]
-            public['contracts'] = [{k: row[k] for k in ('command', 'result')} for row in result['contracts']]
-            (output / 'validation.json').write_text(json.dumps(public, indent=2) + '\n')
+            publish_validation(full_log, output, receipt, python)
         receipt['target_after'] = target_identity(ROOT); require_identity(receipt['target_before'], receipt['target_after'])
         if receipt['dependency_lock_digest'] != digest((ROOT / lock['dependency_lock']['path']).read_bytes()): raise ContractError('dependency lock changed during run')
+        if run == 'full': verify_validation_result(output, receipt)
         receipt.update(status='success', exit=0)
     except KeyboardInterrupt:
         receipt.update(status='cancelled', exit=130)

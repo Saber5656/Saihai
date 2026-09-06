@@ -155,6 +155,167 @@ class ToolchainTests(unittest.TestCase):
         self.assertIn('receipt.json', workflow); self.assertIn('validation.json', workflow)
 
 
+class ValidationProjectionTests(unittest.TestCase):
+    """Exercise execute's real sanitizer/receipt writer; provisioning is synthetic."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / 'repo'
+        (self.repo / '.github').mkdir(parents=True)
+        (self.repo / '.github/delivery-toolchain.lock.json').write_text('fixture lock')
+        (self.repo / '.github/requirements-delivery.lock').write_text('fixture dependency')
+        (self.repo / 'tests').mkdir()
+        (self.repo / 'tests/test_fixture.py').write_text('print("fixture")')
+        self.private = self.root / 'runtime'
+        self.python = self.private / 'venv/bin/python3'
+        self.counter = 0
+
+    def validation(self):
+        return {'schema_version': 1, 'result': 'pass', 'compiled': True,
+                'suites': [{'path': 'tests/test_fixture.py', 'result': 'pass', 'cases': 2,
+                            'executed': 2, 'failed': 0, 'skipped': 0, 'unknown': 0,
+                            'count_method': 'completed_test_functions', 'status': 'passed', 'exit_code': 0,
+                            'command': [str(self.python), str(self.repo / 'tests/test_fixture.py')],
+                            'cwd': str(self.repo), 'started_at': '2026-09-06T00:00:00+00:00',
+                            'finished_at': '2026-09-06T00:00:01+00:00', 'duration_seconds': 1.0}],
+                'contracts': [{'command': [str(self.python), 'organization/runtime/workflows/scripts/workflow_selector.py', 'validate-contracts'], 'result': 'pass'},
+                              {'command': [str(self.python), 'organization/runtime/workflows/scripts/template_role_validator.py'], 'result': 'pass'}]}
+
+    def execute_fixture(self, result, *, raw=None, mutate_output=False, mutate_log=False):
+        self.counter += 1
+        output = self.root / ('attempt-' + str(self.counter))
+        selected = {'version': '3.11.16', 'machine': 'arm64', 'interpreter': 'python/bin/python3.11'}
+        lock = {'dependency_lock': {'path': '.github/requirements-delivery.lock',
+                                  'sha256': tool.digest(b'fixture dependency')}}
+        def stage(name, command, directory, receipt, env, timeout):
+            log = directory / (name + '.log')
+            if name in ('interpreter-probe', 'venv-probe'):
+                data = json.dumps({'version': '3.11.16', 'machine': 'arm64', 'executable': command[0],
+                                   'prefix': str(self.private / 'venv')}).encode()
+            elif name == 'full': data = raw if raw is not None else json.dumps(result).encode()
+            else: data = b'fixture stage'
+            log.write_bytes(data)
+            receipt['stages'].append({'name': name, 'command': command, 'start': tool.now(),
+                                      'end': tool.now(), 'status': 'success', 'exit': 0,
+                                      'log_sha256': tool.digest(data)})
+            tool.save_receipt(directory, receipt)
+            if name == 'full' and mutate_log:
+                swapped = copy.deepcopy(result)
+                swapped['suites'][0].update(cases=3, executed=3)
+                log.write_text(json.dumps(swapped))
+            return log
+        calls = 0
+        def identity(root):
+            nonlocal calls
+            calls += 1
+            if calls == 2 and mutate_output:
+                (output / 'validation.json').write_text('{"swapped":true}')
+            return {'head': 'synthetic-fixed'}
+        # Only external provisioning/stage input and target source are mocked.
+        # execute, validation parsing/projection and final receipt persistence are real.
+        with patch.object(tool, 'ROOT', self.repo), patch.object(tool.tempfile, 'mkdtemp', return_value=str(self.private)), patch.object(tool, 'load_lock', return_value=lock), patch.object(tool, 'select', return_value=selected), patch.object(tool, 'download'), patch.object(tool, 'safe_extract'), patch.object(tool, 'run_stage', side_effect=stage), patch.object(tool, 'target_identity', side_effect=identity):
+            code = tool.execute(output, 'full')
+        return code, output, json.loads((output / 'receipt.json').read_text())
+
+    def test_current_suite_evidence_survives_public_projection(self):
+        result = self.validation()
+        result['suites'][0]['stdout_tail'] = 'private-output-marker'
+        result['suites'][0]['environment'] = {'PRIVATE': 'private-environment-marker'}
+        result['arbitrary'] = 'private-top-level-marker'
+        code, output, receipt = self.execute_fixture(result)
+        self.assertEqual(code, 0)
+        public = json.loads((output / 'validation.json').read_bytes())
+        for key in ('command', 'cwd', 'started_at', 'finished_at', 'exit_code', 'status',
+                    'cases', 'executed', 'failed', 'skipped', 'unknown', 'count_method', 'duration_seconds'):
+            self.assertEqual(public['suites'][0][key], result['suites'][0][key], key)
+        self.assertEqual(public['suite_evidence_version'], 1)
+        self.assertNotIn('private-', (output / 'validation.json').read_text())
+
+    def test_receipt_binds_exact_sanitized_bytes_not_log_bytes(self):
+        code, output, receipt = self.execute_fixture(self.validation())
+        self.assertEqual(code, 0)
+        data = (output / 'validation.json').read_bytes()
+        self.assertEqual(receipt['validation_result'], {'path': 'validation.json', 'sha256': tool.digest(data), 'bytes': len(data)})
+        self.assertNotEqual(receipt['validation_result']['sha256'], receipt['stages'][-1]['log_sha256'])
+
+    def test_malformed_missing_and_unsuccessful_required_fields_fail(self):
+        for field, value in [('cases', 0), ('cases', True), ('executed', 0), ('executed', True),
+                             ('failed', 1), ('skipped', 1), ('unknown', 1), ('unknown', False),
+                             ('exit_code', True), ('exit_code', 7), ('status', 'unknown'),
+                             ('count_method', 'unknown'), ('started_at', 'bad'),
+                             ('finished_at', '2000-01-01T00:00:00+00:00'), ('duration_seconds', True),
+                             ('command', ['arbitrary', 'private-command-marker'])]:
+            with self.subTest(field=field, value=value):
+                result = self.validation(); result['suites'][0][field] = value
+                code, output, receipt = self.execute_fixture(result)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(receipt['status'], 'failure')
+                self.assertNotIn('validation_result', receipt)
+                self.assertFalse((output / 'validation.json').exists())
+        for field in ('executed', 'failed', 'skipped', 'unknown', 'command', 'cwd', 'started_at',
+                      'finished_at', 'exit_code', 'status', 'count_method'):
+            with self.subTest(missing=field):
+                result = self.validation(); del result['suites'][0][field]
+                self.assertNotEqual(self.execute_fixture(result)[0], 0)
+
+    def test_failed_compile_contract_and_duplicate_suite_fail(self):
+        for mutate in (lambda r: r.update(compiled=False),
+                       lambda r: r['contracts'][0].update(result='fail'),
+                       lambda r: r.update(contracts=[]),
+                       lambda r: r['suites'].append(copy.deepcopy(r['suites'][0]))):
+            result = self.validation(); mutate(result)
+            self.assertNotEqual(self.execute_fixture(result)[0], 0)
+
+    def test_duplicate_nonfinite_and_nonobject_json_fail(self):
+        good = json.dumps(self.validation())
+        for raw in (b'[]', b'null', b'{', good.replace('"schema_version": 1', '"schema_version": 1, "schema_version": 1').encode(),
+                    good.replace('"duration_seconds": 1.0', '"duration_seconds": NaN').encode()):
+            with self.subTest(raw_kind=raw[:10]):
+                self.assertNotEqual(self.execute_fixture(None, raw=raw)[0], 0)
+
+    def test_full_log_swap_cannot_change_bound_result(self):
+        code, output, receipt = self.execute_fixture(self.validation(), mutate_log=True)
+        self.assertNotEqual(code, 0)
+        self.assertNotIn('validation_result', receipt)
+
+    def test_changed_result_before_final_receipt_cannot_succeed(self):
+        code, output, receipt = self.execute_fixture(self.validation(), mutate_output=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(receipt['status'], 'failure')
+
+
+    def test_actual_u0_child_evidence_reaches_real_producer(self):
+        spec = importlib.util.spec_from_file_location('u0_runner_fixture', ROOT / 'scripts/validate_all.py')
+        runner = importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
+        suite = self.repo / 'tests/test_fixture.py'
+        suite.write_text('import unittest\nclass Check(unittest.TestCase):\n    def test_one(self): self.assertTrue(True)\nunittest.main()\n')
+        with patch.object(runner, 'REPO_ROOT', self.repo): row = runner.run_suite(suite)
+        self.assertEqual(row['result'], 'pass')
+        result = self.validation(); result['suites'] = [row]
+        for contract in result['contracts']: contract['command'][0] = sys.executable
+        output = self.root / 'real-producer'; output.mkdir()
+        receipt = {'stages': []}
+        with patch.object(tool, 'ROOT', self.repo):
+            log = tool.run_stage('full', [sys.executable, '-c', 'print(' + repr(json.dumps(result)) + ')'], output, receipt, os.environ.copy(), 5)
+            tool.publish_validation(log, output, receipt, sys.executable)
+            tool.verify_validation_result(output, receipt)
+        public = json.loads((output / 'validation.json').read_bytes())
+        self.assertEqual(public['suites'][0]['executed'], 1)
+        self.assertEqual(public['suites'][0]['count_method'], 'unittest_summary')
+        self.assertEqual(public['suites'][0]['command'], row['command'])
+        self.assertEqual(json.loads((output / 'receipt.json').read_text())['validation_result']['sha256'], tool.digest((output / 'validation.json').read_bytes()))
+
+    def test_projection_file_budget_symlink_and_depth_are_rejected(self):
+        path = self.root / 'bounded.json'
+        path.write_bytes(b' ' * (tool.VALIDATION_JSON_LIMIT + 1))
+        with self.assertRaises(tool.ContractError): tool.validation_document(path)
+        path.write_text('[' * 40 + '0' + ']' * 40)
+        with self.assertRaises(tool.ContractError): tool.validation_document(path)
+        link = self.root / 'linked.json'; link.symlink_to(path)
+        with self.assertRaises((OSError, tool.ContractError)): tool.validation_document(link)
+        with self.assertRaises(tool.ContractError): tool.validation_document(self.root)
+
+
 class CodeQLContractTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
