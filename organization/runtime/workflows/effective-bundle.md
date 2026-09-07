@@ -154,3 +154,62 @@ surfaces. Missing producers remain blockers there. #128 owns required-check and
 reviewer inventories, waivers and atomic merge; this observer adds none of them.
 No fabricated generation, host manifest, signing key or active boolean closes
 these dependencies.
+
+## Host installation and canonical sync (#141/#148)
+
+`effective_installation.configure(authorization, state_root, plan)` is an
+explicit host-only Python entrypoint before the worker claim. It freezes an
+independent host plan against the existing authorization digest; request JSON,
+worker stdout and old policy documents cannot supply or replace that plan.
+Repeated identical configuration is idempotent; changed or late configuration
+is rejected. Configured claims cannot fall back to legacy if their plan is lost;
+repair executions inherit the original constraints, and the catalog primary path
+is fixed at configuration and checked again before synchronization. Existing authority serialization and model/role permissions remain
+unchanged. An execution without a plan reports `legacy_not_configured`: this
+preserves old receipts and does **not** prove current installed artifacts or a
+verified dependent-task base. New consumers requiring those guarantees must
+configure a plan before execution, not retroactively bless an old run.
+
+The closed version-1 plan has `version`, `surface`, `roots`, `members`,
+`policy_snapshots`, `approved_symlinks`, `source_identity`,
+`expected_content_digest`, and `sync_catalog_key`. `members`, policy snapshots,
+source identity and approved links use the U1 contract above. `roots` maps U1
+root IDs to fresh primary catalog keys (or the fixed `CODEX_SURFACE` /
+`CLAUDE_SURFACE` existing discovery directories), not arbitrary worker paths.
+All six artifact categories need installed readback. The host obtains the
+expected observation digest from its approved deployment evidence. Changed
+bytes, stale selected snapshots, unknown source revision and changed exact
+links fail closed; configuration does not install or update anything.
+
+Trusted-local execute and publication resume revalidate the plan before doing
+work. The private readback includes selected surface, source/install/link
+identities, content and plan digests, plus authority binding. The result is
+`installed_bytes_verified`; `active_runtime` remains `not_proven`. Reading an
+active discovery symlink proves its current target/bytes, never that an already
+running App reloaded them. Approved distribution/rollback and actual target
+process readback remain host operations; no generation, credential, routing
+supersession or runtime reload is fabricated by this API.
+
+After actual merge and successful integrated CI, opted-in publication calls
+`sync_primary`. `sync_catalog_key` is one of `SAIHAI_ROOT`, `DOTFILES_ROOT`, or
+`SKILLS_REPO_ROOT`; repository identity must match existing host authorization.
+Only the catalog primary's clean, unique registered `main` tracking
+`origin/main` is eligible. The host fetches that remote branch, verifies its
+pinned tip against the validated merge SHA, and uses `merge --ff-only`.
+Untracked files, detached/wrong branch, divergence, repository/upstream mismatch,
+transport failure and a newer remote tip produce typed blockers while preserving
+user files. No stash, reset, branch switch, blanket pull or force occurs.
+
+The host rechecks local HEAD/status and remote tip and persists an idempotent
+`.sync.json` receipt with `dependent_base`. Dependent work must consume that
+verified base; `legacy_not_configured` has no such base. A newer remote tip needs
+fresh relevant integrated validation and a new host continuation; the old merge's
+CI is not reusable as validation of newer code. Existing worker branches are
+never rebased, and sync is not release. The host lock coordinates this state
+root's callers; other tools must respect primary ownership. Concurrent external
+Git writes cannot be claimed to be globally serialized by this lock.
+
+Validation: `python3.11 organization/runtime/workflows/tests/test_effective_installation.py`
+uses temporary repositories and files. Its installation readback, dirty,
+detached, divergent, advanced-tip, pending-CI and duplicate cases are hermetic
+behavior evidence, not live target rollout acceptance.

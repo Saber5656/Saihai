@@ -23,6 +23,7 @@ import host_publication_adapter as publication
 import run_lock
 import run_store
 import vault_task_records
+import effective_installation
 import scoped_worker_executor as scoped
 
 PROFILE = 'trusted_local_v1'
@@ -211,6 +212,10 @@ def _execute(request: dict, authorization: TrustedLocalAuthorization, state_root
              *, starting_identity: dict | None = None, repair_context: dict | None = None) -> dict:
     """Normal trusted-local intake → one actual process → real validation → host report."""
     root = _authorize(request, authorization, clean=starting_identity is None)
+    try:
+        installation = effective_installation.verify(authorization, Path(state_root))
+    except effective_installation.InstallationError as exc:
+        raise TrustedLocalError(str(exc)) from exc
     if starting_identity is not None:
         paths = _paths(root); _scope(paths, authorization.publication.allowed_paths)
         if publication.snapshot(root, paths) != starting_identity:
@@ -226,6 +231,8 @@ def _execute(request: dict, authorization: TrustedLocalAuthorization, state_root
     claim = {'request_digest': publication.digest(request), 'authorization_digest': publication.digest(dataclasses.asdict(authorization)),
              'profile': PROFILE, 'review_policy': authorization.review_policy, 'actor_kind': ACTOR,
              'authority_evidence_ref': host.authority_evidence_ref}
+    if installation['status'] != 'legacy_not_configured':
+        claim['installation_required'] = True
     try:
         fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except FileExistsError as exc:
@@ -532,6 +539,10 @@ def repair_validation(authorization: TrustedLocalAuthorization, state_root: Path
     progress.update(attempt=attempt, same_cause_retries=retries, cause=cause, execution_id=execution_id, status='running')
     _save(progress_path, progress)
     try:
+        try:
+            effective_installation.inherit(authorization, repaired, Path(state_root))
+        except effective_installation.InstallationError as exc:
+            raise TrustedLocalError(str(exc)) from exc
         result = _execute(repaired_request, repaired, state_root, starting_identity=identity, repair_context=context)
     except (TrustedLocalError, publication.PublicationError, run_store.RunStoreError, OSError, ValueError, subprocess.SubprocessError) as exc:
         reason = str(exc) if isinstance(exc, (TrustedLocalError, publication.PublicationError)) else 'repair_execution_unavailable'
@@ -577,6 +588,10 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
     claim = run_store.read_json(directory / 'claim.json')
     if claim['authorization_digest'] != publication.digest(dataclasses.asdict(authorization)):
         raise TrustedLocalError('publication_authorization_changed')
+    try:
+        installation = effective_installation.verify(authorization, Path(state_root))
+    except effective_installation.InstallationError as exc:
+        raise TrustedLocalError(str(exc)) from exc
     current = authorization
     repair_path = directory / 'validation-repair.json'
     if repair_path.exists():
@@ -642,6 +657,12 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
         result = dict(result, merge_status='merged', integrated_checks=states,
                       status='complete' if all(s == 'success' for s in states.values()) else
                       'integrated_ci_failed' if any(s in {'failure','error','cancelled','timed_out','action_required','skipped','neutral','stale'} for s in states.values()) else 'integrated_ci_pending')
+    result['effective_installation'] = installation
+    if result['status'] == 'complete':
+        try:
+            result['canonical_sync'] = effective_installation.sync_primary(authorization, Path(state_root), result)
+        except effective_installation.InstallationError as exc:
+            result.update(status='canonical_sync_blocked', reason=str(exc))
     if result['status'] == 'complete':
         try:
             binding_path = directory / 'vault-task-binding.json'
@@ -654,7 +675,7 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
                 attachments=[{'path':validation['evidence_path'], 'digest':validation['evidence_digest']}])
         except vault_task_records.VaultTaskError as exc:
             result.update(status='vault_persistence_failed', reason=exc.reason_class)
-    result['decision'] = 'blocked' if result['status'] in {'vault_persistence_failed','ci_failed','integrated_ci_failed','requires_user_decision','same_conflict_retry_limit','integration_reconciliation_required'} else 'ok'
+    result['decision'] = 'blocked' if result['status'] in {'canonical_sync_blocked','vault_persistence_failed','ci_failed','integrated_ci_failed','requires_user_decision','same_conflict_retry_limit','integration_reconciliation_required'} else 'ok'
     _save(directory / 'publication.json', result)
     return result
 
