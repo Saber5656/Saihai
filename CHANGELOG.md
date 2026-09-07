@@ -4,7 +4,35 @@ This file records shipped repository changes. The v0.1.0 section is prepared
 for the human-owned tag and GitHub Release; its presence does not mean the
 release has been published.
 
-## [0.1.0]
+## [0.1.0] — release candidate, unpublished
+
+### Usage-first continuation (2026-09-07)
+
+These entries record merged source, not a claim that every live acceptance or
+commissioning step passed. Existing entries below retain the original history.
+
+- [#159](https://github.com/Saber5656/Saihai/pull/159) preserved original review finding identities for bounded closeout.
+- [#162](https://github.com/Saber5656/Saihai/pull/162) connected explicitly authorized trusted-local execution and host publication.
+- [#163](https://github.com/Saber5656/Saihai/pull/163) added validation-failure repair under existing authority.
+- [#165](https://github.com/Saber5656/Saihai/pull/165) delivered the historical live status task after repair and conflict integration.
+- [#166](https://github.com/Saber5656/Saihai/pull/166) bounded validation repair inputs and diagnostics.
+- [#167](https://github.com/Saber5656/Saihai/pull/167) added the bounded host driver.
+- [#168](https://github.com/Saber5656/Saihai/pull/168) bound canonical tasks and persisted verified completion.
+- [#169](https://github.com/Saber5656/Saihai/pull/169) repaired Vault/driver integration and completion replay.
+- [#170](https://github.com/Saber5656/Saihai/pull/170) recovered legacy review context without replay.
+- [#171](https://github.com/Saber5656/Saihai/pull/171) connected startup recovery and output monitoring.
+- [#172](https://github.com/Saber5656/Saihai/pull/172) bound typed intake and full requirement scope.
+- [#173](https://github.com/Saber5656/Saihai/pull/173) froze role contracts in work orders.
+- [#174](https://github.com/Saber5656/Saihai/pull/174) bound installed artifacts and canonical main synchronization.
+- [#175](https://github.com/Saber5656/Saihai/pull/175) bound validation to delivery profiles.
+- [#176](https://github.com/Saber5656/Saihai/pull/176) aligned review prerequisites with execution phases.
+- [#177](https://github.com/Saber5656/Saihai/pull/177) added App host mediation and durable leases without claiming live App commissioning.
+- [#178](https://github.com/Saber5656/Saihai/pull/178) bound delivery/recovery to measured artifacts.
+- [#179](https://github.com/Saber5656/Saihai/pull/179) synchronized managed policy snapshots and installed skill readback.
+- [#180](https://github.com/Saber5656/Saihai/pull/180) enforced explicit host Assignees on PR creation/reuse/resume.
+- [#181](https://github.com/Saber5656/Saihai/pull/181) preserved full requirements through intake failure and continuation.
+
+Current live worker startup recovery is tracked in [#182](https://github.com/Saber5656/Saihai/issues/182); a fresh complete intake-to-publication run is not yet proven. See the [release checklist](docs/runbooks/release-readiness.md).
 
 ### Contracts
 
@@ -84,6 +112,6 @@ release has been published.
 - The frontend and worker require separately governed policy domains. v0.1.0 does not ship automatic cross-domain transport between the frontend gateway and the worker domain.
 - Same-rootfs Codex 0.144.1 worker evidence is not promotable because generic external mutation, absolute local `git push`, and credential denial cannot be proved there; `external_mutation`, `git_commit`, `git_push`, and `credential_access` remain failed/inconclusive, and worker `commission-seal` stays fail-closed until isolated-domain evidence exists.
 - The shipped scoped-worker executor rejects every network and provider grant. Live provider adapters are a separate host-owned, opt-in, readonly path.
-- Commit, push, and pull-request publication remain behind separate review, approval, and publication gates.
+- Those separate publication gates describe the original managed profile. The approved ordinary trusted-local flow now uses explicit host authority and required CI, with one limited review only for elevated risk.
 - The supported checkout is the host-managed primary checkout at `~/dev/Saihai` or one of its linked worktrees. An arbitrary fresh clone does not satisfy the checkout identity contract.
-- Daemon scheduling, tmux worker execution, package distribution, automatic publication, credential provisioning, and release publication are not part of the v0.1.0 runtime.
+- Daemon scheduling, tmux worker execution, package distribution, credential provisioning, and release publication are not part of the v0.1.0 runtime.

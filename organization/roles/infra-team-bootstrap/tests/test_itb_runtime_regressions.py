@@ -35,6 +35,21 @@ def load_builder_module():
     return BUILDER_MODULE
 
 
+def dispatch_valid_fixture_session(builder, *, runtime, state_root, hook_input):
+    """Existing provider tests use an identity-bound bootstrap with their roster.
+
+    Missing/corrupt session state is covered separately by session-routing tests.
+    """
+    session_id = hook_input["session_id"]
+    session_dir = state_root / session_id
+    if (session_dir / "roster.json").exists() and not (session_dir / "bootstrap.json").exists():
+        (session_dir / "bootstrap.json").write_text(json.dumps({
+            "session_id": session_id,
+            "organization_instance_id": builder.resolve_organization_instance_id({}, hook_input, session_id),
+        }), encoding="utf-8")
+    return builder.agent_dispatch(runtime=runtime, state_root=state_root, hook_input=hook_input)
+
+
 def policy_load_exception(exception_type, sensitive_detail: str) -> BaseException:
     if exception_type is UnicodeDecodeError:
         return UnicodeDecodeError("utf-8", b"\xff", 0, 1, sensitive_detail)
@@ -1707,7 +1722,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                     builder,
                     "run_claude_command_with_bounded_output",
                 ) as claude_runner:
-                    output = builder.agent_dispatch(
+                    output = dispatch_valid_fixture_session(builder,
                         runtime="codex",
                         state_root=Path(tmp),
                         hook_input={
@@ -1720,8 +1735,8 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                     )
 
                 self.assertEqual(
-                    output,
-                    {"decision": "block", "reason": "canonical role policy is unavailable"},
+                    (output["decision"], output["reason"], output["provider_invoked"]),
+                    ("block", "canonical_role_policy_unavailable", False),
                 )
                 self.assertNotIn(sensitive_detail, json.dumps(output, sort_keys=True))
                 codex_mock.assert_not_called()
@@ -1751,13 +1766,13 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                 builder,
                 "claude_cli_agent_dispatch",
             ) as claude_mock:
-                output = builder.agent_dispatch(
+                output = dispatch_valid_fixture_session(builder,
                     runtime="codex",
                     state_root=state_root,
                     hook_input={"session_id": "session", "agent_id": "unknown-role"},
                 )
 
-            self.assertEqual(output, {"decision": "block", "reason": "canonical role policy is unavailable"})
+            self.assertEqual((output["decision"], output["reason"], output["provider_invoked"]), ("block", "canonical_role_policy_unavailable", False))
             codex_mock.assert_not_called()
             claude_mock.assert_not_called()
 
@@ -1775,13 +1790,13 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                 builder,
                 "claude_cli_agent_dispatch",
             ) as claude_mock:
-                output = builder.agent_dispatch(
+                output = dispatch_valid_fixture_session(builder,
                     runtime="codex",
                     state_root=Path(tmp),
                     hook_input={"session_id": "session", "agent_id": "tech-backend"},
                 )
 
-            self.assertEqual(output, {"decision": "block", "reason": "canonical provider policy is unsupported"})
+            self.assertEqual((output["decision"], output["reason"], output["provider_invoked"]), ("block", "current_provider_policy_unsupported", False))
             codex_mock.assert_not_called()
             claude_mock.assert_not_called()
 
@@ -1882,7 +1897,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                             "prompt": "Review only.",
                         }
                         if entrypoint == "generic":
-                            output = builder.agent_dispatch(
+                            output = dispatch_valid_fixture_session(builder,
                                 runtime="codex",
                                 state_root=state_root,
                                 hook_input=hook_input,
@@ -1895,10 +1910,14 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                             )
 
                     self.assertEqual(output["decision"], "block")
-                    self.assertEqual(output["reason"], expected_reason)
+                    self.assertEqual(output["reason"], "session_route_outside_current_policy" if entrypoint == "generic" else expected_reason)
                     which_mock.assert_not_called()
                     claude_mock.assert_not_called()
                     roster = json.loads((session_dir / "roster.json").read_text(encoding="utf-8"))
+                    if entrypoint == "generic":
+                        self.assertEqual(roster, [persisted])
+                        self.assertFalse((session_dir / "invocation-evidence.jsonl").exists())
+                        continue
                     evidence = json.loads(
                         (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
                     )
@@ -1956,7 +1975,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                         "prompt": "Review only.",
                     }
                     if entrypoint == "generic":
-                        output = builder.agent_dispatch(runtime="codex", state_root=state_root, hook_input=hook_input)
+                        output = dispatch_valid_fixture_session(builder, runtime="codex", state_root=state_root, hook_input=hook_input)
                     elif entrypoint == "direct":
                         output = builder.claude_cli_agent_dispatch(
                             runtime="codex",
@@ -1966,6 +1985,11 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                     else:
                         output = builder.provider_activate(runtime="codex", state_root=state_root, hook_input=hook_input)
 
+                if entrypoint == "generic":
+                    self.assertEqual(output["reason"], "session_route_outside_current_policy")
+                    claude_mock.assert_not_called()
+                    self.assertEqual(json.loads((session_dir / "roster.json").read_text()), [persisted])
+                    continue
                 command = claude_mock.call_args.args[0]
                 self.assertEqual(command[command.index("--model") + 1], canonical_claude["intended_model"])
                 self.assertEqual(
@@ -2746,7 +2770,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                             "prompt": "Review only.",
                         }
                         if entrypoint == "generic":
-                            output = builder.agent_dispatch(
+                            output = dispatch_valid_fixture_session(builder,
                                 runtime="codex",
                                 state_root=state_root,
                                 hook_input=hook_input,
@@ -2791,7 +2815,9 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                         self.assertEqual(output["decision"], "block")
                         for untrusted_value in model_fields.values():
                             if isinstance(untrusted_value, str) and untrusted_value:
-                                self.assertNotIn(untrusted_value, json.dumps(output))
+                                self.assertNotIn(untrusted_value, json.dumps({key: value for key, value in output.items() if key != "sessionRoute"}))
+                                if "sessionRoute" in output:
+                                    self.assertEqual(output["sessionRoute"]["model"], canonical_claude["intended_model"])
                                 self.assertNotIn(untrusted_value, row["notes"])
                         self.assertEqual(row["provider_status"], "provider_model_mismatch")
                         self.assertEqual(row["response_status"], "not_invoked")
@@ -4553,7 +4579,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                 "run_command_with_bounded_output",
                 side_effect=AssertionError("stale generic route must not launch Codex"),
             ) as run_mock:
-                output = builder.agent_dispatch(
+                output = dispatch_valid_fixture_session(builder,
                     runtime="codex",
                     state_root=state_root,
                     hook_input={
@@ -4570,11 +4596,10 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
             lease_mock.assert_not_called()
             which_mock.assert_not_called()
             run_mock.assert_not_called()
-            evidence = json.loads(
-                (session_dir / "invocation-evidence.jsonl").read_text(encoding="utf-8").splitlines()[-1]
-            )
-            self.assertEqual(evidence["result"], "provider_model_policy_invalid")
-            self.assertFalse(evidence["provider_invoked"])
+            self.assertEqual(output['reason'], 'session_route_policy_drift')
+            self.assertFalse(output['provider_invoked'])
+            self.assertFalse((session_dir / 'invocation-evidence.jsonl').exists())
+            self.assertEqual(json.loads((session_dir / 'roster.json').read_text()), [codex_policy])
 
     def test_provider_consumers_block_policy_drift_after_execution(self) -> None:
         """Never return success when canonical policy changes during a provider call."""
@@ -5719,7 +5744,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                         "prompt": "Review only.",
                     }
                     if entrypoint == "generic":
-                        output = builder.agent_dispatch(runtime="codex", state_root=state_root, hook_input=hook_input)
+                        output = dispatch_valid_fixture_session(builder, runtime="codex", state_root=state_root, hook_input=hook_input)
                     elif entrypoint == "direct":
                         output = builder.codex_exec_agent_dispatch(
                             runtime="codex",
@@ -5729,6 +5754,11 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                     else:
                         output = builder.provider_activate(runtime="codex", state_root=state_root, hook_input=hook_input)
 
+                if entrypoint == "generic":
+                    self.assertEqual(output["reason"], "session_route_outside_current_policy")
+                    run_mock.assert_not_called()
+                    self.assertEqual(json.loads((session_dir / "roster.json").read_text()), [persisted])
+                    continue
                 command = run_mock.call_args.args[0]
                 self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
                 self.assertEqual(command[command.index("--sandbox") + 1], "read-only")

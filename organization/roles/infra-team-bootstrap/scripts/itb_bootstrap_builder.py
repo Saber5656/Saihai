@@ -11399,7 +11399,20 @@ def launch_provider_with_canonical_policy(
         }
 
     lease_id = normalize_cell(lease.get("lease_id"))
+    session_lock = None
     try:
+        selection = bound_execution_row.get('_effective_session_route')
+        if selection is not None:
+            session_lock = Path(selection['state_root']) / selection['session_id'] / 'roster.json.lock.d'
+            try:
+                acquire_queue_lock(session_lock)
+            except (OSError, TimeoutError, ValueError):
+                session_lock = None
+                return {'status':'lock_unavailable','initial_policy_digest':initial_digest,
+                        'launch_policy_digest':'','launch_lock':'session_unavailable'}
+            if not revalidate_session_route(selection):
+                return {'status':'policy_drift','initial_policy_digest':initial_digest,
+                        'launch_policy_digest':'','launch_lock':'session_acquired'}
         final_execution_row, policy_error, initial_digest, final_digest = (
             revalidate_canonical_provider_execution(
                 bound_execution_row,
@@ -11428,6 +11441,9 @@ def launch_provider_with_canonical_policy(
         command[0] = str(Path(executable_path).expanduser().resolve(strict=False))
 
         def process_started(_process: subprocess.Popen[bytes]) -> None:
+            nonlocal session_lock
+            if session_lock is not None:
+                release_queue_lock(session_lock); session_lock = None
             release_provider_policy_launch_lease(lease, lease_id=lease_id)
 
         completed = runner(
@@ -11444,6 +11460,8 @@ def launch_provider_with_canonical_policy(
             "launch_lock": "released_after_process_start",
         }
     finally:
+        if session_lock is not None:
+            release_queue_lock(session_lock)
         release_provider_policy_launch_lease(lease, lease_id=lease_id)
 
 
@@ -13179,7 +13197,7 @@ Provider request:
 """
 
 
-def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
+def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any], selected_route: dict[str, Any] | None = None) -> dict[str, Any]:
     session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
     session_dir = state_root / safe_id(session_id)
     state_path = session_dir / "bootstrap.json"
@@ -13187,7 +13205,7 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     session_dir.mkdir(parents=True, exist_ok=True)
     now = current_timestamp()
 
-    state = read_json(state_path) if state_path.exists() else {}
+    state = json.loads(json.dumps(selected_route['state'])) if selected_route is not None else (read_json(state_path) if state_path.exists() else {})
     if not isinstance(state, dict):
         state = {}
     organization_instance_id = resolve_organization_instance_id(
@@ -13209,9 +13227,9 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         return {"decision": "block", "reason": "codex exec provider adapter requires prompt"}
     request_id = exact_hook_request_id(hook_input)
     try:
-        roster = read_json(roster_path) if roster_path.exists() else role_agent_rows(
+        roster = json.loads(json.dumps(selected_route['roster'] if selected_route['roster'] is not None else [selected_route['row']])) if selected_route is not None else (read_json(roster_path) if roster_path.exists() else role_agent_rows(
             organization_instance_id=organization_instance_id,
-        )
+        ))
     except (OSError, ValueError, UnicodeDecodeError):
         return reject_provider_identity_policy(
             runtime=runtime,
@@ -13276,6 +13294,9 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         organization_instance_id=organization_instance_id,
     )
     if model_policy_error:
+        if selected_route is not None:
+            return {"decision":"block", "reason":"session_route_policy_drift", "origin_layer":"session_route",
+                    "provider_invoked":False, "next_action":"resolve_current_session_route"}
         return reject_provider_identity_policy(
             runtime=runtime,
             state=state,
@@ -13291,6 +13312,8 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             reason=model_policy_error,
             now=now,
         )
+    if selected_route is not None:
+        execution_row['_effective_session_route'] = selected_route
     canonical_intended_model = normalize_cell(execution_row.get("intended_model"))
     bind_response_policy_identity(row, execution_row)
     policy_evidence = canonical_execution_evidence(execution_row)
@@ -13379,6 +13402,10 @@ def codex_exec_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             ),
         )
         return {"decision": "block", "reason": process_note}
+    if selected_route is not None and launch['status'] != 'started':
+        return {'decision':'block', 'reason':'session_route_' + launch['status'],
+                'origin_layer':'provider_launch', 'provider_invoked':False,
+                'next_action':'restore_current_route_or_host_adapter'}
     if launch["status"] in {"policy_drift", "lock_timeout", "lock_unavailable"}:
         return reject_provider_prelaunch_policy(
             runtime=runtime,
@@ -13746,7 +13773,7 @@ Provider request:
 """
 
 
-def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
+def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any], selected_route: dict[str, Any] | None = None) -> dict[str, Any]:
     session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
     session_dir = state_root / safe_id(session_id)
     state_path = session_dir / "bootstrap.json"
@@ -13756,7 +13783,7 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
 
     state_missing = not state_path.exists()
     roster_missing = not roster_path.exists()
-    state = read_json(state_path) if not state_missing else {}
+    state = json.loads(json.dumps(selected_route['state'])) if selected_route is not None else (read_json(state_path) if not state_missing else {})
     if not isinstance(state, dict):
         state = {}
     organization_instance_id = resolve_organization_instance_id(
@@ -13778,9 +13805,9 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         return {"decision": "block", "reason": "claude CLI provider adapter requires prompt"}
     request_id = exact_hook_request_id(hook_input)
     try:
-        roster = read_json(roster_path) if not roster_missing else role_agent_rows(
+        roster = json.loads(json.dumps(selected_route['roster'] if selected_route['roster'] is not None else [selected_route['row']])) if selected_route is not None else (read_json(roster_path) if not roster_missing else role_agent_rows(
             organization_instance_id=organization_instance_id,
-        )
+        ))
     except (OSError, ValueError, UnicodeDecodeError):
         return reject_provider_identity_policy(
             runtime=runtime,
@@ -13845,6 +13872,9 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
         organization_instance_id=organization_instance_id,
     )
     if model_policy_error:
+        if selected_route is not None:
+            return {"decision":"block", "reason":"session_route_policy_drift", "origin_layer":"session_route",
+                    "provider_invoked":False, "next_action":"resolve_current_session_route"}
         return reject_provider_identity_policy(
             runtime=runtime,
             state=state,
@@ -13860,6 +13890,8 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             reason=model_policy_error,
             now=now,
         )
+    if selected_route is not None:
+        execution_row['_effective_session_route'] = selected_route
     canonical_intended_model = normalize_cell(execution_row.get("intended_model"))
     bind_response_policy_identity(row, execution_row)
     policy_evidence = canonical_execution_evidence(execution_row)
@@ -13959,6 +13991,10 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
             ),
         )
         return {"decision": "block", "reason": process_note}
+    if selected_route is not None and launch['status'] != 'started':
+        return {'decision':'block', 'reason':'session_route_' + launch['status'],
+                'origin_layer':'provider_launch', 'provider_invoked':False,
+                'next_action':'restore_current_route_or_host_adapter'}
     if launch["status"] in {"policy_drift", "lock_timeout", "lock_unavailable"}:
         return reject_provider_prelaunch_policy(
             runtime=runtime,
@@ -14367,32 +14403,154 @@ def claude_cli_agent_dispatch(*, runtime: str, state_root: Path, hook_input: dic
     }
 
 
-def agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
-    organization_instance_id = resolve_organization_instance_id(
-        {},
-        hook_input,
-        session_id,
-    )
-    agent_id = normalize_cell(hook_input.get("agent_id") or hook_input.get("agentId"))
-    if not agent_id:
-        return {"decision": "block", "reason": "agent-dispatch requires agent_id"}
+def strict_session_route_json(path: Path) -> Any:
+    """Bounded no-follow state read; invalid existing state is never absence."""
+    absolute = path.absolute()
+    descriptor = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        row = role_agent_row_for(
-            agent_id,
-            organization_instance_id=organization_instance_id,
-        )
+        for part in absolute.parts[1:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor); descriptor = child
+        fd = os.open(absolute.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat_module.S_ISREG(info.st_mode) or info.st_size > 2 * 1024 * 1024:
+                raise ValueError('session_state_bounds')
+            raw = stream.read(2 * 1024 * 1024 + 1)
+        if len(raw) > 2 * 1024 * 1024:
+            raise ValueError('session_state_bounds')
+        def unique(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value: raise ValueError('session_state_duplicate_key')
+                value[key] = item
+            return value
+        def invalid(_value): raise ValueError('session_state_nonfinite')
+        value = json.loads(raw, object_pairs_hook=unique, parse_constant=invalid)
+        pending = [(value, 0)]; count = 0
+        while pending:
+            item, depth = pending.pop(); count += 1
+            if depth > 32 or count > 20000: raise ValueError('session_state_structure_budget')
+            if type(item) is dict: pending.extend((v, depth+1) for v in item.values())
+            elif type(item) is list: pending.extend((v, depth+1) for v in item)
+        return value
+    finally:
+        os.close(descriptor)
+
+
+def effective_session_route(*, state_root: Path, session_id: str,
+                            organization_instance_id: str, role_id: str) -> dict[str, Any]:
+    """Select an existing validated row under the current approved role policy.
+
+    This consumes no new failover authority. Old Sol/session switch metadata is
+    uncommissioned under the current Luna policy, and never grants a new route.
+    """
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', session_id):
+        raise ValueError('session_identity_invalid')
+    try:
+        canonical = role_agent_row_for(role_id, organization_instance_id=organization_instance_id)
     except (OSError, ValueError, UnicodeDecodeError):
-        row = {}
-    if not row:
-        return {"decision": "block", "reason": "canonical role policy is unavailable"}
+        raise ValueError('canonical_role_policy_unavailable') from None
+    if not canonical: raise ValueError('canonical_role_policy_unavailable')
+    state_root = state_root.resolve()
+    directory = state_root / session_id
+    roster_path = directory / 'roster.json'
+    state_path = directory / 'bootstrap.json'
+    state = {}; roster = None
+    # lstat distinguishes a dangling link from true absence. Validate ancestors
+    # even for absence, so a linked session directory cannot select fallback.
+    for parent in (directory, *directory.parents):
+        if parent.is_symlink(): raise ValueError('session_state_symlink')
+    try:
+        roster_path.lstat()
+    except FileNotFoundError:
+        row = dict(canonical); generation = None; source = 'static_absent_roster'
+        if state_path.exists() or state_path.is_symlink():
+            state = strict_session_route_json(state_path)
+            if (type(state) is not dict or state.get('session_id') != session_id
+                    or state.get('organization_instance_id') != organization_instance_id):
+                raise ValueError('session_identity_mismatch')
+    else:
+        state = strict_session_route_json(state_path)
+        roster = strict_session_route_json(roster_path)
+        if (type(state) is not dict or state.get('session_id') != session_id
+                or state.get('organization_instance_id') != organization_instance_id):
+            raise ValueError('session_identity_mismatch')
+        if type(roster) is not list or not roster or any(type(r) is not dict or not r.get('agent_id') for r in roster):
+            raise ValueError('session_roster_schema_invalid')
+        ids = [r['agent_id'] for r in roster]
+        if any(type(i) is not str for i in ids) or len(set(ids)) != len(ids):
+            raise ValueError('session_roster_role_duplicate')
+        matches = [r for r in roster if r['agent_id'] == role_id]
+        if len(matches) != 1: raise ValueError('session_role_missing')
+        row = dict(matches[0]); generation = state.get('route_generation')
+        if generation is not None or 'route_generation' in row:
+            if type(generation) is not int or generation < 0 or type(row.get('route_generation')) is not int or row['route_generation'] != generation:
+                raise ValueError('session_generation_stale')
+        if any(k.startswith(('provider_switch_', 'provider_route_')) for k in row):
+            raise ValueError('session_route_authority_uncommissioned')
+        source = 'validated_session'
+    for field in CANONICAL_PROVIDER_EXECUTION_FIELDS:
+        actual, expected_value = row.get(field), canonical.get(field)
+        if field in CANONICAL_PROVIDER_ROUTING_FIELDS:
+            actual, expected_value = normalize_cell(actual), normalize_cell(expected_value)
+        if actual != expected_value:
+            raise ValueError('session_route_outside_current_policy')
+    expected = canonical_execution_policy_digest(canonical)
+    if row.get('canonical_execution_policy_digest', expected) != expected:
+        raise ValueError('session_policy_generation_stale')
+    binding = {'source':source, 'session_id':session_id, 'organization_instance_id':organization_instance_id,
+               'role_id':role_id, 'provider':row['provider'], 'model':row['intended_model'],
+               'execution_mode':row['execution_mode'], 'generation':generation, 'policy_digest':expected}
+    binding['digest'] = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return {'row':row, 'state':state, 'roster':roster, 'binding':binding, 'state_root':str(state_root.absolute()),
+            'session_id':session_id, 'organization_instance_id':organization_instance_id, 'role_id':role_id}
+
+
+def revalidate_session_route(selection: dict[str, Any]) -> bool:
+    try:
+        current = effective_session_route(state_root=Path(selection['state_root']),
+            session_id=selection['session_id'], organization_instance_id=selection['organization_instance_id'],
+            role_id=selection['role_id'])
+        return current['binding'] == selection['binding']
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        return False
+
+
+def agent_dispatch(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
+    agent_id = normalize_cell(hook_input.get("agent_id") or hook_input.get("agentId"))
+    if any(k in hook_input for k in ('provider','model','intended_model','execution_mode','selected_route','session_route')):
+        return {"decision":"block", "reason":"caller_provider_override_forbidden", "origin_layer":"session_route"}
+    try:
+        session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', session_id):
+            raise ValueError('session_identity_invalid')
+        state_path = state_root.resolve() / session_id / 'bootstrap.json'
+        state = strict_session_route_json(state_path) if state_path.exists() or state_path.is_symlink() else {}
+        if type(state) is not dict:
+            raise ValueError('session_identity_mismatch')
+        organization_instance_id = resolve_organization_instance_id(state, hook_input, session_id)
+        selection = effective_session_route(state_root=state_root, session_id=session_id,
+            organization_instance_id=organization_instance_id, role_id=agent_id)
+    except (OSError, ValueError, TypeError, RecursionError) as exc:
+        reason = str(exc) if type(exc) is ValueError and re.fullmatch(r'(?:session|canonical)_[a-z_]+', str(exc)) else "session_state_unreadable"
+        return {"decision":"block", "reason":reason, "origin_layer":"session_route",
+                "next_action":"restore_existing_session_or_confirm_new_route_authority", "provider_invoked":False}
+    expected_binding = hook_input.get('expected_session_route_digest')
+    if expected_binding is not None and expected_binding != selection['binding']['digest']:
+        return {"decision":"block", "reason":"session_route_receipt_stale", "origin_layer":"session_route",
+                "provider_invoked":False, "next_action":"resolve_current_session_route"}
+    row = selection['row']
     provider = normalize_cell(row.get("provider")).lower()
     execution_mode = normalize_cell(row.get("execution_mode")).lower()
     if provider == "openai" and execution_mode == "codex":
-        return codex_exec_agent_dispatch(runtime=runtime, state_root=state_root, hook_input=hook_input)
-    if provider == "anthropic" and execution_mode == "claude":
-        return claude_cli_agent_dispatch(runtime=runtime, state_root=state_root, hook_input=hook_input)
-    return {"decision": "block", "reason": "canonical provider policy is unsupported"}
+        result = codex_exec_agent_dispatch(runtime=runtime, state_root=state_root, hook_input=hook_input, selected_route=selection)
+    elif provider == "anthropic" and execution_mode == "claude":
+        result = claude_cli_agent_dispatch(runtime=runtime, state_root=state_root, hook_input=hook_input, selected_route=selection)
+    else:
+        return {"decision":"block", "reason":"current_provider_policy_unsupported", "provider_invoked":False}
+    result['sessionRoute'] = selection['binding']
+    return result
 
 
 def reset_response_evidence(
@@ -19905,16 +20063,19 @@ def validate_agent_call_manifest(manifest: dict[str, Any], *, organization_insta
 
 
 def agent_call(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
-    session_dir = state_root / safe_id(session_id)
-    state_path = session_dir / "bootstrap.json"
-    state = read_json(state_path) if state_path.exists() else {}
-    organization_instance_id = str(
-        state.get("organization_instance_id")
-        or hook_input.get("organization_instance_id")
-        or hook_input.get("organizationInstanceId")
-        or organization_id(session_id)
-    )
+    try:
+        session_id = str(current_session_id(state_root, hook_input) or "unknown-session")
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', session_id):
+            raise ValueError('session_identity_invalid')
+        session_dir = state_root.resolve() / session_id
+        state_path = session_dir / "bootstrap.json"
+        state = strict_session_route_json(state_path) if state_path.exists() or state_path.is_symlink() else {}
+        if type(state) is not dict:
+            raise ValueError('session_identity_mismatch')
+        organization_instance_id = resolve_organization_instance_id(state, hook_input, session_id)
+    except (OSError, ValueError, TypeError, RecursionError):
+        return {"decision":"block", "reason":"session_state_unreadable", "origin_layer":"session_route",
+                "provider_invoked":False, "next_action":"restore_existing_session"}
     manifest = merged_manifest_input(
         hook_input,
         ("manifest", "agent_call_manifest", "agentCallManifest", "agent_call", "agentCall"),
@@ -19923,11 +20084,20 @@ def agent_call(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) ->
     if errors:
         return {"decision": "block", "reason": "; ".join(errors), "agentCall": {"result": "blocked", "errors": errors}}
 
+    try:
+        selection = effective_session_route(state_root=state_root, session_id=session_id,
+            organization_instance_id=organization_instance_id, role_id=normalized['to_role'])
+    except (OSError, ValueError, TypeError, RecursionError):
+        return {"decision":"block", "reason":"session_route_invalid", "origin_layer":"session_route",
+                "provider_invoked":False, "next_action":"restore_existing_session",
+                "agentCall":{"result":"blocked_session_route"}}
+
     payload = dict(manifest.get("payload")) if isinstance(manifest.get("payload"), dict) else {}
     payload.update(
         {
             "type": "agent_call",
             "agent_call_manifest_version": AGENT_CALL_MANIFEST_VERSION,
+            "session_route_binding": selection["binding"],
             "from_role": normalized["from_role"],
             "to_role": normalized["to_role"],
             "role_layer": normalized["role_layer"],
@@ -19978,6 +20148,9 @@ def agent_call(*, runtime: str, state_root: Path, hook_input: dict[str, Any]) ->
         "decision": "ok",
         "agentCall": {
             "agent_call_receipt_version": "1",
+            "session_route_binding": selection["binding"],
+            "provider_invoked": False,
+            "host_execution_status": "host_commissioning_unverified",
             "result": role_queue_summary.get("result", "queued"),
             "task_id": normalized["task_id"],
             "from_role": normalized["from_role"],
@@ -20051,6 +20224,11 @@ def transport_status(*, runtime: str, state_root: Path, hook_input: dict[str, An
         "decision": "ok",
         "transportStatus": {
             "schema_version": 1,
+            "host_execution_status": "host_commissioning_unverified",
+            "origin_layer": "host_authorization",
+            "authority_status": "repository_policy_is_not_host_acceptance",
+            "next_action": "verify_existing_task_authority_on_actual_host_surface",
+            "message": "CLIの存在だけでは、ホストが既承認の送信範囲を受け入れたことを確認できません。",
             "runtime": runtime,
             "state_root": str(state_root),
             "session_id": session_id,
