@@ -1,7 +1,6 @@
 """Bounded host scheduling for the existing trusted-local execution APIs."""
 from __future__ import annotations
 
-import dataclasses
 import math
 from pathlib import Path
 import time
@@ -45,7 +44,7 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
             or worktree in root.parents):
         raise local.TrustedLocalError('drive_state_root_invalid')
     directory = root / 'trusted-local' / host.execution_id
-    binding = local.publication.digest(dataclasses.asdict(authorization))
+    binding = local.publication.digest(local._authorization_material(authorization))
     invocation = 'drive-' + uuid.uuid4().hex
     actor = {'principal_type': 'harness_runner', 'principal_id': local.ACTOR, 'authn_method': 'local_cli'}
     started = time.monotonic()
@@ -73,7 +72,7 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
                    'last_status': result.get('status')}
         # Keep host continuation receipts separate from completion. Never turn a
         # pending Vault write into complete, and never perform that write here.
-        for key in ('pr', 'head', 'merge_commit', 'integrated_checks', 'completion_persistence', 'continuation'):
+        for key in ('pr', 'head', 'merge_commit', 'integrated_checks', 'completion_persistence', 'continuation', 'next_action', 'intake_digest'):
             if key in result:
                 payload[key] = result[key]
         record('stop', reason)
@@ -143,6 +142,8 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
                     return finish('blocked', 'completion_persistence_' + str(persistence.get('status', 'unknown')))
                 if status == 'complete':
                     return finish('terminal', 'complete')
+                if status == 'intake_scope_refresh_required':
+                    return finish('blocked', status, True)
                 if status in HUMAN:
                     return finish('waiting_human', status)
                 if status in UNCERTAIN:

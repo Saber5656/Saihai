@@ -951,6 +951,7 @@ def test_deployed_env_override_is_forbidden_and_immutable_imports_work() -> None
         shutil.copy2(WORKFLOW_ROOT.parents[2] / task_discovery, runtime / task_discovery)
         shutil.copy2(WORKFLOW_ROOT.parents[2] / "directory_paths.py", runtime / "directory_paths.py")
         shutil.copy2(WORKFLOW_ROOT.parents[2] / "saihai_env.py", runtime / "saihai_env.py")
+        shutil.copy2(WORKFLOW_ROOT.parents[2] / "requirement_scope.py", runtime / "requirement_scope.py")
         assert not (runtime / ".git").exists()
         imported = subprocess.run(
             [
