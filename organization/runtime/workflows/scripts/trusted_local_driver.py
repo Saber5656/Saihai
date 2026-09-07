@@ -1,7 +1,6 @@
 """Bounded host scheduling for the existing trusted-local execution APIs."""
 from __future__ import annotations
 
-import dataclasses
 import math
 from pathlib import Path
 import time
@@ -73,7 +72,7 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
                    'last_status': result.get('status')}
         # Keep host continuation receipts separate from completion. Never turn a
         # pending Vault write into complete, and never perform that write here.
-        for key in ('pr', 'head', 'merge_commit', 'integrated_checks', 'completion_persistence', 'continuation'):
+        for key in ('pr', 'head', 'merge_commit', 'integrated_checks', 'completion_persistence', 'continuation', 'next_action', 'intake_digest'):
             if key in result:
                 payload[key] = result[key]
         record('stop', reason)
@@ -143,6 +142,8 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
                     return finish('blocked', 'completion_persistence_' + str(persistence.get('status', 'unknown')))
                 if status == 'complete':
                     return finish('terminal', 'complete')
+                if status == 'intake_scope_refresh_required':
+                    return finish('blocked', status, True)
                 if status in HUMAN:
                     return finish('waiting_human', status)
                 if status in UNCERTAIN:

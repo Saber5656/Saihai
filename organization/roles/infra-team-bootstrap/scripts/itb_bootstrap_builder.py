@@ -7332,12 +7332,30 @@ approval_required: false
 approval_reason: "none"
 workflow_mode: {workflow_mode}
 risk_tier: {risk_tier}
+scope_contract_version: 1
+requirements_version: "[intake snapshot version; not approval]"
+selection_requirements_version: "[same intake snapshot version]"
+requirements:
+  - requirement_id: R-1
+    text: "[requirement text; enumerate every requirement]"
+requirements_history: []
+selected_unit_id: "[explicitly selected unit_id]"
 task_units:
   - unit_id: unit-1
     title: "..."
     main_team: gate
     assignee: gate-task-creator
     priority: P0
+    repository: "[target repository]"
+    binding:
+      status: pending
+    requirement_ids: ["R-1"]
+    scope:
+      in: ["..."]
+      out: ["..."]
+    deliverables: ["..."]
+    allowed_paths: ["[proposed change path; not capability]"]
+    depends_on: []
     done_criteria: ["..."]
 routing_hint: "teams-project-manager"
 review_requirements: ["domain_review", "independent_review"]
@@ -7476,45 +7494,9 @@ def gate_entry_response_is_repairable(response: str) -> bool:
 def normalize_gate_entry_response(response: str, user_prompt: str) -> tuple[str, bool, list[str]]:
     if not validate_gate_entry_response(response):
         return response.strip(), False, []
-    if not gate_entry_response_is_repairable(response):
-        return response.strip(), False, ["provider response is not repairable as Gate Intake Envelope"]
-    title = compact_title(user_prompt, fallback="Gate intake")
-    repaired = f"""envelope_version: "2"
-source_type: human_prompt
-original_request: |
-{yaml_block(user_prompt)}
-intent_summary: "{title}"
-desired_outcome:
-  deliverables: ["Task Detail and Project Manager Handoff"]
-  done_criteria: ["gate-task-creator can create the task without reinterpreting the human prompt"]
-scope:
-  in: ["Normalize and create Gate task artifacts"]
-  out: ["Perform specialist task work in gate-prompt-formatter"]
-approval_required: false
-approval_reason: "none"
-workflow_mode: strict_flow
-risk_tier: normal
-task_units:
-  - unit_id: unit-1
-    title: "{title}"
-    main_team: gate
-    assignee: gate-task-creator
-    priority: P0
-    done_criteria: ["Task Detail is created and handed off to teams-project-manager"]
-routing_hint: "teams-project-manager"
-review_requirements: ["domain_review", "independent_review"]
-vault_update_targets: ["Agents-Vault"]
-missing_information: []
-risks: []
-handoff_notes:
-  gate-task-creator: "Use original_request as source of truth; provider returned a partial envelope fragment."
-improvement_log:
-  - "adapter_repaired_partial_gate_intake_envelope"
-provider_fragment: |
-{yaml_block(response)}
-"""
-    repair_errors = validate_gate_entry_response(repaired)
-    return repaired.strip(), True, repair_errors
+    # A partial formatter response cannot establish omitted user requirements.
+    # Preserve it for diagnostics; never invent a replacement task unit.
+    return response.strip(), False, ["incomplete Gate Intake Envelope requires a complete producer response"]
 
 
 GTC_ENVELOPE_REQUIRED_FIELDS = (
@@ -7645,13 +7627,31 @@ def nested_list_field(envelope: dict[str, Any], key: str, nested_key: str) -> li
     return []
 
 
+from requirement_scope import gtc_unit_ledger_errors
+
+
 def first_task_unit(envelope: dict[str, Any]) -> dict[str, Any]:
-    units = envelope.get("task_units")
-    if isinstance(units, list):
-        for unit in units:
-            if isinstance(unit, dict):
-                return dict(unit)
-    return {}
+    """Compatibility name: return only an explicitly selected, validated unit."""
+    if gtc_missing_envelope_fields(envelope):
+        return {}
+    return next(dict(unit) for unit in envelope["task_units"]
+                if unit["unit_id"] == envelope["selected_unit_id"])
+
+
+def gtc_requirement_ledger(envelope: dict[str, Any]) -> dict[str, Any]:
+    errors = gtc_missing_envelope_fields(envelope)
+    if errors:
+        raise ValueError("invalid requirement ledger: " + ", ".join(errors))
+    # Retain the entire source snapshot, including history/non-goals/unknown fields.
+    ledger = json.loads(json.dumps(envelope))
+    ledger["integration_status"] = "integration_pending"
+    ledger["authority"] = "unverified_intake_observation"
+    ledger["unit_dispositions"] = {
+        unit["unit_id"]: ("selected" if unit["unit_id"] == envelope["selected_unit_id"]
+                          else "dependency_pending" if unit["depends_on"] else "pending")
+        for unit in envelope["task_units"]
+    }
+    return ledger
 
 
 def gtc_missing_envelope_fields(envelope: dict[str, Any]) -> list[str]:
@@ -7672,10 +7672,13 @@ def gtc_missing_envelope_fields(envelope: dict[str, Any]) -> list[str]:
         for field in ("in", "out"):
             if not list_field_values(scope.get(field)):
                 missing.append(f"scope.{field}")
+    missing.extend(gtc_unit_ledger_errors(envelope))
     return list(dict.fromkeys(missing))
 
 
 def gtc_initial_status(envelope: dict[str, Any], missing_fields: list[str], hook_input: dict[str, Any]) -> str:
+    if missing_fields:
+        return "triage"
     explicit = normalized_publication_value(hook_input.get("status") or hook_input.get("initial_status") or hook_input.get("initialStatus"))
     if explicit in {"ready", "waiting_human", "blocked", "triage", "in_progress"}:
         return explicit
@@ -8797,16 +8800,19 @@ def gtc_scaffold_task_detail_text(
     organization_instance_id: str,
     queue_root: Path,
     missing_fields: list[str],
+    ledger_artifact: dict[str, Any],
 ) -> str:
+    ledger = gtc_requirement_ledger(envelope)
+    pending_count = sum(value != "selected" for value in ledger["unit_dispositions"].values())
     unit = first_task_unit(envelope)
     main_team = normalize_cell(unit.get("main_team")) or normalize_cell(envelope.get("main_team")) or "gate"
     assignee = normalize_cell(unit.get("assignee")) or normalize_cell(envelope.get("assignee")) or "teams-project-manager"
     routing_director = gtc_routing_director_for_team(main_team, assignee)
     original_request = normalize_cell(envelope.get("original_request")) or "(missing original_request)"
-    deliverables = nested_list_field(envelope, "desired_outcome", "deliverables")
-    done_criteria = nested_list_field(envelope, "desired_outcome", "done_criteria")
-    scope_in = nested_list_field(envelope, "scope", "in")
-    scope_out = nested_list_field(envelope, "scope", "out")
+    deliverables = list_field_values(unit.get("deliverables"))
+    done_criteria = list_field_values(unit.get("done_criteria"))
+    scope_in = nested_list_field(unit, "scope", "in")
+    scope_out = nested_list_field(unit, "scope", "out")
     review_requirements = list_field_values(envelope.get("review_requirements"))
     vault_updates = list_field_values(envelope.get("vault_update_targets"))
     missing_information = list_field_values(envelope.get("missing_information")) + missing_fields
@@ -8860,6 +8866,22 @@ requires_human_approval: {str(truthy_input(envelope.get("approval_required"))).l
 | Requires Human Approval | {str(truthy_input(envelope.get("approval_required"))).lower()} |
 | Workflow Mode | {markdown_table_cell(workflow_mode)} |
 | Risk Tier | {markdown_table_cell(risk_tier)} |
+
+## Requirement Ledger
+
+Local intake accounting only. Trusted requirement updates, execution authorization,
+worker/diff/review/commit binding and durable host-writer acceptance remain integration_pending.
+Unselected units are pending observations; no Task or Issue creation is asserted.
+
+| Field | Value |
+|---|---|
+| Requirements Version | {markdown_table_cell(ledger["requirements_version"])} |
+| Selected Unit | {markdown_table_cell(ledger["selected_unit_id"])} |
+| Selected Status | {markdown_table_cell(status)} |
+| Other Units | {pending_count} pending; full dispositions in artifact |
+| Ledger | [requirement-ledger.json](requirement-ledger.json) |
+| Ledger SHA256 | {ledger_artifact["sha256"]} |
+| Persistence | {ledger_artifact["state"]}; host ACK integration_pending |
 
 ## Request Summary
 
@@ -9006,6 +9028,13 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
     if not envelope:
         return {"decision": "block", "reason": "; ".join(envelope_errors), "gtcScaffold": {"result": "blocked", "errors": envelope_errors}}
 
+    missing_fields = gtc_missing_envelope_fields(envelope)
+    if envelope_errors or missing_fields:
+        return {"decision": "block", "reason": "invalid requirement ledger",
+                "gtcScaffold": {"result": "blocked", "errors": envelope_errors,
+                                "missing_envelope_fields": missing_fields}}
+    ledger = gtc_requirement_ledger(envelope)
+
     vault_lock_resource_id = f"gtc-scaffold-vault:{resolved_path(vault_root)}"
     vault_lock_path = shared_lock_path(state_root, vault_lock_resource_id)
     vault_lock_owner: dict[str, Any] = {}
@@ -9053,9 +9082,32 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         project_root = vault_root / "01-Projects" / project_name
         task_dir = project_root / f"{task_id}-{slug}"
         task_detail_path = task_dir / "task.md"
-        if task_detail_path.exists() and not truthy_input(hook_input.get("update_existing") or hook_input.get("updateExisting")):
-            reason = f"Task Detail already exists: {task_detail_path}"
+        if task_detail_path.exists() or task_detail_path.is_symlink():
+            reason = f"Task Detail already exists; requirement update integration_pending: {task_detail_path}"
             return {"decision": "block", "reason": reason, "gtcScaffold": {"result": "blocked", "task_detail_path": str(task_detail_path)}}
+
+        ledger_path = task_dir / "requirement-ledger.json"
+        # Keep this generated artifact in the existing canonical task directory.
+        # The Vault lock serializes this writer; no host ACK is inferred here.
+        relative_dir = task_dir.relative_to(vault_root)
+        if ".." in relative_dir.parts:
+            raise ValueError("requirement_ledger.path_escape")
+        cursor = vault_root
+        for component in relative_dir.parts:
+            cursor = cursor / component
+            if cursor.is_symlink():
+                raise ValueError("requirement_ledger.symlink_parent")
+        if ledger_path.exists() or ledger_path.is_symlink():
+            raise ValueError("requirement_ledger.existing_artifact")
+        ledger_text = json.dumps(ledger, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
+        ledger_bytes = ledger_text.encode("utf-8")
+        ledger_artifact = {
+            "path": str(ledger_path),
+            "relative_path": "requirement-ledger.json",
+            "sha256": hashlib.sha256(ledger_bytes).hexdigest(),
+            "state": "planned" if dry_run else "local_persisted",
+            "host_ack": "integration_pending",
+        }
 
         task_text = gtc_scaffold_task_detail_text(
             task_id=task_id,
@@ -9070,6 +9122,7 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
             organization_instance_id=organization_instance_id,
             queue_root=queue_root,
             missing_fields=missing_fields,
+            ledger_artifact=ledger_artifact,
         )
         detail_link = task_detail_wikilink(vault_root, task_detail_path)
         index_path = vault_root / "00-Inbox&Tasks" / "Task-Index.md"
@@ -9080,7 +9133,13 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         kanban_line = f"- [[{detail_link}|{task_id} {title}]]"
 
         if not dry_run:
+            atomic_write_text(ledger_path, ledger_text)
+            if ledger_path.is_symlink() or ledger_path.read_bytes() != ledger_bytes:
+                raise ValueError("requirement_ledger.readback_mismatch")
             atomic_write_text(task_detail_path, task_text)
+            if (ledger_path.is_symlink() or ledger_path.read_bytes() != ledger_bytes
+                    or task_detail_path.is_symlink() or task_detail_path.read_bytes() != task_text.encode("utf-8")):
+                raise ValueError("requirement_ledger.reference_readback_mismatch")
             index_changed = append_unique_markdown_line(index_path, index_line)
             kanban_changed = ensure_kanban_entry(kanban_path, gtc_kanban_section_for_status(status), kanban_line)
             active_output = active_task_output(
@@ -9099,6 +9158,12 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         else:
             index_changed = False
             kanban_changed = False
+    except (OSError, ValueError) as exc:
+        # Partial artifacts remain available for diagnosis; never overwrite on retry.
+        return {"decision": "block", "reason": "requirement ledger persistence blocked",
+                "gtcScaffold": {"result": "blocked", "persistence": "recording_pending",
+                                "host_ack": "integration_pending",
+                                "errors": [f"requirement_ledger.persistence:{type(exc).__name__}:{exc}"]}}
     finally:
         if vault_lock_owner:
             release_queue_lock(vault_lock_path)
@@ -9109,7 +9174,7 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         errors, warnings = validate_task_flow_artifact(task_detail_path, "pre_execution")
     if envelope_errors:
         warnings.extend(envelope_errors)
-    result = "scaffolded_triage" if status == "triage" else "scaffolded"
+    result = "planned" if dry_run else "scaffolded_triage" if status == "triage" else "scaffolded"
     if errors:
         result = "scaffolded_with_validation_errors"
     payload = {
@@ -9131,6 +9196,8 @@ def gtc_scaffold_output(*, runtime: str, state_root: Path, hook_input: dict[str,
         "active_task": active_output.get("activeTask") if isinstance(active_output, dict) else {},
         "source_ref": source_ref,
         "missing_envelope_fields": missing_fields,
+        "requirement_ledger": ledger,
+        "requirement_ledger_artifact": ledger_artifact,
         "validation_errors": errors,
         "validation_warnings": warnings,
         "dry_run": dry_run,

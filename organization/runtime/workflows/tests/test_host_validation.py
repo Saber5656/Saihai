@@ -99,7 +99,7 @@ class ProfileTests(TrustedLocalTests):
         return plan,save
 
     def test_actual_host_profile_and_optional_authority_digest_compatibility(self):
-        legacy=dataclasses.asdict(self.auth);legacy.pop('validation_profile')
+        legacy=dataclasses.asdict(self.auth);legacy.pop('validation_profile');legacy.pop('intake_digest')
         self.assertEqual(local.authorization_payload(self.auth),legacy)
         plan,save=self.plan();ref=save('profile.json',plan);ref.pop('bytes');ref['path']=str(self.root/'profile.json')
         command=(sys.executable,'-c',"import unittest; unittest.TextTestRunner().run(unittest.TestSuite([unittest.FunctionTestCase(lambda:None)]))")
