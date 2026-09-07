@@ -5598,6 +5598,17 @@ def validate_report(
     return payload
 
 
+def recover_review_context(*, state_root: Path, run_id: str, principal: dict[str, Any] | None = None) -> dict[str, Any]:
+    import legacy_review_recovery
+    try:
+        return legacy_review_recovery.recover(state_root=state_root, run_id=run_id,
+            principal=principal or default_manual_principal())
+    except scoped_worker_executor.ScopedWorkerError as exc:
+        raise FrontdoorError(exc.reason_class) from exc
+    except (run_store.RunStoreError, KeyError, TypeError, ValueError, OSError) as exc:
+        raise FrontdoorError("review_recovery_state_invalid") from exc
+
+
 def run_harness_gate(*, state_root: Path, run_id: str,
                      principal: dict[str, Any] | None = None) -> dict[str, Any]:
     actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
@@ -6218,6 +6229,12 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--principal-id", default="manual-cli")
     create.add_argument("--authn-method", default="local_cli")
 
+    recovery = sub.add_parser("recover-review-context")
+    recovery.add_argument("--run-id", required=True)
+    recovery.add_argument("--principal-type", default="manual_operator")
+    recovery.add_argument("--principal-id", default="manual-cli")
+    recovery.add_argument("--authn-method", default="local_cli")
+
     drain = sub.add_parser("drain")
     drain.add_argument("--run-id", required=True)
     drain.add_argument("--principal-type", default="manual_operator")
@@ -6455,6 +6472,9 @@ def main() -> None:
                 resume_policy=args.resume_policy,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
+        elif args.command == "recover-review-context":
+            payload = recover_review_context(state_root=state_root, run_id=args.run_id,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method))
         elif args.command == "drain":
             payload = drain_run(
                 state_root=state_root,

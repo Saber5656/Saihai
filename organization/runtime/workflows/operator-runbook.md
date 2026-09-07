@@ -745,3 +745,31 @@ python3 scripts/configure_organization.py workflow-selector validate-contracts
 | [#73](https://github.com/Saber5656/Saihai/issues/73) | Fake-provider evidence and completion-verification alignment. |
 | [#74](https://github.com/Saber5656/Saihai/issues/74) | Codex frontend exec-policy state-root enforcement. |
 | [#81](https://github.com/Saber5656/Saihai/issues/81) | Host-verified scoped worker capabilities and bounded CLI execution. |
+
+
+## Legacy standard run review context recovery
+
+If a completed legacy `standard_code_change` implementation lacks
+`review_context`, use the explicit host operation before creating its first
+review work order:
+
+```text
+python3.11 scripts/configure_organization.py workflow-frontdoor --state-root /absolute/private-state recover-review-context --run-id <legacy-run-id>
+```
+
+This creates a separately identified `current_content_review_recovery` under
+`worker-evidence/<run-id>/current-review-recovery-<execution-id>.json`. It captures
+current bounded worktree contents; it does not reconstruct the old execution's
+contents or modify its evidence. The host checks task/request/run, consumed
+execution identity, signed implementation order, unchanged activation scope,
+repository, branch and worktree. Only the initial queued review at iteration two,
+with no review order/snapshot, provider execution or review lifecycle, can create
+this receipt. Recovery does not reissue a capability or increase a step budget.
+
+Repeat calls reuse the existing receipt only while its bindings and current
+contents still match. Later consumers use that same digest-checked context;
+drift or tampering stops processing and never overwrites the receipt. A modern
+producer context, including a malformed or empty one, is not replaced through
+this legacy route. Ordinary review remains optional under the existing policy.
+Resume the existing `drain` flow after recovery; this command alone does not
+complete review, validation, publication, or the task.
