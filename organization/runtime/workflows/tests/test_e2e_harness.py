@@ -53,6 +53,7 @@ jobs:
           DEV_WORKTREES_ROOT: ${{ runner.temp }}/worktrees
           TASK_WORKTREE_ROOT: ${{ runner.temp }}/worktrees
         run: |
+          node --version
           mkdir -p "$AGENTS_VAULT_ROOT" "$USER_VAULT_ROOT" "$DEV_WORKTREES_ROOT"
           python3 scripts/validate_all.py __CONT__
             --shard-index "${{ matrix.shard_index }}" __CONT__
