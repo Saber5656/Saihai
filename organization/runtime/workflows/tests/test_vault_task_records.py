@@ -11,6 +11,14 @@ import vault_task_records as vault
 
 
 class VaultRecordsTests(unittest.TestCase):
+    def test_catalog_failure_is_typed_without_fallback(self):
+        from unittest.mock import patch
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+        import directory_paths
+        with patch.object(directory_paths, 'load_environment', side_effect=directory_paths.EnvError('required_path_missing')):
+            with self.assertRaisesRegex(vault.VaultTaskError, 'vault_catalog_unavailable'):
+                vault.canonical_root()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
