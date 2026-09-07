@@ -27,7 +27,7 @@
     "exit.final_evidence_complete"
   ],
   "initial_step": "implement",
-  "max_steps": 4,
+  "max_steps": 6,
   "scheduler": {
     "mode": "invocation-drain",
     "state_persistence": "durable_state",
@@ -127,8 +127,20 @@
         {
           "on": "review_complete",
           "to": "qa"
+        },
+        {
+          "on": "changes_requested",
+          "to": "implement",
+          "reason_class": "repair_original_findings"
         }
-      ]
+      ],
+      "resolution_policy": {
+        "initial_review_limit": 1,
+        "after_repair": "original_findings_only",
+        "on_all_resolved": "qa",
+        "on_unresolved": "implement",
+        "budget_source": "approved_activation"
+      }
     },
     {
       "id": "qa",

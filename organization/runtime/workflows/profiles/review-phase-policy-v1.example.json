@@ -1,0 +1,23 @@
+{
+  "version": "review-phase-v1",
+  "status": "inactive",
+  "repositories": ["Saber5656/Saihai", "Saber5656/skills", "Saber5656/dotfiles"],
+  "producer_contract": "integration_pending",
+  "settings_readback": "pending",
+  "prerequisites": ["dotfiles#11", "skills#41", "Saihai#128", "Saihai#141"],
+  "bots": [
+    {
+      "bot": "coderabbitai",
+      "trigger_mode": "manual",
+      "automatic_on_open": false,
+      "automatic_on_push": false
+    },
+    {
+      "bot": "codex",
+      "trigger_mode": "automatic_initial",
+      "automatic_on_open": true,
+      "automatic_on_push": false
+    }
+  ],
+  "preserved_gates": "current_effective_policy_until_verified_transition"
+}
