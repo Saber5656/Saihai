@@ -31,6 +31,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import review_lifecycle  # noqa: E402
+import request_intake  # noqa: E402
 import run_lock  # noqa: E402
 import run_lifecycle  # noqa: E402
 import run_store  # noqa: E402
@@ -1761,6 +1762,12 @@ def derive_capability(
         "allowed_paths": allowed_paths,
         "forbidden": ["commit", "push", "pull_request", "network", "provider", "worktree_change", "branch_change"],
     }
+    if 'work_brief_ref' in work_order:
+        try:
+            instruction['work_brief_ref'] = work_order['work_brief_ref']
+            instruction['approved_work_brief'] = request_intake.for_order(state_root, work_order)
+        except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+            raise ScopedWorkerError(str(exc)) from exc
     instruction_path = _state_artifact_path(
         state_root,
         "instructions",
@@ -2585,6 +2592,19 @@ def execute_capability(
             execution_path = _state_artifact_path(state_root, "executions", f"{execution_id}.json")
             run_store.atomic_write_json(execution_path, execution)
             instruction_path = Path(capability["prompt_artifact"]["path"])
+            instruction_data = _read_state_json(instruction_path, reason='instruction_artifact_invalid')
+            scope_artifact = None
+            if 'work_brief_ref' in instruction_data:
+                try:
+                    scope_artifact = request_intake.resolve(state_root, instruction_data['work_brief_ref'])
+                    live_run = run_store.load_run(state_root, capability['run_id'])
+                    if live_run.get('work_brief_ref') != instruction_data['work_brief_ref']:
+                        raise request_intake.IntakeError('worker_requirements_version_stale')
+                    # Validate declared ranges/base before the worker, including empty diffs.
+                    request_intake.scope.validate_diff(worktree_path, scope_artifact['requirement_ledger'],
+                        base=capability['repository']['base_revision'], actual_paths=[])
+                except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+                    raise ScopedWorkerError(str(exc)) from exc
             raw_result = active_runner.run(
                 worktree_path=worktree_path,
                 instruction_path=instruction_path,
@@ -2593,6 +2613,16 @@ def execute_capability(
             )
         verify_task_worktree_after_execution(capability, worktree_path)
         actual_changed_paths = _changed_paths(worktree_path)
+        scope_evidence = None
+        if scope_artifact is not None:
+            try:
+                live_run = run_store.load_run(state_root, capability['run_id'])
+                if live_run.get('work_brief_ref') != instruction_data['work_brief_ref']:
+                    raise request_intake.IntakeError('worker_requirements_version_stale')
+                scope_evidence = request_intake.scope.validate_diff(worktree_path, scope_artifact['requirement_ledger'],
+                    base=capability['repository']['base_revision'], actual_paths=actual_changed_paths)
+            except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+                raise ScopedWorkerError(str(exc)) from exc
         result = validate_worker_result(raw_result, actual_changed_paths=actual_changed_paths)
         evidence = {
             "evidence_version": "1",
@@ -2607,6 +2637,7 @@ def execute_capability(
             "base_revision": capability["repository"]["base_revision"],
             "changed_paths": actual_changed_paths,
             "result": result,
+            **({'requirement_scope': scope_evidence} if scope_evidence is not None else {}),
             "review_context": capture_review_context(capability, worktree_path, actual_changed_paths),
         }
         evidence_path = _state_artifact_path(
@@ -2847,8 +2878,8 @@ def capture_review_context(capability: dict[str, Any], root: Path, changed: list
     return result
 
 
-def load_completed_review_context(state_root: Path, run: dict[str, Any]) -> list[dict[str, Any]]:
-    """Read the last host-recorded completed execution; never accept provider paths."""
+def completed_review_evidence(state_root: Path, run: dict[str, Any]) -> tuple[dict, dict, dict, dict]:
+    """Read canonical completed implementation evidence without changing it."""
     history = [row for row in run['step_history'] if row.get('step_id') == 'implement' and row.get('status') == 'completed' and row.get('execution_id')]
     if not history:
         raise ScopedWorkerError('review_execution_evidence_missing')
@@ -2863,7 +2894,16 @@ def load_completed_review_context(state_root: Path, run: dict[str, Any]) -> list
         raise ScopedWorkerError('review_execution_evidence_mismatch')
     if evidence['capability_digest'] != capability['capability_digest'] or evidence['execution_id'] != execution['execution_id']:
         raise ScopedWorkerError('review_execution_identity_mismatch')
+    return row, execution, capability, evidence
+
+
+def load_completed_review_context(state_root: Path, run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read a producer snapshot, or an explicitly created current-content recovery."""
+    row, execution, capability, evidence = completed_review_evidence(state_root, run)
     context = evidence.get('review_context')
+    if 'review_context' not in evidence:
+        import legacy_review_recovery
+        return legacy_review_recovery.load_context(state_root, run, (row, execution, capability, evidence))
     if not isinstance(context, list) or not context:
         raise ScopedWorkerError('review_execution_context_missing')
     tree = Path(capability['worktree']['worktree_path'])

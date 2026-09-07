@@ -505,6 +505,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.path in {"/", "/index.html"}:
                 self._send_html(INDEX_HTML)
                 return
+            if self.path == "/orchestrator/output-status":
+                principal = self._authenticated_channel_principal(allowed_channels={'operator', 'harness'})
+                import output_monitor
+                self._send_json(output_monitor.status(frontdoor, state_root=self.state_root, principal=principal))
+                return
             if self.path == "/healthz":
                 self._send_json({"schema_version": 1, "decision": "ok"})
                 return

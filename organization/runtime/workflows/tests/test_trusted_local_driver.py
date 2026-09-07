@@ -60,6 +60,29 @@ class TrustedLocalDriverTests(unittest.TestCase):
         self.assertEqual(1, sum(c[:3] == ['gh','pr','create'] for c in self.commands.calls))
         self.assertEqual('f'*40, result['merge_commit'])
 
+    def test_existing_non_intake_claim_keeps_legacy_authorization_digest(self):
+        local.execute(self.f.request, self.f.auth, self.f.state)
+        directory = self.f.state/'trusted-local'/self.f.auth.publication.execution_id
+        claim = json.loads((directory/'claim.json').read_text())
+        legacy = dataclasses.asdict(self.f.auth); legacy.pop('intake_digest')
+        self.assertEqual(local.publication.digest(legacy), claim['authorization_digest'])
+        with patch.object(local, '_run_process', side_effect=AssertionError('existing worker replayed')):
+            result = self.drive(max_iterations=1)
+        self.assertEqual('ci_pending', result['last_status'])
+        self.assertEqual(claim['authorization_digest'], json.loads((directory/'drive.json').read_text())['authorization_digest'])
+
+    def test_intake_scope_refresh_preserves_host_action_without_human_question(self):
+        local.execute(self.f.request, self.f.auth, self.f.state)
+        response = {'status': 'intake_scope_refresh_required', 'next_action': 'host_refresh_base_and_hunk_contracts',
+                    'intake_digest': 'sha256:' + 'a'*64}
+        with patch.object(local, 'advance_publication', return_value=response), \
+             patch.object(local, '_run_process', side_effect=AssertionError('worker replayed')):
+            result = self.drive()
+        self.assertEqual(response['status'], result['status'])
+        self.assertEqual(response['next_action'], result['next_action'])
+        self.assertEqual('blocked', result['stop']); self.assertTrue(result['resumable'])
+        self.assertEqual(0, result['polls'])
+
     def test_pending_bound_and_resume_never_replays_worker(self):
         first = self.drive(request=self.f.request, max_iterations=2)
         self.assertEqual('iteration_exhausted', first['status'])
@@ -139,6 +162,15 @@ class TrustedLocalDriverTests(unittest.TestCase):
         self.assertEqual(receipt['continuation'], stopped['continuation'])
         self.assertTrue(stopped['resumable'])
 
+    def test_intake_and_installation_receipts_survive_driver_summary(self):
+        self.drive(request=self.f.request, max_iterations=1)
+        receipt={'status':'complete','intake_digest':'sha256:'+'2'*64,
+                 'effective_installation':{'status':'installed_bytes_verified','active_runtime':'not_proven'},
+                 'canonical_sync':{'status':'synced','dependent_base':'a'*40}}
+        with patch.object(local,'advance_publication',return_value=receipt):
+            result=self.drive()
+        for key in ('intake_digest','effective_installation','canonical_sync'):
+            self.assertEqual(result[key],receipt[key])
     def test_completion_failure_and_unknown_status_stop(self):
         self.drive(request=self.f.request, max_iterations=1)
         for status in ('failed', 'unknown'):

@@ -4,7 +4,6 @@ Plans constrain existing authority, never grant it. No installer, role/model
 selection, credential provisioning or process-reload claim is implemented here.
 """
 from __future__ import annotations
-import dataclasses
 import os
 from pathlib import Path
 import re
@@ -36,6 +35,13 @@ def catalog() -> dict:
     return env
 
 
+def _authorization_digest(auth):
+    # Reuse the host serializer: absent optional intake fields must preserve
+    # legacy plan/claim identities; a real intake binding remains covered.
+    from trusted_local_executor import _authorization_material
+    return publication.digest(_authorization_material(auth))
+
+
 def _path(auth, state_root):
     run_store.validate_artifact_id(auth.publication.execution_id, 'execution_id')
     root = Path(state_root)
@@ -61,7 +67,7 @@ def configure(auth, state_root: Path, plan: dict) -> dict:
         raise InstallationError('installation_plan_invalid')
     if plan['sync_catalog_key'] not in {'SAIHAI_ROOT', 'DOTFILES_ROOT', 'SKILLS_REPO_ROOT'}:
         raise InstallationError('sync_catalog_key_invalid')
-    record = {'authorization_digest': publication.digest(dataclasses.asdict(auth)), 'plan': plan,
+    record = {'authorization_digest': _authorization_digest(auth), 'plan': plan,
               'primary_identity': publication.digest(str(Path(catalog()[plan['sync_catalog_key']]).resolve()))}
     # Read back before freezing; no drift can be acknowledged by configuration.
     _observe(plan)
@@ -113,7 +119,7 @@ def verify(auth, state_root: Path) -> dict:
             raise InstallationError('installation_plan_missing')
         return {'status': 'legacy_not_configured', 'active_runtime': 'not_proven'}
     record = run_store.read_json(path)
-    if record.get('authorization_digest') != publication.digest(dataclasses.asdict(auth)):
+    if record.get('authorization_digest') != _authorization_digest(auth):
         raise InstallationError('installation_authority_changed')
     observed = _observe(record['plan'])
     receipt = {'status': 'installed_bytes_verified', 'authorization_digest': record['authorization_digest'],
@@ -152,7 +158,7 @@ def sync_primary(auth, state_root: Path, merged: dict) -> dict:
         verify(auth, state_root)  # A lost required plan is never legacy.
         return {'status': 'legacy_not_configured', 'dependent_base': None}
     record = run_store.read_json(path)
-    if record.get('authorization_digest') != publication.digest(dataclasses.asdict(auth)):
+    if record.get('authorization_digest') != _authorization_digest(auth):
         raise InstallationError('installation_authority_changed')
     host = auth.publication
     sha = merged.get('merge_commit', '')

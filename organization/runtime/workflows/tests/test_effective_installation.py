@@ -52,6 +52,14 @@ class InstallationTests(unittest.TestCase):
         install.configure(self.auth,self.state,self.plan)
         with self.assertRaisesRegex(install.InstallationError,'authority_changed'):
             install.verify(dataclasses.replace(self.auth,model='other'),self.state)
+    def test_host_intake_serialization_preserves_legacy_and_binds_new(self):
+        legacy=dataclasses.asdict(self.auth);legacy.pop('intake_digest')
+        self.assertEqual(install._authorization_digest(self.auth),pub.digest(legacy))
+        with_intake=dataclasses.replace(self.auth,intake_digest='sha256:'+'2'*64)
+        self.assertEqual(install._authorization_digest(with_intake),pub.digest(local._authorization_material(with_intake)))
+        install.configure(self.auth,self.state,self.plan)
+        with self.assertRaisesRegex(install.InstallationError,'authority_changed'):
+            install.verify(with_intake,self.state)
     def test_drift_and_incomplete_rejected(self):
         self.plan['members']=self.plan['members'][:-1]
         with self.assertRaisesRegex(install.InstallationError,'incomplete'):install.configure(self.auth,self.state,self.plan)

@@ -41,6 +41,7 @@ import workflow_selector
 import provider_runner
 import scoped_worker_executor
 import frontdoor_surface_registry
+import request_intake
 
 WORKFLOW_ROOT = Path(__file__).resolve().parents[1]
 HOST_HOME = host_state_root.HOST_HOME
@@ -1634,6 +1635,9 @@ def proposed_request(
     principal: dict[str, Any] | None = None,
     surface_registry: frontdoor_surface_registry.SurfaceRegistry | None = None,
     provider_adapter_id: str = "",
+    intake_provider: Any = None,
+    requirement_ledger: dict | None = None,
+    intake_model: str = "",
 ) -> dict[str, Any]:
     validate_artifact_id(request_id, "request_id")
     validate_artifact_id(task_id, "task_id")
@@ -1646,6 +1650,40 @@ def proposed_request(
     bounded = bounded_context(refs, allowed_paths)
     path = request_path(state_root, request_id)
     existing_record = read_json(path) if state_file_exists(path) else None
+    intake_ref = None
+    if intake_provider is not None:
+        if actor.get('principal_type') not in EXECUTION_PRINCIPAL_TYPES:
+            raise FrontdoorError('intake_host_principal_required')
+        try:
+            if existing_record and existing_record.get('work_brief_ref'):
+                intake_ref = existing_record['work_brief_ref']
+                intake = request_intake.resolve(state_root, intake_ref)
+                if (intake['source_prompt_digest'] != request_intake.scope.digest(user_prompt)
+                        or intake['requirement_ledger'] != requirement_ledger
+                        or intake['task_id'] != task_id
+                        or existing_record.get('context_refs') != bounded['context_refs']
+                        or existing_record.get('allowed_paths') != bounded['allowed_paths']
+                        or existing_record.get('expires_at') != expires_at
+                        or existing_record.get('requested_provider_adapter_id', '') != provider_adapter_id):
+                    raise request_intake.IntakeError('intake_request_conflict')
+                if existing_record.get('status') != 'waiting_human':
+                    return {'schema_version': 1, 'decision': 'ok', 'replayed': True,
+                            'request_status': existing_record['status'], 'activation': existing_record['proposal']}
+            else:
+                intake_ref = request_intake.prepare(state_root=state_root, request_id=request_id,
+                    task_id=task_id, user_prompt=user_prompt, ledger=requirement_ledger,
+                    provider=intake_provider, intended_model=intake_model)
+                intake = request_intake.resolve(state_root, intake_ref)
+            selected = request_intake.scope.selected_unit(intake['requirement_ledger'])
+            if any(not any(a == '.' or p == a or p.startswith(a + '/') for a in bounded['allowed_paths'])
+                   for p in selected['allowed_paths']):
+                raise request_intake.IntakeError('intake_scope_exceeds_request')
+            classification = intake['classification']
+        except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+            return {'schema_version': 1, 'decision': 'blocked', 'request_status': 'blocked',
+                    'reason': str(exc), 'next_action': 'inspect_internal_intake_evidence'}
+    elif isinstance(classification, dict) and classification.get('classification_source') == 'bounded_classifier_step':
+        raise FrontdoorError('bounded_classification_requires_host_intake')
     if existing_record is not None:
         if classification is None:
             if existing_record.get("status") == "waiting_human" and isinstance(existing_record.get("proposal"), dict):
@@ -1794,6 +1832,15 @@ def proposed_request(
             "requested_provider_adapter_id": provider_adapter_id,
         }
     )
+    if intake_ref is not None:
+        record['work_brief_ref'] = intake_ref
+        record['work_brief_summary'] = intake['brief']
+        if intake['brief']['open_questions']:
+            record['status'] = 'waiting_human'
+            record['proposal'] = {'decision': 'waiting_human', 'reason': 'material_requirement_unresolved',
+                                  'questions': intake['brief']['open_questions'], 'next_action': 'ask_human'}
+            write_json(path, record)
+            return record['proposal']
     attach_approval_summary(record)
     write_json(path, record)
     snapshot_path = snapshot_envelope(state_root, request_id, envelope)
@@ -1841,6 +1888,9 @@ def approval_action_id(record: dict[str, Any]) -> str:
         "expires_at": record.get("expires_at"),
         "provider_binding": provider_binding,
     }
+    if "work_brief_ref" in record:
+        material["work_brief_ref"] = record["work_brief_ref"]
+        material["work_brief_summary"] = record.get("work_brief_summary")
     return "approve-" + stable_digest(material)[:20]
 
 
@@ -1926,6 +1976,8 @@ def approval_summary(record: dict[str, Any]) -> dict[str, Any]:
                 "max_ref_total_bytes": MAX_CONTEXT_REF_TOTAL_BYTES,
             },
         },
+        **({"work_brief_ref": record["work_brief_ref"], "work_brief": record.get("work_brief_summary")}
+           if "work_brief_ref" in record else {}),
         "classification_provenance": proposal.get("classification_provenance"),
         "next_action": proposal.get("next_action"),
     }
@@ -3813,9 +3865,11 @@ def build_bridge_projection(
         )
     except work_order_builder.WorkOrderError:
         projection_binding = None
+    import output_monitor
     return {
         "schema_version": 1,
         "decision": "ok",
+        "run_output": output_monitor.run_output(run_store, state_root, record),
         "projection_version": "1",
         "safe_for_principal": redacted_principal(principal),
         "request_id": record.get("request_id"),
@@ -3985,6 +4039,20 @@ def bridge_read_projection(
     return projection
 
 
+def _clear_stale_output_for_ack(state_root: Path, request_id: str, digest: str, principal: dict) -> None:
+    path = state_root / 'output-observations' / (validate_artifact_id(request_id, 'request_id') + '.json')
+    if not state_file_exists(path):
+        return
+    observed = read_json(path)
+    if observed.get('request_id') != request_id:
+        raise FrontdoorError('output_observation_binding_mismatch')
+    if observed.get('projection_digest') == digest and observed.get('stale_output') is True:
+        append_audit_event(state_root=state_root, event_type='stale_output_cleared', principal=principal,
+            subject={'request_id': request_id, 'run_id': observed.get('run_id')}, outcome='ok',
+            details={'projection_digest':digest,'reason':'acknowledged','transition_effect':'none'})
+        write_json(path, dict(observed, stale_output=False, acknowledged=True))
+
+
 def bridge_ack_output(
     *,
     state_root: Path,
@@ -4116,6 +4184,7 @@ def bridge_ack_output(
             or existing_ack.get("ack_verified") is not True
         ):
             raise FrontdoorError("ack idempotency artifact conflict")
+        _clear_stale_output_for_ack(state_root, request_id, projection_digest, principal)
         return {
             "schema_version": 1,
             "decision": "ok",
@@ -4137,6 +4206,7 @@ def bridge_ack_output(
         "transition_effect": "none",
     }
     write_json(ack_path, ack)
+    _clear_stale_output_for_ack(state_root, request_id, projection_digest, principal)
     after = read_json(request_path(state_root, request_id))
     append_audit_event(
         state_root=state_root,
@@ -4281,6 +4351,15 @@ def verify_approved_provider_binding(
 ) -> dict[str, str]:
     """Fail closed if mutable request or registry state diverges from human approval."""
 
+    if 'work_brief_ref' in record:
+        try:
+            prepared = request_intake.resolve(state_root, record['work_brief_ref'])
+            if (prepared['classification'] != record.get('classification') or prepared['brief']['open_questions']
+                    or prepared['brief'] != record.get('work_brief_summary')
+                    or prepared['source_prompt_digest'] != request_intake.scope.digest(record.get('user_prompt'))):
+                raise request_intake.IntakeError('intake_approval_binding_changed')
+        except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+            raise FrontdoorError(str(exc)) from exc
     approval_record = record.get("approval_record")
     if not isinstance(approval_record, dict):
         raise FrontdoorError(provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH)
@@ -4365,6 +4444,17 @@ def _approve_core(
             subject={"request_id": request_id, "task_id": str(record.get("task_id") or "")},
             blocked_reason="unsupported approval principal",
         )
+    if 'work_brief_ref' in record:
+        try:
+            prepared = request_intake.resolve(state_root, record['work_brief_ref'])
+            if prepared['brief']['open_questions']:
+                raise request_intake.IntakeError('material_requirement_unresolved')
+            if (prepared['classification'] != record.get('classification')
+                    or prepared['brief'] != record.get('work_brief_summary')
+                    or prepared['source_prompt_digest'] != request_intake.scope.digest(record.get('user_prompt'))):
+                raise request_intake.IntakeError('intake_classification_changed')
+        except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+            raise FrontdoorError(str(exc)) from exc
     classification = record.get("classification")
     if not isinstance(classification, dict):
         raise FrontdoorError("typed classification is required before approval")
@@ -4789,6 +4879,8 @@ def create_run(
                     }
                 ],
             }
+            if 'work_brief_ref' in record:
+                run['work_brief_ref'] = record['work_brief_ref']
             path = run_store.store_run(state_root, run)
             record["run_id"] = effective_run_id
             link_request_run(record, effective_run_id)
@@ -4901,6 +4993,8 @@ def drain_run(
                     provider_runner.PROVIDER_ADAPTER_MODEL_BINDING_MISMATCH
                 )
 
+            if run.get('work_brief_ref') != request_record.get('work_brief_ref'):
+                raise FrontdoorError('intake_run_binding_changed')
             run_lock.assert_p0_concurrency(state_root, target_run_id=run_id)
             workflow_id = str(run.get("workflow_id") or "")
             current_step_id = str(run.get("current_step") or "")
@@ -5604,6 +5698,16 @@ def validate_report(
     return payload
 
 
+def recover_review_context(*, state_root: Path, run_id: str, principal: dict[str, Any] | None = None) -> dict[str, Any]:
+    import legacy_review_recovery
+    try:
+        return legacy_review_recovery.recover(state_root=state_root, run_id=run_id,
+            principal=principal or default_manual_principal())
+    except scoped_worker_executor.ScopedWorkerError as exc:
+        raise FrontdoorError(exc.reason_class) from exc
+    except (run_store.RunStoreError, KeyError, TypeError, ValueError, OSError) as exc:
+        raise FrontdoorError("review_recovery_state_invalid") from exc
+
 def drive_run(**kwargs: Any) -> dict[str, Any]:
     from bounded_driver import drive_run as drive
     return drive(**kwargs)
@@ -6231,6 +6335,12 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--principal-id", default="manual-cli")
     create.add_argument("--authn-method", default="local_cli")
 
+    recovery = sub.add_parser("recover-review-context")
+    recovery.add_argument("--run-id", required=True)
+    recovery.add_argument("--principal-type", default="manual_operator")
+    recovery.add_argument("--principal-id", default="manual-cli")
+    recovery.add_argument("--authn-method", default="local_cli")
+
     drive = sub.add_parser("drive-run")
     selector = drive.add_mutually_exclusive_group(required=True)
     selector.add_argument("--run-id", default="")
@@ -6491,6 +6601,10 @@ def main() -> None:
                 resume_policy=args.resume_policy,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
+        elif args.command == "recover-review-context":
+            payload = recover_review_context(state_root=state_root, run_id=args.run_id,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method))
+
         elif args.command == "drive-run":
             payload = drive_run(state_root=state_root, run_id=args.run_id, request_id=args.request_id,
                 max_iterations=args.max_iterations, duration_seconds=args.duration_seconds,
