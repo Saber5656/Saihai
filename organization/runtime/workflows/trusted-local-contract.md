@@ -131,3 +131,57 @@ does not write the canonical Vault. Private `drive.json` and
 `drive-events.jsonl` contain bounded status metadata, not worker transcripts.
 The existing `usage run`, `usage advance`, and readonly `drive-run` remain
 available. Synthetic GitHub tests verify scheduling, not a live deployment.
+
+## Validation profiles and current evidence
+
+Host validation now emits version 2 receipts. Each command retains actual argv,
+time, exit and output digests. Test commands require positive measured counts and
+no failed/skipped/unknown results. A non-test check records no invented test count.
+The receipt binds all nonignored source bytes/modes, the exact host command plan
+and selected executable. Publication and code-change final gates recheck current
+artifacts; a provider's `passed` field alone is insufficient. Legacy versionless
+receipts remain history and are not upgraded into current successful evidence.
+
+During host integration, previous results are reused only when the complete source
+digest, command plan, executable bytes and optional profile reference are unchanged.
+Head/base changes alone do not require rerunning unaffected work. Changes to any
+source input conservatively require revalidation; no transitive dependency inference
+is claimed. Full validation belongs to the integrated feature, not each commit.
+The file reader limits each source/artifact to 2 MiB and rejects parent symlinks;
+oversized input is an explicit unavailable result, never successful validation.
+
+`TrustedLocalAuthorization.validation_profile` is optional. When absent it is
+omitted from authorization hashing to preserve previous authority identity. When
+present it is `{path, sha256}`: a canonical absolute mode-0600 JSON file outside
+the worker worktree, selected by the host. It binds an existing delivery `profile`,
+`layers`, `behavior`, `owners`, `owner_evidence`, `artifact`, `device_evidence`, and
+`tdd`. No worker report can select this file. Profile-less tasks retain the exact
+host-selected command plan; they do not claim mobile or release readiness.
+
+`layers` names static/unit/feature/e2e/build/security/full/device. Each entry has
+`required` (boolean), a nonempty host applicability `reason`, and `commands` (zero
+based indexes into host validation_commands). Required test layers need measured
+tests. Required full evidence cannot be a single shard. Existing profile minima
+cannot be disabled. A docs-only plan cannot exempt runtime instructions or code.
+
+Owners are `{ci, cd, rollback}`. The digest-bound owner artifact must exactly match
+repository, profile_digest, owners, release targets and rollback prerequisites.
+Mobile behavior additionally needs a current artifact ref and digest-bound physical
+device record (model, OS, operation, start/end, passed status, artifact hash and
+image ref). Simulator and different-build results fail. Behavioral profile plans
+retain digest-bound Red/Green records, unchanged test refs and explicit refactor
+disposition. Host-owned acquisition is the trusted-local provenance assumption;
+this does not claim managed-domain attestation or authorize a release.
+
+For Saihai itself, the existing workflow inventory is compared with actual
+workflow bytes and locks at validation time. CI retains eight pinned-runtime
+shards and the aggregate required `validate` job. Shard receipts explicitly bind
+index/count so they cannot be mistaken for a whole-suite run. Only actual CI
+results can satisfy remote checks. Luna invocations explicitly select max reasoning
+without changing global CLI configuration.
+
+Legacy standard_code_change QA/final/completion consumes the host-owned
+`reports/<run_id>/host-validation.json`, bound to the latest completed implement
+execution and current worktree. Hosts must run actual scoped validation to produce
+it; the gate never manufactures one from a provider report. The normal usage route
+continues to use its own execution directory and independently supplied authority.

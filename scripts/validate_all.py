@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +123,95 @@ def child_env() -> dict[str, str]:
     return env
 
 
+def unknown_counts() -> dict[str, Any]:
+    # None means no usable count; zero is reserved for an observed zero.
+    return {"cases": None, "executed": None, "failed": None, "skipped": None,
+            "unknown": 1, "count_method": "unknown"}
+
+
+def suite_json_result(text: str) -> tuple[dict[str, Any] | None, str]:
+    """Distinguish ordinary unittest logging from an invalid final JSON result."""
+    def unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate_key")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(text, object_pairs_hook=unique_pairs)
+    except json.JSONDecodeError:
+        return None, "malformed" if text.lstrip().startswith(("{", "[", '"')) else "text"
+    except (ValueError, RecursionError):
+        return None, "malformed"
+    return (value, "object") if isinstance(value, dict) else (None, "nonobject")
+
+
+def structured_counts(payload: dict[str, Any]) -> dict[str, Any]:
+    """Legacy cases remain supported, with no coercion or inferred zero success.
+
+    Counts are suite-reported completions, not assertion/branch coverage or
+    authenticated execution provenance. Optional outcome counts cannot be hidden
+    behind a pass label. The six custom loops explicitly report their method.
+    """
+    cases = payload.get("cases")
+    if type(cases) is not int or cases < 0:
+        return unknown_counts()
+    outcomes = {key: payload.get(key, 0) for key in ("failed", "skipped", "unknown")}
+    # Existing E2E suites report skipped identifiers as a list. Count entries;
+    # any nonempty list still blocks required success, regardless of its labels.
+    if isinstance(outcomes["skipped"], list):
+        outcomes["skipped"] = len(outcomes["skipped"])
+    if any(type(value) is not int or value < 0 for value in outcomes.values()):
+        return unknown_counts()
+    if "executed" in payload and (type(payload["executed"]) is not int or payload["executed"] != cases):
+        return unknown_counts()
+    method = payload.get("count_method", "structured_result")
+    if method not in ("structured_result", "completed_test_functions"):
+        return unknown_counts()
+    return {"cases": cases, "executed": cases, **outcomes, "count_method": method}
+
+
+def unittest_counts(*outputs: str) -> tuple[dict[str, Any], bool] | None:
+    """Read one complete unittest terminal summary, including non-success work.
+
+    unittest's Ran count includes skipped tests. executed/cases exclude them;
+    failures include errors, expected failures and unexpected successes because
+    none of those satisfy required passing work. A missing/ambiguous summary is
+    unknown, even when the child exits zero.
+    """
+    summaries = []
+    for output in outputs:
+        starts = list(re.finditer(r"^Ran (\d+) tests? in [^\n]+$", output, re.MULTILINE))
+        for start in starts:
+            ending = output[start.end():].strip()
+            match = re.fullmatch(r"(OK|FAILED)(?: \(([^\n]+)\))?", ending)
+            if match is None:
+                summaries.append((unknown_counts(), False))
+                continue
+            counts = {key: 0 for key in ("failures", "errors", "skipped", "expected failures", "unexpected successes")}
+            seen = set()
+            valid = True
+            for item in match.group(2).split(", ") if match.group(2) else []:
+                key, separator, number = item.partition("=")
+                if not separator or key not in counts or key in seen or not re.fullmatch(r"[0-9]+", number):
+                    valid = False
+                    break
+                counts[key] = int(number)
+                seen.add(key)
+            ran = int(start.group(1))
+            if not valid or counts["skipped"] > ran:
+                summaries.append((unknown_counts(), False))
+                continue
+            executed = ran - counts["skipped"]
+            failed = sum(counts[key] for key in counts if key != "skipped")
+            value = {"cases": executed, "executed": executed, "failed": failed,
+                     "skipped": counts["skipped"], "unknown": 0, "count_method": "unittest_summary"}
+            summaries.append((value, match.group(1) == "OK"))
+    if not summaries:
+        return None
+    return summaries[0] if len(summaries) == 1 else (unknown_counts(), False)
 def run_captured(
     command: list[str],
     *,
@@ -189,64 +279,52 @@ def run_captured(
 
 def run_suite(path: Path, *, timeout: float = 300) -> dict[str, Any]:
     started = time.perf_counter()
-    target = rel(path)
-    completed = run_captured(
-        [sys.executable, str(path)],
-        timeout=timeout,
-        heartbeat_event="suite_heartbeat",
-        heartbeat_target=target,
-    )
-    if completed["timed_out"]:
-        return {
-            "path": target,
-            "result": "fail",
-            "cases": 0,
-            "duration_seconds": round(time.perf_counter() - started, 3),
-            "detail": "timeout",
-            "stdout_tail": tail(completed["stdout"]),
-            "stderr_tail": tail(completed["stderr"]),
-        }
-    duration = round(time.perf_counter() - started, 3)
-    payload = last_json_line(completed["stdout"])
-    if completed["returncode"] == 0 and payload and payload.get("result") == "pass":
-        return {
-            "path": target,
-            "result": "pass",
-            "cases": int(payload.get("cases") or 0),
-            "duration_seconds": duration,
-            "detail": "",
-        }
-    if completed["returncode"] == 0 and payload is None:
-        cases = parse_unittest_cases(completed["stdout"], completed["stderr"])
-        if cases == 0:
-            return {
-                "path": target,
-                "result": "fail",
-                "cases": 0,
-                "duration_seconds": duration,
-                "detail": "exit_zero_no_result_json",
-                "stdout_tail": tail(completed["stdout"]),
-                "stderr_tail": tail(completed["stderr"]),
-            }
-        return {
-            "path": target,
-            "result": "pass",
-            "cases": cases,
-            "duration_seconds": duration,
-            "detail": "exit_zero_no_result_json",
-        }
-    detail = "missing_result_json" if payload is None else f"result:{payload.get('result')}"
-    if completed["returncode"] != 0:
-        detail = f"exit:{completed['returncode']}"
-    return {
-        "path": target,
-        "result": "fail",
-        "cases": int((payload or {}).get("cases") or 0),
-        "duration_seconds": duration,
-        "detail": detail,
-        "stdout_tail": tail(completed["stdout"]),
-        "stderr_tail": tail(completed["stderr"]),
+    result: dict[str, Any] = {
+        "path": rel(path), "command": [sys.executable, str(path)], "cwd": str(REPO_ROOT),
+        "started_at": datetime.now(timezone.utc).isoformat(),
     }
+    captured = run_captured(result["command"], timeout=timeout,
+                            heartbeat_event="suite_heartbeat", heartbeat_target=rel(path))
+    if captured["timed_out"]:
+        return {**result, **unknown_counts(), "result": "fail", "status": "timed_out",
+                "exit_code": None, "finished_at": datetime.now(timezone.utc).isoformat(),
+                "duration_seconds": round(time.perf_counter() - started, 3), "detail": "timeout",
+                "stdout_tail": tail(captured["stdout"]), "stderr_tail": tail(captured["stderr"])}
+    completed = subprocess.CompletedProcess(result["command"], captured["returncode"], captured["stdout"], captured["stderr"])
+    result.update(exit_code=completed.returncode, finished_at=datetime.now(timezone.utc).isoformat(),
+                  duration_seconds=round(time.perf_counter() - started, 3))
+    lines = completed.stdout.strip().splitlines()
+    # Only the final stdout line may be a structured result. Never recover an
+    # earlier pass after a malformed, missing or contradictory final record.
+    payload, json_state = suite_json_result(lines[-1]) if lines else (None, "text")
+    summary = unittest_counts(completed.stdout, completed.stderr)
+    counts = unknown_counts()
+    declared_pass = False
+    if payload is not None:
+        counts = structured_counts(payload)
+        declared_pass = payload.get("result") == "pass"
+        if summary is not None:
+            # Two reporting channels must agree; a pass JSON cannot mask skips
+            # or failures in the real unittest terminal output.
+            observed, terminal_ok = summary
+            if any(counts[key] != observed[key] for key in ("executed", "failed", "skipped", "unknown")):
+                counts = unknown_counts()
+            declared_pass = declared_pass and terminal_ok
+    elif summary is not None:
+        counts, declared_pass = summary
+        # Scalar/null JSON is an invalid result too, not ordinary log text.
+        if json_state != "text":
+            counts, declared_pass = unknown_counts(), False
+    passed = (completed.returncode == 0 and declared_pass
+              and type(counts["executed"]) is int and counts["executed"] > 0
+              and counts["failed"] == counts["skipped"] == counts["unknown"] == 0)
+    result.update(counts, result="pass" if passed else "fail", status="passed" if passed else "failed",
+                  detail="" if passed else (f"exit:{completed.returncode}" if completed.returncode else "required_test_evidence_not_passed"))
+    if not passed:
+        # Bounded diagnostics remain private; downstream public transport must
+        # explicitly allowlist metadata rather than publish these output tails.
+        result.update(stdout_tail=tail(completed.stdout), stderr_tail=tail(completed.stderr))
+    return result
 
 
 def run_contract(command: list[str], *, timeout: float = 300) -> dict[str, Any]:
@@ -384,6 +462,10 @@ def main() -> None:
         "compiled": compiled,
         "total_duration_seconds": round(time.perf_counter() - started, 3),
     }
+    if args.only:
+        summary['selection'] = {'kind':'subset','only':args.only}
+    if shard_requested:
+        summary['selection'] = {'kind':'shard','index':args.shard_index,'count':args.shard_count}
     if no_suites:
         summary["detail"] = "no_suites_matched"
     if compile_errors:
