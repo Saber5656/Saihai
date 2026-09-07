@@ -1322,6 +1322,39 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
         self.assertEqual(dispatch["input_tokens"], 11)
         self.assertEqual(dispatch["output_tokens"], 7)
 
+    def test_provider_activation_preserves_response_and_distinct_attempt_evidence(self) -> None:
+        builder = load_builder_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            state_root = Path(tmp)
+            builder.session_start_metadata_output(
+                runtime="codex", state_root=state_root,
+                hook_input={"session_id": "session", "cwd": "/tmp/project", "source": "startup"},
+            )
+            outputs = []
+            for stdout in (current_codex_jsonl(), current_codex_jsonl(include_message=False)):
+                with mock.patch.object(builder.shutil, "which", return_value="/usr/bin/codex"), mock.patch.object(
+                    builder, "run_command_with_bounded_output",
+                    return_value=subprocess.CompletedProcess(["codex"], 0, stdout, ""),
+                ):
+                    outputs.append(builder.provider_activate(
+                        runtime="codex", state_root=state_root,
+                        hook_input={"session_id": "session", "agent_id": "tech-backend",
+                                    "request_id": "same-request", "cwd": "/tmp/project"},
+                    ))
+                evidence = outputs[-1]["evidence"]
+                transcript = Path(evidence["transcript_path"])
+                self.assertTrue(transcript.is_relative_to(state_root / "session"))
+                self.assertEqual(transcript.read_text(encoding="utf-8"), stdout)
+                self.assertEqual(evidence["transcript_sha256"],
+                                 builder.hashlib.sha256(stdout.encode("utf-8")).hexdigest())
+                self.assertEqual(evidence["request_id"], "same-request")
+            self.assertNotEqual(outputs[0]["evidence"]["transcript_path"],
+                                outputs[1]["evidence"]["transcript_path"])
+            self.assertEqual(outputs[0]["activation"]["response"], "final review result")
+            self.assertEqual(outputs[0]["activation"]["request_id"], "same-request")
+            self.assertEqual(outputs[1]["decision"], "block")
+            self.assertNotIn("activation", outputs[1])
+
     def test_provider_activate_uses_thread_started_effective_model(self) -> None:
         builder = load_builder_module()
         with tempfile.TemporaryDirectory() as tmp:
