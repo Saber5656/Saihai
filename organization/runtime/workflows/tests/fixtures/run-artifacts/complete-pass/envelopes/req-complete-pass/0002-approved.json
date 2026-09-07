@@ -43,7 +43,7 @@
       "publication": "not_required"
     },
     "request_id": "req-complete-pass",
-    "task_id": "TSK-complete-pass",
+    "task_id": "TSK-PENDING-complete-pass",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],

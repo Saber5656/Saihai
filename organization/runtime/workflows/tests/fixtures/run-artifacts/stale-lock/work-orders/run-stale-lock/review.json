@@ -43,7 +43,7 @@
   "role_definition_path": "organization/roles/tech-reviewer/skill.md",
   "run_id": "run-stale-lock",
   "step_id": "review",
-  "task_id": "TSK-stale-lock",
+  "task_id": "TSK-PENDING-stale-lock",
   "to_role": "tech-reviewer",
   "work_order_authority": {
     "issuer_principal": {

@@ -69,7 +69,7 @@
     "role_definition_path": "organization/roles/tech-reviewer/skill.md",
     "run_id": "run-complete-findings",
     "step_id": "review",
-    "task_id": "TSK-complete-findings",
+    "task_id": "TSK-PENDING-complete-findings",
     "to_role": "tech-reviewer",
     "work_order_authority": {
       "issuer_principal": {

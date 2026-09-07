@@ -35,7 +35,8 @@ class ValidationRepairTests(unittest.TestCase):
         originals={p.name:p.read_bytes() for p in self.directory.glob('*.json')}
         authority=self.f.root/'authority.json';authority.write_text(json.dumps(dataclasses.asdict(self.f.auth)));authority.chmod(0o600)
         cli=Path(__file__).resolve().parents[4]/'scripts'/'saihai.py'
-        command=[sys.executable,str(cli),'usage','repair-validation','--authorization',str(authority),'--state-root',str(self.f.state),'--repair-instruction','Retain the task result and fix its validation only.']
+        wrapper='import sys,runpy; from pathlib import Path; sys.path.insert(0,sys.argv.pop(1)); import vault_task_records as v; root=Path(sys.argv.pop(1)); v.canonical_root=lambda:root; sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__")'
+        command=[sys.executable,'-c',wrapper,str(cli.parent.parent/'organization/runtime/workflows/scripts'),str(self.f.vault),str(cli),'usage','repair-validation','--authorization',str(authority),'--state-root',str(self.f.state),'--repair-instruction','Retain the task result and fix its validation only.']
         done=subprocess.run(command,capture_output=True,text=True)
         self.assertEqual(done.returncode,0,done.stdout+done.stderr)
         result=json.loads(done.stdout);self.assertEqual(result['status'],'validated')

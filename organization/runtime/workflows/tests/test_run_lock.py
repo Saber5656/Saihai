@@ -33,7 +33,7 @@ def valid_run(**overrides) -> dict:
     candidate = {
         "run_version": "1",
         "run_id": "run-lock",
-        "task_id": "TSK-run-lock",
+        "task_id": "TSK-PENDING-run-lock",
         "request_id": "req-run-lock",
         "workflow_id": "single_step_external_review",
         "approved_provider_binding": {

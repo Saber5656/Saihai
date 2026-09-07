@@ -69,7 +69,7 @@
     "role_definition_path": "organization/roles/tech-reviewer/skill.md",
     "run_id": "run-corrupt",
     "step_id": "review",
-    "task_id": "TSK-corrupt",
+    "task_id": "TSK-PENDING-corrupt",
     "to_role": "tech-reviewer",
     "work_order_authority": {
       "issuer_principal": {

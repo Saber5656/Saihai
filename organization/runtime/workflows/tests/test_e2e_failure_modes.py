@@ -90,7 +90,7 @@ def artifact_paths_containing(state_root: Path, marker: str, *, exclude: set[Pat
 def prepare_run(harness: OrchestratorHarness, suffix: str) -> str:
     request_id = f"req-failure-{suffix}"
     run_id = f"run-failure-{suffix}"
-    harness.propose(task_id=f"TSK-failure-{suffix}", request_id=request_id)
+    harness.propose(task_id=f"TSK-PENDING-failure-{suffix}", request_id=request_id)
     harness.approve(request_id)
     harness.create_run(request_id, run_id)
     harness.drain(run_id)
@@ -171,7 +171,7 @@ def write_review_artifacts(
 
 
 def scenario_prompt_only_cannot_run(harness: OrchestratorHarness) -> dict[str, Any]:
-    harness.propose(task_id="TSK-prompt-only", request_id="req-prompt-only")
+    harness.propose(task_id="TSK-PENDING-prompt-only", request_id="req-prompt-only")
     blocked = capture_blocked(
         lambda: harness.frontdoor.create_run(
             state_root=harness.state_root,
@@ -187,7 +187,7 @@ def scenario_prompt_only_cannot_run(harness: OrchestratorHarness) -> dict[str, A
 
 def scenario_approval_rate_limit(harness: OrchestratorHarness) -> dict[str, Any]:
     request_id = "req-rate-limit"
-    harness.propose(task_id="TSK-rate-limit", request_id=request_id)
+    harness.propose(task_id="TSK-PENDING-rate-limit", request_id=request_id)
     for attempt in range(3):
         blocked = capture_blocked(
             lambda attempt=attempt: harness.frontdoor.approve_request(
@@ -215,7 +215,7 @@ def scenario_destructive_blocked(harness: OrchestratorHarness) -> dict[str, Any]
     request_id = "req-destructive"
     proposal = harness.frontdoor.proposed_request(
         state_root=harness.state_root,
-        task_id="TSK-destructive",
+        task_id="TSK-PENDING-destructive",
         request_id=request_id,
         user_prompt="Attempt a destructive operation.",
         refs=[harness.make_ref("destructive.md")],
@@ -241,7 +241,7 @@ def scenario_publication_waits_human(harness: OrchestratorHarness) -> dict[str, 
     request_id = "req-publication"
     proposal = harness.frontdoor.proposed_request(
         state_root=harness.state_root,
-        task_id="TSK-publication",
+        task_id="TSK-PENDING-publication",
         request_id=request_id,
         user_prompt="Publish the reviewed result.",
         refs=[harness.make_ref("publication.md")],
@@ -260,7 +260,7 @@ def scenario_publication_waits_human(harness: OrchestratorHarness) -> dict[str, 
 
 def scenario_bridge_cannot_execute(harness: OrchestratorHarness) -> dict[str, Any]:
     request_id = "req-bridge-exec"
-    harness.propose(task_id="TSK-bridge-exec", request_id=request_id)
+    harness.propose(task_id="TSK-PENDING-bridge-exec", request_id=request_id)
     harness.approve(request_id)
     bridge = harness.frontdoor.bridge_principal("codex", "failure-matrix")
     blocked = capture_blocked(
@@ -283,7 +283,7 @@ def scenario_bridge_cannot_execute(harness: OrchestratorHarness) -> dict[str, An
 
 def scenario_bridge_smuggled_authority(harness: OrchestratorHarness) -> dict[str, Any]:
     payload = {
-        "task_id": "TSK-bridge-smuggle",
+        "task_id": "TSK-PENDING-bridge-smuggle",
         "request_id": "req-bridge-smuggle",
         "request_kind": "external_review",
         "prompt": "Review the bounded fixture.",
@@ -547,7 +547,7 @@ def scenario_resume_after_interrupt(harness: OrchestratorHarness) -> dict[str, A
 
 def scenario_lock_contention_is_typed(harness: OrchestratorHarness) -> dict[str, Any]:
     request_id, run_id = "req-lock-contention", "run-lock-contention"
-    harness.propose(task_id="TSK-lock-contention", request_id=request_id)
+    harness.propose(task_id="TSK-PENDING-lock-contention", request_id=request_id)
     harness.approve(request_id)
     harness.create_run(request_id, run_id)
     run_path = harness.state_root / "runs" / f"{run_id}.json"
@@ -569,7 +569,7 @@ def scenario_lock_contention_is_typed(harness: OrchestratorHarness) -> dict[str,
 
 def scenario_stale_lock_recovered(harness: OrchestratorHarness) -> dict[str, Any]:
     request_id, run_id = "req-stale-lock", "run-stale-lock"
-    harness.propose(task_id="TSK-stale-lock", request_id=request_id)
+    harness.propose(task_id="TSK-PENDING-stale-lock", request_id=request_id)
     harness.approve(request_id)
     harness.create_run(request_id, run_id)
     lock_path = harness.frontdoor.run_lock.global_lock_path(harness.state_root)
@@ -599,7 +599,7 @@ def scenario_stale_lock_recovered(harness: OrchestratorHarness) -> dict[str, Any
 def scenario_concurrency_one_enforced(harness: OrchestratorHarness) -> dict[str, Any]:
     first = prepare_run(harness, "concurrency-first")
     request_id, second = "req-concurrency-second", "run-concurrency-second"
-    harness.propose(task_id="TSK-concurrency-second", request_id=request_id)
+    harness.propose(task_id="TSK-PENDING-concurrency-second", request_id=request_id)
     harness.approve(request_id)
     harness.create_run(request_id, second)
     before = (harness.state_root / "runs" / f"{second}.json").read_bytes()
@@ -692,7 +692,7 @@ def scenario_context_ref_confinement(harness: OrchestratorHarness) -> dict[str, 
     marker = "CONTEXT-BODY-MARKER-c31d"
     ref = harness.make_ref("context-fixture.md", marker + "\n")
     request_id, run_id = "req-context", "run-context"
-    harness.propose(task_id="TSK-context", request_id=request_id, refs=[ref])
+    harness.propose(task_id="TSK-PENDING-context", request_id=request_id, refs=[ref])
     approved = harness.approve(request_id)
     harness.create_run(request_id, run_id)
     harness.drain(run_id)
@@ -712,7 +712,7 @@ def scenario_frontdoor_parity(harness: OrchestratorHarness) -> dict[str, Any]:
     for frontdoor in ("claude", "codex"):
         request_id = f"req-parity-{frontdoor}"
         harness.propose(
-            task_id=f"TSK-parity-{frontdoor}",
+            task_id=f"TSK-PENDING-parity-{frontdoor}",
             request_id=request_id,
             frontdoor=frontdoor,
             chat_session_id=f"session-{frontdoor}",
