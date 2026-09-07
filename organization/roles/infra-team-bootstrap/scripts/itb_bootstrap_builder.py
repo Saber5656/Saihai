@@ -1757,7 +1757,7 @@ def read_regular_file_bytes_at(
     try:
         file_fd = os.open(
             filename,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK,
             dir_fd=parent_fd,
         )
         stat = os.fstat(file_fd)
