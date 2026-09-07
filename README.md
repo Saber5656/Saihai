@@ -26,7 +26,11 @@ Release history and the merged pull requests included in v0.1.0 are recorded
 in the [changelog](CHANGELOG.md). Tagging and GitHub Release publication are
 human-owned operations and are separate from merging a release-preparation PR.
 
-The v0.1.0 certainty and authority boundary is deliberately narrow:
+The release is not yet published. The [release readiness checklist](docs/runbooks/release-readiness.md) separates source, historical live evidence, pending acceptance, and release authorization.
+
+For ordinary authorized work, the explicit `trusted_local_v1` profile uses the host-owned execution/publication driver and existing host authentication. Required CI precedes head-pinned PR merge; ordinary work does not require another approval or Bot review. Permission expansion, authentication secrets, and data-loss risk receive one limited review. See the [trusted-local contract](organization/runtime/workflows/trusted-local-contract.md). This is not a commissioned `action_enforced` or `managed_worker` claim.
+
+The separate legacy managed-profile authority boundary remains narrow:
 
 - The Saihai bridge accepts only typed-request submission, redacted-projection
   reads, and output acknowledgement. It rejects frontend-supplied
@@ -59,15 +63,15 @@ The v0.1.0 certainty and authority boundary is deliberately narrow:
   active `managed_worker` generation is currently claimable on the same rootfs.
 - The shipped scoped-worker executor rejects all network and provider grants.
   The opt-in live provider adapters are a separate host-owned readonly path.
-- Commit, push, and pull-request publication remain behind separate review,
-  approval, and publication gates.
+- Legacy managed publication retains its explicitly selected gates. Ordinary
+  trusted-local publication uses existing host authority and required CI; no
+  credential provisioning or release permission is implied.
 - The supported checkout is the host-managed primary checkout at `~/dev/Saihai`
   or one of its linked worktrees. An arbitrary fresh clone does not satisfy the
   checkout identity contract.
 
-Daemon scheduling, tmux worker execution, package distribution, automatic
-publication, credential provisioning, and release publication are outside the
-v0.1.0 runtime boundary.
+Daemon scheduling, tmux worker execution, package distribution, credential
+provisioning, and release publication are outside ordinary runtime authority.
 
 ## Requirements
 
@@ -141,7 +145,7 @@ for the complete path audit.
 | Provider credential provisioning | Operators create and configure credentials manually. The runner accepts neither credential values nor arbitrary argv, shell, model, cwd, or endpoint overrides. |
 | tmux worker execution | `tmux_interactive` remains a compatibility model but is not used by the P0 execution path. |
 | Daemon or LaunchAgent scheduling | The scheduler is invocation-drain with durable state and global concurrency 1. |
-| Implicit commit, push, or PR automation | Publication is a separate gate. A normal P0 workflow does not publish changes directly. |
+| Worker-owned publication | Readonly P0 and low-trust workers never publish directly. Explicit trusted-local host authority enables the separate host publication driver. |
 | Workflow control from the status viewer | The viewer is read-only. Workflow control belongs to the operator CLI or the authenticated frontdoor HTTP API. |
 
 ## Offline quickstart
@@ -152,12 +156,16 @@ provider call. Complete [Local environment](#local-environment) first; path
 configuration alone does not authorize a different clone.
 
 ```sh
+# A host operator registers this canonical task before the run.
 suffix="$(date +%s)"
+task_id="TSK-PENDING-readme-smoke-$suffix"
+python3 scripts/saihai.py task scaffold --task-id "$task_id" --project Release-Smoke \
+  --brief '{"objective":"Verify the offline README flow","scope":"Fake provider and private run evidence only","acceptance_criteria":"Typed completion and canonical task persistence"}'
 request_id="req-readme-smoke-$suffix"
 run_id="run-readme-smoke-$suffix"
 
 python3 scripts/saihai.py frontdoor propose \
-  --task-id TSK-readme-smoke \
+  --task-id "$task_id" \
   --request-id "$request_id" \
   --prompt "Run a readonly external review." \
   --ref organization/runtime/workflows/README.md \
@@ -188,6 +196,11 @@ python3 scripts/saihai.py workflow run-provider \
 python3 scripts/configure_organization.py workflow-frontdoor \
   verify-completion --run-id "$run_id"
 ```
+
+This operator flow writes its registered canonical Vault task and completion;
+it is not a side-effect-free test. Use the temporary-Vault tests in the release
+checklist for offline validation without touching shared records. The release
+smoke itself remains pending until its exact transcript is recorded.
 
 The final command must return a typed completion decision. For deeper
 background on blocked states, artifact inspection, recovery, migration, and
@@ -406,8 +419,9 @@ observations. In particular,
 `dedicated_auth_deny_configured_not_mechanically_proven` are explicit
 non-claims, not mechanical denial evidence.
 The shipped local action gateway does not provide automatic transport to such a
-domain, so the current release is not an automatically connected end-to-end
-worker system.
+domain, so this legacy managed profile is not an automatically connected
+end-to-end worker system. The separate trusted-local host driver does not claim
+these isolated-domain guarantees.
 
 | Environment variable | Purpose |
 |---|---|
