@@ -382,7 +382,7 @@ def existing_provider_attempt_journal(state_root: Path, run: dict[str, Any]) -> 
 
 
 def account_expired_provider_attempt(state_root: Path, run: dict[str, Any]) -> tuple[bool, Path | None]:
-    """Persist one abandoned attempt and consume the same-failure retry budget."""
+    """Persist one abandoned attempt and consume the shared per-step retry budget."""
 
     execution = run.get("provider_execution") if isinstance(run.get("provider_execution"), dict) else {}
     if not execution:
@@ -401,7 +401,6 @@ def account_expired_provider_attempt(state_root: Path, run: dict[str, Any]) -> t
     else:
         retry["last_failure_fingerprint"] = fingerprint
         retry["consecutive_failures"] = 1
-        retry["auto_retries_used"] = 0
     configured_max = retry.get("max_auto_retries")
     max_retries = int(configured_max) if isinstance(configured_max, int) and not isinstance(configured_max, bool) else 5
     auto_retries_used = int(retry.get("auto_retries_used") or 0)

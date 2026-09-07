@@ -761,9 +761,7 @@ sidecar. Both report types retain the existing effective-model policy checks.
 No provider/model override or additional research-to-review context promotion is
 introduced: each step uses the original approved bounded context.
 
-Production admission remains blocked until the complete chain runtime is validated.
-Offline integration fixtures substitute only the host readiness result.
-For an approved fixture `readonly_review_chain` run, use the existing commands in order:
+For an approved `readonly_review_chain` run, use the existing commands in order:
 `workflow drain`, `workflow run-provider --fake-provider-mode success`, then
 repeat that pair for review, passing the same `--state-root` and `--run-id` as in
 the examples above. Drain creates each order; run-provider executes only that
