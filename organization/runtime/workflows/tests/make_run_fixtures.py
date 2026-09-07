@@ -218,7 +218,7 @@ def refresh_content_digests(state_root: Path) -> None:
 def _prepare_run(harness: OrchestratorHarness, scenario: str) -> str:
     request_id = f"req-{scenario}"
     run_id = f"run-{scenario}"
-    harness.propose(task_id=f"TSK-{scenario}", request_id=request_id)
+    harness.propose(task_id=f"TSK-PENDING-{scenario}", request_id=request_id)
     harness.approve(request_id)
     harness.create_run(request_id, run_id)
     harness.drain(run_id)
@@ -357,8 +357,11 @@ def generate_fixture(scenario: str, destination: Path) -> None:
         raise RuntimeError("refusing to generate fixtures while SAIHAI_ALLOW_LIVE_PROVIDERS is set")
     if destination.exists():
         shutil.rmtree(destination)
-    destination.mkdir(parents=True)
-    build_scenario(scenario, destination)
+    # Execute against a genuinely private root, then export inert fixtures.
+    with tempfile.TemporaryDirectory() as raw:
+        generated = Path(raw).resolve()
+        build_scenario(scenario, generated)
+        shutil.copytree(generated, destination)
 
 
 def directory_snapshot(root: Path) -> dict[str, bytes]:

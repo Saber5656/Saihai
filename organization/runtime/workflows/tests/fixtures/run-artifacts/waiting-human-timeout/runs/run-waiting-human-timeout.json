@@ -137,7 +137,7 @@
       "work_order_path": "__STATE_ROOT__/work-orders/run-waiting-human-timeout/review.json"
     }
   ],
-  "task_id": "TSK-waiting-human-timeout",
+  "task_id": "TSK-PENDING-waiting-human-timeout",
   "terminal": {
     "reason": null,
     "status": null
@@ -496,5 +496,11 @@
       "transition_version": "1"
     }
   ],
+  "vault_task_binding": {
+    "content_digest": "sha256:3dbda9181561e832a2341a4e36b67746ec260ee172288a82810384e4f2367298",
+    "convention": "03-Contexts/Policies/Task-File-Conventions.md",
+    "path": "__STATE_ROOT__/fixture-vault/01-Projects/Fixtures/TSK-PENDING-waiting-human-timeout/task.md",
+    "task_id": "TSK-PENDING-waiting-human-timeout"
+  },
   "workflow_id": "single_step_external_review"
 }

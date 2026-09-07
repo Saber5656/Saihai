@@ -426,10 +426,8 @@ def validate_workflow_candidate(
             missing_fields=[required_permission],
         )
 
-    if workflow_id == "readonly_review_chain":
-        # Keep the declaration loadable, but admit it only after the multi-step
-        # runner, report transitions and final gate have end-to-end validation.
-        return blocked_selection("readonly_chain_runtime_unavailable", candidates=[workflow_id])
+    if workflow_id == "readonly_review_chain" and not classification.get("external_provider_required"):
+        return waiting_selection("readonly_chain_requires_provider", [workflow_id])
 
     if workflow_id == "single_step_external_review":
         if classification.get("task_kind") != "external_review":

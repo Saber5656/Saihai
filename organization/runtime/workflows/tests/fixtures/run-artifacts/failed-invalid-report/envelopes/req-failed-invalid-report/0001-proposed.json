@@ -41,7 +41,7 @@
       "publication": "not_required"
     },
     "request_id": "req-failed-invalid-report",
-    "task_id": "TSK-failed-invalid-report",
+    "task_id": "TSK-PENDING-failed-invalid-report",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],

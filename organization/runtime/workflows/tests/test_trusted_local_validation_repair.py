@@ -35,7 +35,8 @@ class ValidationRepairTests(unittest.TestCase):
         originals={p.name:p.read_bytes() for p in self.directory.glob('*.json')}
         authority=self.f.root/'authority.json';authority.write_text(json.dumps(dataclasses.asdict(self.f.auth)));authority.chmod(0o600)
         cli=Path(__file__).resolve().parents[4]/'scripts'/'saihai.py'
-        command=[sys.executable,str(cli),'usage','repair-validation','--authorization',str(authority),'--state-root',str(self.f.state),'--repair-instruction','Retain the task result and fix its validation only.']
+        wrapper='import sys,runpy; from pathlib import Path; sys.path.insert(0,sys.argv.pop(1)); import vault_task_records as v; root=Path(sys.argv.pop(1)); v.canonical_root=lambda:root; sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__")'
+        command=[sys.executable,'-c',wrapper,str(cli.parent.parent/'organization/runtime/workflows/scripts'),str(self.f.vault),str(cli),'usage','repair-validation','--authorization',str(authority),'--state-root',str(self.f.state),'--repair-instruction','Retain the task result and fix its validation only.']
         done=subprocess.run(command,capture_output=True,text=True)
         self.assertEqual(done.returncode,0,done.stdout+done.stderr)
         result=json.loads(done.stdout);self.assertEqual(result['status'],'validated')
@@ -104,6 +105,38 @@ class ValidationRepairTests(unittest.TestCase):
         progress=json.loads((self.directory/'validation-repair.json').read_text())
         self.assertEqual(progress['attempt'],3)
         self.assertEqual(progress['same_cause_retries'],2)
+
+    def test_stdout_failure_change_resets_counter(self):
+        self.f.auth=dataclasses.replace(self.f.auth,validation_commands=((sys.executable,'-c',"from pathlib import Path; print(Path('app.txt').read_text()); raise SystemExit(7)"),))
+        self.fail_initial()
+        for _ in range(2):
+            with self.assertRaisesRegex(local.TrustedLocalError,'host_validation_failed'):
+                local.repair_validation(self.f.auth,self.f.state)
+        progress=json.loads((self.directory/'validation-repair.json').read_text())
+        self.assertEqual(progress['same_cause_retries'],1)
+
+    def test_maximum_execution_id_keeps_fresh_valid_repair_identity(self):
+        identity='EXE-'+('x'*92)
+        self.f.auth=dataclasses.replace(self.f.auth,publication=dataclasses.replace(self.f.auth.publication,execution_id=identity))
+        self.f.request['execution_id']=identity
+        self.directory=self.f.state/'trusted-local'/identity
+        self.fail_initial()
+        result=local.repair_validation(self.f.auth,self.f.state)
+        self.assertEqual(result['status'],'validated')
+        self.assertLessEqual(len(result['execution_id']),96)
+        self.assertNotEqual(result['execution_id'],identity)
+
+    def test_maximum_instruction_preserved_and_guidance_transported(self):
+        text=self.f.cli.read_text().replace("request['task']['instruction']", "str(request)")
+        self.f.cli.write_text(text)
+        self.f.auth=dataclasses.replace(self.f.auth,executable_digest=publication.digest(self.f.cli.read_bytes()))
+        self.f.request['instruction']='x'*65536
+        self.fail_initial()
+        result=local.repair_validation(self.f.auth,self.f.state,repair_instruction='Keep original scope.')
+        repaired=Path(result['report_path']).parent
+        self.assertEqual(json.loads((repaired/'request.json').read_text())['instruction'],self.f.request['instruction'])
+        self.assertIn('Keep original scope.',json.loads((repaired/'repair-input.json').read_text())['host_repair_guidance'])
+        self.assertEqual(result['status'],'validated')
 
     def test_failed_diagnostics_are_private_bounded_and_digest_bound(self):
         self.f.auth=dataclasses.replace(self.f.auth,validation_commands=((sys.executable,'-c',"import sys; print('x'*20000,file=sys.stderr); raise SystemExit(1)"),))

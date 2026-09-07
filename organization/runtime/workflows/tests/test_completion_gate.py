@@ -21,6 +21,10 @@ SERVER_SCRIPT = SCRIPT_DIR / "frontdoor_server.py"
 FRONTDOOR_TEST_WRAPPER = """
 import sys
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, str(__import__("pathlib").Path(sys.argv[1]).parent / "tests"))
+import vault_test_support
+if 'create-run' in sys.argv or 'verify-completion' in sys.argv:
+    vault_test_support.prepare(__import__("pathlib").Path(sys.argv[2]))
 import frontdoor_orchestrator as frontdoor
 frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
 sys.argv = [sys.argv[0], *sys.argv[3:]]
@@ -99,7 +103,7 @@ def prepare_terminal_run(
             state_root,
             "propose",
             "--task-id",
-            f"TSK-{request_id}",
+            f"TSK-PENDING-{request_id}",
             "--request-id",
             request_id,
             "--prompt",
@@ -242,6 +246,16 @@ def test_complete_run_verifies_and_annotates() -> None:
         assert_equal(block["evidence_sha256"], file_sha256(artifacts["evidence_path"]), "evidence digest")
         assert "completion_verification" in payload["workflow_run"], "run annotation missing"
         assert_equal(payload["workflow_run"]["run_state"], "complete", "run state unchanged")
+        task_path = Path(block['vault_persistence']['path'])
+        assert_equal(task_path.read_text().count('## Saihai completion'), 1, 'one persisted completion')
+        repeated = verify(state_root)
+        assert repeated['evidence']['vault_persistence']['replayed']
+        assert_equal(task_path.read_text().count('## Saihai completion'), 1, 'idempotent replay')
+        task_path.chmod(0o444)
+        denied = verify(state_root, check=False)
+        assert_equal(denied['decision'], 'blocked', 'unwritable Vault blocks success')
+        assert_equal(denied['reason'], 'vault_task_record_not_writable', 'write denial typed')
+
 
 
 def test_non_terminal_blocks_without_annotation() -> None:
@@ -252,7 +266,7 @@ def test_non_terminal_blocks_without_annotation() -> None:
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-nonterminal",
+                "TSK-PENDING-nonterminal",
                 "--request-id",
                 "req-nonterminal",
                 "--prompt",
@@ -499,6 +513,8 @@ def test_http_verify_completion_route() -> None:
         state_root = Path(raw_tmp)
         prepare_terminal_run(state_root)
         server_module = load_server_module()
+        import vault_test_support
+        vault_test_support.prepare(state_root)
         try:
             server = server_module.FrontdoorServer(
                 ("127.0.0.1", 0),
