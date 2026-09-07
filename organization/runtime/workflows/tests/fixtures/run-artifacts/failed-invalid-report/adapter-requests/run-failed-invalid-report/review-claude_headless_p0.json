@@ -147,6 +147,8 @@
   "replacement": "run-provider --live",
   "report_path": "__STATE_ROOT__/reports/run-failed-invalid-report/review-external-review-report.json",
   "request_id": "req-failed-invalid-report",
+  "role_definition_digest": "sha256:b7ef9237e3f7015738db6aa11890183cca55d9260c640bd398c678befc4a0047",
+  "role_definition_path": "organization/roles/tech-reviewer/skill.md",
   "run_id": "run-failed-invalid-report",
   "step_id": "review",
   "transcript_path": "__STATE_ROOT__/provider-evidence/run-failed-invalid-report/review-provider-transcript.json",

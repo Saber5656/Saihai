@@ -105,6 +105,8 @@
   "lease_id": "provider-lease-fixture",
   "report_path": "__STATE_ROOT__/reports/run-stale-lock/review-external-review-report.json",
   "request_id": "req-stale-lock",
+  "role_definition_digest": "sha256:b7ef9237e3f7015738db6aa11890183cca55d9260c640bd398c678befc4a0047",
+  "role_definition_path": "organization/roles/tech-reviewer/skill.md",
   "run_id": "run-stale-lock",
   "step_contract": {
     "adapter_kind": "external_provider",

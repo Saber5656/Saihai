@@ -103,6 +103,11 @@ def test_fake_provider_success_completes_with_normalized_evidence() -> None:
         assert_equal(payload["workflow_run"]["run_state"], "complete", "run state")
         evidence = json.loads(Path(payload["evidence_path"]).read_text(encoding="utf-8"))
         assert_equal(evidence["evidence_version"], "1", "evidence version")
+        order = json.loads((state_root / "work-orders" / "run-provider-ok" / "review.json").read_text())
+        assert_equal(evidence["role_definition_digest"], order["role_definition_digest"], "frozen role evidence")
+        import task_state_bridge
+        rows = task_state_bridge.queue_evidence_view(state_root, payload["workflow_run"])
+        assert_equal(rows[0]["role_definition_digest"], evidence["role_definition_digest"], "projected frozen role")
         assert "provider_evidence_version" not in evidence
         assert_equal(evidence["provider_adapter_id"], "claude_headless_p0", "adapter id")
         assert_equal(evidence["provider_target"], "claude_headless", "provider target")
@@ -415,7 +420,11 @@ def test_completion_rejects_tampered_runner_evidence_identity_path_and_type() ->
     def remove_model_assurance(evidence: dict, _state_root: Path) -> None:
         evidence.pop("model_assurance")
 
+    def change_role_digest(evidence: dict, _state_root: Path) -> None:
+        evidence["role_definition_digest"] = "sha256:" + "0" * 64
+
     variants = (
+        ("role-digest", change_role_digest, "normalized_evidence.role_definition_digest mismatch"),
         ("request-id", change_request_id, "normalized_evidence.request_id mismatch"),
         ("self-path", change_self_path, "must reference its own artifact"),
         ("transcript-path", change_transcript_path, "must match current run transcript path"),
