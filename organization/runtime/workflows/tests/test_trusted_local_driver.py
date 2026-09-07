@@ -80,7 +80,9 @@ class TrustedLocalDriverTests(unittest.TestCase):
         cli = Path(__file__).resolve().parents[4]/'scripts'/'saihai.py'
         # One real CLI invocation, one real subprocess and validation. A ceiling
         # before publication keeps this CLI test entirely offline without a shim.
-        result = subprocess.run([sys.executable, str(cli), 'usage', 'drive',
+        wrapper = 'import sys,runpy; from pathlib import Path; sys.path.insert(0,sys.argv.pop(1)); import vault_task_records as v; root=Path(sys.argv.pop(1)); v.canonical_root=lambda:root; sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__")'
+        result = subprocess.run([sys.executable, '-c', wrapper,
+            str(cli.parents[1]/'organization/runtime/workflows/scripts'), str(self.f.vault), str(cli), 'usage', 'drive',
             '--authorization', str(authority), '--request', str(request), '--state-root', str(self.f.state),
             '--max-iterations', '1'], capture_output=True, text=True)
         self.assertEqual(0, result.returncode, result.stdout+result.stderr)

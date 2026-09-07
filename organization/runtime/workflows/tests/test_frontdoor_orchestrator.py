@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 sys.path.insert(0, str(__import__("pathlib").Path(sys.argv[1]).parent / "tests"))
 import vault_test_support
-if 'create-run' in sys.argv or 'verify-completion' in sys.argv:
+if any(command in sys.argv for command in ('create-run', 'verify-completion', 'drive-run')):
     vault_test_support.prepare(__import__("pathlib").Path(sys.argv[2]))
 import frontdoor_orchestrator as frontdoor
 frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]

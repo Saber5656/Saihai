@@ -2852,8 +2852,8 @@ def capture_review_context(capability: dict[str, Any], root: Path, changed: list
     return result
 
 
-def load_completed_review_context(state_root: Path, run: dict[str, Any]) -> list[dict[str, Any]]:
-    """Read the last host-recorded completed execution; never accept provider paths."""
+def completed_review_evidence(state_root: Path, run: dict[str, Any]) -> tuple[dict, dict, dict, dict]:
+    """Read canonical completed implementation evidence without changing it."""
     history = [row for row in run['step_history'] if row.get('step_id') == 'implement' and row.get('status') == 'completed' and row.get('execution_id')]
     if not history:
         raise ScopedWorkerError('review_execution_evidence_missing')
@@ -2868,7 +2868,16 @@ def load_completed_review_context(state_root: Path, run: dict[str, Any]) -> list
         raise ScopedWorkerError('review_execution_evidence_mismatch')
     if evidence['capability_digest'] != capability['capability_digest'] or evidence['execution_id'] != execution['execution_id']:
         raise ScopedWorkerError('review_execution_identity_mismatch')
+    return row, execution, capability, evidence
+
+
+def load_completed_review_context(state_root: Path, run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read a producer snapshot, or an explicitly created current-content recovery."""
+    row, execution, capability, evidence = completed_review_evidence(state_root, run)
     context = evidence.get('review_context')
+    if 'review_context' not in evidence:
+        import legacy_review_recovery
+        return legacy_review_recovery.load_context(state_root, run, (row, execution, capability, evidence))
     if not isinstance(context, list) or not context:
         raise ScopedWorkerError('review_execution_context_missing')
     tree = Path(capability['worktree']['worktree_path'])

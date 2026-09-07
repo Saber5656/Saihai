@@ -9,6 +9,22 @@ match the current P0 frontdoor/orchestrator direction.
 Do not delete blindly: several files are still referenced by the current facade,
 dashboard, tests, and policy docs.
 
+## Port-first dependency gate (Issues #115, #116, #117)
+
+Legacy ITB deletion is blocked until **both #115 and #116 are closed**, the
+workflows Vault gates are integrated, and their task-binding, scaffold,
+append/idempotency, write-denial and evidence-reference behavior is verified.
+A source commit or a cleanup plan alone does not satisfy this dependency.
+
+The workflows port lives in `organization/runtime/workflows/scripts/vault_task_records.py`,
+with frontdoor and trusted-local completion consumers; see
+`docs/runbooks/vault-task-lifecycle.md`. This document authorizes no file deletion.
+Future removal requires its own explicit scoped task and dependency readback.
+
+Keep `infra-task-dispatcher` and its `itd_monitor.py` Vault-quality monitor.
+Task discovery/quality monitoring remains a separate responsibility from execution
+and completion persistence. No replacement monitor is claimed by this port.
+
 ## Current Cleanup Candidates
 
 | Area | Current Finding | Candidate Action |
@@ -33,6 +49,8 @@ dashboard, tests, and policy docs.
 
 ## Acceptance Criteria
 
+- [ ] Close #115 and #116 after workflows Vault gate semantics are ported, integrated and verified; record their evidence before any ITB deletion.
+- [ ] Re-confirm the keep decision for `infra-task-dispatcher` / `itd_monitor.py`; no deletion in this task.
 - [ ] Decide the new canonical location for role/model/team registry data.
 - [ ] Replace frontdoor startup dependency on `scripts/configure_organization.py`, or explicitly rename/keep it as the orchestrator facade.
 - [ ] Migrate `server.py` away from ITB runtime paths if ITB is removed.

@@ -542,6 +542,7 @@
         }
       ]
     },
+    "run_output": {"anyOf": [{"type":"null"}, {"type":"object","required":["run_id","run_state","current_step","iteration"],"properties":{"run_id":{"type":"string"},"run_state":{"type":"string"},"current_step":{"type":"string"},"iteration":{"type":"integer"}},"additionalProperties":false}]},
     "child_thread_summaries": {
       "type": "array",
       "items": {

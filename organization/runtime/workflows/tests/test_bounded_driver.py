@@ -35,13 +35,15 @@ class BoundedDriverTests(unittest.TestCase):
     def approve(self, root, suffix="chain"):
         request = "req-" + suffix
         proposed = load_payload(run_frontdoor(
-            root, "propose", "--task-id", "TSK-" + suffix, "--request-id", request,
+            root, "propose", "--task-id", "TSK-PENDING-" + suffix, "--request-id", request,
             "--prompt", "Research and independently review bounded evidence",
             "--classification", json.dumps(external_review_classification(
                 task_kind="research", expected_artifacts=["research_report", "typed_report", "final_evidence"])),
             "--ref", "organization/runtime/workflows/README.md"))
         load_payload(run_frontdoor(root, "approve", "--request-id", request,
                                   "--human-action-id", proposed["approval"]["human_action_id"]))
+        import vault_test_support
+        vault_test_support.prepare(root)
         return request
 
     def test_one_approval_one_actual_cli_drive_including_create(self):
