@@ -233,7 +233,7 @@ def create_repo(root: Path) -> Path:
 
 def direct_work_order(**overrides) -> dict:
     order = {
-        "task_id": "TSK-scoped",
+        "task_id": "TSK-PENDING-scoped",
         "request_id": "req-scoped",
         "run_id": "run-scoped",
         "step_id": "implement",
@@ -441,7 +441,7 @@ def create_approved_code_change(state_root: Path, *, user_prompt: str, worker_re
         state_root=state_root,
         frontend_kind="codex",
         payload={
-            "task_id": "TSK-scoped-e2e",
+            "task_id": "TSK-PENDING-scoped-e2e",
             "request_id": "req-scoped-e2e",
             "request_kind": "agent_task_request",
             "prompt": user_prompt,
@@ -459,7 +459,7 @@ def create_approved_code_change(state_root: Path, *, user_prompt: str, worker_re
     )
     proposed = frontdoor.proposed_request(
         state_root=state_root,
-        task_id="TSK-scoped-e2e",
+        task_id="TSK-PENDING-scoped-e2e",
         request_id="req-scoped-e2e",
         user_prompt=user_prompt,
         refs=["README.md"],
@@ -475,6 +475,8 @@ def create_approved_code_change(state_root: Path, *, user_prompt: str, worker_re
         request_id="req-scoped-e2e",
         human_action_id=proposed["approval"]["human_action_id"],
     )
+    import vault_test_support
+    vault_test_support.prepare(state_root)
     frontdoor.create_run(
         state_root=state_root,
         request_id="req-scoped-e2e",
@@ -619,7 +621,7 @@ def test_main_agent_and_arbitrary_inputs_are_rejected() -> None:
             ),
         )
     base = {
-        "task_id": "TSK-main",
+        "task_id": "TSK-PENDING-main",
         "request_id": "req-main",
         "request_kind": "external_review_request",
         "prompt": "typed user intent",
@@ -649,7 +651,7 @@ def test_tamper_expiry_replay_and_binding_checks() -> None:
             ),
         )
         for reason, kwargs in (
-            ("capability_task_id_mismatch", {"expected_task_id": "TSK-other"}),
+            ("capability_task_id_mismatch", {"expected_task_id": "TSK-PENDING-other"}),
             ("capability_run_id_mismatch", {"expected_run_id": "run-other"}),
             ("capability_work_order_digest_mismatch", {"expected_work_order_digest": "sha256:" + "0" * 64}),
             ("capability_branch_mismatch", {"expected_branch": "codex/other"}),
@@ -710,7 +712,7 @@ def test_tamper_expiry_replay_and_binding_checks() -> None:
         os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = "/usr/bin/true"
         try:
             order["worker_execution_plan"] = executor.build_execution_plan(
-                task_id="TSK-scoped",
+                task_id="TSK-PENDING-scoped",
                 request_id="req-scoped",
                 run_id="run-scoped",
                 step_id="implement",
@@ -1012,7 +1014,7 @@ def test_codex_backend_requires_fixed_secure_absolute_executable() -> None:
             assert_reason(
                 "codex_backend_executable_not_configured",
                 lambda: executor.build_execution_plan(
-                    task_id="TSK-binary",
+                    task_id="TSK-PENDING-binary",
                     request_id="req-binary",
                     run_id="run-binary",
                     step_id="implement",
@@ -1029,7 +1031,7 @@ def test_codex_backend_requires_fixed_secure_absolute_executable() -> None:
             assert_reason(
                 "codex_backend_executable_insecure",
                 lambda: executor.build_execution_plan(
-                    task_id="TSK-binary",
+                    task_id="TSK-PENDING-binary",
                     request_id="req-binary",
                     run_id="run-binary",
                     step_id="implement",
@@ -1043,7 +1045,7 @@ def test_codex_backend_requires_fixed_secure_absolute_executable() -> None:
             assert_reason(
                 "codex_backend_executable_not_configured",
                 lambda: executor.build_execution_plan(
-                    task_id="TSK-binary",
+                    task_id="TSK-PENDING-binary",
                     request_id="req-binary",
                     run_id="run-binary",
                     step_id="implement",
@@ -1179,7 +1181,7 @@ def test_review_fix_expired_reissue_paths_git_and_gateway_compatibility() -> Non
         os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = "/usr/bin/true"
         try:
             order["worker_execution_plan"] = executor.build_execution_plan(
-                task_id="TSK-scoped",
+                task_id="TSK-PENDING-scoped",
                 request_id="req-scoped",
                 run_id="run-scoped",
                 step_id="implement",
@@ -1242,7 +1244,7 @@ def test_review_fix_expired_reissue_paths_git_and_gateway_compatibility() -> Non
         os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = "/usr/bin/true"
         try:
             order["worker_execution_plan"] = executor.build_execution_plan(
-                task_id="TSK-scoped",
+                task_id="TSK-PENDING-scoped",
                 request_id="req-scoped",
                 run_id="run-scoped",
                 step_id="implement",

@@ -364,6 +364,16 @@ def handle_usage_repair_validation(frontdoor: Any, args: argparse.Namespace) -> 
                                                    repair_instruction=args.repair_instruction)
 
 
+def handle_task_scaffold(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import vault_task_records
+    try:
+        brief = read_request_json(frontdoor, args.brief)
+        return {'decision':'ok', 'task':vault_task_records.scaffold(vault_task_records.canonical_root(),
+            args.task_id, project=args.project, brief=brief)}
+    except vault_task_records.VaultTaskError as exc:
+        raise frontdoor.FrontdoorError(exc.reason_class) from exc
+
+
 def build_usage_parser(sub: Any) -> None:
     parser = sub.add_parser('usage', help='explicit trusted-local execution and host publication')
     commands = parser.add_subparsers(dest='command', required=True)
@@ -403,6 +413,13 @@ def build_parser() -> argparse.ArgumentParser:
     build_frontdoor_parser(sub)
     build_workflow_parser(sub)
     build_usage_parser(sub)
+    task = sub.add_parser('task', help='canonical host task records')
+    tasks = task.add_subparsers(dest='command', required=True)
+    scaffold = tasks.add_parser('scaffold')
+    scaffold.add_argument('--task-id', required=True)
+    scaffold.add_argument('--project', required=True)
+    scaffold.add_argument('--brief', required=True, help='host-approved typed objective/scope/acceptance JSON')
+    scaffold.set_defaults(handler=handle_task_scaffold)
     return parser
 
 

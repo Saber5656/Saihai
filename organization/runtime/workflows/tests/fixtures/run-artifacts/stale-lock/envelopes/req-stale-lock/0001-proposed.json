@@ -41,7 +41,7 @@
       "publication": "not_required"
     },
     "request_id": "req-stale-lock",
-    "task_id": "TSK-stale-lock",
+    "task_id": "TSK-PENDING-stale-lock",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],

@@ -26,6 +26,10 @@ spec = importlib.util.spec_from_file_location("saihai_e2e_cli", cli_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 frontdoor = module.frontdoor_module()
+sys.path.insert(0,str(cli_path.parent.parent / "organization/runtime/workflows/tests"))
+import vault_test_support
+if 'create-run' in sys.argv or 'verify-completion' in sys.argv:
+    vault_test_support.prepare(Path(sys.argv[2]))
 frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
 module.frontdoor_module = lambda: frontdoor
 raise SystemExit(module.main(sys.argv[3:]))
@@ -39,6 +43,10 @@ cli_path = Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("frontdoor_e2e_cli", cli_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+sys.path.insert(0,str(cli_path.parent.parent / "tests"))
+import vault_test_support
+if 'create-run' in sys.argv or 'verify-completion' in sys.argv:
+    vault_test_support.prepare(Path(sys.argv[2]))
 module.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
 sys.argv = [str(cli_path), "--state-root", sys.argv[2], *sys.argv[3:]]
 module.main()
@@ -221,7 +229,7 @@ def execute_harness_flow(*, mode: str, request_id: str, run_id: str) -> tuple[Pa
     temporary = tempfile.TemporaryDirectory()
     state_root = Path(temporary.name)
     harness = OrchestratorHarness(state_root)
-    proposed = harness.propose(task_id=f"TSK-{request_id}", request_id=request_id)
+    proposed = harness.propose(task_id=f"TSK-PENDING-{request_id}", request_id=request_id)
     assert proposed["request_status"] == "proposed"
     assert proposed["activation"]["activation_status"] == "proposed"
     assert proposed["activation"]["next_action"] == "keep_draft"
@@ -303,7 +311,7 @@ def test_cli_parity_happy_path() -> None:
             str(state_root),
             "propose",
             "--task-id",
-            "TSK-e2e-cli",
+            "TSK-PENDING-e2e-cli",
             "--request-id",
             request_id,
             "--prompt",
@@ -372,7 +380,7 @@ def test_cli_parity_happy_path() -> None:
         assert provider["report_gate"]["outcome"] == "report_valid"
         completed = run_frontdoor_cli(state_root, "verify-completion", "--run-id", run_id)
         assert completed["decision"] == "complete"
-        task_view = run_frontdoor_cli(state_root, "task-view", "--task-id", "TSK-e2e-cli")
+        task_view = run_frontdoor_cli(state_root, "task-view", "--task-id", "TSK-PENDING-e2e-cli")
         assert len(task_view["runs"]) == 1
         assert task_view["runs"][0]["run_state"] == "complete"
         assert_identity_and_evidence(state_root, run_id, request_id)

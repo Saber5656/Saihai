@@ -41,7 +41,7 @@
       "publication": "not_required"
     },
     "request_id": "req-traversal",
-    "task_id": "TSK-traversal",
+    "task_id": "TSK-PENDING-traversal",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],

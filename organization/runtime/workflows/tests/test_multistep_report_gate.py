@@ -121,7 +121,7 @@ class MultistepReportGateTests(unittest.TestCase):
             task_kind="research", expected_artifacts=["research_report", "typed_report", "final_evidence"],
         )
         proposed = load_payload(run_frontdoor(
-            root, "propose", "--task-id", "TSK-chain", "--request-id", "req-chain",
+            root, "propose", "--task-id", "TSK-PENDING-chain", "--request-id", "req-chain",
             "--prompt", "Research and independently review bounded evidence",
             "--classification", json.dumps(classification),
             "--ref", "organization/runtime/workflows/README.md",

@@ -78,7 +78,7 @@ class OrchestratorHarness:
     """Drives a full orchestrator flow against a throwaway state root."""
 
     def __init__(self, state_root: Path, repo_root: Path | None = None):
-        self.state_root = Path(state_root)
+        self.state_root = Path(state_root).resolve()
         self.repo_root = Path(repo_root or REPO_ROOT)
         self.frontdoor = _load_frontdoor()
         self.optional_modules = {
@@ -125,7 +125,7 @@ class OrchestratorHarness:
 
     def propose(
         self,
-        task_id: str = "TSK-e2e",
+        task_id: str = "TSK-PENDING-e2e",
         request_id: str = "req-e2e",
         *,
         prompt: str = "Run bounded offline external review.",
@@ -174,6 +174,8 @@ class OrchestratorHarness:
         return response
 
     def create_run(self, request_id: str, run_id: str = "") -> dict[str, Any]:
+        import vault_test_support
+        vault_test_support.prepare(self.state_root)
         response = self.frontdoor.create_run(
             state_root=self.state_root,
             request_id=request_id,
@@ -270,6 +272,11 @@ class OrchestratorHarness:
         }
         report.update(overrides)
         report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        for artifact in (report_path, evidence_path, transcript_path):
+            artifact.chmod(0o600)
+            for parent in artifact.parents:
+                if parent == self.state_root: break
+                parent.chmod(0o700)
         return report_path
 
     def validate_report(self, run_id: str) -> dict[str, Any]:

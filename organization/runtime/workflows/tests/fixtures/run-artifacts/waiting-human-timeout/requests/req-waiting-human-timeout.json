@@ -87,7 +87,7 @@
       "human_action_id": "approve-fixture",
       "provider_binding_digest": "sha256:9a967fa1940b4384a1ea34a3d310ec1ac0d4c9d68d80519acdb73165da1c08e2",
       "request_id": "req-waiting-human-timeout",
-      "task_id": "TSK-waiting-human-timeout"
+      "task_id": "TSK-PENDING-waiting-human-timeout"
     }
   },
   "approved_activation": {
@@ -134,7 +134,7 @@
       "publication": "not_required"
     },
     "request_id": "req-waiting-human-timeout",
-    "task_id": "TSK-waiting-human-timeout",
+    "task_id": "TSK-PENDING-waiting-human-timeout",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],
@@ -219,7 +219,7 @@
       "publication": "not_required"
     },
     "request_id": "req-waiting-human-timeout",
-    "task_id": "TSK-waiting-human-timeout",
+    "task_id": "TSK-PENDING-waiting-human-timeout",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],
@@ -271,7 +271,7 @@
     ],
     "target_assurance_state": "action_enforced"
   },
-  "task_id": "TSK-waiting-human-timeout",
+  "task_id": "TSK-PENDING-waiting-human-timeout",
   "updated_at": "2026-01-01T00:00:00+0000",
   "user_prompt": "Run bounded offline external review."
 }
