@@ -585,7 +585,7 @@ def worker_source_identity(root: Path, paths: list[str]) -> dict:
 
 
 def worker_strategy(auth: TrustedLocalAuthorization, plan: dict | None = None) -> dict:
-    """Only measured execution behavior/configuration, never retry IDs or HEAD."""
+    """Measure behavior, excluding plan bookkeeping (kept only as evidence)."""
     import ast
     import inspect
     import textwrap
@@ -597,7 +597,8 @@ def worker_strategy(auth: TrustedLocalAuthorization, plan: dict | None = None) -
     return {'wire_schema': publication.digest(request_intake.provider_schema(json.loads(RESULT_SCHEMA.read_bytes()))),
             'behavior': publication.digest(behavior), 'prompt': publication.digest(ast.dump(prompt, include_attributes=False)),
             'executable': auth.executable_digest, 'model': auth.model,
-            'installation_plan': publication.digest(plan) if plan else None}
+            'emitted_argv': publication.digest(_argv(auth, Path(auth.publication.worktree),
+                Path('/__saihai_worker_result__'), schema_path=Path('/__saihai_worker_schema__')))}
 
 
 def repair_worker_process(authorization: TrustedLocalAuthorization, state_root: Path, *, installation_plan: dict | None = None) -> dict:
@@ -661,7 +662,16 @@ def repair_worker_process(authorization: TrustedLocalAuthorization, state_root: 
     saved_strategy = previous / 'worker-strategy.json'
     previous_strategy = run_store.read_json(saved_strategy) if saved_strategy.exists() else {'legacy': True}
     key = publication.digest({'strategy': strategy, 'cause': cause})
-    same = progress.get('worker_same_cause', 0) if progress.get('worker_cause_key') == key else 0
+    # Preserve counters recorded before plan bookkeeping was excluded. Only
+    # that known field is projected out; real behavior differences remain.
+    compatible_key = publication.digest({'strategy': previous_strategy, 'cause': cause})
+    previous_strategy = {k: v for k, v in previous_strategy.items() if k != 'installation_plan'}
+    if ('emitted_argv' not in previous_strategy and 'wire_schema' in previous_strategy
+            and process.get('argv_digest') == publication.digest(_argv(previous_auth, root,
+                previous / 'worker-result.json', schema_path=previous / 'worker-schema.json'))):
+        previous_strategy['emitted_argv'] = strategy['emitted_argv']
+    same = (progress.get('worker_same_cause', 0) if previous_strategy == strategy
+            and progress.get('worker_cause_key') in {key, compatible_key} else 0)
     # Count an observed failure once. Actual corrections start a new sequence.
     if previous_strategy == strategy and progress.get('worker_counted_execution') != progress['execution_id']:
         same += 1

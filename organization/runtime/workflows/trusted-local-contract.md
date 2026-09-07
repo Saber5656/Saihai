@@ -206,7 +206,8 @@ publication, including subsequent validation repair.
 
 Five consecutive observed failures of the same typed cause and measured worker
 strategy stop that sequence. The strategy fingerprints wire schema, decoder,
-provider command, prompt and approved executable/model/installation. Retry IDs,
+provider command, prompt and approved executable/model. Installation source SHA
+and readback digests remain evidence, not budget keys. Retry IDs,
 host restarts and unrelated commits do not reset it. An actual correction starts
 a new sequence while all earlier attempts remain saved. Driver iteration and
 duration bounds remain independent.

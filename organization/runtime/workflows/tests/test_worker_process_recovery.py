@@ -143,6 +143,47 @@ assert 'null' in schema['properties']['incidental_findings']['type']
                 driver.drive(authorization=self.f.auth,state_root=self.f.state)
             run.assert_not_called()
 
+    def test_strategy_ignores_plan_bookkeeping_but_tracks_execution_changes(self):
+        import inspect
+        import textwrap
+        first={'source_identity':{'commit':'a'*40},'expected_content_digest':'old'}
+        second={'source_identity':{'commit':'b'*40},'expected_content_digest':'new'}
+        original=local.worker_strategy(self.f.auth,first)
+        self.assertEqual(original,local.worker_strategy(self.f.auth,second))
+        self.assertEqual(original,local.worker_strategy(self.f.auth))
+        self.assertNotEqual(original,local.worker_strategy(dataclasses.replace(self.f.auth,model='different'),second))
+        # Readback bookkeeping is independent of genuine emitted argv changes.
+        original_argv=local._argv
+        def corrected_argv(*args,**kwargs):return original_argv(*args,**kwargs)+['--fixture-correction']
+        with patch.object(local,'_argv',corrected_argv):
+            self.assertNotEqual(original,local.worker_strategy(self.f.auth,first))
+        template=local.scoped.worker_argv_template
+        with patch.object(local.scoped,'worker_argv_template',side_effect=lambda *args:template(*args)+['--template-correction']):
+            self.assertNotEqual(original,local.worker_strategy(self.f.auth,first))
+        # Measure an actual alternate prompt expression without invoking a worker.
+        source=textwrap.dedent(inspect.getsource(local._execute))
+        corrected_source=source.replace('Perform only the authorized task below.', 'Perform precisely the authorized task below.')
+        real_source=inspect.getsource
+        def changed_prompt(fn):return corrected_source if fn is local._execute else real_source(fn)
+        with patch.object(inspect,'getsource',side_effect=changed_prompt):
+            self.assertNotEqual(original,local.worker_strategy(self.f.auth,first))
+
+    def test_historical_plan_key_does_not_reset_existing_failure_counter(self):
+        self.configure('always');self.fail()
+        for _ in range(4):driver.drive(authorization=self.f.auth,state_root=self.f.state,max_iterations=1)
+        progress_path=self.directory/'validation-repair.json';progress=json.loads(progress_path.read_text())
+        previous=self.directory.parent/progress['execution_id'];strategy_path=previous/'worker-strategy.json'
+        strategy=json.loads(strategy_path.read_text());strategy.pop('emitted_argv');strategy['installation_plan']='sha256:old-plan-bookkeeping'
+        local._save(strategy_path,strategy)
+        cause=local.request_intake.process_failure_cause(json.loads((previous/'process.json').read_text()))
+        progress['worker_cause_key']=pub.digest({'strategy':strategy,'cause':cause});local._save(progress_path,progress)
+        old={p:p.read_bytes() for p in self.directory.parent.glob('*/*.json')}
+        with patch.object(local,'_run_process') as run:
+            result=driver.drive(authorization=self.f.auth,state_root=self.f.state,max_iterations=1)
+            self.assertEqual(result['status'],'same_worker_retry_limit');run.assert_not_called()
+        for p,raw in old.items():
+            if p.name!='drive.json':self.assertEqual(p.read_bytes(),raw)
+
     def test_corrected_wire_strategy_allows_retry_without_erasing_failures(self):
         self.configure('always');self.fail()
         for _ in range(4):driver.drive(authorization=self.f.auth,state_root=self.f.state,max_iterations=1)
