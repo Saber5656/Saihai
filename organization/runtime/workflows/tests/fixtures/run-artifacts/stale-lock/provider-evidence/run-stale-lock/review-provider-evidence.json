@@ -17,6 +17,8 @@
   "raw_transcript_policy": "signal_only_not_shared",
   "reason_class": "ok",
   "request_id": "req-stale-lock",
+  "role_definition_digest": "sha256:2c77985d85b908b7c62a69886fb2a1ea3e2a51a651df6b36c8e48112976b623c",
+  "role_definition_path": "organization/roles/tech-reviewer/skill.md",
   "run_id": "run-stale-lock",
   "step_id": "review",
   "surface_metadata": {

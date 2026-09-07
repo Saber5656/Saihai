@@ -15,6 +15,9 @@
     "to_role",
     "assignment_role",
     "instruction",
+    "role_definition_path",
+    "role_definition_digest",
+    "role_contract",
     "expected_output",
     "context_refs",
     "context_scope",
@@ -30,6 +33,41 @@
     "work_order_authority"
   ],
   "properties": {
+    "role_definition_path": {
+      "type": "string",
+      "pattern": "^organization/roles/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/skill\\.md$"
+    },
+    "role_definition_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "role_contract": {"type": "string", "minLength": 1, "maxLength": 65536},
+    "work_brief_ref": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "digest",
+        "requirements_version",
+        "selected_unit_id"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "requirements_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selected_unit_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
     "work_order_version": {
       "const": "1"
     },

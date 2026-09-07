@@ -24,6 +24,35 @@
     "approved_provider_binding"
   ],
   "properties": {
+    "work_brief_ref": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "digest",
+        "requirements_version",
+        "selected_unit_id"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "requirements_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selected_unit_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
     "vault_task_binding": {"type": "object", "required": ["task_id", "path", "content_digest", "convention"], "properties": {"task_id": {"type": "string"}, "path": {"type": "string"}, "content_digest": {"type": "string"}, "convention": {"type": "string"}}, "additionalProperties": false},
     "review_lifecycle": {
       "$ref": "review-lifecycle.schema.json"
