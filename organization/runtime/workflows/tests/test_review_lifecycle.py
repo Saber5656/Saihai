@@ -21,7 +21,7 @@ OWNER = {'principal_type': 'harness_runner', 'principal_id': 'owner', 'authn_met
 SNAPSHOT = {'repository': 'Saber5656/Saihai', 'base': 'a' * 40, 'head': 'b' * 40}
 
 
-def finding(rule='rule-1', *, task='TSK-run-store', mandatory=True, path='src/app.py', **extra):
+def finding(rule='rule-1', *, task='TSK-PENDING-run-store', mandatory=True, path='src/app.py', **extra):
     return dict(rule_id=rule, path=path, anchor='function:main', task_id=task,
                 mandatory=mandatory, severity='high', evidence_ref='reports/review.json', **extra)
 

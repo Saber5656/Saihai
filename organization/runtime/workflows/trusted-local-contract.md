@@ -100,3 +100,34 @@ within the existing task scope; it cannot alter authority or allowed paths.
 The monotonically increasing `attempt` is separate from `same_cause_retries`;
 a changed failure cause resets only the consecutive counter. Validation timings
 and the private execution directory are normalized out of the cause identity.
+
+## Bounded automatic host progression
+
+```text
+python3.11 scripts/saihai.py usage drive --request /absolute/request.json --authorization /absolute/authority.json --state-root /absolute/private-state
+python3.11 scripts/saihai.py usage drive --authorization /absolute/authority.json --state-root /absolute/private-state
+```
+
+`usage drive` composes the existing run, validation repair and publication
+advance APIs. The request is required only before the exclusive execution claim
+exists. Resume checks the original authority and, when supplied, request digest.
+An existing claim without a usable execution receipt stops for inspection; it
+never starts the original worker again. The canonical private state directory
+must be outside the authorized worktree.
+
+Defaults are 32 admitted operations, 300 seconds, and five seconds between CI
+observations. `--max-iterations` accepts 1–256, `--duration-seconds` accepts a
+positive value up to 3600, and `--poll-interval-seconds` accepts 0–60. These are
+operation admission bounds: an already admitted operation retains its existing
+worker timeout. CI polling consumes no repair budget. Actual failed validation
+receipts use the existing same-cause repair limit; driver invocation does not
+reset that limit. The state-root lock is released before polling sleeps.
+
+The result distinguishes terminal completion, resumable bounds, human decisions,
+uncertain mutations and blocked execution. Publication reconciliation remains
+owned by the existing adapter. Completion persistence receipts are returned
+separately, and pending persistence does not become task completion. This driver
+does not write the canonical Vault. Private `drive.json` and
+`drive-events.jsonl` contain bounded status metadata, not worker transcripts.
+The existing `usage run`, `usage advance`, and readonly `drive-run` remain
+available. Synthetic GitHub tests verify scheduling, not a live deployment.

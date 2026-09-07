@@ -155,7 +155,7 @@
       "step_id": "review"
     }
   ],
-  "task_id": "TSK-complete-findings",
+  "task_id": "TSK-PENDING-complete-findings",
   "terminal": {
     "reason": "report_valid",
     "status": "complete"
@@ -300,5 +300,11 @@
       "transition_version": "1"
     }
   ],
+  "vault_task_binding": {
+    "content_digest": "sha256:a5c232bde0ea206490df87cca5e553947bdb9d68053b1c149b3fca7e22534346",
+    "convention": "03-Contexts/Policies/Task-File-Conventions.md",
+    "path": "__STATE_ROOT__/fixture-vault/01-Projects/Fixtures/TSK-PENDING-complete-findings/task.md",
+    "task_id": "TSK-PENDING-complete-findings"
+  },
   "workflow_id": "single_step_external_review"
 }

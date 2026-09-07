@@ -87,7 +87,7 @@
       "human_action_id": "approve-fixture",
       "provider_binding_digest": "sha256:d057891811a80833ff3ace0baf4f076a1944e2316cc561cd14ebbdd3a53413b8",
       "request_id": "req-failed-invalid-report",
-      "task_id": "TSK-failed-invalid-report"
+      "task_id": "TSK-PENDING-failed-invalid-report"
     }
   },
   "approved_activation": {
@@ -134,7 +134,7 @@
       "publication": "not_required"
     },
     "request_id": "req-failed-invalid-report",
-    "task_id": "TSK-failed-invalid-report",
+    "task_id": "TSK-PENDING-failed-invalid-report",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],
@@ -219,7 +219,7 @@
       "publication": "not_required"
     },
     "request_id": "req-failed-invalid-report",
-    "task_id": "TSK-failed-invalid-report",
+    "task_id": "TSK-PENDING-failed-invalid-report",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],
@@ -271,7 +271,7 @@
     ],
     "target_assurance_state": "action_enforced"
   },
-  "task_id": "TSK-failed-invalid-report",
+  "task_id": "TSK-PENDING-failed-invalid-report",
   "updated_at": "2026-01-01T00:00:00+0000",
   "user_prompt": "Run bounded offline external review."
 }

@@ -17,6 +17,7 @@ import report_gate
 import run_lifecycle
 import run_lock
 import run_store
+import vault_task_records
 import work_order_builder
 
 
@@ -562,6 +563,19 @@ def verify_completion(
                 block["provider_evidence_step_id"] = "review"
                 block["accepted_report_refs"] = [str(report_gate.report_path(state_root, run_id, step))
                                                   for step in ("research", "review", "final_evidence")]
+            try:
+                binding = run.get('vault_task_binding') or vault_task_records.bind_task(run['task_id'])
+                if binding.get('task_id') != run['task_id']:
+                    raise vault_task_records.VaultTaskError('vault_task_identity_mismatch')
+                attachments = [{'path':str(report_file), 'digest':vault_task_records.digest(report_file.read_bytes())}]
+                if evidence_path is not None:
+                    attachments.append({'path':str(evidence_path), 'digest':vault_task_records.digest(evidence_path.read_bytes())})
+                persisted = vault_task_records.persist_completion(binding, run_id=run_id, evidence=block, attachments=attachments)
+                block['vault_persistence'] = persisted
+            except (vault_task_records.VaultTaskError, OSError) as exc:
+                failure = exc.reason_class if isinstance(exc, vault_task_records.VaultTaskError) else 'vault_attachment_unavailable'
+                return {'schema_version':1, 'decision':'blocked', 'reason':failure,
+                        'run_id':run_id, 'reasons':[reason(failure, 'Canonical task completion was not persisted')]}
             if annotate:
                 run = annotate_completion(state_root, run, block=block, principal=actor)
             return {

@@ -325,6 +325,18 @@ def handle_usage_run(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]
                                       state_root=Path(args.state_root))
 
 
+def handle_usage_drive(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        authority = trusted_local_executor.load_host_authorization(Path(args.authorization))
+    except trusted_local_executor.TrustedLocalError as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
+    request = read_request_json(frontdoor, args.request) if args.request else None
+    return frontdoor.drive_trusted_local(authorization=authority, state_root=Path(args.state_root),
+        request=request, max_iterations=args.max_iterations, duration_seconds=args.duration_seconds,
+        poll_interval_seconds=args.poll_interval_seconds)
+
+
 def handle_usage_advance(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
     import trusted_local_executor
     try:
@@ -352,6 +364,16 @@ def handle_usage_repair_validation(frontdoor: Any, args: argparse.Namespace) -> 
                                                    repair_instruction=args.repair_instruction)
 
 
+def handle_task_scaffold(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import vault_task_records
+    try:
+        brief = read_request_json(frontdoor, args.brief)
+        return {'decision':'ok', 'task':vault_task_records.scaffold(vault_task_records.canonical_root(),
+            args.task_id, project=args.project, brief=brief)}
+    except vault_task_records.VaultTaskError as exc:
+        raise frontdoor.FrontdoorError(exc.reason_class) from exc
+
+
 def build_usage_parser(sub: Any) -> None:
     parser = sub.add_parser('usage', help='explicit trusted-local execution and host publication')
     commands = parser.add_subparsers(dest='command', required=True)
@@ -360,6 +382,14 @@ def build_usage_parser(sub: Any) -> None:
     run.add_argument('--authorization', required=True, help='private host-owned authorization file')
     run.add_argument('--state-root', required=True)
     run.set_defaults(handler=handle_usage_run)
+    drive = commands.add_parser('drive', help='run or resume a bounded authorized task through CI and completion')
+    drive.add_argument('--authorization', required=True)
+    drive.add_argument('--state-root', required=True)
+    drive.add_argument('--request', default='', help='initial request; omit to resume the existing execution')
+    drive.add_argument('--max-iterations', type=int, default=32)
+    drive.add_argument('--duration-seconds', type=float, default=300)
+    drive.add_argument('--poll-interval-seconds', type=float, default=5)
+    drive.set_defaults(handler=handle_usage_drive)
     advance = commands.add_parser('advance', help='advance host PR, CI, merge and integrated validation')
     advance.add_argument('--authorization', required=True)
     advance.add_argument('--state-root', required=True)
@@ -383,6 +413,13 @@ def build_parser() -> argparse.ArgumentParser:
     build_frontdoor_parser(sub)
     build_workflow_parser(sub)
     build_usage_parser(sub)
+    task = sub.add_parser('task', help='canonical host task records')
+    tasks = task.add_subparsers(dest='command', required=True)
+    scaffold = tasks.add_parser('scaffold')
+    scaffold.add_argument('--task-id', required=True)
+    scaffold.add_argument('--project', required=True)
+    scaffold.add_argument('--brief', required=True, help='host-approved typed objective/scope/acceptance JSON')
+    scaffold.set_defaults(handler=handle_task_scaffold)
     return parser
 
 

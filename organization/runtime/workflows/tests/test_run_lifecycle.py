@@ -47,7 +47,7 @@ def valid_run(**overrides) -> dict:
     candidate = {
         "run_version": "1",
         "run_id": "run-lifecycle",
-        "task_id": "TSK-run-lifecycle",
+        "task_id": "TSK-PENDING-run-lifecycle",
         "request_id": "req-run-lifecycle",
         "workflow_id": "single_step_external_review",
         "approved_provider_binding": {
@@ -570,7 +570,7 @@ def test_create_from_unapproved_activation_fails() -> None:
         state_root = Path(raw_tmp)
         frontdoor.proposed_request(
             state_root=state_root,
-            task_id="TSK-unapproved",
+            task_id="TSK-PENDING-unapproved",
             request_id="req-unapproved",
             user_prompt="Run bounded external review",
             refs=["organization/runtime/workflows/README.md"],

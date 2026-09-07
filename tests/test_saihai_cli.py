@@ -26,6 +26,10 @@ spec = importlib.util.spec_from_file_location("saihai_cli_test", cli_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 frontdoor = module.frontdoor_module()
+sys.path.insert(0,str(cli_path.parent.parent / "organization/runtime/workflows/tests"))
+import vault_test_support
+if 'create-run' in sys.argv or 'verify-completion' in sys.argv:
+    vault_test_support.prepare(Path(sys.argv[2]))
 frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
 module.frontdoor_module = lambda: frontdoor
 raise SystemExit(module.main(sys.argv[3:]))
@@ -143,7 +147,7 @@ def propose_review_request(state_root: Path, request_id: str = "req-saihai") -> 
         state_root,
         "propose",
         "--task-id",
-        f"TSK-{request_id}",
+        f"TSK-PENDING-{request_id}",
         "--request-id",
         request_id,
         "--prompt",
@@ -312,7 +316,7 @@ def test_exit_code_convention() -> None:
             state_root,
             "propose",
             "--task-id",
-            "TSK-exit-ok",
+            "TSK-PENDING-exit-ok",
             "--request-id",
             "req-exit-ok",
             "--prompt",
@@ -328,7 +332,7 @@ def test_exit_code_convention() -> None:
             state_root,
             "propose",
             "--task-id",
-            "TSK-exit-blocked",
+            "TSK-PENDING-exit-blocked",
             "--request-id",
             "req-exit-blocked",
             "--prompt",

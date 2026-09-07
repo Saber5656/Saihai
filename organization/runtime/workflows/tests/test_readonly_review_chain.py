@@ -55,13 +55,11 @@ class ReadonlyChainTests(unittest.TestCase):
         c = typed_classification('research', external_provider_required=True, expected_artifacts=['research_report', 'typed_report', 'final_evidence'])
         for _ in range(3):
             result = selector.select_workflow(c)
-            self.assertEqual(ID, selector.candidate_workflow_id(c))
-            self.assertEqual('blocked', result['decision'])
-            self.assertEqual('readonly_chain_runtime_unavailable', result['workflow_selection']['reason'])
-            self.assertEqual([ID], result['workflow_selection']['candidates'])
+            self.assertEqual('selected', result['decision'])
+            self.assertEqual(ID, result['workflow_selection']['workflow_id'])
             scope = selector.activation_scope_for_selection(result['workflow_selection'], c, allowed_paths=['evidence'], expires_at='2099-01-01T00:00:00Z')
             self.assertEqual(OPS, scope['allowed_ops'])
-            self.assertEqual(1, scope['step_budget'])
+            self.assertEqual(3, scope['step_budget'])
         self.assertEqual('research_only', selector.candidate_workflow_id(typed_classification('research')))
         for updates, expected in [({'security_sensitive': True}, 'security_sensitive_change'), ({'publication_required': True}, 'publication_required')]:
             self.assertEqual(expected, selector.candidate_workflow_id(dict(c, **updates)))

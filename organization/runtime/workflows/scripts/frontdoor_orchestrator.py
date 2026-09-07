@@ -28,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import host_state_root
 import safe_paths
+import vault_task_records
 import run_store
 import run_lock
 import run_lifecycle
@@ -4745,6 +4746,10 @@ def create_run(
                     "workflow_run": existing,
                 }
 
+            try:
+                task_binding = vault_task_records.bind_task(record['task_id'])
+            except vault_task_records.VaultTaskError as exc:
+                raise FrontdoorError(exc.reason_class) from exc
             run = {
                 "run_version": "1",
                 "run_id": effective_run_id,
@@ -4773,6 +4778,7 @@ def create_run(
                     "step_local_snapshot": "immutable_step_attempt_snapshot",
                     "provider_transcript": "confined_evidence_path_only",
                 },
+                "vault_task_binding": task_binding,
                 "approved_provider_binding": approved_provider_binding,
                 "transitions": [],
                 "transition_provenance": [
@@ -4806,7 +4812,7 @@ def create_run(
         principal=actor,
         subject=subject,
         outcome="ok",
-        details={"created": True, "run_link": link_status},
+        details={"created": True, "run_link": link_status, "vault_task_binding": task_binding},
     )
     return {
         "schema_version": 1,
@@ -5608,6 +5614,10 @@ def recover_review_context(*, state_root: Path, run_id: str, principal: dict[str
     except (run_store.RunStoreError, KeyError, TypeError, ValueError, OSError) as exc:
         raise FrontdoorError("review_recovery_state_invalid") from exc
 
+def drive_run(**kwargs: Any) -> dict[str, Any]:
+    from bounded_driver import drive_run as drive
+    return drive(**kwargs)
+
 
 def run_harness_gate(*, state_root: Path, run_id: str,
                      principal: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -5628,6 +5638,7 @@ def run_provider(
     timeout_seconds: int = provider_runner.DEFAULT_PROVIDER_TIMEOUT_SECONDS,
     fake_provider_mode: str = "",
     live: bool = False,
+    return_on_retry: bool = False,
     principal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
@@ -5639,6 +5650,7 @@ def run_provider(
             timeout_seconds=timeout_seconds,
             fake_provider_mode=fake_provider_mode,
             live=live,
+            return_on_retry=return_on_retry,
             principal=actor,
         )
     except provider_runner.ProviderRunnerError as exc:
@@ -6235,6 +6247,20 @@ def parser() -> argparse.ArgumentParser:
     recovery.add_argument("--principal-id", default="manual-cli")
     recovery.add_argument("--authn-method", default="local_cli")
 
+    drive = sub.add_parser("drive-run")
+    selector = drive.add_mutually_exclusive_group(required=True)
+    selector.add_argument("--run-id", default="")
+    selector.add_argument("--request-id", default="")
+    drive.add_argument("--max-iterations", type=int, default=32)
+    drive.add_argument("--duration-seconds", type=float, default=300)
+    drive.add_argument("--timeout-seconds", type=int, default=provider_runner.DEFAULT_PROVIDER_TIMEOUT_SECONDS)
+    drive.add_argument("--adapter-id", default=provider_runner.DEFAULT_ADAPTER_ID)
+    drive.add_argument("--fake-provider-mode", choices=["", "success", "findings", "blocked", "timeout", "nonzero", "malformed", "unavailable", "model_mismatch", "missing_effective_model"], default="")
+    drive.add_argument("--live", action="store_true")
+    drive.add_argument("--principal-type", default="harness_runner")
+    drive.add_argument("--principal-id", default="local-harness")
+    drive.add_argument("--authn-method", default="local_cli")
+
     drain = sub.add_parser("drain")
     drain.add_argument("--run-id", required=True)
     drain.add_argument("--principal-type", default="manual_operator")
@@ -6391,6 +6417,15 @@ def parser() -> argparse.ArgumentParser:
     return parser
 
 
+def drive_trusted_local(**kwargs: Any) -> dict[str, Any]:
+    import trusted_local_driver
+    import trusted_local_executor
+    try:
+        return trusted_local_driver.drive(**kwargs)
+    except (trusted_local_executor.TrustedLocalError, trusted_local_executor.publication.PublicationError) as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
 def run_trusted_local(*, request: dict[str, Any], authorization: Any, state_root: Path) -> dict[str, Any]:
     """Explicit usage-first host entry; no managed-worker attestation is implied."""
     import trusted_local_executor
@@ -6474,6 +6509,13 @@ def main() -> None:
             )
         elif args.command == "recover-review-context":
             payload = recover_review_context(state_root=state_root, run_id=args.run_id,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method))
+
+        elif args.command == "drive-run":
+            payload = drive_run(state_root=state_root, run_id=args.run_id, request_id=args.request_id,
+                max_iterations=args.max_iterations, duration_seconds=args.duration_seconds,
+                timeout_seconds=args.timeout_seconds, adapter_id=args.adapter_id,
+                fake_provider_mode=args.fake_provider_mode, live=args.live,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method))
         elif args.command == "drain":
             payload = drain_run(
