@@ -7,6 +7,7 @@ URL, command, credential, cache or existing-environment fallback is accepted.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import gzip
 import selectors
 import unicodedata
@@ -272,8 +273,11 @@ def run_stage(name, command, directory, receipt, env, timeout):
     save_receipt(directory, receipt)
     log = directory / (name + '.log')
     try:
-        with log.open('xb') as stream:
-            child = subprocess.Popen(command, cwd=ROOT, env=env, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+        # validate_all emits progress JSON on stderr and one result on stdout.
+        # Keep the digest-bound result a strict whole JSON document.
+        errors = (directory / 'full.progress.log').open('xb') if name == 'full' else nullcontext(subprocess.STDOUT)
+        with log.open('xb') as stream, errors as error_stream:
+            child = subprocess.Popen(command, cwd=ROOT, env=env, stdout=stream, stderr=error_stream, start_new_session=True)
             try: code = child.wait(timeout=timeout)
             except KeyboardInterrupt:
                 os.killpg(child.pid, signal.SIGKILL); child.wait()

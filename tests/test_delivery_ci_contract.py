@@ -332,7 +332,7 @@ class ValidationProjectionTests(unittest.TestCase):
         output = self.root / 'real-producer'; output.mkdir()
         receipt = {'stages': []}
         with patch.object(tool, 'ROOT', self.repo):
-            log = tool.run_stage('full', [sys.executable, '-c', 'print(' + repr(json.dumps(result)) + ')'], output, receipt, os.environ.copy(), 5)
+            log = tool.run_stage('full', [sys.executable, '-c', 'import sys;print("progress heartbeat",file=sys.stderr);print(' + repr(json.dumps(result)) + ')'], output, receipt, os.environ.copy(), 5)
             tool.publish_validation(log, output, receipt, sys.executable)
             tool.verify_validation_result(output, receipt)
         public = json.loads((output / 'validation.json').read_bytes())
@@ -340,6 +340,22 @@ class ValidationProjectionTests(unittest.TestCase):
         self.assertEqual(public['suites'][0]['count_method'], 'unittest_summary')
         self.assertEqual(public['suites'][0]['command'], row['command'])
         self.assertEqual(json.loads((output / 'receipt.json').read_text())['validation_result']['sha256'], tool.digest((output / 'validation.json').read_bytes()))
+
+    def test_actual_runner_stdout_is_strict_despite_progress_stderr(self):
+        output = self.root / 'actual-progress'; output.mkdir()
+        receipt = {'stages': []}
+        log = tool.run_stage('full', [sys.executable, '-B', 'scripts/validate_all.py',
+                            '--only', 'test_delivery_profiles'], output, receipt, os.environ.copy(), 90)
+        actual = tool.validation_document(log, receipt['stages'][-1]['log_sha256'])
+        self.assertEqual(actual['result'], 'pass')
+        self.assertEqual(len(actual['suites']), 1)
+        self.assertGreater(actual['suites'][0]['executed'], 0)
+        self.assertIn('suite_start', (output/'full.progress.log').read_text())
+        tool.sanitize_validation(actual, sys.executable)
+        log.write_bytes(log.read_bytes() + b'garbage')
+        with self.assertRaises(tool.ContractError): tool.validation_document(log)
+        with self.assertRaises(tool.ContractError):
+            tool.validation_document(log, receipt['stages'][-1]['log_sha256'])
 
     def test_projection_file_budget_symlink_and_depth_are_rejected(self):
         path = self.root / 'bounded.json'
