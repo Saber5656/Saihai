@@ -83,6 +83,30 @@ class ToolchainTests(unittest.TestCase):
         self.assertEqual((dest / 'python/bin/copy').read_text(), 'ok')
         with self.assertRaises((FileExistsError, tool.ContractError)): tool.safe_extract(archive, dest)
 
+    def test_case_variants_follow_actual_destination_semantics(self):
+        archive = self.archive([('python/E/Eterm', 'file', 'upper'),
+                                ('python/e/eterm', 'file', 'lower')])
+        probe = self.root / 'probe'; probe.mkdir()
+        sensitive = tool.case_sensitive_destination(probe)
+        destination = self.root / 'case-variants'
+        if sensitive:
+            tool.safe_extract(archive, destination)
+            self.assertEqual((destination/'python/E/Eterm').read_text(), 'upper')
+            self.assertEqual((destination/'python/e/eterm').read_text(), 'lower')
+        else:
+            with self.assertRaisesRegex(tool.ContractError, 'colliding'):
+                tool.safe_extract(archive, destination)
+        with patch.object(tool, 'case_sensitive_destination', return_value=False):
+            with self.assertRaisesRegex(tool.ContractError, 'colliding'):
+                tool.safe_extract(archive, self.root/'forced-insensitive')
+
+    def test_case_variant_implicit_parent_is_rejected_on_insensitive_destination(self):
+        archive = self.archive([('python/A/one', 'file', 'one'),
+                                ('python/a/two', 'file', 'two')])
+        with patch.object(tool, 'case_sensitive_destination', return_value=False):
+            with self.assertRaisesRegex(tool.ContractError, 'colliding'):
+                tool.safe_extract(archive, self.root/'parent-alias')
+
     def test_filter_and_expansion_limits_are_mandatory(self):
         archive = self.archive([('python/a', 'file', 'large')])
         with patch.object(tarfile, 'data_filter', None):

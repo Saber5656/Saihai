@@ -155,17 +155,32 @@ def parent_fd(root_fd, parts):
         os.close(fd); raise
 
 
+def case_sensitive_destination(destination):
+    """Measure the new destination filesystem, not the host OS name."""
+    with tempfile.TemporaryDirectory(prefix='.case-probe-', dir=destination) as raw:
+        probe = Path(raw) / 'case-probe'
+        probe.write_bytes(b'')
+        return not (Path(raw) / 'CASE-PROBE').exists()
+
+
 def safe_extract(archive, destination):
     if not callable(getattr(tarfile, 'data_filter', None)):
         raise ContractError('safe extraction filter unavailable')
     destination.mkdir(mode=0o700)  # Must be a new private directory, never reused.
-    start = time.monotonic(); members = {}; link_targets = {}; names_folded = set(); total = 0
+    case_sensitive = case_sensitive_destination(destination)
+    start = time.monotonic(); members = {}; link_targets = {}; names_folded = {}; total = 0
     with tarfile.open(archive, 'r:gz') as source:
         for member in source:
             if len(members) >= MAX_MEMBERS or time.monotonic() - start > 120: raise ContractError('archive member/time budget')
             name = member_name(member.name)
-            if name.casefold() in names_folded: raise ContractError('duplicate/colliding archive entry')
-            names_folded.add(name.casefold())
+            if name in members: raise ContractError('duplicate/colliding archive entry')
+            if not case_sensitive:
+                # Include implicit parents: A/one and a/two also collide.
+                for candidate in (PurePosixPath(name), *PurePosixPath(name).parents):
+                    spelling = str(candidate); folded = spelling.casefold()
+                    if folded in names_folded and names_folded[folded] != spelling:
+                        raise ContractError('duplicate/colliding archive entry')
+                    names_folded[folded] = spelling
             if not (member.isfile() or member.isdir() or member.issym() or member.islnk()) or member.sparse:
                 raise ContractError('special/sparse archive member')
             total += member.size
