@@ -511,6 +511,10 @@ def build_work_order(
     effective_model_policy_value: str,
     worker_execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    import workflow_selector
+    phase_errors = workflow_selector.validate_phase_prerequisites(template)
+    if phase_errors:
+        raise WorkOrderError(phase_errors[0])
     step_id = str(step["id"])
     review_action = review_lifecycle.next_review_action(run)
     if review_action is not None:

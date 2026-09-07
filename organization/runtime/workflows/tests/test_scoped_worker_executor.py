@@ -2143,6 +2143,19 @@ def _standard_review_flow_case(*, legacy_budget=False, unresolved=False, drift=F
         assert_equal(len(flow['verifications']),1,'one bounded verification')
         assert_equal(len([r for r in run['step_history'] if r.get('step_id')=='review' and r.get('status')=='complete']),2,'one review plus one verification')
         drain()
+        # Host fixture executes a real validation command against the actual repaired tree.
+        import trusted_local_executor as local
+        import host_publication_adapter as publication
+        from types import SimpleNamespace
+        sandbox = root/'validation-sandbox-fixture'
+        sandbox.write_text('#!/usr/bin/env python3\nimport subprocess,sys\nraise SystemExit(subprocess.run(sys.argv[sys.argv.index("--")+1:]).returncode)\n')
+        sandbox.chmod(0o755)
+        implementation = [r for r in run['step_history'] if r.get('step_id')=='implement' and r.get('status')=='completed'][-1]
+        host = SimpleNamespace(execution_id=implementation['execution_id'],repository='Saber5656/Saihai',allowed_paths=('README.md',))
+        auth = SimpleNamespace(publication=host,executable=str(sandbox),codex_home=str(root),timeout_seconds=30,validation_profile=None,
+            validation_commands=((sys.executable,'-c',"from pathlib import Path; assert Path('README.md').read_text() == 'fixed\\n'"),))
+        local._validate(task_trees[-1],auth,publication.snapshot(task_trees[-1],['README.md']),
+            state_root/'reports'/run_id/'host-validation.json')
         qa = provider_runner.run_provider(state_root=state_root, run_id=run_id,
             adapter_id='codex_cli_openai_p0', fake_provider_mode='success', principal=owner)
         assert_equal(qa['decision'],'ok','QA gate')

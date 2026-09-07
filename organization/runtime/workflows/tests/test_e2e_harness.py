@@ -17,12 +17,19 @@ from e2e_harness import HarnessAssertion, HarnessFeatureUnavailable, Orchestrato
 ROOT = Path(__file__).resolve().parents[4]
 VALIDATE_ALL = ROOT / "scripts" / "validate_all.py"
 VALIDATE_WORKFLOW = ROOT / ".github" / "workflows" / "validate.yml"
-EXPECTED_VALIDATE_WORKFLOW = """name: validate
+EXPECTED_VALIDATE_WORKFLOW = """\
+name: validate
 
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -55,9 +62,19 @@ jobs:
         run: |
           node --version
           mkdir -p "$AGENTS_VAULT_ROOT" "$USER_VAULT_ROOT" "$DEV_WORKTREES_ROOT"
-          python3 scripts/validate_all.py __CONT__
+          python3 scripts/verify_delivery_toolchain.py --run full --output "$RUNNER_TEMP/delivery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-${{ matrix.shard_index }}" __CONT__
             --shard-index "${{ matrix.shard_index }}" __CONT__
             --shard-count 8
+      - name: Retain bounded validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: delivery-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard_index }}
+          path: |
+            ${{ runner.temp }}/delivery-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard_index }}/receipt.json
+            ${{ runner.temp }}/delivery-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard_index }}/validation.json
+          retention-days: 14
+          if-no-files-found: error
 
   validate:
     name: validate
@@ -344,7 +361,7 @@ def test_validate_all_rejects_empty_zero_exit_suite() -> None:
     assert_equal(result["result"], "fail", "empty zero-exit suite result")
     assert_equal(
         result["detail"],
-        "exit_zero_no_result_json",
+        "required_test_evidence_not_passed",
         "empty zero-exit suite detail",
     )
 

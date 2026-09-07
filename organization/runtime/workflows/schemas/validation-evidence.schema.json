@@ -1,0 +1,927 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "saihai:validation-evidence:v1",
+  "title": "Read-only validation evidence request; never an authorization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "expected_target",
+    "delivery_profile",
+    "inventory",
+    "execution_bundle",
+    "change_contract",
+    "phase"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "expected_target": {
+      "$ref": "#/$defs/target"
+    },
+    "delivery_profile": {
+      "$ref": "#/$defs/artifact"
+    },
+    "inventory": {
+      "$ref": "#/$defs/artifact"
+    },
+    "execution_bundle": {
+      "$ref": "#/$defs/bundle"
+    },
+    "change_contract": {
+      "$ref": "#/$defs/change"
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "change_unit",
+        "final_pre_pr",
+        "remote_after_pr"
+      ]
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "bytes"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "mode",
+        "sha256",
+        "bytes"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "100644",
+            "100755",
+            "120000",
+            "000000"
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "head",
+        "tree",
+        "files",
+        "patch_sha256"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "commit",
+            "intended"
+          ]
+        },
+        "head": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            }
+          ]
+        },
+        "tree": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "patch_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "task",
+        "unit",
+        "base",
+        "snapshot"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "task": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "unit": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "base": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/snapshot"
+        }
+      }
+    },
+    "pair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        }
+      }
+    },
+    "matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            }
+          ]
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "ref",
+        "base_ref",
+        "fork",
+        "action"
+      ],
+      "properties": {
+        "event": {
+          "type": "string",
+          "enum": [
+            "pull_request",
+            "push",
+            "merge_group",
+            "workflow_dispatch"
+          ]
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "base_ref": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "fork": {
+          "type": "boolean"
+        },
+        "action": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+            }
+          ]
+        }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "arch",
+        "image"
+      ],
+      "properties": {
+        "os": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "arch": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+            }
+          ]
+        }
+      }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "argv",
+        "body"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "argv",
+            "shell"
+          ]
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "body": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+            }
+          ]
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow",
+        "workflow_body",
+        "job",
+        "matrix",
+        "ordinal",
+        "layer",
+        "placement",
+        "invocation",
+        "cwd",
+        "interpreter",
+        "runtime_sha256",
+        "dependency_lock_sha256",
+        "runner",
+        "services_sha256",
+        "context",
+        "source",
+        "result_name"
+      ],
+      "properties": {
+        "workflow": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "workflow_body": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "job": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "matrix": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/matrix"
+          },
+          "minItems": 0,
+          "maxItems": 1000
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000
+        },
+        "layer": {
+          "type": "string",
+          "enum": [
+            "static",
+            "unit",
+            "feature",
+            "e2e",
+            "build",
+            "security",
+            "full",
+            "device"
+          ]
+        },
+        "placement": {
+          "type": "string",
+          "enum": [
+            "local",
+            "remote"
+          ]
+        },
+        "invocation": {
+          "$ref": "#/$defs/invocation"
+        },
+        "cwd": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "interpreter": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "runtime_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "dependency_lock_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "runner": {
+          "$ref": "#/$defs/runner"
+        },
+        "services_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "context": {
+          "$ref": "#/$defs/context"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "suite",
+            "stage"
+          ]
+        },
+        "result_name": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "applicability",
+        "reason",
+        "policy_ref"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "enum": [
+            "static",
+            "unit",
+            "feature",
+            "e2e",
+            "build",
+            "security",
+            "full",
+            "device"
+          ]
+        },
+        "applicability": {
+          "type": "string",
+          "enum": [
+            "required",
+            "not_applicable",
+            "unknown"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "policy_ref": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifact"
+            }
+          ]
+        }
+      }
+    },
+    "test_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "command",
+        "start",
+        "end",
+        "status",
+        "exit",
+        "executed",
+        "failed",
+        "skipped",
+        "unknown",
+        "tests",
+        "result",
+        "expectation"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "start": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "end": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "failed",
+            "passed"
+          ]
+        },
+        "exit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000
+        },
+        "executed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000
+        },
+        "unknown": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000000
+        },
+        "tests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "result": {
+          "$ref": "#/$defs/artifact"
+        },
+        "expectation": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        }
+      }
+    },
+    "tdd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "red",
+        "green",
+        "refactor",
+        "refactor_result",
+        "journal"
+      ],
+      "properties": {
+        "red": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/test_record"
+            }
+          ]
+        },
+        "green": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/test_record"
+            }
+          ]
+        },
+        "refactor": {
+          "type": "string",
+          "enum": [
+            "none",
+            "performed",
+            "unknown"
+          ]
+        },
+        "refactor_result": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/test_record"
+            }
+          ]
+        },
+        "journal": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifact"
+            }
+          ]
+        }
+      }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "model",
+        "os",
+        "artifact_sha256",
+        "operation",
+        "start",
+        "end",
+        "status",
+        "image",
+        "result",
+        "provenance"
+      ],
+      "properties": {
+        "surface": {
+          "type": "string",
+          "enum": [
+            "physical",
+            "simulator"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "os": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "artifact_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "operation": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "start": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "end": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "unknown"
+          ]
+        },
+        "image": {
+          "$ref": "#/$defs/artifact"
+        },
+        "result": {
+          "$ref": "#/$defs/artifact"
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifact"
+            }
+          ]
+        }
+      }
+    },
+    "start": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "profile_sha256",
+        "ci_owner",
+        "cd_owner",
+        "rollback_owner",
+        "commands",
+        "targets",
+        "rollback_prerequisites",
+        "owner_evidence"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "profile_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "ci_owner": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "cd_owner": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "rollback_owner": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/invocation"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "rollback_prerequisites": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^\\x00-\\x1f\\x7f]{1,4096}$"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "owner_evidence": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifact"
+            }
+          ]
+        }
+      }
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "profile_sha256",
+        "inventory_sha256",
+        "behavior",
+        "layers",
+        "commands",
+        "tdd",
+        "devices",
+        "build_sha256",
+        "project_start",
+        "adoption",
+        "commit_bridge"
+      ],
+      "properties": {
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "profile_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "inventory_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "behavior": {
+          "type": "string",
+          "enum": [
+            "behavioral",
+            "docs_only",
+            "unknown"
+          ]
+        },
+        "layers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/layer"
+          },
+          "minItems": 8,
+          "maxItems": 8
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/command"
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "tdd": {
+          "$ref": "#/$defs/tdd"
+        },
+        "devices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/device"
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "build_sha256": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        },
+        "project_start": {
+          "$ref": "#/$defs/start"
+        },
+        "adoption": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifact"
+            }
+          ]
+        },
+        "commit_bridge": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/artifact"
+            }
+          ]
+        }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt",
+        "validation",
+        "artifacts"
+      ],
+      "properties": {
+        "receipt": {
+          "$ref": "#/$defs/artifact"
+        },
+        "validation": {
+          "$ref": "#/$defs/artifact"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          },
+          "minItems": 0,
+          "maxItems": 128
+        }
+      }
+    }
+  }
+}

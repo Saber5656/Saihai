@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Static security contract for the repository-owned CodeQL setup."""
 
-import json
 from pathlib import Path
+import sys
+import json
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "organization/runtime/workflows/scripts"))
+from delivery_workflow_inventory import parse_workflow
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,7 +65,47 @@ def test_local_model_pack_remains_discoverable() -> None:
     assert "path-injection" in model
 
 
+def test_actual_codeql_consumer_order_and_observation_boundaries() -> None:
+    workflow = parse_workflow(WORKFLOW.read_text())
+    assert set(workflow['on']) == {'push', 'pull_request', 'schedule', 'workflow_dispatch', 'merge_group'}
+    assert workflow['permissions'] == {'contents': 'read'}
+    job = workflow['jobs']['analyze']
+    assert job['permissions'] == {'contents': 'read', 'security-events': 'write'}
+    assert job['strategy']['matrix']['language'] == ['actions', 'python']
+    steps = job['steps']
+    acquire = next(i for i, x in enumerate(steps) if '--codeql-phase acquire' in x.get('run', ''))
+    init = next(i for i, x in enumerate(steps) if x.get('id') == 'codeql-init')
+    probe = next(i for i, x in enumerate(steps) if '--codeql-phase probe' in x.get('run', ''))
+    analyze = next(i for i, x in enumerate(steps) if x.get('id') == 'codeql-analysis')
+    observe = next(i for i, x in enumerate(steps) if '--codeql-phase observe' in x.get('run', ''))
+    assert acquire < init < probe < analyze < observe
+    assert steps[init]['with']['tools'].endswith('/bundle.tar.gz')
+    assert steps[init]['with']['trap-caching'] == 'false'
+    assert steps[init]['with']['dependency-caching'] == 'false'
+    assert steps[analyze]['with'].get('upload', 'always') == 'always'
+    assert steps[analyze]['with'].get('wait-for-processing', True) is True
+    assert steps[analyze]['with'].get('upload-database', True) is True
+    assert steps[observe]['if'] == 'always()'
+    for step in steps:
+        assert '${{ steps.' not in step.get('run', '')
+        assert 'continue-on-error' not in step
+    assert steps[probe]['env']['CODEQL_PATH'] == '${{ steps.codeql-init.outputs.codeql-path }}'
+    assert '--codeql-path "$CODEQL_PATH"' in steps[probe]['run']
+    artifact = steps[-1]
+    assert artifact['uses'] == 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+    assert artifact['with']['retention-days'] == 14
+    assert [line.rsplit('/', 1)[-1] for line in artifact['with']['path'].splitlines()] == ['receipt-acquire.json', 'receipt-probe.json', 'receipt-observe.json']
+    assert 'matrix.language' in artifact['with']['name']
+
+
 if __name__ == "__main__":
-    test_advanced_codeql_contract()
-    test_local_model_pack_remains_discoverable()
-    print(json.dumps({"result": "pass", "cases": 2}, ensure_ascii=False))
+    tests = [
+        test_advanced_codeql_contract,
+        test_local_model_pack_remains_discoverable,
+        test_actual_codeql_consumer_order_and_observation_boundaries,
+    ]
+    completed = 0
+    for test in tests:
+        test()
+        completed += 1
+    print(json.dumps({"result": "pass", "cases": completed, "count_method": "completed_test_functions"}))

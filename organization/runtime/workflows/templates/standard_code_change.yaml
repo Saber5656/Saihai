@@ -140,7 +140,10 @@
         "on_all_resolved": "qa",
         "on_unresolved": "implement",
         "budget_source": "approved_activation"
-      }
+      },
+      "requires_prior_steps": [
+        "implement"
+      ]
     },
     {
       "id": "qa",

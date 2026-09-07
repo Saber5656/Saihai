@@ -677,9 +677,11 @@ def main() -> None:
         test_frontend_credential_fact_is_limited_to_known_codex_auth_paths,
         test_public_gateway_receipt_linkage_retains_only_idempotency_digest,
     ]
+    completed = 0
     for test in tests:
         test()
-    print(json.dumps({"result": "pass", "cases": len(tests)}, ensure_ascii=False))
+        completed += 1
+    print(json.dumps({"result": "pass", "cases": completed, "count_method": "completed_test_functions"}))
 
 
 if __name__ == "__main__":
