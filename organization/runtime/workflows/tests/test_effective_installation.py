@@ -41,6 +41,18 @@ class InstallationTests(unittest.TestCase):
         sha=subprocess.check_output(['git','rev-parse','HEAD'],cwd=self.worker,text=True).strip()
         subprocess.run(['git','push','origin','HEAD:main'],cwd=self.worker,capture_output=True,check=True)
         return {'status':'complete','merge_commit':sha,'integrated_checks':{'validate':'success'}}
+    def test_fixed_agents_surface_and_unknown_root(self):
+        self.plan['roots']['skills'] = 'AGENTS_SURFACE'
+        observed = dict(missing_categories=[], members=[], policy_snapshots=[],
+                        source_identity={'status': 'match'},
+                        content_digest=self.plan['expected_content_digest'])
+        with patch.object(bundle, 'observe_bundle', return_value=observed) as probe:
+            install._observe(self.plan)
+        self.assertEqual(probe.call_args.kwargs['catalog_roots']['skills'], str(Path.home() / '.agents'))
+        self.plan['roots']['skills'] = '/arbitrary/root'
+        with self.assertRaisesRegex(install.InstallationError, 'catalog_root_unknown'):
+            install._observe(self.plan)
+
     def test_configure_verify_immutable_and_drift(self):
         install.configure(self.auth,self.state,self.plan)
         self.assertEqual(install.verify(self.auth,self.state)['status'],'installed_bytes_verified')

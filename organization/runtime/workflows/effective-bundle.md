@@ -174,7 +174,7 @@ The closed version-1 plan has `version`, `surface`, `roots`, `members`,
 `policy_snapshots`, `approved_symlinks`, `source_identity`,
 `expected_content_digest`, and `sync_catalog_key`. `members`, policy snapshots,
 source identity and approved links use the U1 contract above. `roots` maps U1
-root IDs to fresh primary catalog keys (or the fixed `CODEX_SURFACE` /
+root IDs to fresh primary catalog keys (or the fixed `AGENTS_SURFACE` / `CODEX_SURFACE` /
 `CLAUDE_SURFACE` existing discovery directories), not arbitrary worker paths.
 All six artifact categories need installed readback. The host obtains the
 expected observation digest from its approved deployment evidence. Changed
