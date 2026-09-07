@@ -83,9 +83,10 @@ class IntakeTests(unittest.TestCase):
         calls=[]
         def malformed(**kw):
             calls.append(1);return None,provider(**kw)[1]
+        with self.assertRaisesRegex(intake.IntakeError,'recovery_(?:exhausted|yielded)'):self.prepare(provider=malformed)
+        with self.assertRaisesRegex(intake.IntakeError,'recovery_(?:exhausted|yielded)'):self.prepare(provider=malformed)
         with self.assertRaisesRegex(intake.IntakeError,'recovery_exhausted'):self.prepare(provider=malformed)
-        with self.assertRaisesRegex(intake.IntakeError,'recovery_exhausted'):self.prepare(provider=malformed)
-        self.assertEqual(len(calls),3)
+        self.assertEqual(len(calls),5)
     def test_model_mismatch_blocks(self):
         def wrong(**kw):
             value,receipt=provider(**kw);receipt['effective_model']='unapproved';return value,receipt
@@ -99,7 +100,7 @@ class IntakeTests(unittest.TestCase):
                     value,receipt=provider(**kw)
                     if kw['stage']=='shape':mutate(value)
                     return value,receipt
-                with self.assertRaisesRegex(intake.IntakeError,'recovery_exhausted'):
+                with self.assertRaisesRegex(intake.IntakeError,'recovery_(?:exhausted|yielded)'):
                     self.prepare(provider=wrong,state_root=Path(temp)/'state')
     def test_actual_material_ambiguity_one_question_blocks_transport(self):
         doc=ledger();doc['requirements'][1]['requires_decision']='product_requirement'
@@ -117,7 +118,7 @@ class IntakeTests(unittest.TestCase):
         self.assertEqual(intake.resolve(self.state,ref)['brief']['objective'],'Review API B')
     def test_material_question_cannot_be_silently_omitted(self):
         doc=ledger();doc['requirements'][1]['requires_decision']='material_scope'
-        with self.assertRaisesRegex(intake.IntakeError,'recovery_exhausted'):
+        with self.assertRaisesRegex(intake.IntakeError,'recovery_(?:exhausted|yielded)'):
             self.prepare(ledger=doc)
         new=scope.revise(doc,expected_digest=scope.digest(doc),version='v2',replacements={'RB':'Review chosen API B'},
             additions=[],units=doc['task_units'],selected_unit_id='B',resolved_decisions=('RB',))

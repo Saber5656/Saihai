@@ -142,7 +142,7 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
                     return finish('blocked', 'completion_persistence_' + str(persistence.get('status', 'unknown')))
                 if status == 'complete':
                     return finish('terminal', 'complete')
-                if status == 'intake_scope_refresh_required':
+                if status in {'intake_scope_refresh_required', 'intake_findings_pending'}:
                     return finish('blocked', status, True)
                 if status in HUMAN:
                     return finish('waiting_human', status)

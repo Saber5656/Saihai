@@ -35,6 +35,40 @@
       "items": {
         "type": "string"
       }
+    },
+    "incidental_findings": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "requirement_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "ordinary",
+              "requirement_choice",
+              "permission",
+              "authentication",
+              "data_loss"
+            ]
+          }
+        },
+        "required": [
+          "text",
+          "requirement_ids",
+          "kind"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
