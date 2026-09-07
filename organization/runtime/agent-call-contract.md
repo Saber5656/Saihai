@@ -41,6 +41,47 @@ configured provider when it stays inside the approved scope in
 | Commands in scope | `agent-call`, `agent-dispatch`, `role-queue`, `provider-activate`, `agent-switch`, `provider-failover` |
 | Forbidden | secrets, credentials, auth tokens, unrelated personal data, unbounded Vault/repository/home/transcript dumps |
 
+## Effective session route and host boundary
+
+`agent-call` validates the requested session route before enqueueing and records
+`session_route_binding` in its payload and receipt. `agent-dispatch` selects the
+same kind of binding, passes the selected snapshot to the adapter, and verifies
+its generation and current canonical policy again under the roster writer lock
+immediately before starting the process. An orchestration caller carrying a
+queue receipt supplies its digest as `expected_session_route_digest`; a stale
+receipt blocks. The digest constrains execution and does not grant authority.
+
+Only a genuinely absent roster permits canonical static compatibility fallback.
+An existing roster requires valid bootstrap session/organization identities,
+a unique requested role, and current execution-policy fields. Corruption,
+missing roles, duplicate JSON keys, linked state files/directories, stale
+explicit generations or old provider-switch authority block without silently
+rebuilding the session. Existing canonical roles remain Luna Max; historical
+Sol/Anthropic switch data is not a current production grant.
+
+Queueing does not invoke a provider. The independent orchestration-to-host
+connection has no commissioning proof in this interface, so the queue receipt
+and `transport-status` report `host_commissioning_unverified`. CLI availability
+is only binary discovery, and repository `organization_flow: preapproved` is
+not proof of host acceptance. No new credentials or host permissions are
+created here.
+
+The normal `usage run` / `usage repair-validation` path retains its independently
+supplied host authorization and binds repaired content to a fresh request and
+execution claim. The repair regression exercises this with Luna Max and no
+additional approval prompt. This does not turn that authorization into a
+reusable organization-review transport grant: provider/destination/data-category
+scope, expiry/revocation, trusted host verification, and initial/repair review
+E2E across the independent queue consumer remain unverified for #133. Existing
+signed work orders and single-use capability receipts retain their restrictions.
+
+| Stop | Origin and next action |
+|---|---|
+| Invalid/stale session or queue binding | `session_route`; restore or resolve the current session before retrying |
+| Current policy changed before start | `session_route` / `provider_launch`; resolve current policy without reusing the old binding |
+| CLI unavailable | `provider_launch`; restore the existing approved adapter, not blanket provider authority |
+| No evidence of host grant acceptance | `host_authorization`; verify the existing task authority on the actual host surface |
+
 ## Agent Call Flow
 
 ```text

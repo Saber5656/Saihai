@@ -56,6 +56,27 @@ class ValidationRepairTests(unittest.TestCase):
         self.assertEqual(published['status'],'ci_pending',published)
         self.assertEqual(sum(c[:3]==['gh','pr','create'] for c in commands.calls),1)
 
+    def test_current_luna_task_authority_repair_has_fresh_payload_and_no_question(self):
+        self.f.auth=dataclasses.replace(self.f.auth,model='gpt-5.6-luna')
+        self.fail_initial()
+        original_authority=local.authorization_payload(self.f.auth)
+        original_claim=json.loads((self.directory/'claim.json').read_text())
+        result=local.repair_validation(self.f.auth,self.f.state,repair_instruction='Fix only the authorized validation failure.')
+        self.assertEqual(result['status'],'validated')
+        repaired=Path(result['report_path']).parent
+        fresh_claim=json.loads((repaired/'claim.json').read_text())
+        self.assertNotEqual(fresh_claim['request_digest'],original_claim['request_digest'])
+        self.assertEqual(local.authorization_payload(self.f.auth),original_authority)
+        request=json.loads((repaired/'request.json').read_text())
+        self.assertEqual(request['task_id'],self.f.auth.publication.task_id)
+        self.assertEqual(fresh_claim['request_digest'],publication.digest(request))
+        argv=local._argv(self.f.auth,self.f.repo,self.f.root/'result.json')
+        self.assertIn('model_reasoning_effort="max"',argv)
+        self.assertIn('approval_policy="never"',argv)
+        self.assertEqual(argv[argv.index('--model')+1],'gpt-5.6-luna')
+        again=local.repair_validation(self.f.auth,self.f.state)
+        self.assertEqual(again['execution_id'],result['execution_id'])
+
     def test_changed_tree_and_authority_block_before_repair(self):
         self.fail_initial()
         with patch.object(local,'_run_process') as run:
