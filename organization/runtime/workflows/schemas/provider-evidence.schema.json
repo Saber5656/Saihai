@@ -188,6 +188,14 @@
     },
     "raw_transcript_policy": {
       "const": "signal_only_not_shared"
+    },
+    "role_definition_path": {
+      "type": "string",
+      "pattern": "^organization/roles/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/skill\\.md$"
+    },
+    "role_definition_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
     }
   },
   "additionalProperties": false
