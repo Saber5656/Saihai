@@ -9,9 +9,14 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  validation_shards:
+    name: validate / shard-${{ matrix.shard_index }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -30,4 +35,18 @@ jobs:
           TASK_WORKTREE_ROOT: ${{ runner.temp }}/worktrees
         run: |
           mkdir -p "$AGENTS_VAULT_ROOT" "$USER_VAULT_ROOT" "$DEV_WORKTREES_ROOT"
-          python3 scripts/validate_all.py
+          python3 scripts/validate_all.py \
+            --shard-index "${{ matrix.shard_index }}" \
+            --shard-count 8
+
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: validation_shards
+    if: ${{ always() }}
+    steps:
+      - name: Confirm every validation shard passed
+        env:
+          SHARD_RESULT: ${{ needs.validation_shards.result }}
+        run: test "$SHARD_RESULT" = "success"

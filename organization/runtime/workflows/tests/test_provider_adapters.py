@@ -251,6 +251,7 @@ def test_claude_stream_is_strictly_bound_to_one_init_and_result() -> None:
 
 
 def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
+    """Require the confined Codex wrapper to pin Luna and max effort."""
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         binary, digest = secure_file(root, "codex")
@@ -283,6 +284,8 @@ def test_codex_requires_pinned_confinement_and_uses_wrapper() -> None:
     assert command[4] == binding["SAIHAI_CODEX_EXECUTABLE_PATH"]
     assert command[command.index("--sandbox") + 1] == "read-only"
     assert "--ignore-user-config" in command and "--ignore-rules" in command
+    assert command[command.index("--model") + 1] == provider_adapters.DEFAULT_CODEX_MODEL
+    assert 'model_reasoning_effort="max"' in command
 
 
 def test_host_binding_rejects_missing_digest_symlink_mode_and_digest_mismatch() -> None:
@@ -437,8 +440,98 @@ def test_stop_process_terminates_dedicated_process_group() -> None:
     ]
 
 
+def research_request() -> dict:
+    import provider_runner
+    candidate = request()
+    candidate.update(workflow_id="readonly_review_chain", step_id="research")
+    candidate["step_contract"] = provider_runner.resolve_step_contract({
+        "workflow_id": "readonly_review_chain", "step_id": "research", "to_role": "contents-researcher",
+        "assignment_role": "observer", "expected_output": "research_report", "permission_mode": "readonly"})
+    return candidate
+
+
+def test_research_prompt_schema_and_fake_process() -> None:
+    candidate = research_request()
+    prompt = provider_adapters.bounded_prompt(candidate)
+    assert "tool-disabled contents-researcher" in prompt
+    assert "research-report.schema.json" in prompt
+    assert "External Review Report" not in prompt
+    assert "provider_evidence.evidence_path" not in prompt
+    assert '"additionalProperties": false' in prompt
+    assert "read additional files" in prompt
+    report = {"report_version": "1", "workflow_id": "readonly_review_chain", "step_id": "research",
+              "result": "findings", "source_refs": ["README.md"],
+              "findings": [{"summary": "Offline result", "evidence_refs": ["README.md"]}],
+              "uncertainty": ["Fake subprocess transport"], "no_diff_completion": True}
+    events = [json.loads(line) for line in (FIXTURE_DIR / "claude_print_result.json").read_text().splitlines()]
+    events[1]["result"] = json.dumps(report)
+    stdout = "\n".join(json.dumps(event) for event in events).encode()
+    with tempfile.TemporaryDirectory() as raw:
+        result, calls = invoke_with_fake(provider_adapters.invoke_claude_cli, claude_binding(Path(raw)),
+                                        stdout, request_value=candidate)
+    assert len(calls) == 1
+    assert result["status"] == "ok", result
+    assert result["report"] == report
+    assert result["evidence_fields"]["effective_model"] == candidate["intended_model"]
+    assert calls[0]["shell"] is False
+
+
+def test_multistep_missing_or_tampered_contract_has_no_legacy_fallback() -> None:
+    import copy
+    candidate = research_request()
+    for kind in ("missing", "digest", "oversized", "role", "instruction"):
+        changed = copy.deepcopy(candidate)
+        if kind == "missing":
+            changed.pop("step_contract")
+        elif kind == "digest":
+            changed["step_contract"]["report_schema"] += " "
+        elif kind == "oversized":
+            changed["step_contract"]["report_schema"] = "x" * 8193
+        elif kind == "role":
+            changed["step_contract"]["role"] = "x" * 129
+        else:
+            changed["instruction"] = "x" * (provider_adapters.MAX_INSTRUCTION_BYTES + 1)
+        try:
+            provider_adapters.bounded_prompt(changed)
+        except provider_adapters.AdapterConfigurationError:
+            pass
+        else:
+            raise AssertionError(f"{kind} must fail closed")
+    review = research_request()
+    review.update(step_id="review")
+    review.pop("step_contract")
+    try:
+        provider_adapters.bounded_prompt(review)
+    except provider_adapters.AdapterConfigurationError as exc:
+        assert str(exc) == "step_contract_missing"
+    else:
+        raise AssertionError("Multi-step review cannot use single-step legacy fallback")
+
+
+def test_research_live_binding_preserves_closed_body_and_model_guards() -> None:
+    import provider_runner
+    candidate = research_request()
+    adapter = provider_runner.load_provider_adapters()["claude_headless_p0"]
+    report = {"result": "findings", "provider_evidence": {"forbidden": "must not be stripped"}}
+    details = {"effective_model": candidate["intended_model"], "provider_session_id": "fake-subprocess"}
+    bound = provider_runner.bind_live_report(report=report, request=candidate, adapter=adapter, details=details)
+    outcome, normalized, actual = provider_runner.enforce_effective_model_policy(
+        outcome="ok", report=bound, details=details, request=candidate, adapter=adapter)
+    assert outcome == "ok" and normalized == report
+    assert actual["model_assurance"] == "exact_match_enforced"
+    assert provider_runner.enforce_effective_model_policy(outcome="ok", report=bound, details={},
+        request=candidate, adapter=adapter)[0] == "provider_model_mismatch"
+    clean = {"result": "findings"}
+    assert provider_runner.bind_live_report(report=clean, request=candidate, adapter=adapter, details=details) == clean
+    assert provider_runner.enforce_effective_model_policy(outcome="ok", report=clean, details=details,
+        request=candidate, adapter=adapter)[1] == clean
+
+
 if __name__ == "__main__":
     tests = (
+        test_research_prompt_schema_and_fake_process,
+        test_multistep_missing_or_tampered_contract_has_no_legacy_fallback,
+        test_research_live_binding_preserves_closed_body_and_model_guards,
         test_extract_json_and_digest_verified_prompt,
         test_claude_fixture_fixed_command_and_minimal_env,
         test_claude_stream_is_strictly_bound_to_one_init_and_result,
