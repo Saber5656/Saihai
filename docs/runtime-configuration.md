@@ -37,8 +37,8 @@ from hook input, state, or another setting.
 | `ITB_CLAUDE_TRANSCRIPT_STALE_TOLERANCE_SECONDS` | non-negative integer seconds | `300` | builder transcript freshness | yes |
 | `ITB_CODEX_APPROVAL_POLICY` | `untrusted`, `on-failure`, `on-request`, `never` | `never` | builder Codex runner | yes |
 | `ITB_CODEX_EXEC_DISPATCH_TIMEOUT_SECONDS` | positive integer seconds | provider timeout, then `120` | builder Codex exec runner | yes |
-| `ITB_CODEX_MODEL` | non-empty string | `gpt-5.5` | builder Codex runner | yes |
-| `ITB_CODEX_REASONING_EFFORT` | `minimal`, `low`, `medium`, `high`, `xhigh` | `xhigh` | builder Codex runner | yes |
+| `ITB_CODEX_MODEL` | deprecated; ignored by role dispatch | `gpt-5.6-luna` from model registry | builder compatibility surface | yes |
+| `ITB_CODEX_REASONING_EFFORT` | deprecated; role dispatch is fixed | `max` | builder Codex runner | yes |
 | `ITB_CODEX_SERVICE_TIER` | `auto`, `default`, `flex`, `fast` | `fast` | builder Codex runner | yes |
 | `ITB_FINAL_GATE_HARD_BLOCK` | bool | `false` | builder final-response guard | yes |
 | `ITB_GATE_ENTRY_AUTO_GTC` | bool | `true` | builder gate-entry routing | yes |
