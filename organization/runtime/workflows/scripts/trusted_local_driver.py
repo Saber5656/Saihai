@@ -45,7 +45,7 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
             or worktree in root.parents):
         raise local.TrustedLocalError('drive_state_root_invalid')
     directory = root / 'trusted-local' / host.execution_id
-    binding = local.publication.digest(dataclasses.asdict(authorization))
+    binding = local.publication.digest(local.authorization_payload(authorization))
     invocation = 'drive-' + uuid.uuid4().hex
     actor = {'principal_type': 'harness_runner', 'principal_id': local.ACTOR, 'authn_method': 'local_cli'}
     started = time.monotonic()
