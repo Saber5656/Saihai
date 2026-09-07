@@ -683,6 +683,114 @@ run IDs.
 
 ## Scheduler Lock And P0 Concurrency
 
+### Readonly chain report gate
+
+`validate-report` consumes the declared `readonly_review_chain` step contracts.
+The gate derives an event from the validated artifact and resolves exactly one
+matching template transition. Report fields cannot select a schema, event,
+role, or transition target.
+
+| Current step | Accepted output | Event | Normal next state |
+|---|---|---|---|
+| `research` | Closed research payload, signed frozen work order, authoritative request and normalized sidecar | `research_complete` | `review`, `step_queued` |
+| `review` | External review with result `pass` and bound provider evidence | `review_complete` | `final_evidence`, `step_queued` |
+| `final_evidence` | Final report referencing this run's accepted research and review | `final_evidence_valid` | `complete` |
+
+Intermediate acceptance leaves terminal status unset and returns
+`next_action: drain`. The ordinary drain creates the next work order and frozen
+snapshot; it does not advance the step. The next producer must consume that
+order. Only the final declared transition can complete the run. Declared
+non-success `waiting_human` targets wait without accepting the step, and
+declared `blocked` targets map to lifecycle `failed` with terminal status
+`blocked`. Waiting requires the existing explicit `resume --requeue` before
+another attempt. A success transition to `waiting_human` without a defined
+resume target is rejected as `unsupported_success_waiting_transition` before
+state changes. The current readonly chain declares no waiting edges.
+
+The new chain requires strict readonly permissions and all-false operations.
+It rejects unsupported step/gate contracts, ambiguous or undeclared events,
+unknown/backward targets, intermediate completion, and exhausted step budgets.
+`duplicate_step_report`, `out_of_order_report`, and `step_report_mismatch` are
+stable rejection reasons. A chain terminal replay is a duplicate rejection;
+the legacy single-step replay behavior is unchanged.
+
+Accepted history pins the report, normalized evidence, transcript, authoritative
+adapter request, signed work order, exact iteration snapshot, source contract,
+and gate-derived transition in a signed acceptance record. State, current step,
+history and signed lifecycle transitions persist together under the global
+lock. The transition artifact is written before that canonical run commit;
+an orphan artifact from a failed commit never counts as an acceptance.
+Final evidence rechecks those prior artifacts and their acceptance
+records; missing, changed, foreign, or unaccepted references cannot authorize
+completion. A self-reported `review_status: pass` is insufficient. The research
+payload stays closed: run/request provenance comes from the bound sidecar and
+work order rather than added report envelope fields.
+
+Current research/review results require a signed, previously stored provider
+claim, matching registered attempt/lease/request/context/model bindings and a
+completed attempt journal promoted to `result_ready`. Enumerating an unclaimed
+request file cannot authorize the chain. An unfinished expired attempt cannot
+pass, while a previously completed result does not require a future lease.
+Past accepted steps use their verified pinned requests rather than the current
+step's execution record.
+
+The readonly chain gate reconstructs normalized evidence from the authoritative
+attempt journal and compares every typed field. Canonical transcripts must match
+the recovery copy or the existing normal-finalize representation: a new envelope
+timestamp, with otherwise identical live transcript fields or the signal payload
+built from the journal outcome and details. Rehashing a changed canonical
+transcript or replacing a sidecar session does not establish attempt provenance.
+The fake-host E2E uses actual journal recovery; separate deterministic writer tests
+cover signal and live-transcript format compatibility without live provider calls.
+
+The chain tests use a test-owned fake host and actual frontdoor setup,
+drain, report gate and lifecycle. The host registers the claim under the global
+lock, runs existing dispatch preflight, writes a deterministic attempt journal,
+and promotes it through the existing recovery API with the caller's lock/store.
+It never directly repairs current step, iteration, accepted history or work
+orders. Only the gate advances the steps. Those tests cover the gate consumer.
+
+The provider runner also executes the chain's research and review steps through
+the same signed-order, claim, attempt journal, promotion, and report-gate path.
+It resolves the current template's readonly route, role and output schema into a
+runner-owned `step_contract` inside the digest-bound adapter request. The bounded
+prompt includes the selected role and complete output schema (at most 8 KiB for the readonly chain, 16 KiB for the existing standard code-change report),
+without granting file or tool access. Research results keep their closed schema;
+parsed provider/model evidence remains in execution details and the normalized
+sidecar. Both report types retain the existing effective-model policy checks.
+No provider/model override or additional research-to-review context promotion is
+introduced: each step uses the original approved bounded context.
+
+Production admission remains blocked until the complete chain runtime is validated.
+Offline integration fixtures substitute only the host readiness result.
+For an approved fixture `readonly_review_chain` run, use the existing commands in order:
+`workflow drain`, `workflow run-provider --fake-provider-mode success`, then
+repeat that pair for review, passing the same `--state-root` and `--run-id` as in
+the examples above. Drain creates each order; run-provider executes only that
+step and the gate advances it. A final drain creates the `final_evidence` work order; the provider
+runner rejects that harness-only step. Two provider successes do not complete
+the run. The deterministic final-evidence producer (#111) remains separate.
+Canonical filenames retain the existing `<step>-external-review-report.json`
+suffix even for the research schema.
+
+`test_multistep_provider_runner.py` exercises actual frontdoor entry and both
+runner-produced claims/journals, plus crash recovery without reinvocation,
+contract tampering, unsafe signed orders and invalid producer payloads. The
+adapter tests use an offline fake subprocess, including research JSON in the
+normal CLI stream parser. These fixtures do not prove live provider dispatch,
+human approval custody, formal role-review provenance, or commissioned runtime
+enforcement. Frozen role-definition integration and its projected evidence
+(#110) remain pending on the common accepted ancestry.
+
+Requests without a step contract retain compatibility only for exact
+`single_step_external_review/review`, including old completed-attempt journals
+whose existing frozen-order, model and request bindings still validate. That
+legacy format cannot attest a historical schema digest. Newly issued runner
+requests always carry the contract; a missing contract on a multi-step request
+fails closed with `provider_step_contract_mismatch`. Current template/schema
+drift on contract-bound requests is rejected before dispatch, successful result
+finalization, or completed-journal promotion; old requests are never silently upgraded or reissued.
+
 Workflow-run execution uses an invocation-drain scheduler with a per-state-root
 global advisory lock:
 

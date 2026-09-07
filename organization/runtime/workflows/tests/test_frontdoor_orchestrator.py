@@ -1379,6 +1379,52 @@ def test_drain_allows_edit_capable_code_change_gate() -> None:
         )
         assert_equal(created["workflow_run"]["workflow_id"], "standard_code_change", "created workflow")
 
+        denied = run_frontdoor(state_root, "drain", "--run-id", "run-code-change", check=False)
+        assert denied.returncode != 0, "unbound edit must fail closed"
+        blocked = load_payload(denied)
+        assert_equal(blocked["decision"], "blocked", "unbound typed decision")
+        assert_equal(blocked["reason"], "work_order_invalid", "unbound typed reason")
+        assert "unbound_work_order_requires_readonly" in blocked["errors"]
+        assert "Traceback" not in denied.stderr
+        saved_run = json.loads(Path(blocked["run_path"]).read_text())
+        assert_equal(saved_run["run_state"], "waiting_human", "persisted rejected state")
+        assert_equal(saved_run["transitions"][-1]["reason_class"], "work_order_invalid", "persisted rejection reason")
+        assert any(
+            event["event_type"] == "drain_run" and event["outcome"] == "blocked"
+            and event["details"].get("reason") == "work_order_invalid"
+            and "unbound_work_order_requires_readonly" in event["details"].get("errors", [])
+            for event in read_audit_events(state_root)
+        ), "typed rejection audit must be persisted"
+        assert not list((state_root / "work-orders").rglob("*.json")), "unbound work order must not be saved"
+        assert not list((state_root / "provider-runs").rglob("*.json")), "unbound worker must not be dispatched"
+        assert not list((state_root / "worker-executions").rglob("*.json")), "unbound worker execution must not exist"
+
+        # Keep the rejected run immutable; use an independent approved fixture
+        # for the bound positive path.
+        state_root = Path(raw_tmp) / "bound"
+        proposed = load_payload(run_frontdoor(
+            state_root, "propose", "--task-id", "TSK-code-change", "--request-id", "req-code-change",
+            "--prompt", "Implement bounded code change", "--classification", json.dumps(classification),
+            "--ref", "organization/runtime/workflows/README.md", "--allowed-path", "organization/runtime/workflows",
+        ))
+        run_frontdoor(state_root, "approve", "--request-id", "req-code-change",
+                      "--human-action-id", proposed["approval"]["human_action_id"])
+        # Supply the trusted frontend binding before creating this distinct run.
+        frontdoor = load_server_module().frontdoor
+        request_path = frontdoor.request_path(state_root, "req-code-change")
+        request = frontdoor.read_json(request_path)
+        request["owner_principal"] = {
+            "principal_type": "main_agent_bridge",
+            "principal_id": "codex-main-agent-a-prime",
+            "authn_method": "installed_frontend_profile",
+        }
+        checkout = frontdoor.resolve_checkout_identity(
+            workspace_id="Saber5656/Saihai", managed_primary=ROOT, checkout_root=ROOT,
+        )
+        request["checkout_identity_digest"] = checkout["identity_digest"]
+        frontdoor.write_json(request_path, request)
+        run_frontdoor(state_root, "create-run", "--request-id", "req-code-change", "--run-id", "run-code-change")
+
         drained = load_payload(run_frontdoor(state_root, "drain", "--run-id", "run-code-change"))
         work_order = drained["work_order"]
         assert_equal(drained["workflow_run"]["run_state"], "step_queued", "code change drain run state")
@@ -5030,8 +5076,22 @@ def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
             raise AssertionError("bridge should reject child-thread/raw tool smuggling")
 
 
+def test_standard_same_iteration_drain_preserves_signed_order() -> None:
+    from test_scoped_worker_executor import create_repo, create_approved_code_change
+    import frontdoor_orchestrator as frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        state = root/'state'
+        _, first = create_approved_code_change(state, user_prompt='Bounded replay fixture', worker_repo=create_repo(root))
+        old = first['work_order']
+        replay = frontdoor.drain_run(state_root=state, run_id='run-scoped-e2e')
+        assert replay['work_order'] == old
+        assert replay['drained'] is False
+
+
 def main() -> None:
     tests = [
+        test_standard_same_iteration_drain_preserves_signed_order,
         test_channel_token_permissions_are_private,
         test_state_root_is_fixed_by_host_configuration,
         test_state_root_catalog_is_loaded_only_from_primary_checkout,

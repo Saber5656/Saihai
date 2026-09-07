@@ -115,7 +115,7 @@ def run_facade_raw(*args: str) -> subprocess.CompletedProcess[str]:
 def test_contract_validation() -> None:
     contracts = selector.validate_contracts()
     assert_equal(contracts["decision"], "ok", f"contracts errors: {contracts['errors']}")
-    assert_equal(contracts["workflow_contracts"]["template_count"], 6, "template count")
+    assert_equal(contracts["workflow_contracts"]["template_count"], 7, "template count")
     expected_schemas = [
         "activation-envelope.schema.json",
         "agent-integration-assurance.schema.json",
@@ -136,10 +136,13 @@ def test_contract_validation() -> None:
         "provider-adapter-capability.schema.json",
         "provider-evidence.schema.json",
         "publication-result.schema.json",
+        "readonly-final-evidence-report.schema.json",
         "research-report.schema.json",
+        "review-lifecycle.schema.json",
         "scoped-worker-capability.schema.json",
         "scoped-worker-result.schema.json",
         "security-review-report.schema.json",
+        "trusted-local-worker-result.schema.json",
         "typed-classification.schema.json",
         "work-order.schema.json",
         "workflow-run.schema.json",
@@ -161,6 +164,7 @@ def test_registry_gate_profiles_and_active_templates() -> None:
             "publication_required",
             "policy_or_permission_change",
             "security_sensitive_change",
+            "readonly_review_chain",
         ],
         "active workflow ids",
     )
@@ -457,7 +461,7 @@ def test_activation_scope_follows_selected_template() -> None:
         {"edit": True, "commit": False, "push": False, "network": False},
         "code approved allowed ops",
     )
-    assert_equal(approved_code["activation_scope"]["step_budget"], 4, "code budget")
+    assert_equal(approved_code["activation_scope"]["step_budget"], 6, "code budget")
 
     approved_publication = selector.activation_envelope(
         typed_classification("publication"),
@@ -864,6 +868,30 @@ def test_blocked_activation_cli_exits_nonzero() -> None:
     assert_equal(payload["activation_status"], "blocked", "blocked activation payload")
 
 
+def test_readonly_chain_runtime_unavailable_cannot_be_approved() -> None:
+    classification = typed_classification(
+        "research", external_provider_required=True,
+        expected_artifacts=["research_report", "typed_report", "final_evidence"],
+    )
+    for source in ("frontdoor_prompt", "orchestrator-start", "human_ui", "manual_cli"):
+        envelope = selector.activation_envelope(
+            classification, activation_source=source, task_id="TSK-chain",
+            request_id="req-chain", refs=["organization/runtime/workflows/README.md"],
+        )
+        assert_equal(envelope["activation_status"], "blocked", source)
+        assert_equal(envelope["workflow_selection"]["status"], "blocked", source)
+        assert_equal(envelope["approval_required_reason"], "readonly_chain_runtime_unavailable", source)
+        assert_equal(envelope["next_action"], "abort", source)
+        assert "approved_by" not in envelope
+        assert "approved_at" not in envelope
+        assert "goal_state_transition" not in envelope
+    # The unavailable runtime must not become an ordinary provider-approval request.
+    classification["external_provider_required"] = False
+    result = selector.select_workflow(classification)
+    assert_equal(result["decision"], "blocked", "provider absence does not unblock runtime")
+    assert_equal(result["workflow_selection"]["reason"], "readonly_chain_runtime_unavailable", "runtime reason")
+
+
 def main() -> None:
     tests = [
         test_contract_validation,
@@ -892,6 +920,7 @@ def main() -> None:
         test_workflow_run_schema_encodes_scheduler_and_activation_scope,
         test_configure_organization_facade,
         test_blocked_activation_cli_exits_nonzero,
+        test_readonly_chain_runtime_unavailable_cannot_be_approved,
     ]
     for test in tests:
         test()

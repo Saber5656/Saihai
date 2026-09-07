@@ -22,6 +22,7 @@ import run_store
 import safe_paths
 import scoped_worker_executor
 import workflow_selector
+import work_order_builder
 
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
 EXECUTION_PRINCIPAL_TYPES = {
@@ -496,6 +497,115 @@ def validate_adapter_descriptor(adapter: dict[str, Any]) -> list[str]:
     return errors
 
 
+def read_report_schema(path: Path) -> bytes:
+    """Read a bounded regular schema without following a final-component symlink."""
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ProviderRunnerError("unsupported_report_schema")
+    limit = 16384 if path.name == "code-change-report.schema.json" else 8192
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ProviderRunnerError("unsupported_report_schema")
+            raw = handle.read(limit + 1)
+        if len(raw) > limit:
+            raise ProviderRunnerError("report_schema_too_large")
+        if not isinstance(json.loads(raw.decode("utf-8")), dict):
+            raise ProviderRunnerError("unsupported_report_schema")
+        return raw
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ProviderRunnerError("unsupported_report_schema") from exc
+
+
+def resolve_step_contract(work_order: dict[str, Any], *, state_root: Path | None = None,
+                          run: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Resolve only producer/gate contracts implemented by this readonly runner."""
+    try:
+        return _resolve_step_contract(work_order, state_root=state_root, run=run)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise ProviderRunnerError("unsupported_step_contract") from exc
+
+
+def _resolve_step_contract(work_order: dict[str, Any], *, state_root: Path | None,
+                           run: dict[str, Any] | None) -> dict[str, Any]:
+    workflow_id = work_order.get("workflow_id")
+    template = workflow_selector.load_template(str(workflow_id or ""))
+    if not isinstance(template, dict) or template.get("lifecycle_status") != "active":
+        raise ProviderRunnerError("unsupported_step_contract")
+    if workflow_id == "readonly_review_chain":
+        try:
+            steps = report_gate._chain_contract(template, run or {
+                "activation": {"activation_status": "approved",
+                               "workflow_selection": {"workflow_id": workflow_id}}})
+        except report_gate.ReportGateError as exc:
+            raise ProviderRunnerError(str(exc)) from exc
+    elif workflow_id == "single_step_external_review":
+        steps = template.get("steps", [])
+        if (len(steps) != 1 or steps[0].get("id") != "review"
+                or (steps[0].get("role"), steps[0].get("assignment_role"), steps[0].get("output_contract"))
+                != ("tech-reviewer", "reviewer", "external_review_report")):
+            raise ProviderRunnerError("unsupported_step_contract")
+    elif workflow_id == "standard_code_change" and work_order.get("step_id") in {"review", "qa"}:
+        steps = template.get("steps", [])
+    else:
+        raise ProviderRunnerError("unsupported_step_contract")
+    selected = [step for step in steps if step.get("id") == work_order.get("step_id")]
+    if len(selected) != 1:
+        raise ProviderRunnerError("unsupported_step_contract")
+    step = selected[0]
+    route = step.get("provider_route", {})
+    ops = step.get("allowed_ops", {"edit": False, "commit": False, "push": False, "network": False})
+    if (step.get("permission_mode") != "readonly" or template.get("safety_class") != ("standard" if workflow_id == "standard_code_change" else "readonly")
+            or route.get("adapter_kind") not in {"external_provider", "bounded_provider"}
+            or route.get("runner_authority") != "write_report_only"
+            or route.get("transition_authority") != "harness_engine"
+            or set(ops) != {"edit", "commit", "push", "network"}
+            or any(value is not False for value in ops.values())):
+        raise ProviderRunnerError("unsupported_step_contract")
+    expected = {"to_role": step.get("role"), "assignment_role": step.get("assignment_role"),
+                "expected_output": step.get("output_contract"), "permission_mode": "readonly"}
+    if any(work_order.get(key) != value for key, value in expected.items()):
+        raise ProviderRunnerError("work_order_contract_mismatch")
+    if state_root is not None and run is not None:
+        if (run.get("workflow_id") != workflow_id or run.get("current_step") != step["id"]
+                or work_order_builder.validate_work_order(work_order, template=template, step=step,
+                                                         state_root=state_root, run=run)):
+            raise ProviderRunnerError("work_order_contract_mismatch")
+    output = step["output_contract"]
+    schema_names = {"code_change_report": "code-change-report.schema.json",
+                    "research_report": "research-report.schema.json",
+                    "external_review_report": "external-review-report.schema.json"}
+    if output not in schema_names:
+        raise ProviderRunnerError("unsupported_step_contract")
+    declaration = template.get("output_contracts", {}).get(output, {})
+    schema_path = "organization/runtime/workflows/schemas/" + schema_names[output]
+    if (declaration.get("schema_path") != schema_path or declaration.get("required") is not True
+            or declaration.get("canonical") is not True):
+        raise ProviderRunnerError("unsupported_report_schema")
+    raw = read_report_schema(REPO_ROOT / schema_path)
+    schema = raw.decode("utf-8")
+    return {"adapter_kind": route["adapter_kind"], "role": step["role"],
+            "assignment_role": step["assignment_role"], "output_contract": output,
+            "report_schema_path": schema_path, "report_schema_sha256": sha256_bytes(raw),
+            "report_schema": schema, "template_contract_sha256": "sha256:" + stable_digest(template)}
+
+
+def verify_request_step_contract(request: dict[str, Any], work_order: dict[str, Any], *,
+                                 state_root: Path, run: dict[str, Any]) -> None:
+    current = resolve_step_contract(work_order, state_root=state_root, run=run)
+    legacy_single_step = ("step_contract" not in request
+                          and (work_order.get("workflow_id"), work_order.get("step_id"))
+                          == ("single_step_external_review", "review"))
+    if (any(request.get(key) != work_order.get(key) for key in
+            ("run_id", "request_id", "workflow_id", "step_id", "instruction", "context_refs"))
+            or (not legacy_single_step and request.get("step_contract") != current)):
+        raise ProviderRunnerError("provider_step_contract_mismatch")
+
+
+def is_research_request(request: dict[str, Any]) -> bool:
+    return (request.get("step_contract") or {}).get("output_contract") == "research_report"
+
+
 def validate_work_order_for_runner(
     work_order: dict[str, Any],
     *,
@@ -503,14 +613,15 @@ def validate_work_order_for_runner(
     run: dict[str, Any] | None = None,
 ) -> list[str]:
     errors: list[str] = []
-    if work_order.get("workflow_id") != "single_step_external_review":
-        errors.append("only single_step_external_review is supported")
-    if work_order.get("step_id") != "review":
-        errors.append("only review step is supported")
+    standard = work_order.get('workflow_id') == 'standard_code_change' and work_order.get('step_id') in {'review', 'qa'}
+    try:
+        resolve_step_contract(work_order, state_root=state_root, run=run)
+    except ProviderRunnerError as exc:
+        errors.append(str(exc))
     if work_order.get("permission_mode") != "readonly":
         errors.append("permission_mode must be readonly")
-    if work_order.get("external_provider_allowed") is not True:
-        errors.append("external_provider_allowed must be true")
+    if work_order.get("external_provider_allowed") is not (False if standard else True):
+        errors.append("provider route does not match template")
     if not isinstance(work_order.get("intended_model"), str) or not work_order.get("intended_model"):
         errors.append("intended_model must be non-empty string")
     if not isinstance(work_order.get("provider_adapter_id"), str) or not work_order.get(
@@ -520,7 +631,13 @@ def validate_work_order_for_runner(
     if work_order.get("effective_model_policy") not in EFFECTIVE_MODEL_POLICIES:
         errors.append("effective_model_policy unsupported")
     allowed_ops = ((work_order.get("activation_scope") or {}).get("allowed_ops") or {})
+    if set(allowed_ops) != {"edit", "commit", "push", "network"}:
+        errors.append("activation_scope.allowed_ops must contain exactly readonly operations")
     for op in ("edit", "commit", "push", "network"):
+        if op == 'edit' and standard:
+            if allowed_ops.get(op) is not True:
+                errors.append('standard activation requires existing edit approval')
+            continue
         if allowed_ops.get(op) is not False:
             errors.append(f"activation_scope.allowed_ops.{op} must be false")
     if (work_order.get("context_scope") or {}).get("raw_transcript_sharing") != "forbidden":
@@ -604,7 +721,16 @@ def adapter_request(
     evidence_path = provider_evidence_path(state_root, run_id, step_id)
     transcript_path = provider_transcript_path(state_root, run_id, step_id)
     report_path = provider_report_path(state_root, run_id, step_id)
-    context_snapshot = load_verified_context_snapshot(work_order.get("context_refs"))
+    if run.get('workflow_id') == 'standard_code_change':
+        try:
+            context_snapshot = scoped_worker_executor.load_completed_review_context(state_root, run)
+        except scoped_worker_executor.ScopedWorkerError as exc:
+            raise ProviderRunnerError(exc.reason_class) from exc
+        expected = [dict(type='repo_file', value=row['path'], size_bytes=row['size_bytes'], digest=row['sha256']) for row in context_snapshot]
+        if work_order.get('context_refs') != expected:
+            raise ProviderRunnerError('review_context_work_order_mismatch')
+    else:
+        context_snapshot = load_verified_context_snapshot(work_order.get("context_refs"))
     context_snapshot_digest = "sha256:" + stable_digest(context_snapshot)
     context_json = json.dumps(context_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     context_bytes = context_json.encode("utf-8")
@@ -628,6 +754,7 @@ def adapter_request(
         "evidence_path": str(evidence_path),
         "transcript_path": str(transcript_path),
         "instruction": work_order["instruction"],
+        "step_contract": resolve_step_contract(work_order, state_root=state_root, run=run),
         "context_refs": work_order.get("context_refs", []),
         "approved_context": context_snapshot,
         "context_snapshot": {
@@ -813,6 +940,8 @@ def recover_completed_provider_attempt(
     ):
         raise ProviderRunnerError("adapter_request_digest_mismatch")
 
+    verify_request_step_contract(request, frozen_work_order, state_root=state_root, run=run)
+
     report_path, evidence_path, transcript_path = verified_request_artifact_paths(
         state_root=state_root,
         run_id=str(run["run_id"]),
@@ -885,7 +1014,8 @@ def build_provider_execution(
     principal: dict[str, Any],
 ) -> dict[str, Any]:
     previous = run.get("provider_execution") if isinstance(run.get("provider_execution"), dict) else {}
-    retry = previous.get("retry") if isinstance(previous.get("retry"), dict) else {}
+    retry = (previous.get("retry") if previous.get("step_id") == request["step_id"]
+             and isinstance(previous.get("retry"), dict) else {})
     attempt_number = int(previous.get("attempt_number") or 0) + 1
     claimed_at = now_iso()
     return {
@@ -948,7 +1078,8 @@ def authorize_provider_dispatch(
         supplied_digest = str(request_copy.pop("adapter_request_digest", ""))
         if supplied_digest != "sha256:" + stable_digest(request_copy):
             raise ProviderRunnerError("adapter_request_digest_mismatch")
-        current_context = load_verified_context_snapshot(request.get("context_refs"))
+        current_context = (scoped_worker_executor.load_completed_review_context(state_root, run)
+            if run.get('workflow_id') == 'standard_code_change' else load_verified_context_snapshot(request.get("context_refs")))
         if "sha256:" + stable_digest(current_context) != execution.get("context_snapshot_digest"):
             raise ProviderRunnerError("context_snapshot_digest_mismatch")
         frozen_binding = request.get("execution_binding")
@@ -959,7 +1090,7 @@ def authorize_provider_dispatch(
                 raise ProviderRunnerError("binary_binding_invalid") from exc
             if current_binding != frozen_binding:
                 raise ProviderRunnerError("binary_binding_invalid")
-        scoped_worker_executor.verify_frozen_work_order(
+        frozen_order, _, _ = scoped_worker_executor.verify_frozen_work_order(
             state_root,
             run_id=run_id,
             step_id=str(request["step_id"]),
@@ -967,6 +1098,7 @@ def authorize_provider_dispatch(
             expected_iteration=int(run["iteration"]),
             expected_work_order_digest=str(execution["work_order_digest"]),
         )
+        verify_request_step_contract(request, frozen_order, state_root=state_root, run=run)
         execution["phase"] = "invoking"
         execution["lease"]["last_heartbeat_at"] = now_iso()
         execution["lease"]["lease_expires_at"] = future_iso(DEFAULT_PROVIDER_LEASE_SECONDS)
@@ -1008,6 +1140,14 @@ def fake_provider_report(
     adapter: dict[str, Any],
     mode: str,
 ) -> dict[str, Any]:
+    if is_research_request(request):
+        refs = [ref["value"] for ref in request["context_refs"]]
+        return {"report_version": "1", "workflow_id": request["workflow_id"],
+                "step_id": request["step_id"], "result": "blocked" if mode == "blocked" else "findings",
+                "source_refs": refs, "findings": [{"summary": "Fake bounded research result.",
+                                                    "evidence_refs": refs}],
+                "uncertainty": ["Offline fake provider; not actual research or live acceptance."],
+                "no_diff_completion": True}
     result = "pass"
     findings: list[dict[str, Any]] = []
     if mode == "findings":
@@ -1038,7 +1178,7 @@ def fake_provider_report(
     }
     if mode == "missing_effective_model":
         provider_evidence.pop("effective_model")
-    return {
+    report = {
         "report_version": "1",
         "report_id": f"report-{request['run_id']}",
         "request_id": request["request_id"],
@@ -1055,6 +1195,25 @@ def fake_provider_report(
             "raw_transcript_shared": False,
         },
     }
+    if request['workflow_id'] == 'standard_code_change':
+        paths = [ref['value'] for ref in request['context_refs']]
+        for finding in findings:
+            finding['evidence_refs'] = paths[:1]
+        report.update(result='blocked' if mode == 'blocked' else 'complete',
+            code_diff={'paths': paths, 'summary': 'Fixture bounded change'},
+            review={'status': 'changes_requested' if mode == 'findings' else 'approved',
+                    'findings': findings, 'evidence_refs': [request['evidence_path']]},
+            validation={'status': 'passed' if request['step_id'] == 'qa' and mode != 'blocked' else 'not_run',
+                        'evidence_refs': [request['evidence_path']]},
+            final_evidence={'refs': [request['evidence_path']]})
+        report.pop('findings')
+        if 'original_findings_only' in request['instruction']:
+            binding = json.loads(request['instruction'].split('\n')[-1])['binding']
+            report['review']['findings'] = []
+            report['resolution'] = {'binding': binding, 'results': {fid: {
+                'status': 'unresolved' if mode == 'findings' else 'resolved', 'evidence_refs': paths[:1]}
+                for fid in binding['finding_ids']}}
+    return report
 
 
 def execute_provider(
@@ -1086,6 +1245,11 @@ def execute_provider(
             effective_model = report_evidence.get("effective_model")
             if isinstance(effective_model, str) and effective_model:
                 details["effective_model"] = effective_model
+        if is_research_request(request):
+            details.update(fake_provider=True, provider_session_id=f"fake-session-{request['attempt_id']}")
+            if fake_provider_mode != "missing_effective_model":
+                details["effective_model"] = ("claude-model-mismatch" if fake_provider_mode == "model_mismatch"
+                                              else request["intended_model"])
         return "ok", report, details
 
     adapter_id = str(adapter.get("provider_adapter_id") or "")
@@ -1152,6 +1316,8 @@ def bind_live_report(
     adapter: dict[str, Any],
     details: dict[str, Any],
 ) -> dict[str, Any]:
+    if is_research_request(request):
+        return dict(report)
     bound = dict(report)
     supplied = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
     bound["provider_evidence"] = {
@@ -1220,6 +1386,10 @@ def enforce_effective_model_policy(
             {**details, "reason": PROVIDER_MODEL_MISMATCH},
         )
     assurance = MODEL_ASSURANCE_FOR_POLICY[effective_model_policy]
+    details["effective_model_policy"] = effective_model_policy
+    details["model_assurance"] = assurance
+    if is_research_request(request):
+        return outcome, dict(report), details
     report = dict(report)
     provider_evidence = (
         dict(report.get("provider_evidence"))
@@ -1932,6 +2102,13 @@ def run_provider(
                     "attempt_result_path": str(attempt_result_path),
                     "workflow_run": current_run,
                 }
+            if outcome == "ok" and report is not None:
+                try:
+                    verify_request_step_contract(request, work_order, state_root=state_root, run=current_run)
+                except ProviderRunnerError as exc:
+                    authorization_error = str(exc)
+                    outcome, report = "provider_unavailable", None
+                    details = {**details, "reason": authorization_error}
             if was_live:
                 canonical_payload = write_live_transcript(
                     state_root,

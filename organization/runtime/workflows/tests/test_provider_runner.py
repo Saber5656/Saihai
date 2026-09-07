@@ -1756,8 +1756,25 @@ def test_request_artifact_paths_are_recomputed_and_confined() -> None:
             raise AssertionError("symlinked report root must be rejected")
 
 
+def test_standard_review_runner_preserves_readonly_execution_boundary() -> None:
+    from test_work_order_builder import build, run_record, activation_scope
+    template = json.loads((Path(__file__).resolve().parents[1]/'templates/standard_code_change.yaml').read_text())
+    run = run_record(workflow_id='standard_code_change')
+    run['activation']['activation_scope'] = activation_scope(allowed_paths=['.'],
+        allowed_ops={'edit':True,'commit':False,'push':False,'network':False}, step_budget=6)
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        order = build(Path(raw_tmp), run=run, template=template, step=template['steps'][1])
+        assert provider_runner.validate_work_order_for_runner(order) == []
+        for field,value in [('permission_mode','edit'),('external_provider_allowed',True)]:
+            bad = json.loads(json.dumps(order));bad[field]=value
+            assert provider_runner.validate_work_order_for_runner(bad)
+        bad = json.loads(json.dumps(order));bad['activation_scope']['allowed_ops']['commit']=True
+        assert provider_runner.validate_work_order_for_runner(bad)
+
+
 if __name__ == "__main__":
     tests = (
+        test_standard_review_runner_preserves_readonly_execution_boundary,
         test_fake_provider_success_completes_with_normalized_evidence,
         test_fake_provider_model_mismatch_waits_for_human_without_accepting_report,
         test_fake_provider_missing_effective_model_waits_for_human,
