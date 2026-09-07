@@ -2047,6 +2047,12 @@ def validate_standard_review_report(report: dict[str, Any], *, run: dict[str, An
             errors.extend(review_lifecycle.validate_record(candidate['review_lifecycle'], run=candidate))
         elif report['validation']['status'] != 'passed' or review_lifecycle.next_review_action(run) != 'merge_preflight':
             errors.append('required_validation_not_passed')
+        if run['current_step'] == 'qa':
+            import host_validation
+            try:
+                host_validation.verify_standard_receipt(state_root, run)
+            except host_validation.ValidationError:
+                errors.append('host_validation_missing_or_stale')
         if run['current_step'] == 'qa' and (report['review']['status'] != 'approved' or report['review'].get('findings')):
             errors.append('qa_blocking_findings')
         if run['current_step'] == 'qa' and 'resolution' in report:
@@ -2107,6 +2113,11 @@ def finalize_standard_review(state_root: Path, run: dict[str, Any], *, principal
     report = read_json(path)
     if 'sha256:' + stable_digest(report) != qa['digest'] or report['validation']['status'] != 'passed':
         raise ReportGateError('final_validation_evidence_invalid')
+    import host_validation
+    try:
+        host_validation.verify_standard_receipt(state_root, run)
+    except host_validation.ValidationError as exc:
+        raise ReportGateError('host_validation_missing_or_stale') from exc
     # The final step is a harness gate, not another model review.
     run_lifecycle.transition_run(state_root, run['run_id'], to_state='validating',
         reason_class='final_evidence_ready', transition='finalize_standard_review', principal=principal, run=run, persist=False)

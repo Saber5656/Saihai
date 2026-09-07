@@ -23,6 +23,7 @@ import host_publication_adapter as publication
 import run_lock
 import run_store
 import vault_task_records
+import host_validation
 import scoped_worker_executor as scoped
 
 PROFILE = 'trusted_local_v1'
@@ -44,6 +45,14 @@ class TrustedLocalAuthorization:
     validation_commands: tuple[tuple[str, ...], ...]
     review_policy: str = 'normal_optional'
     timeout_seconds: int = 900
+    validation_profile: dict | None = None
+
+
+def authorization_payload(auth):
+    value = dataclasses.asdict(auth)
+    if value.get('validation_profile') is None:
+        value.pop('validation_profile', None)
+    return value
 
 
 def _git(root: Path, *args: str) -> str:
@@ -117,6 +126,10 @@ def _authorize(request: dict, auth: TrustedLocalAuthorization, *, clean: bool = 
     home = Path(auth.codex_home)
     if not home.is_absolute() or home.resolve(strict=True) != home or not home.is_dir():
         raise TrustedLocalError('existing_codex_home_required')
+    try:
+        host_validation.load_profile(auth.validation_profile, root)
+    except (host_validation.ValidationError, OSError, ValueError) as exc:
+        raise TrustedLocalError('host_validation_profile_invalid') from exc
     return root
 
 
@@ -141,7 +154,8 @@ def _argv(auth: TrustedLocalAuthorization, root: Path, output: Path) -> list[str
                     'features.code_mode=false': 'features.code_mode=true',
                     'features.code_mode_host=false': 'features.code_mode_host=true'}
     argv = [replacements.get(item, item) for item in argv]
-    return argv[:-1] + ['--model', auth.model, '--json', '-']
+    effort = ['-c', 'model_reasoning_effort="max"'] if auth.model == 'gpt-5.6-luna' else []
+    return argv[:-1] + ['--model', auth.model, *effort, '--json', '-']
 
 
 def _run_process(argv: list[str], prompt: str, auth: TrustedLocalAuthorization, root: Path) -> tuple[dict, bytes]:
@@ -170,8 +184,26 @@ def _run_process(argv: list[str], prompt: str, auth: TrustedLocalAuthorization, 
     return receipt, out
 
 
-def _validate(root: Path, auth: TrustedLocalAuthorization, identity: dict, evidence: Path) -> dict:
+def _validate(root: Path, auth: TrustedLocalAuthorization, identity: dict, evidence: Path, *, reuse_from: Path | None = None) -> dict:
     results = []
+    try:
+        source_before = host_validation.source_digest(root)
+        parity = host_validation.workflow_parity(root)
+        profile = host_validation.load_profile(auth.validation_profile, root)
+    except host_validation.ValidationError as exc:
+        raise TrustedLocalError(str(exc)) from exc
+    if reuse_from is not None and reuse_from.is_file() and not reuse_from.is_symlink():
+        try:
+            previous = json.loads(reuse_from.read_bytes())
+        except (OSError, ValueError):
+            previous = {}
+        if host_validation.reusable(previous, root=root, commands=auth.validation_commands) and previous.get('profile_reference') == auth.validation_profile:
+            receipt = dict(previous, **identity, execution_id=auth.publication.execution_id,
+                reused_from_digest=publication.digest(reuse_from.read_bytes()), workflow_parity=parity)
+            receipt['delivery_profile'] = host_validation.assess_profile(profile, root=root, repository=auth.publication.repository,
+                commands=auth.validation_commands, observations=receipt['commands'], changed_paths=_paths(root))
+            _save(evidence, receipt)
+            return receipt
     scratch = evidence.parent / 'validation-scratch'
     run_store.ensure_private_directory(scratch)
     for index, command in enumerate(auth.validation_commands):
@@ -184,23 +216,34 @@ def _validate(root: Path, auth: TrustedLocalAuthorization, identity: dict, evide
                    'PYTHONDONTWRITEBYTECODE':'1', 'LANG':'C.UTF-8'}
             done = subprocess.run(sandbox_argv, cwd=root, env=env, capture_output=True, timeout=auth.timeout_seconds, check=False)
             result = {'argv': list(command), 'exit': done.returncode, 'stdout_digest': publication.digest(done.stdout),
-                      'stderr_digest': publication.digest(done.stderr)}
+                      'stderr_digest': publication.digest(done.stderr),
+                      **host_validation.observe(command, done.stdout, done.stderr, done.returncode),
+                      'command_digest': host_validation.command_digest(command)}
         except (OSError, subprocess.TimeoutExpired) as exc:
-            result = {'argv': list(command), 'exit': None, 'error': 'host_validation_unavailable'}
+            result = {'argv': list(command), 'exit': None, 'passed':False, 'error': 'host_validation_unavailable'}
             diagnostic = {'stdout': (getattr(exc, 'stdout', None) or b'')[-16384:].decode(errors='replace'),
                           'stderr': (getattr(exc, 'stderr', None) or b'')[-16384:].decode(errors='replace')}
         else:
             diagnostic = {'stdout': done.stdout[-16384:].decode(errors='replace'),
                           'stderr': done.stderr[-16384:].decode(errors='replace')}
-        if result['exit'] != 0:
+        if not result['passed']:
             diagnostic_path = evidence.with_name(evidence.stem + '-diagnostic-' + str(index) + '.json')
             _save(diagnostic_path, dict(diagnostic, trust='untrusted_validation_output', bounded_bytes_per_stream=16384))
             result.update(diagnostic_path=str(diagnostic_path), diagnostic_digest=publication.digest(diagnostic_path.read_bytes()))
         result.update(started_at_epoch=start, ended_at_epoch=time.time()); results.append(result)
-        if result['exit'] != 0:
+        if not result['passed']:
             break
-    receipt = dict(status='passed' if all(r['exit'] == 0 for r in results) else 'failed',
-                   execution_id=auth.publication.execution_id, **identity, commands=results)
+    receipt = dict(validation_version=2, status='passed' if results and all(r['passed'] for r in results) else 'failed',
+                   execution_id=auth.publication.execution_id, **identity, commands=results,
+                   source_digest=source_before, plan_digest=host_validation.digest([list(c) for c in auth.validation_commands]), workflow_parity=parity)
+    if source_before != host_validation.source_digest(root):
+        receipt.update(status='failed', reason='source_changed_during_validation')
+    receipt['profile_reference'] = auth.validation_profile
+    try:
+        receipt['delivery_profile'] = host_validation.assess_profile(profile, root=root, repository=auth.publication.repository,
+            commands=auth.validation_commands, observations=results, changed_paths=_paths(root))
+    except host_validation.ValidationError as exc:
+        receipt.update(status='failed', reason=str(exc))
     _save(evidence, receipt)
     if receipt['status'] != 'passed':
         raise TrustedLocalError('host_validation_failed')
@@ -223,7 +266,7 @@ def _execute(request: dict, authorization: TrustedLocalAuthorization, state_root
     directory = Path(state_root).resolve() / 'trusted-local' / host.execution_id
     run_store.ensure_private_directory(directory)
     lock_path = directory / 'claim.json'
-    claim = {'request_digest': publication.digest(request), 'authorization_digest': publication.digest(dataclasses.asdict(authorization)),
+    claim = {'request_digest': publication.digest(request), 'authorization_digest': publication.digest(authorization_payload(authorization)),
              'profile': PROFILE, 'review_policy': authorization.review_policy, 'actor_kind': ACTOR,
              'authority_evidence_ref': host.authority_evidence_ref}
     try:
@@ -293,7 +336,7 @@ def execute(request: dict, authorization: TrustedLocalAuthorization, state_root:
                 run_store.validate_artifact_id(authorization.publication.execution_id,'execution_id')
                 directory = Path(state_root).resolve() / 'trusted-local' / authorization.publication.execution_id
                 claim = run_store.read_json(directory/'claim.json')
-                if claim.get('authorization_digest') == publication.digest(dataclasses.asdict(authorization)):
+                if claim.get('authorization_digest') == publication.digest(authorization_payload(authorization)):
                     _save(directory/'outcome.json',{'status':'blocked','reason':reason,'next_action':'inspect failure evidence'})
             except (run_store.RunStoreError, OSError):
                 pass
@@ -448,7 +491,7 @@ def repair_validation(authorization: TrustedLocalAuthorization, state_root: Path
     run_store.validate_artifact_id(original.execution_id, 'execution_id')
     directory = Path(state_root).resolve() / 'trusted-local' / original.execution_id
     claim = run_store.read_json(directory / 'claim.json')
-    authority_digest = publication.digest(dataclasses.asdict(authorization))
+    authority_digest = publication.digest(authorization_payload(authorization))
     if claim['authorization_digest'] != authority_digest:
         raise TrustedLocalError('repair_authority_mismatch')
     request = run_store.read_json(directory / 'request.json')
@@ -466,7 +509,7 @@ def repair_validation(authorization: TrustedLocalAuthorization, state_root: Path
     previous = directory.parent / progress['execution_id']
     previous_auth = dataclasses.replace(authorization, publication=dataclasses.replace(original, execution_id=progress['execution_id']))
     previous_claim = run_store.read_json(previous / 'claim.json')
-    if previous_claim['authorization_digest'] != publication.digest(dataclasses.asdict(previous_auth)):
+    if previous_claim['authorization_digest'] != publication.digest(authorization_payload(previous_auth)):
         raise TrustedLocalError('repair_claim_mismatch')
     failed_path = previous / 'validation.json'
     if not failed_path.exists() or (previous / 'report.json').exists():
@@ -478,7 +521,7 @@ def repair_validation(authorization: TrustedLocalAuthorization, state_root: Path
     paths = _paths(root); _scope(paths, original.allowed_paths)
     if publication.snapshot(root, paths) != identity:
         raise TrustedLocalError('failed_validation_tree_changed')
-    failure = next((row for row in failed['commands'] if row['exit'] != 0), None)
+    failure = next((row for row in failed['commands'] if row['exit'] != 0 or row.get('passed') is False), None)
     if failure is None:
         raise TrustedLocalError('failed_validation_required')
     # Older receipts retained only digests. Re-observe the exact failed tree once
@@ -495,7 +538,7 @@ def repair_validation(authorization: TrustedLocalAuthorization, state_root: Path
             raise TrustedLocalError('failed_validation_tree_changed')
         if observed['status'] != 'failed':
             raise TrustedLocalError('validation_failure_not_reproduced')
-        failure = next(row for row in observed['commands'] if row['exit'] != 0)
+        failure = next(row for row in observed['commands'] if row['exit'] != 0 or row.get('passed') is False)
     diagnostic_path = Path(failure['diagnostic_path'])
     if diagnostic_path.parent != previous or publication.digest(diagnostic_path.read_bytes()) != failure['diagnostic_digest']:
         raise TrustedLocalError('validation_diagnostic_identity_mismatch')
@@ -575,7 +618,7 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
     host = authorization.publication
     directory = Path(state_root).resolve() / 'trusted-local' / host.execution_id
     claim = run_store.read_json(directory / 'claim.json')
-    if claim['authorization_digest'] != publication.digest(dataclasses.asdict(authorization)):
+    if claim['authorization_digest'] != publication.digest(authorization_payload(authorization)):
         raise TrustedLocalError('publication_authorization_changed')
     current = authorization
     repair_path = directory / 'validation-repair.json'
@@ -743,7 +786,7 @@ def _integrate_conflict(original: TrustedLocalAuthorization, current: TrustedLoc
     patch=cmd.run(['git','diff','--cached','--binary','--full-index','--no-ext-diff','--no-renames',fresh],cwd=root)
     identity={'tree':tree,'diff_digest':publication.digest(patch)}
     try:
-        _validate(root,repaired,identity,evidence/'validation.json')
+        _validate(root,repaired,identity,evidence/'validation.json', reuse_from=directory/'validation.json')
     except TrustedLocalError:
         progress.update(status='retryable_validation', repair_paths=paths)
         _save(progress_path,progress)
@@ -764,8 +807,8 @@ def _integrate_conflict(original: TrustedLocalAuthorization, current: TrustedLoc
                    'process_evidence_path':str(evidence/'process.json'),'process_evidence_digest':publication.digest((evidence/'process.json').read_bytes())},
         validation={'status':'passed','evidence_path':str(evidence/'validation.json'),'evidence_digest':publication.digest((evidence/'validation.json').read_bytes())})
     publication.validate_report(report,repaired_host)
-    continuation={'authorization':dataclasses.asdict(repaired),'report':report,'integrated_parent':prior['head'],
-                  'original_authorization_digest':publication.digest(dataclasses.asdict(original))}
+    continuation={'authorization':authorization_payload(repaired),'report':report,'integrated_parent':prior['head'],
+                  'original_authorization_digest':publication.digest(authorization_payload(original))}
     _save(directory/'continuation.json',continuation)
     progress['status']='integrated';_save(progress_path,progress)
     return {'status':'integration_validated','head':head,'base':fresh,'execution_id':execution_id}

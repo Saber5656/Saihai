@@ -249,14 +249,15 @@ class InventoryTests(unittest.TestCase):
             observed = inventory.observe_workflows({".github/workflows/test.yml": json.dumps(doc)})
             self.assertTrue(observed["errors"] or observed["gaps"])
 
-    def test_real_repository_maps_three_cells_and_exposes_current_gaps(self):
+    def test_real_repository_maps_shards_and_exposes_current_gaps(self):
         expected = json.loads(ACTUAL.read_text())
         result = inventory.audit_repository(REPO, expected, context(),
                                             {"repository": "Saber5656/Saihai", "head_sha": "a" * 40, "base_sha": "b" * 40})
         self.assertEqual(result["parsing"], "valid", result)
         self.assertEqual(result["parity"], "match", result["drift"])
         self.assertEqual([(x["job_id"], x["matrix"]) for x in result["jobs"]],
-                         [("analyze", {"language": "actions"}), ("analyze", {"language": "python"}), ("validate", {})])
+                         [("analyze", {"language": "actions"}), ("analyze", {"language": "python"})]
+                         + [("validation_shards", {"shard_index": i}) for i in range(8)] + [("validate", {})])
         text = json.dumps(result["gaps"])
         for marker in ("floating_runtime", "codeql_bundle_integrity_unverified", "codeql_implicit_cache_unverified", "authoritative_policy_missing"):
             self.assertIn(marker, text)

@@ -462,6 +462,8 @@ def main() -> None:
         "compiled": compiled,
         "total_duration_seconds": round(time.perf_counter() - started, 3),
     }
+    if args.only:
+        summary['selection'] = {'kind':'subset','only':args.only}
     if shard_requested:
         summary['selection'] = {'kind':'shard','index':args.shard_index,'count':args.shard_count}
     if no_suites:

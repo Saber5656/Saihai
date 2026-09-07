@@ -181,7 +181,7 @@ class ValidationProjectionTests(unittest.TestCase):
                 'contracts': [{'command': [str(self.python), 'organization/runtime/workflows/scripts/workflow_selector.py', 'validate-contracts'], 'result': 'pass'},
                               {'command': [str(self.python), 'organization/runtime/workflows/scripts/template_role_validator.py'], 'result': 'pass'}]}
 
-    def execute_fixture(self, result, *, raw=None, mutate_output=False, mutate_log=False):
+    def execute_fixture(self, result, *, raw=None, mutate_output=False, mutate_log=False, shard_index=None, shard_count=None):
         self.counter += 1
         output = self.root / ('attempt-' + str(self.counter))
         selected = {'version': '3.11.16', 'machine': 'arm64', 'interpreter': 'python/bin/python3.11'}
@@ -214,8 +214,20 @@ class ValidationProjectionTests(unittest.TestCase):
         # Only external provisioning/stage input and target source are mocked.
         # execute, validation parsing/projection and final receipt persistence are real.
         with patch.object(tool, 'ROOT', self.repo), patch.object(tool.tempfile, 'mkdtemp', return_value=str(self.private)), patch.object(tool, 'load_lock', return_value=lock), patch.object(tool, 'select', return_value=selected), patch.object(tool, 'download'), patch.object(tool, 'safe_extract'), patch.object(tool, 'run_stage', side_effect=stage), patch.object(tool, 'target_identity', side_effect=identity):
-            code = tool.execute(output, 'full')
+            code = tool.execute(output, 'full', shard_index, shard_count)
         return code, output, json.loads((output / 'receipt.json').read_text())
+
+    def test_shard_selection_is_bound_and_never_full(self):
+        result = self.validation()
+        result['selection'] = {'kind':'shard','index':0,'count':8}
+        code, output, receipt = self.execute_fixture(result, shard_index=0, shard_count=8)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads((output/'validation.json').read_text())['selection'], result['selection'])
+        self.assertEqual(receipt['selection'], result['selection'])
+        self.assertIn('--shard-index', receipt['stages'][-1]['command'])
+        self.assertNotEqual(self.execute_fixture(result)[0], 0)
+        with self.assertRaises(tool.ContractError):
+            tool.execute(self.root/'invalid-shard','full',True,8)
 
     def test_current_suite_evidence_survives_public_projection(self):
         result = self.validation()

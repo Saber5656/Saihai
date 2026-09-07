@@ -422,7 +422,8 @@ def _expression_gaps(value: Any, path: str, matrix_keys: set[str]) -> list[str]:
         if expression not in {"github.workspace", "runner.temp", "github.repository", "github.workflow",
                               "github.event_name", "github.ref", "github.run_id", "github.run_attempt", "always()", "steps.codeql-init.outputs.codeql-path",
                               "steps.codeql-init.outputs.codeql-version", "steps.codeql-init.outcome",
-                              "steps.codeql-analysis.outcome", "steps.codeql-analysis.outputs.sarif-id"} | {"matrix." + key for key in matrix_keys}:
+                              "steps.codeql-analysis.outcome", "steps.codeql-analysis.outputs.sarif-id",
+                              "needs.validation_shards.result"} | {"matrix." + key for key in matrix_keys}:
             return [path + ":unsupported_expression"]
         remaining = remaining.replace(match[0], "")
     return [path + ":unsupported_expression"] if "${{" in remaining else []
