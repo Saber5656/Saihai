@@ -109,7 +109,14 @@ class UsageIntakeTests(unittest.TestCase):
     def test_legacy_authority_material_does_not_change_existing_digests(self):
         material=local._authorization_material(self.fixture.auth)
         self.assertNotIn('intake_digest',material)
-        self.assertEqual(publication.digest(material),publication.digest({k:v for k,v in dataclasses.asdict(self.fixture.auth).items() if k!='intake_digest'}))
+        self.assertEqual(publication.digest(material),publication.digest({k:v for k,v in dataclasses.asdict(self.fixture.auth).items() if k not in {'intake_digest','validation_profile'}}))
+        for profile in (None, {'path':'/host/plan','sha256':'a'*64}):
+            for intake in ('', 'sha256:'+'b'*64):
+                auth=dataclasses.replace(self.fixture.auth,validation_profile=profile,intake_digest=intake)
+                value=local.authorization_payload(auth)
+                self.assertEqual(value,local._authorization_material(auth))
+                self.assertEqual('validation_profile' in value,profile is not None)
+                self.assertEqual('intake_digest' in value,bool(intake))
     def test_driver_binds_intake_claim_and_rejects_digest_changes(self):
         import trusted_local_driver as driver
         ref,auth,request=self.prepare();f=self.fixture

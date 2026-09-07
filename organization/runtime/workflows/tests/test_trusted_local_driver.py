@@ -64,7 +64,7 @@ class TrustedLocalDriverTests(unittest.TestCase):
         local.execute(self.f.request, self.f.auth, self.f.state)
         directory = self.f.state/'trusted-local'/self.f.auth.publication.execution_id
         claim = json.loads((directory/'claim.json').read_text())
-        legacy = dataclasses.asdict(self.f.auth); legacy.pop('intake_digest')
+        legacy = dataclasses.asdict(self.f.auth); legacy.pop('intake_digest'); legacy.pop('validation_profile')
         self.assertEqual(local.publication.digest(legacy), claim['authorization_digest'])
         with patch.object(local, '_run_process', side_effect=AssertionError('existing worker replayed')):
             result = self.drive(max_iterations=1)

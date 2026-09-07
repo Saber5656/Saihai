@@ -180,6 +180,16 @@ def validate_report(report: dict, authorization: HostAuthorization) -> Path:
         raise PublicationError('host_validation_evidence_invalid') from exc
     if receipt.get('status') != 'passed' or receipt.get('tree') != report['tree'] or receipt.get('diff_digest') != report.get('diff_digest') or receipt.get('execution_id') != report['execution_id']:
         raise PublicationError('host_validation_identity_mismatch')
+    import host_validation
+    try:
+        host_validation.validate_receipt(receipt, identity={k:report[k] for k in ('execution_id','tree','diff_digest')})
+        profile = host_validation.load_profile(receipt.get('profile_reference'), Path(authorization.worktree))
+        if profile is not None and receipt['delivery_profile'].get('profile_digest') != host_validation.digest(profile[0]):
+            raise host_validation.ValidationError('delivery_profile_changed')
+        if receipt['source_digest'] != host_validation.source_digest(Path(authorization.worktree)):
+            raise host_validation.ValidationError('current_source_changed')
+    except host_validation.ValidationError as exc:
+        raise PublicationError('host_validation_evidence_invalid:' + str(exc)) from exc
     # Host caller owns the evidence location; a matching worker-authored file is
     # not authentication. This contract intentionally requires a trusted caller.
     root = Path(authorization.worktree)

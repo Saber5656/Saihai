@@ -97,7 +97,16 @@ class HostPublicationTests(unittest.TestCase):
             str(self.repo), 'codex/task', head, head, ('app.txt',), ('ci',), 'sha256:' + 'c' * 64, 'parent-task-authority')
         identity = adapter.snapshot(self.repo, ['app.txt'])
         evidence = self.root / 'validation.json'
-        evidence.write_text(json.dumps(dict(status='passed', execution_id='exec-1', **identity)))
+        import host_validation
+        command = [sys.executable, '-c', 'assert True']
+        done = subprocess.run(command, capture_output=True)
+        row = dict(argv=command, exit=done.returncode, started_at_epoch=1, ended_at_epoch=2,
+            stdout_digest=adapter.digest(done.stdout), stderr_digest=adapter.digest(done.stderr),
+            command_digest=host_validation.command_digest(command),
+            **host_validation.observe(command, done.stdout, done.stderr, done.returncode))
+        evidence.write_text(json.dumps(dict(validation_version=2, status='passed', execution_id='exec-1', **identity,
+            source_digest=host_validation.source_digest(self.repo), plan_digest=host_validation.digest([command]), commands=[row],
+            profile_reference=None, delivery_profile={'state':'host_commands','profile_digest':None})))
         process = self.root / 'process.json'
         process.write_text('{"exit":0,"execution_id":"exec-1"}')
         self.report = dict(version='1', profile='trusted_local_v1',
@@ -145,13 +154,13 @@ class HostPublicationTests(unittest.TestCase):
         with self.assertRaises(adapter.PublicationError): self.publish()
         self.report['changed_paths'] = ['app.txt']
         (self.repo / 'app.txt').write_text('unvalidated\n')
-        with self.assertRaisesRegex(adapter.PublicationError, 'validated_tree_changed'): self.publish()
+        with self.assertRaisesRegex(adapter.PublicationError, 'current_source_changed'): self.publish()
         self.assertFalse(any(c[0] == 'gh' for c in self.commands.calls))
 
     def test_unrelated_dirty_and_real_index_preserved(self):
         (self.repo / 'other.txt').write_text('unrelated')
         before = self.git('diff', '--cached')
-        with self.assertRaisesRegex(adapter.PublicationError, 'unrelated_or_missing_changes'): self.publish()
+        with self.assertRaisesRegex(adapter.PublicationError, 'current_source_changed'): self.publish()
         self.assertEqual(self.git('diff', '--cached'), before)
         self.assertEqual((self.repo / 'other.txt').read_text(), 'unrelated')
 
