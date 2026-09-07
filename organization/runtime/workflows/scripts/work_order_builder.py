@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import review_lifecycle
 import run_store
 import safe_paths
 import role_definition
@@ -418,6 +419,45 @@ def _context_scope_for_step(
     return scope
 
 
+def _readonly_chain_provider_allowed(
+    run: dict[str, Any], template: dict[str, Any], step: dict[str, Any],
+) -> bool:
+    """Enable only the two bounded provider contracts of the readonly chain."""
+    expected = {
+        "research": ("contents-researcher", "observer", "research_report"),
+        "review": ("tech-reviewer", "reviewer", "external_review_report"),
+    }
+    step_id = step.get("id")
+    if (run.get("workflow_id") != "readonly_review_chain"
+            or template.get("workflow_id") != "readonly_review_chain"
+            or template.get("safety_class") != "readonly"
+            or run.get("current_step") != step_id
+            or step_id not in expected
+            or step.get("permission_mode") != "readonly"
+            or (step.get("role"), step.get("assignment_role"), step.get("output_contract"))
+            != expected[step_id]):
+        return False
+    route = step.get("provider_route")
+    if not isinstance(route, dict) or any(
+        route.get(key) != value for key, value in {
+            "adapter_kind": "bounded_provider",
+            "runner_authority": "write_report_only",
+            "transition_authority": "harness_engine",
+        }.items()
+    ):
+        return False
+    activation = run.get("activation")
+    scope = activation.get("activation_scope") if isinstance(activation, dict) else None
+    if not isinstance(scope, dict):
+        return False
+    for ops in (step.get("allowed_ops"), scope.get("allowed_ops")):
+        if (not isinstance(ops, dict)
+                or set(ops) != {"edit", "commit", "push", "network"}
+                or any(value is not False for value in ops.values())):
+            return False
+    return True
+
+
 def _unbound_work_order_errors(work_order: dict[str, Any]) -> list[str]:
     """Unbound artifacts carry only readonly scope, never a worker plan."""
     scope = work_order.get("activation_scope")
@@ -434,7 +474,15 @@ def _unbound_work_order_errors(work_order: dict[str, Any]) -> list[str]:
     return errors
 
 
-def _base_instruction(template: dict[str, Any], step: dict[str, Any]) -> str:
+def _base_instruction(template: dict[str, Any], step: dict[str, Any], run: dict[str, Any] | None = None) -> str:
+    if run and run.get('review_lifecycle', {}).get('resolution_flow'):
+        action = review_lifecycle.next_review_action(run)
+        if step['id'] == 'review' and action == 'verify_original_findings':
+            return review_lifecycle.resolution_instruction(run)
+        if step['id'] == 'review' and action == 'initial_review':
+            return review_lifecycle.initial_review_instruction(run)
+        if step['id'] == 'implement' and action == 'repair_original_findings':
+            return review_lifecycle.repair_instruction(run)
     return (f"{template['purpose']} Step '{step['id']}' ({step['assignment_role']}): "
             f"follow the input work order contract and produce {step['output_contract']}.")
 
@@ -456,12 +504,21 @@ def build_work_order(
     worker_execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     step_id = str(step["id"])
+    review_action = review_lifecycle.next_review_action(run)
+    if review_action is not None:
+        allowed = {'review': {'initial_review', 'verify_original_findings'},
+                   'implement': {'repair_original_findings'}, 'qa': {'merge_preflight'},
+                   'final_evidence': {'merge_preflight'}}
+        if review_action not in allowed.get(step_id, set()):
+            raise WorkOrderError('review_work_order_not_requested:' + review_action)
     provider_route = step.get("provider_route") if isinstance(step.get("provider_route"), dict) else {}
     external_provider_allowed = provider_route.get("adapter_kind") == "external_provider"
+    if "readonly_review_chain" in (run.get("workflow_id"), template.get("workflow_id")):
+        external_provider_allowed = _readonly_chain_provider_allowed(run, template, step)
     context_refs = [_normalized_context_ref(item) for item in resolved_refs if isinstance(item, dict)]
     try:
         role_binding = role_definition.load_role_definition(step["role"])
-        instruction = role_definition.instruction_for(_base_instruction(template, step), role_binding)
+        instruction = role_definition.instruction_for(_base_instruction(template, step, run), role_binding)
     except role_definition.RoleDefinitionError as exc:
         raise WorkOrderError(str(exc)) from None
     work_order = {
@@ -578,7 +635,7 @@ def validate_work_order(
         role_definition.validate_role_binding(work_order)
         if work_order.get("to_role") != step.get("role"):
             errors.append("role_definition_step_mismatch")
-        expected_instruction = role_definition.instruction_for(_base_instruction(template, step), work_order)
+        expected_instruction = role_definition.instruction_for(_base_instruction(template, step, run), work_order)
         if work_order.get("instruction") != expected_instruction:
             errors.append("role_definition_instruction_invalid")
     except role_definition.RoleDefinitionError as exc:

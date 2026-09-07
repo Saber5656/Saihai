@@ -1323,6 +1323,7 @@ def test_concurrent_manual_prepare_writes_canonical_artifacts_once() -> None:
 
 
 def test_drain_allows_edit_capable_code_change_gate() -> None:
+    """Route an edit-capable code-change work order through Luna."""
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         classification = external_review_classification(
@@ -1437,7 +1438,7 @@ def test_drain_allows_edit_capable_code_change_gate() -> None:
         )
         assert_equal(
             work_order["intended_model"],
-            "operator-selected-openai",
+            "gpt-5.6-luna",
             "code change intended model",
         )
         assert work_order["intended_model"] != "claude-sonnet-4-6"
@@ -5104,11 +5105,23 @@ def test_missing_role_drain_is_typed_and_creates_no_artifacts() -> None:
             assert "role_definition_unavailable" in json.dumps(result)
             for category in ("work-orders", "adapter-requests", "provider-evidence"):
                 assert not list((state_root / category).rglob("*.json")), category
+def test_standard_same_iteration_drain_preserves_signed_order() -> None:
+    from test_scoped_worker_executor import create_repo, create_approved_code_change
+    import frontdoor_orchestrator as frontdoor
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        state = root/'state'
+        _, first = create_approved_code_change(state, user_prompt='Bounded replay fixture', worker_repo=create_repo(root))
+        old = first['work_order']
+        replay = frontdoor.drain_run(state_root=state, run_id='run-scoped-e2e')
+        assert replay['work_order'] == old
+        assert replay['drained'] is False
 
 
 def main() -> None:
     tests = [
         test_missing_role_drain_is_typed_and_creates_no_artifacts,
+        test_standard_same_iteration_drain_preserves_signed_order,
         test_channel_token_permissions_are_private,
         test_state_root_is_fixed_by_host_configuration,
         test_state_root_catalog_is_loaded_only_from_primary_checkout,

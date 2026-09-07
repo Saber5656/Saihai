@@ -564,6 +564,195 @@
           },
           {
             "properties": {
+              "workflow_id": {
+                "const": "readonly_review_chain"
+              },
+              "step_id": {
+                "const": "research"
+              },
+              "to_role": {
+                "const": "contents-researcher"
+              },
+              "assignment_role": {
+                "const": "observer"
+              },
+              "expected_output": {
+                "const": "research_report"
+              },
+              "permission_mode": {
+                "const": "readonly"
+              },
+              "external_provider_allowed": {
+                "const": true
+              },
+              "activation_scope": {
+                "required": [
+                  "allowed_ops"
+                ],
+                "properties": {
+                  "step_budget": {
+                    "const": 3
+                  },
+                  "allowed_ops": {
+                    "type": "object",
+                    "required": [
+                      "edit",
+                      "commit",
+                      "push",
+                      "network"
+                    ],
+                    "properties": {
+                      "edit": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "commit": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "push": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "network": {
+                        "type": "boolean",
+                        "const": false
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": {
+                "const": "readonly_review_chain"
+              },
+              "step_id": {
+                "const": "review"
+              },
+              "to_role": {
+                "const": "tech-reviewer"
+              },
+              "assignment_role": {
+                "const": "reviewer"
+              },
+              "expected_output": {
+                "const": "external_review_report"
+              },
+              "permission_mode": {
+                "const": "readonly"
+              },
+              "external_provider_allowed": {
+                "const": true
+              },
+              "activation_scope": {
+                "required": [
+                  "allowed_ops"
+                ],
+                "properties": {
+                  "step_budget": {
+                    "const": 3
+                  },
+                  "allowed_ops": {
+                    "type": "object",
+                    "required": [
+                      "edit",
+                      "commit",
+                      "push",
+                      "network"
+                    ],
+                    "properties": {
+                      "edit": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "commit": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "push": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "network": {
+                        "type": "boolean",
+                        "const": false
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "workflow_id": {
+                "const": "readonly_review_chain"
+              },
+              "step_id": {
+                "const": "final_evidence"
+              },
+              "to_role": {
+                "const": "gate-task-evaluator"
+              },
+              "assignment_role": {
+                "const": "reviewer"
+              },
+              "expected_output": {
+                "const": "final_evidence"
+              },
+              "permission_mode": {
+                "const": "readonly"
+              },
+              "external_provider_allowed": {
+                "const": false
+              },
+              "activation_scope": {
+                "required": [
+                  "allowed_ops"
+                ],
+                "properties": {
+                  "step_budget": {
+                    "const": 3
+                  },
+                  "allowed_ops": {
+                    "type": "object",
+                    "required": [
+                      "edit",
+                      "commit",
+                      "push",
+                      "network"
+                    ],
+                    "properties": {
+                      "edit": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "commit": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "push": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "network": {
+                        "type": "boolean",
+                        "const": false
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
               "workflow_id": { "const": "research_only" },
               "step_id": { "const": "research" },
               "assignment_role": { "const": "observer" },

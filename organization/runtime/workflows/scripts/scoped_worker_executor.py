@@ -30,6 +30,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+import review_lifecycle  # noqa: E402
 import run_lock  # noqa: E402
 import run_lifecycle  # noqa: E402
 import run_store  # noqa: E402
@@ -1769,7 +1770,7 @@ def derive_capability(
         state_root,
         "instructions",
         _artifact_component(run_id, label="run_id"),
-        f"{_artifact_component(step_id, label='step_id')}.json",
+        f"{_artifact_component(step_id, label='step_id')}-{work_order_digest.removeprefix('sha256:')}.json",
     )
     if instruction_path.exists():
         existing_instruction = _read_state_json(
@@ -2232,8 +2233,11 @@ def record_worker_run_outcome(
         if result["status"] == "completed":
             if run.get("workflow_id") != "standard_code_change" or capability["step_id"] != "implement":
                 raise ScopedWorkerError("worker_transition_not_supported")
-            run["current_step"] = "review"
-            run["iteration"] = int(run.get("iteration") or 1) + 1
+            if run.get('review_lifecycle', {}).get('resolution_flow'):
+                evidence = _read_state_json(evidence_path, reason='worker_evidence_invalid')
+                snapshot = dict(kind='work_order', work_order_digest=capability['work_order_digest'].removeprefix('sha256:'),
+                                context_digest=review_lifecycle._digest(evidence['review_context']))
+                review_lifecycle.record_gated_repair_result(run, snapshot)
             reason = "scoped_worker_completed_review_required"
         else:
             reason = "scoped_worker_result_not_completed"
@@ -2249,6 +2253,9 @@ def record_worker_run_outcome(
                 "principal": principal,
             }
         )
+        if result['status'] == 'completed':
+            return run_lifecycle.queue_standard_step(state_root, run, step='review', principal=principal,
+                                                    artifact_refs=[str(evidence_path)])
         return run_lifecycle.transition_run(
             state_root,
             run_id,
@@ -2275,6 +2282,8 @@ def validate_live_run_authority(
             return
         raise ScopedWorkerError("worker_run_state_missing")
     run = run_store.load_run(state_root, safe_run_id)
+    if review_lifecycle.next_review_action(run) == 'stopped':
+        raise ScopedWorkerError('review_lifecycle_stopped')
     if (
         run.get("task_id") != capability.get("task_id")
         or run.get("workflow_id") != "standard_code_change"
@@ -2603,6 +2612,7 @@ def execute_capability(
             "base_revision": capability["repository"]["base_revision"],
             "changed_paths": actual_changed_paths,
             "result": result,
+            "review_context": capture_review_context(capability, worktree_path, actual_changed_paths),
         }
         evidence_path = _state_artifact_path(
             state_root,
@@ -2781,6 +2791,97 @@ def commissioning_cli(argv: list[str] | None = None) -> int:
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result["decision"] == "pass" else 2
+
+
+
+def capture_review_context(capability: dict[str, Any], root: Path, changed: list[str]) -> list[dict[str, Any]]:
+    """Freeze bounded code through a pinned root and no-follow descriptors."""
+    instruction = _read_state_json(Path(capability['prompt_artifact']['path']), reason='instruction_artifact_invalid')
+    refs = {str(ref.get('value') or '') for ref in instruction['context_refs'] if ref.get('type') == 'repo_file'}
+    refs.update(changed)  # Template promotion rule: typed result refs within existing edit scope.
+    if not refs or len(refs) > 16:
+        raise ScopedWorkerError('review_context_ref_limit')
+    result, total = [], 0
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        root_fd = os.open(root, directory_flags)
+        try:
+            for raw in sorted(refs):
+                relative = _canonical_relative_path(raw)
+                if not any(path == '.' or relative == path or relative.startswith(path.rstrip('/') + '/') for path in capability['allowed_paths']):
+                    raise ScopedWorkerError('review_context_outside_scope')
+                components = Path(relative).parts
+                parent_fd = os.dup(root_fd)
+                try:
+                    try:
+                        for component in components[:-1]:
+                            next_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+                            os.close(parent_fd)
+                            parent_fd = next_fd
+                        fd = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        result.append(dict(path=relative, size_bytes=0, sha256=sha256_digest('deleted'), content='', deleted=True))
+                        continue
+                    try:
+                        if not stat.S_ISREG(os.fstat(fd).st_mode):
+                            raise ScopedWorkerError('review_context_not_regular')
+                        chunks, captured_bytes = [], 0
+                        while captured_bytes <= 262144:
+                            chunk = os.read(fd, min(65536, 262145 - captured_bytes))
+                            if not chunk:
+                                break
+                            chunks.append(chunk)
+                            captured_bytes += len(chunk)
+                        data = b''.join(chunks)
+                    finally:
+                        os.close(fd)
+                finally:
+                    os.close(parent_fd)
+                total += len(data)
+                if len(data) > 262144 or total > 1048576:
+                    raise ScopedWorkerError('review_context_byte_limit')
+                result.append(dict(path=relative, size_bytes=len(data), sha256='sha256:' + hashlib.sha256(data).hexdigest(), content=data.decode('utf-8')))
+        finally:
+            os.close(root_fd)
+    except (OSError, ValueError, UnicodeDecodeError, NotImplementedError) as exc:
+        raise ScopedWorkerError('review_context_unavailable') from exc
+    import provider_adapters
+    serialized = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    if len(serialized) > provider_adapters.MAX_CONTEXT_BYTES:
+        raise ScopedWorkerError('review_context_serialized_limit')
+    return result
+
+
+def load_completed_review_context(state_root: Path, run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read the last host-recorded completed execution; never accept provider paths."""
+    history = [row for row in run['step_history'] if row.get('step_id') == 'implement' and row.get('status') == 'completed' and row.get('execution_id')]
+    if not history:
+        raise ScopedWorkerError('review_execution_evidence_missing')
+    row = history[-1]
+    execution = _read_state_json(_state_artifact_path(state_root, 'executions', row['execution_id'] + '.json'), reason='execution_artifact_invalid')
+    capability = _load_canonical_capability(state_root, execution['capability_id'])
+    if capability['run_id'] != run['run_id'] or capability['task_id'] != run['task_id'] or capability['capability_digest'] != row['capability_digest']:
+        raise ScopedWorkerError('review_execution_identity_mismatch')
+    evidence_path = _state_artifact_path(state_root, 'evidence', run['run_id'], 'implement-' + row['execution_id'] + '.json')
+    evidence = _read_state_json(evidence_path, reason='worker_evidence_invalid')
+    if execution['status'] != 'completed' or execution['evidence_digest'] != row['evidence_digest'] or sha256_digest(evidence) != row['evidence_digest']:
+        raise ScopedWorkerError('review_execution_evidence_mismatch')
+    if evidence['capability_digest'] != capability['capability_digest'] or evidence['execution_id'] != execution['execution_id']:
+        raise ScopedWorkerError('review_execution_identity_mismatch')
+    context = evidence.get('review_context')
+    if not isinstance(context, list) or not context:
+        raise ScopedWorkerError('review_execution_context_missing')
+    tree = Path(capability['worktree']['worktree_path'])
+    verify_task_worktree_after_execution(capability, tree)
+    changed = _changed_paths(tree)
+    if changed != evidence['changed_paths'] or capture_review_context(capability, tree, changed) != context:
+        raise ScopedWorkerError('review_worktree_drift')
+    return context
+
+
+def completed_review_context_refs(state_root: Path, run: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(type='repo_file', path=row['path'], size_bytes=row['size_bytes'], digest=row['sha256'])
+            for row in load_completed_review_context(state_root, run)]
 
 
 if __name__ == "__main__":

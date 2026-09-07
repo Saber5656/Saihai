@@ -243,6 +243,8 @@ def candidate_workflow_id(classification: dict[str, Any]) -> str | None:
     if task_kind == "code_change":
         return "standard_code_change"
     if task_kind == "research":
+        if permission == "readonly" and "final_evidence" in classification.get("expected_artifacts", []):
+            return "readonly_review_chain"
         return "research_only"
     return None
 
@@ -423,6 +425,9 @@ def validate_workflow_candidate(
             candidates=[workflow_id],
             missing_fields=[required_permission],
         )
+
+    if workflow_id == "readonly_review_chain" and not classification.get("external_provider_required"):
+        return waiting_selection("readonly_chain_requires_provider", [workflow_id])
 
     if workflow_id == "single_step_external_review":
         if classification.get("task_kind") != "external_review":
@@ -653,6 +658,8 @@ def activation_envelope(
     if selection["status"] == "blocked":
         envelope["activation_status"] = "blocked"
         envelope["approval_required_reason"] = selection.get("reason", "workflow_selection_blocked")
+        if selection.get("reason") == "readonly_chain_runtime_unavailable":
+            envelope["next_action"] = "abort"
         return envelope
 
     if selection["status"] == "waiting_human":
@@ -787,7 +794,14 @@ def validate_template(template: dict[str, Any], path: Path, registry: dict[str, 
 
     adapter = template["provider_adapter"]
     transports = set(adapter.get("allowed_transports", []))
-    if "tmux_interactive" not in transports:
+    if template["workflow_id"] == "readonly_review_chain":
+        if not transports or not transports <= {"headless_cli", "codex_exec"}:
+            errors.append("readonly_review_chain requires supported bounded transports")
+        if adapter.get("default_transport") not in transports:
+            errors.append("readonly_review_chain default transport must be allowed")
+        if template["safety_class"] != "readonly" or any(publication_gate.values()):
+            errors.append("readonly_review_chain must remain readonly without publication")
+    elif "tmux_interactive" not in transports:
         errors.append(f"{template['workflow_id']} adapter must model future tmux_interactive transport")
 
     output_contracts = template["output_contracts"]
@@ -801,6 +815,13 @@ def validate_template(template: dict[str, Any], path: Path, registry: dict[str, 
 
     step_ids = {step["id"] for step in template["steps"]}
     for step in template["steps"]:
+        if template["workflow_id"] == "readonly_review_chain":
+            ops = step.get("allowed_ops")
+            if (step.get("permission_mode") != "readonly"
+                    or not isinstance(ops, dict)
+                    or set(ops) != {"edit", "commit", "push", "network"}
+                    or any(value is not False for value in ops.values())):
+                errors.append(f"readonly_review_chain step {step.get('id')} must explicitly deny all write/network ops")
         if step.get("permission_mode") not in {"readonly", "edit", "full"}:
             errors.append(f"{template['workflow_id']} step {step.get('id')} has invalid permission")
         if step.get("output_contract") not in output_contracts:

@@ -622,6 +622,154 @@ def test_role_all_template_steps_and_reader_drift() -> None:
             else:
                 raise AssertionError("role drift accepted")
             assert_equal(reader.call_count, 1, "one bounded read")
+def chain_template() -> dict:
+    path = TEMPLATE_PATH.with_name('readonly_review_chain.yaml')
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def chain_run(step_id: str) -> dict:
+    value = run_record(workflow_id='readonly_review_chain', current_step=step_id)
+    value['activation']['activation_scope']['step_budget'] = 3
+    return value
+
+
+def test_readonly_chain_provider_flags_match_existing_schema() -> None:
+    tpl = chain_template()
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        for stp in tpl['steps']:
+            run = chain_run(stp['id'])
+            order = build(root, template=tpl, step=stp, run=run,
+                          report_path=str(work_order_builder.report_path(root, run['run_id'], stp['id'])))
+            assert order['external_provider_allowed'] is (stp['id'] != 'final_evidence')
+            assert work_order_builder.validate_work_order(
+                order, template=tpl, step=stp, state_root=root, run=run,
+            ) == []
+
+
+def test_readonly_chain_provider_flag_rejects_contract_drift() -> None:
+    import copy
+    changes = [
+        ('step', 'permission_mode', 'edit'), ('step', 'permission_mode', 'full'),
+        ('step', 'id', 'unknown'), ('step', 'role', 'git-publisher'),
+        ('step', 'assignment_role', 'implementer'),
+        ('step', 'output_contract', 'code_change_report'),
+        ('run', 'workflow_id', 'research_only'),
+        ('run', 'current_step', 'final_evidence'),
+        ('template', 'workflow_id', 'research_only'),
+        ('template', 'safety_class', 'standard'),
+    ]
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        for original in chain_template()['steps'][:2]:
+            for target, field, value in changes:
+                tpl = chain_template()
+                stp = copy.deepcopy(original)
+                run = chain_run(stp['id'])
+                {'template': tpl, 'step': stp, 'run': run}[target][field] = value
+                order = build(root, template=tpl, step=stp, run=run)
+                assert order['external_provider_allowed'] is False, (target, field, value)
+            for key, value in [('adapter_kind', 'unknown'), ('adapter_kind', 'external_provider'),
+                               ('runner_authority', 'edit'), ('transition_authority', 'provider')]:
+                tpl = chain_template()
+                stp = copy.deepcopy(original)
+                stp['provider_route'][key] = value
+                order = build(root, template=tpl, step=stp, run=chain_run(stp['id']))
+                assert order['external_provider_allowed'] is False, (key, value)
+            for target in ('step', 'activation'):
+                for key in ('edit', 'commit', 'push', 'network'):
+                    for value in (True, 0, 0.0, None, 'false', 'missing'):
+                        tpl = chain_template()
+                        stp = copy.deepcopy(original)
+                        run = chain_run(stp['id'])
+                        ops = stp['allowed_ops'] if target == 'step' else run['activation']['activation_scope']['allowed_ops']
+                        if value == 'missing':
+                            del ops[key]
+                        else:
+                            ops[key] = value
+                        order = build(root, template=tpl, step=stp, run=run)
+                        assert order['external_provider_allowed'] is False, (target, key, value)
+                for invalid in (None, [], {}, {'edit': False, 'commit': False,
+                                               'push': False, 'network': False, 'shell': False}):
+                    tpl = chain_template()
+                    stp = copy.deepcopy(original)
+                    run = chain_run(stp['id'])
+                    scope = stp if target == 'step' else run['activation']['activation_scope']
+                    scope['allowed_ops'] = invalid
+                    order = build(root, template=tpl, step=stp, run=run)
+                    assert order['external_provider_allowed'] is False, (target, invalid)
+
+
+def test_existing_bounded_routes_remain_unpermitted() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        checked = 0
+        for path in sorted(TEMPLATE_PATH.parent.glob('*.yaml')):
+            tpl = json.loads(path.read_text())
+            if tpl['workflow_id'] == 'readonly_review_chain':
+                continue
+            for stp in tpl['steps']:
+                order = build(root, template=tpl, step=stp,
+                              run=run_record(workflow_id=tpl['workflow_id'], current_step=stp['id']))
+                expected = stp['provider_route']['adapter_kind'] == 'external_provider'
+                assert order['external_provider_allowed'] is expected, (tpl['workflow_id'], stp['id'])
+                checked += 1
+        assert checked == 21
+
+
+def test_real_readonly_chain_propose_approve_create_drain() -> None:
+    from test_frontdoor_orchestrator import external_review_classification, load_payload, run_frontdoor
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw).resolve()
+        classification = external_review_classification(
+            task_kind='research', expected_artifacts=['research_report', 'typed_report', 'final_evidence'],
+        )
+        proposed = load_payload(run_frontdoor(
+            root, 'propose', '--task-id', 'TSK-chain', '--request-id', 'req-chain',
+            '--prompt', 'Research and independently review bounded evidence',
+            '--classification', json.dumps(classification),
+            '--ref', 'organization/runtime/workflows/README.md',
+        ))
+        load_payload(run_frontdoor(root, 'approve', '--request-id', 'req-chain',
+                                  '--human-action-id', proposed['approval']['human_action_id']))
+        created = load_payload(run_frontdoor(root, 'create-run', '--request-id', 'req-chain', '--run-id', 'run-chain'))
+        assert created['workflow_run']['current_step'] == 'research'
+        drained = load_payload(run_frontdoor(root, 'drain', '--run-id', 'run-chain', check=False))
+        assert drained['decision'] == 'ok', drained
+        assert drained['workflow_run']['run_state'] == 'step_queued', drained
+        order = json.loads((root / 'work-orders/run-chain/research.json').read_text())
+        assert order['external_provider_allowed'] is True
+        assert order['provider_adapter_id'] == created['workflow_run']['approved_provider_binding']['provider_adapter_id']
+        assert order['intended_model'] == created['workflow_run']['approved_provider_binding']['default_model']
+        assert work_order_builder.validate_against_work_order_schema(order) == []
+
+
+def test_bounded_resolution_instruction_preserves_original_ids() -> None:
+    from test_review_lifecycle import ReviewLifecycleTests
+    fixture = ReviewLifecycleTests()
+    fixture.setUp()
+    try:
+        ids = fixture.enable_flow()
+        fixture.seal(ids)
+        run = fixture.produced()
+        tpl = standard_template()
+        stp = tpl['steps'][1]
+        request = request_record(request_id=run['request_id'], task_id=run['task_id'])
+        order = build(fixture.root, run=run, template=tpl, step=stp, request=request,
+                      report_path=str(work_order_builder.report_path(fixture.root, run['run_id'], stp['id'])))
+        errors = work_order_builder.validate_work_order(order, template=tpl, step=stp,
+            state_root=fixture.root, run=run)
+        assert errors == [], errors
+        assert order['expected_output'] == 'code_change_report'
+        assert stp['provider_route']['adapter_kind'] == 'bounded_provider'
+        assert 'original_findings_only' in order['instruction']
+        assert 'original issue' in order['instruction']
+        for fid in ids:
+            assert fid in order['instruction']
+        assert 'c'*40 in order['instruction']
+        assert order['permission_mode'] == 'readonly'
+    finally:
+        fixture.tearDown()
 
 
 def main() -> None:
@@ -629,6 +777,11 @@ def main() -> None:
         test_role_definition_exact_bytes_are_bound,
         test_role_reader_and_binding_negatives,
         test_role_all_template_steps_and_reader_drift,
+        test_readonly_chain_provider_flags_match_existing_schema,
+        test_readonly_chain_provider_flag_rejects_contract_drift,
+        test_existing_bounded_routes_remain_unpermitted,
+        test_real_readonly_chain_propose_approve_create_drain,
+        test_bounded_resolution_instruction_preserves_original_ids,
         test_build_valid_p0_order,
         test_frontend_request_binding_is_all_or_nothing,
         test_unbound_readonly_empty_or_absent_digest_is_valid,
