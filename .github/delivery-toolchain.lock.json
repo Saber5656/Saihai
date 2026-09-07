@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "python": {
+    "Darwin-arm64": {
+      "version": "3.11.16",
+      "machine": "arm64",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16%2B20260901-aarch64-apple-darwin-install_only.tar.gz",
+      "sha256": "50424fa409e8ae84b82a3052522f64695b47dff2158b70bb7358e0ebd6c085c9",
+      "size": 27087450,
+      "interpreter": "python/bin/python3.11"
+    },
+    "Linux-x86_64": {
+      "version": "3.11.16",
+      "machine": "x86_64",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16%2B20260901-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "sha256": "faa0758583a63f14c5eee516af82738403b59c13edda6fc0a21d953febd89eed",
+      "size": 48910466,
+      "interpreter": "python/bin/python3.11"
+    }
+  },
+  "dependency_lock": {
+    "path": ".github/requirements-delivery.lock",
+    "sha256": "93a7e075703f062c614f47f65cc290fef319ec03ecc3bcba97685170d883151c"
+  },
+  "cache": "disabled",
+  "policy_status": "not_adopted",
+  "codeql": {
+    "linux64": {
+      "version": "2.26.0",
+      "size": 822687033,
+      "sha256": "0144d4bc415aee0d5638119dfb626a2d8689e2ff21758ba211a3984862b8522c",
+      "url": "https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.26.0/codeql-bundle-linux64.tar.gz"
+    },
+    "osx64": {
+      "version": "2.26.0",
+      "size": 1366660336,
+      "sha256": "25c79916a4886359b70b4823735c075d7fdc8de8edc567a8bc14b78636b309bb",
+      "url": "https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.26.0/codeql-bundle-osx64.tar.gz"
+    }
+  }
+}

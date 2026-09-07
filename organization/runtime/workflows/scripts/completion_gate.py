@@ -432,6 +432,13 @@ def verify_completion(
             ):
                 reasons.append(reason("activation_not_approved", "activation must be approved from a legal source"))
 
+            if run.get('workflow_id') == 'standard_code_change':
+                import host_validation
+                try:
+                    host_validation.verify_standard_receipt(state_root, run)
+                except host_validation.ValidationError:
+                    reasons.append(reason('host_validation_missing_or_stale', 'Current host measurements are required for code-change completion'))
+
             if run.get("workflow_id") == report_gate.CHAIN_ID:
                 try:
                     report_file, report, evidence_path, evidence = _verify_readonly_chain_completion(state_root, run)
@@ -559,6 +566,13 @@ def verify_completion(
             assert report is not None
             block = vault_evidence(state_root, {**run, "_verified_report_path": str(report_file)}, report, evidence,
                                    verified_evidence_path=evidence_path)
+            if run.get('workflow_id') == 'standard_code_change':
+                import host_validation
+                try:
+                    host_validation.verify_standard_receipt(state_root, run)
+                except host_validation.ValidationError:
+                    reasons.append(reason('host_validation_missing_or_stale', 'Current host measurements are required for code-change completion'))
+
             if run.get("workflow_id") == report_gate.CHAIN_ID:
                 block["provider_evidence_step_id"] = "review"
                 block["accepted_report_refs"] = [str(report_gate.report_path(state_root, run_id, step))

@@ -8,13 +8,21 @@ on:
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
+  merge_group:
+    types: [checks_requested]
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   analyze:
+    permissions:
+      contents: read
+      security-events: write
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -25,11 +33,50 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Acquire and verify fixed CodeQL bundle
+        env:
+          LANGUAGE: ${{ matrix.language }}
+        run: |
+          python3 scripts/verify_delivery_toolchain.py --codeql-phase acquire --bundle linux64 --language "$LANGUAGE" --output "$RUNNER_TEMP/codeql-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$LANGUAGE"
       - name: Initialize CodeQL
+        id: codeql-init
         uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9
         with:
           languages: ${{ matrix.language }}
+          tools: ${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/bundle.tar.gz
+          trap-caching: "false"
+          dependency-caching: "false"
+      - name: Verify initialized bundle and actual CLI version
+        env:
+          LANGUAGE: ${{ matrix.language }}
+          CODEQL_PATH: ${{ steps.codeql-init.outputs.codeql-path }}
+          CODEQL_VERSION: ${{ steps.codeql-init.outputs.codeql-version }}
+          INIT_OUTCOME: ${{ steps.codeql-init.outcome }}
+        run: |
+          python3 scripts/verify_delivery_toolchain.py --codeql-phase probe --bundle linux64 --language "$LANGUAGE" --output "$RUNNER_TEMP/codeql-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$LANGUAGE" --codeql-path "$CODEQL_PATH" --codeql-version "$CODEQL_VERSION" --init-outcome "$INIT_OUTCOME"
       - name: Perform CodeQL analysis
+        id: codeql-analysis
         uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9
         with:
           category: "/language:${{ matrix.language }}"
+          output: ${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/results
+      - name: Record separate analysis and service observations
+        if: always()
+        env:
+          LANGUAGE: ${{ matrix.language }}
+          INIT_OUTCOME: ${{ steps.codeql-init.outcome }}
+          ANALYSIS_OUTCOME: ${{ steps.codeql-analysis.outcome }}
+          SARIF_ID: ${{ steps.codeql-analysis.outputs.sarif-id }}
+        run: |
+          python3 scripts/verify_delivery_toolchain.py --codeql-phase observe --bundle linux64 --language "$LANGUAGE" --output "$RUNNER_TEMP/codeql-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$LANGUAGE" --init-outcome "$INIT_OUTCOME" --analysis-outcome "$ANALYSIS_OUTCOME" --sarif-id "$SARIF_ID"
+      - name: Retain bounded CodeQL phase receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: codeql-receipts-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}
+          path: |
+            ${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/receipt-acquire.json
+            ${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/receipt-probe.json
+            ${{ runner.temp }}/codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}/receipt-observe.json
+          retention-days: 14
+          if-no-files-found: error

@@ -145,6 +145,7 @@ def test_contract_validation() -> None:
         "security-review-report.schema.json",
         "trusted-local-worker-result.schema.json",
         "typed-classification.schema.json",
+        "validation-evidence.schema.json",
         "work-brief.schema.json",
         "work-order.schema.json",
         "workflow-run.schema.json",

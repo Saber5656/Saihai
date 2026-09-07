@@ -1,0 +1,6 @@
+# Delivery validation only. CPython 3.11 wheels; no sdist or dependency fallback.
+# Official metadata: https://pypi.org/pypi/PyYAML/6.0.3/json
+# macOS 11+ arm64 and manylinux2014/2_17/2_28 x86_64, respectively.
+PyYAML==6.0.3 \
+    --hash=sha256:652cb6edd41e718550aad172851962662ff2681490a8a711af6a4d288dd96824 \
+    --hash=sha256:b8bb0864c5a28024fac8a632c443c87c5aa6f215c0b126c449ae1a150412f31d
