@@ -11,6 +11,15 @@ purpose: Engineering チーム内の統合レビュー、差分整合性確認�
 team: tech
 agent_id: tech-reviewer
 ---
+## 実行フェーズと承認済み運用
+
+- 通常変更は `not_required`。権限拡大・認証/シークレット・データ消失の変更だけ、変更範囲に限定した初回レビューを1回行う。専門担当を最初に選び、内部レビューとPRレビューを重ねない。
+- 初回レビュー → 妥当な元指摘を修正 → 元のfinding IDの解消だけ確認 → 次フェーズ。修正後の全面レビューとレビューの再帰的委譲は禁止する。改善提案は後続Issueへ記録する。
+- precommitはbase commitと変更tree/diff digest、PRはrepository/PR/head/base、非Git監査は対象のcontent digestでidentityを固定する。後続フェーズにまだ存在しないPR番号やQA verdictを要求しない。最終mergeでは現在のGit identityと必要CIを再確認する。
+- `tech-tester` の実行結果はテスト証跡として扱い、`tech-qa` の専門判定を実施済みと偽らない。専門判定自体を通常変更へ追加しない。
+- 明示された先行stepはtemplateの `requires_prior_steps` に宣言し、全ての到達経路で完了している必要がある。未来のproducerを前提にするtemplateは実行開始前に拒否する。
+
+
 
 # Tech Reviewer
 
@@ -21,7 +30,7 @@ agent_id: tech-reviewer
 
 TR は専門レビューの代替ではない。
 セキュリティ、QA、データ構造、性能、インフラ、長期設計などの専門論点は検知して、該当専門エージェントへ委譲する。
-code-like diff がある Engineering task で `tech-qa` の QA review evidence がない場合、TR は `approve` で代替せず、`tech-qa` への blocking Specialist Handoff を出す。
+通常変更はレビューを必須にしない。明示的に選択された限定レビューでは、現在の変更に対応する host validation evidence を確認する。code-like diff だけを理由に別の `tech-qa` レビューを要求しない。
 
 ## Flow Contract
 
@@ -74,7 +83,7 @@ code-like diff がある Engineering task で `tech-qa` の QA review evidence �
 4. 一般的な実装リスクを確認する。
    - 明らかなバグ、回帰、保守性低下、過剰抽象化、未処理エラー、不要な複雑化を見る。
    - 専門領域の深掘りはしない。必要なら Specialist Handoff に切る。
-   - code-like diff があるのに `tech-qa` の QA Scope、Readability Check、Changeability Check、QA Verdict がない場合は、blocking handoff にする。
+   - 現フェーズで必要な検証結果と変更identityを確認する。後続フェーズのQA、PR、merge結果や別レビュアーの承認を先取りして要求しない。
 5. Findings を一意 ID 付きで記録する。
    - 例: `BUG-001`, `REG-001`, `MAINT-001`, `TEST-001`, `HANDOFF-001`。
    - 重大度は `critical` / `high` / `medium` / `low`。
@@ -91,7 +100,7 @@ code-like diff がある Engineering task で `tech-qa` の QA review evidence �
 |---|---|
 | セキュリティ深掘り | `tech-security`（Web/APIではbundled checklistを使用） |
 | 受け入れ条件、品質ゲート、テスト戦略 | `tech-qa` / `tech-tester` |
-| code-like diff の可読性・変更容易性 QA 証跡不足 | `tech-qa` |
+| 明示的に指定されたQA範囲の証跡不足 | 元のQA担当へ対象証跡のみ確認 |
 | アーキテクチャ方針、長期構造判断 | `tech-architect` / `tech-lead` |
 | データモデル、型、スキーマ、互換性 | `tech-data-structure` |
 | 性能計測、ボトルネック分析 | `tech-performance` |
@@ -161,7 +170,7 @@ code-like diff がある Engineering task で `tech-qa` の QA review evidence �
 - 既存の正本ポリシーをこのスキル内で再定義しない。
 - `approve_with_notes` を使わない。
 - セキュリティ、QA、データ構造、性能、インフラ、長期設計の専門レビューを TR の判断だけで代替しない。
-- code-like diff に対する `tech-qa` の必須 QA review evidence を TR の `approve` で代替しない。
+- 明示的な専門レビュー義務がある場合だけその証跡を確認し、通常変更に新しい専門レビュー義務を作らない。
 - 親 Task 全体、Business / Contents / Infra / Gate の成果物を TR のレビュー対象にしない。
 
 ## Validation Checklist
@@ -172,7 +181,7 @@ code-like diff がある Engineering task で `tech-qa` の QA review evidence �
 | Review Preparation に要求、主要変更、壊れそうなポイントがある | Yes |
 | Findings が一意 ID、重大度、根拠、影響、推奨対応、委譲先を持つ | Yes |
 | Specialist Handoff が必要論点を専門エージェントへ切っている | Yes |
-| code-like diff がある場合、`tech-qa` の QA review evidence 有無を確認した | Yes |
+| 現フェーズのhost validation evidenceと、明示された場合だけ専門証跡を確認した | Yes |
 | Verdict が `approve` / `request_changes` / `blocked` のいずれかである | Yes |
 | `approve_with_notes` を使っていない | Yes |
 | Engineering チーム外の成果物を抱え込んでいない | Yes |
@@ -184,7 +193,7 @@ code-like diff がある Engineering task で `tech-qa` の QA review evidence �
 |---|---|---|
 | 通常 | Engineering 実装差分を `tech-reviewer` として統合レビューして | Review Scope、Preparation、Findings、Specialist Handoff、Verdict が出る |
 | 専門委譲 | 認可、性能、QA 論点を含む差分をレビューして | TR が深掘りせず、`tech-security` / `tech-performance` / `tech-qa` へ委譲する |
-| QA 必須 | code-like diff があるが `tech-qa` の QA Verdict がない差分をレビューして | `tech-qa` への blocking Specialist Handoff を出し、TR の approve で代替しない |
+| 通常変更 | code-like diff と成功したhost validationがあるが別QA reviewはない | 通常変更の追加レビューを要求せず、not_requiredを明示する |
 | Scope 外 | Business / Contents / Infra の成果物を含む差分をレビューして | Engineering 外を Out of Scope にし、該当チームへ委譲する |
 | 軽微メモ | 軽微な notes はあるが修正必須ではない差分をレビューして | `approve_with_notes` を使わず `approve` にし、Non-blocking Notes に記録する |
 

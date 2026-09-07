@@ -705,6 +705,8 @@ def activation_envelope(
 
 def validate_template(template: dict[str, Any], path: Path, registry: dict[str, Any]) -> list[str]:
     errors: list[str] = []
+    from template_role_validator import validate_phase_prerequisites
+    errors.extend(validate_phase_prerequisites(template))
     required = [
         "workflow_template_version",
         "workflow_id",
