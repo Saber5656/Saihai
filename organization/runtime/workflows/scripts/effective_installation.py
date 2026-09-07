@@ -138,6 +138,45 @@ def inherit(parent, child, state_root: Path) -> None:
     configure(child, state_root, record['plan'])
 
 
+def continue_failed_worker(parent, child, state_root: Path, plan: dict | None) -> None:
+    """Host-only child configuration after executor proves finished failure."""
+    import dataclasses
+    rebound = dataclasses.replace(child, publication=dataclasses.replace(child.publication, execution_id=parent.publication.execution_id))
+    if _authorization_digest(rebound) != _authorization_digest(parent):
+        raise InstallationError('recovery_authority_constraints_changed')
+    if plan is None:
+        inherit(parent, child, state_root)
+        return
+    path = _path(parent, state_root)
+    if not run_store.private_artifact_exists(path):
+        raise InstallationError('recovery_original_installation_required')
+    record = run_store.read_json(path)
+    if record.get('authorization_digest') != _authorization_digest(parent):
+        raise InstallationError('installation_authority_changed')
+    old = record['plan']
+    mutable = {'source_identity', 'expected_content_digest'}
+    if (not isinstance(plan, dict) or set(plan) != set(old)
+            or any(plan[k] != old[k] for k in old if k not in mutable)
+            or not isinstance(plan.get('source_identity'), dict)
+            or set(plan['source_identity']) != set(old['source_identity'])
+            or any(plan['source_identity'][k] != old['source_identity'][k]
+                   for k in old['source_identity'] if k != 'commit')):
+        raise InstallationError('recovery_installation_constraints_changed')
+    # No successful verification of the stale parent is asserted here.
+    configure(child, state_root, plan)
+    verify(child, state_root)
+    receipt = {'parent_execution_id': parent.publication.execution_id,
+               'child_execution_id': child.publication.execution_id,
+               'parent_plan_digest': publication.digest(old), 'child_plan_digest': publication.digest(plan),
+               'parent_authorization_digest': _authorization_digest(parent),
+               'child_authorization_digest': _authorization_digest(child),
+               'status': 'host_explicit_child_readback'}
+    target = _path(child, state_root).with_suffix('.continuation.json')
+    if target.exists() and run_store.read_json(target) != receipt:
+        raise InstallationError('recovery_installation_continuation_changed')
+    run_store.atomic_write_json(target, receipt)
+
+
 def _git(root, *args):
     env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     env.update(GIT_TERMINAL_PROMPT='0', GIT_OPTIONAL_LOCKS='0')
