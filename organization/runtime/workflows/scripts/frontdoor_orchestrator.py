@@ -3812,9 +3812,11 @@ def build_bridge_projection(
         )
     except work_order_builder.WorkOrderError:
         projection_binding = None
+    import output_monitor
     return {
         "schema_version": 1,
         "decision": "ok",
+        "run_output": output_monitor.run_output(run_store, state_root, record),
         "projection_version": "1",
         "safe_for_principal": redacted_principal(principal),
         "request_id": record.get("request_id"),
@@ -3984,6 +3986,20 @@ def bridge_read_projection(
     return projection
 
 
+def _clear_stale_output_for_ack(state_root: Path, request_id: str, digest: str, principal: dict) -> None:
+    path = state_root / 'output-observations' / (validate_artifact_id(request_id, 'request_id') + '.json')
+    if not state_file_exists(path):
+        return
+    observed = read_json(path)
+    if observed.get('request_id') != request_id:
+        raise FrontdoorError('output_observation_binding_mismatch')
+    if observed.get('projection_digest') == digest and observed.get('stale_output') is True:
+        append_audit_event(state_root=state_root, event_type='stale_output_cleared', principal=principal,
+            subject={'request_id': request_id, 'run_id': observed.get('run_id')}, outcome='ok',
+            details={'projection_digest':digest,'reason':'acknowledged','transition_effect':'none'})
+        write_json(path, dict(observed, stale_output=False, acknowledged=True))
+
+
 def bridge_ack_output(
     *,
     state_root: Path,
@@ -4115,6 +4131,7 @@ def bridge_ack_output(
             or existing_ack.get("ack_verified") is not True
         ):
             raise FrontdoorError("ack idempotency artifact conflict")
+        _clear_stale_output_for_ack(state_root, request_id, projection_digest, principal)
         return {
             "schema_version": 1,
             "decision": "ok",
@@ -4136,6 +4153,7 @@ def bridge_ack_output(
         "transition_effect": "none",
     }
     write_json(ack_path, ack)
+    _clear_stale_output_for_ack(state_root, request_id, projection_digest, principal)
     after = read_json(request_path(state_root, request_id))
     append_audit_event(
         state_root=state_root,

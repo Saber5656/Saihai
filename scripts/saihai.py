@@ -352,6 +352,12 @@ def handle_usage_repair_validation(frontdoor: Any, args: argparse.Namespace) -> 
                                                    repair_instruction=args.repair_instruction)
 
 
+def handle_output_status(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import output_monitor
+    return output_monitor.status(frontdoor, state_root=state_root_from_args(frontdoor,args),
+        principal=frontdoor.default_manual_principal(), stale_seconds=args.stale_seconds)
+
+
 def handle_task_scaffold(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
     import vault_task_records
     try:
@@ -393,6 +399,12 @@ def build_parser() -> argparse.ArgumentParser:
     build_frontdoor_parser(sub)
     build_workflow_parser(sub)
     build_usage_parser(sub)
+    output = sub.add_parser('output', help='host acknowledgement monitoring')
+    outputs = output.add_subparsers(dest='command', required=True)
+    status = outputs.add_parser('status')
+    status.add_argument('--state-root', default='')
+    status.add_argument('--stale-seconds', type=int, default=900)
+    status.set_defaults(handler=handle_output_status)
     task = sub.add_parser('task', help='canonical host task records')
     tasks = task.add_subparsers(dest='command', required=True)
     scaffold = tasks.add_parser('scaffold')
