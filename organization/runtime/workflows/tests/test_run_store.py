@@ -9,6 +9,7 @@ import os
 import stat
 import sys
 import tempfile
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -721,8 +722,302 @@ def test_existing_private_helpers_reject_hardlinked_artifacts() -> None:
         assert artifact.exists(), "failed hardlink operations must preserve the artifact"
 
 
+def _intermediate_swap_case(operation: str) -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp).resolve()
+        category = root / "state" / "category"
+        inside = category / "nested" / "artifact"
+        outside = root / "outside"
+        victim = outside / "nested" / "artifact"
+        write_private_fixture(inside, b"inside")
+        write_private_fixture(victim, b"outside")
+        def snapshot():
+            return [(str(p.relative_to(outside)), p.lstat().st_ino,
+                     stat.S_IMODE(p.lstat().st_mode),
+                     p.read_bytes() if p.is_file() else None)
+                    for p in [outside, *sorted(outside.rglob("*"))]]
+        before = snapshot()
+        original_open = os.open
+        injected = False
+        def race_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal injected
+            # Old code opens the final parent absolutely; new traversal opens
+            # each intermediate component relative to an anchored descriptor.
+            if not injected and (Path(path) == inside.parent or
+                                 (str(path) == "category" and dir_fd is not None)):
+                injected = True
+                category.rename(category.with_name("held"))
+                category.symlink_to(outside, target_is_directory=True)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+        actions = {
+            "read": lambda: run_store.read_bytes(inside),
+            "create": lambda: run_store.create_private_file(inside.with_name("new"), b"new"),
+            "delete": lambda: run_store.unlink_private_file(inside),
+            "rename": lambda: run_store.rotate_private_file(inside, inside.with_name("rotated")),
+        }
+        rejected = False
+        try:
+            with patch.object(os, "open", race_open):
+                actions[operation]()
+        except run_store.RunStoreError as exc:
+            assert_equal(exc.reason_class, "io_error", "intermediate race class")
+            rejected = True
+        assert injected, "race injection must actually run"
+        assert_equal(snapshot(), before, "outside tree unchanged")
+        assert rejected, f"{operation} must reject intermediate symlink swap"
+
+
+def test_intermediate_swap_read() -> None:
+    _intermediate_swap_case("read")
+
+
+def test_intermediate_swap_create() -> None:
+    _intermediate_swap_case("create")
+
+
+def test_intermediate_swap_delete() -> None:
+    _intermediate_swap_case("delete")
+
+
+def test_intermediate_swap_rename() -> None:
+    _intermediate_swap_case("rename")
+
+
+def test_private_directory_creation_swap_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp).resolve()
+        outside = root / "outside"
+        outside.mkdir(mode=0o700)
+        original_mkdir = os.mkdir
+        injected = False
+        def race_mkdir(path, mode=0o777, *, dir_fd=None):
+            nonlocal injected
+            original_mkdir(path, mode, dir_fd=dir_fd)
+            if str(path) == "new" and dir_fd is not None:
+                injected = True
+                (root / "new").rename(root / "held")
+                (root / "new").symlink_to(outside, target_is_directory=True)
+        with patch.object(os, "mkdir", race_mkdir):
+            try:
+                run_store.ensure_private_directory(root / "new" / "nested")
+            except run_store.RunStoreError as exc:
+                assert_equal(exc.reason_class, "io_error", "creation swap")
+            else:
+                raise AssertionError("creation swap must fail closed")
+        assert injected
+        assert_equal(list(outside.iterdir()), [], "no outside directory creation")
+
+
+def test_private_directory_nested_initialization_and_umask() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp).resolve()
+        leaf = root / "new" / "nested" / "artifact"
+        old_umask = os.umask(0o777)
+        try:
+            run_store.ensure_private_directory(leaf.parent)
+            restored = os.umask(0o777)
+            assert_equal(restored, 0o777, "caller's restrictive umask restored")
+        finally:
+            os.umask(old_umask)
+        for directory in [leaf.parent, leaf.parent.parent]:
+            assert_equal(stat.S_IMODE(directory.stat().st_mode), 0o700, "created directory mode")
+        assert run_store.create_private_file(leaf, b"normal")
+        assert_equal(run_store.read_bytes(leaf), b"normal", "nested read")
+        target = leaf.with_name("renamed")
+        run_store.rotate_private_file(leaf, target)
+        assert run_store.unlink_private_file(target)
+        assert not target.exists()
+
+
+def test_private_directory_opens_are_relative_and_close_on_failure() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp).resolve()
+        directory = root / "state" / "category"
+        run_store.ensure_private_directory(directory)
+        original_open, original_close = os.open, os.close
+        live = set()
+        calls = []
+        def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+            calls.append((str(path), dir_fd))
+            if dir_fd is None:
+                assert_equal(str(path), "/", "only filesystem anchor may open absolutely")
+            else:
+                assert "/" not in str(path), "walk one component at a time"
+                assert flags & os.O_NOFOLLOW
+                assert flags & os.O_DIRECTORY
+            fd = original_open(path, flags, mode, dir_fd=dir_fd)
+            live.add(fd)
+            return fd
+        def tracked_close(fd):
+            live.remove(fd)
+            return original_close(fd)
+        with patch.object(os, "open", tracked_open), patch.object(os, "close", tracked_close):
+            run_store.ensure_private_directory(directory)
+            assert not live
+            assert run_store._open_private_directory(directory / "missing", create_missing=False) is None
+            assert not live
+            directory.chmod(0o755)
+            try:
+                run_store.ensure_private_directory(directory)
+            except run_store.RunStoreError:
+                pass
+            else:
+                raise AssertionError("private intermediate mode drift must fail")
+            assert not live
+        assert calls
+
+
+def test_private_directory_missing_capability_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp).resolve()
+        for capability in ("O_NOFOLLOW", "O_DIRECTORY"):
+            with patch.object(os, capability, None):
+                try:
+                    run_store.ensure_private_directory(root / "missing")
+                except run_store.RunStoreError as exc:
+                    assert_equal(exc.reason_class, "io_error", "missing capability class")
+                else:
+                    raise AssertionError("missing capability cannot fall back to path I/O")
+            assert not (root / "missing").exists()
+        original_open = os.open
+        def unsupported_open(path, flags, mode=0o777, *, dir_fd=None):
+            if dir_fd is not None:
+                raise NotImplementedError("dir_fd unavailable")
+            return original_open(path, flags, mode)
+        with patch.object(os, "open", unsupported_open):
+            try:
+                run_store.ensure_private_directory(root / "missing")
+            except run_store.RunStoreError as exc:
+                assert_equal(exc.reason_class, "io_error", "unsupported dir_fd")
+            else:
+                raise AssertionError("unsupported dir_fd cannot fall back")
+        assert not (root / "missing").exists()
+
+
+def test_private_leaf_owner_mode_and_link_count_are_preserved() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        artifact = Path(raw_tmp).resolve() / "artifact"
+        write_private_fixture(artifact, b"safe")
+        original_fstat = os.fstat
+        identity = artifact.stat().st_ino
+        for field, value in [(4, os.getuid() + 1), (0, stat.S_IFREG | 0o644), (3, 2)]:
+            def unsafe_fstat(fd):
+                metadata = original_fstat(fd)
+                if metadata.st_ino == identity:
+                    fields = list(metadata)
+                    fields[field] = value
+                    return os.stat_result(fields)
+                return metadata
+            with patch.object(os, "fstat", unsafe_fstat):
+                try:
+                    run_store.read_bytes(artifact)
+                except run_store.RunStoreError as exc:
+                    assert_equal(exc.reason_class, "io_error", "unsafe opened leaf")
+                else:
+                    raise AssertionError("opened leaf owner/mode/link-count must be checked")
+        assert_equal(artifact.read_bytes(), b"safe", "unsafe read preserves artifact")
+
+
+def test_private_leaf_identity_drift_blocks_unlink_and_rotate() -> None:
+    for operation in ("unlink", "rotate"):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            source = root / "source"
+            replacement = root / "replacement"
+            write_private_fixture(source, b"original")
+            write_private_fixture(replacement, b"replacement")
+            original_stat = os.stat
+            injected = False
+            def race_stat(path, *, dir_fd=None, follow_symlinks=True):
+                nonlocal injected
+                if str(path) == "source" and dir_fd is not None and not injected:
+                    injected = True
+                    source.rename(root / "held")
+                    replacement.rename(source)
+                return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+            with patch.object(os, "stat", race_stat):
+                try:
+                    if operation == "unlink":
+                        run_store.unlink_private_file(source)
+                    else:
+                        run_store.rotate_private_file(source, root / "target")
+                except run_store.RunStoreError as exc:
+                    assert_equal(exc.reason_class, "io_error", "leaf identity race")
+                else:
+                    raise AssertionError("leaf identity drift must be rejected")
+            assert injected
+            assert_equal(source.read_bytes(), b"replacement", "replacement preserved")
+            assert_equal((root / "held").read_bytes(), b"original", "original preserved")
+            assert not (root / "target").exists()
+
+
+def test_new_private_component_mode_drift_is_rejected() -> None:
+    # Use a root-owned sticky ancestor so no earlier private component masks
+    # the requirement that a newly created component starts the private tree.
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw_tmp:
+        root = Path(raw_tmp).resolve()
+        root.chmod(0o755)
+        original_mkdir = os.mkdir
+        injected = False
+        def drift_mkdir(path, mode=0o777, *, dir_fd=None):
+            nonlocal injected
+            original_mkdir(path, mode, dir_fd=dir_fd)
+            if str(path) == "new" and dir_fd is not None:
+                injected = True
+                (root / "new").chmod(0o755)
+        with patch.object(os, "mkdir", drift_mkdir):
+            try:
+                run_store.ensure_private_directory(root / "new" / "nested")
+            except run_store.RunStoreError as exc:
+                assert_equal(exc.reason_class, "io_error", "new component mode drift")
+            else:
+                raise AssertionError("new component must retain exact 0700")
+        assert injected
+        assert not (root / "new" / "nested").exists()
+
+
+def test_concurrent_creator_must_start_a_private_subtree() -> None:
+    for mode in (0o755, 0o700):
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw_tmp:
+            root = Path(raw_tmp).resolve()
+            root.chmod(0o755)
+            original_mkdir = os.mkdir
+            injected = False
+            def concurrent_mkdir(path, mode=0o777, *, dir_fd=None):
+                nonlocal injected
+                original_mkdir(path, mode, dir_fd=dir_fd)
+                if str(path) == "new" and dir_fd is not None:
+                    injected = True
+                    (root / "new").chmod(competing_mode)
+                    raise FileExistsError("concurrent creator won")
+            competing_mode = mode
+            rejected = False
+            with patch.object(os, "mkdir", concurrent_mkdir):
+                try:
+                    run_store.ensure_private_directory(root / "new" / "nested")
+                except run_store.RunStoreError as exc:
+                    assert_equal(exc.reason_class, "io_error", "concurrent creator mode")
+                    rejected = True
+            assert injected, "concurrent mkdir branch must run"
+            assert_equal(rejected, mode != 0o700, "concurrent directory must be private")
+            assert_equal((root / "new" / "nested").exists(), mode == 0o700,
+                         "no nested creation through unsafe concurrent directory")
+
+
 def main() -> None:
     tests = [
+        test_concurrent_creator_must_start_a_private_subtree,
+        test_new_private_component_mode_drift_is_rejected,
+        test_private_leaf_owner_mode_and_link_count_are_preserved,
+        test_private_leaf_identity_drift_blocks_unlink_and_rotate,
+        test_private_directory_creation_swap_fails_closed,
+        test_private_directory_nested_initialization_and_umask,
+        test_private_directory_opens_are_relative_and_close_on_failure,
+        test_private_directory_missing_capability_fails_closed,
+        test_intermediate_swap_read,
+        test_intermediate_swap_create,
+        test_intermediate_swap_delete,
+        test_intermediate_swap_rename,
         test_store_and_reload_roundtrip,
         test_store_rejects_schema_invalid,
         test_approved_provider_binding_is_required_and_schema_bounded,

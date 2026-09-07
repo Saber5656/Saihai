@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import review_lifecycle
 import run_store
 import safe_paths
 
@@ -453,6 +454,22 @@ def _readonly_chain_provider_allowed(
     return True
 
 
+def _unbound_work_order_errors(work_order: dict[str, Any]) -> list[str]:
+    """Unbound artifacts carry only readonly scope, never a worker plan."""
+    scope = work_order.get("activation_scope")
+    ops = scope.get("allowed_ops") if isinstance(scope, dict) else None
+    errors = []
+    if (
+        work_order.get("permission_mode") != "readonly"
+        or not isinstance(ops, dict)
+        or any(ops.get(op) is not False for op in ("edit", "commit", "push", "network"))
+    ):
+        errors.append("unbound_work_order_requires_readonly")
+    if "worker_execution_plan" in work_order:
+        errors.append("unbound_work_order_worker_execution_plan_forbidden")
+    return errors
+
+
 def build_work_order(
     *,
     run: dict[str, Any],
@@ -470,6 +487,13 @@ def build_work_order(
     worker_execution_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     step_id = str(step["id"])
+    review_action = review_lifecycle.next_review_action(run)
+    if review_action is not None:
+        allowed = {'review': {'initial_review', 'verify_original_findings'},
+                   'implement': {'repair_original_findings'}, 'qa': {'merge_preflight'},
+                   'final_evidence': {'merge_preflight'}}
+        if review_action not in allowed.get(step_id, set()):
+            raise WorkOrderError('review_work_order_not_requested:' + review_action)
     provider_route = step.get("provider_route") if isinstance(step.get("provider_route"), dict) else {}
     external_provider_allowed = provider_route.get("adapter_kind") == "external_provider"
     if "readonly_review_chain" in (run.get("workflow_id"), template.get("workflow_id")):
@@ -486,8 +510,8 @@ def build_work_order(
         "to_role": str(step["role"]),
         "assignment_role": str(step["assignment_role"]),
         "instruction": (
-            f"{template['purpose']} Step '{step_id}' ({step['assignment_role']}): "
-            f"follow the input work order contract and produce {step['output_contract']}."
+            (review_lifecycle.resolution_instruction(run) if step_id == "review" and review_action == "verify_original_findings" else review_lifecycle.initial_review_instruction(run) if step_id == "review" and review_action == "initial_review" else review_lifecycle.repair_instruction(run) if step_id == "implement" and review_action == "repair_original_findings" else f"{template['purpose']} Step '{step_id}' ({step['assignment_role']}): "
+            f"follow the input work order contract and produce {step['output_contract']}.")
         ),
         "expected_output": str(step["output_contract"]),
         "context_refs": context_refs,
@@ -512,8 +536,12 @@ def build_work_order(
     }
     owner_principal = request_record.get("owner_principal")
     checkout_identity_digest = request_record.get("checkout_identity_digest")
-    if owner_principal is not None or checkout_identity_digest is not None:
-        if not isinstance(owner_principal, dict) or not isinstance(checkout_identity_digest, str):
+    if owner_principal is not None or checkout_identity_digest not in (None, ""):
+        if (
+            not isinstance(owner_principal, dict)
+            or not isinstance(checkout_identity_digest, str)
+            or not checkout_identity_digest
+        ):
             raise WorkOrderError("frontend_request_binding_incomplete")
         work_order["frontend_request_binding"] = {
             "owner_principal": {
@@ -531,6 +559,13 @@ def build_work_order(
         work_order["projection_binding"] = projection_binding_from_request_record(
             request_binding_source
         )
+    else:
+        unbound_candidate = dict(work_order)
+        if worker_execution_plan is not None:
+            unbound_candidate["worker_execution_plan"] = worker_execution_plan
+        unbound_errors = _unbound_work_order_errors(unbound_candidate)
+        if unbound_errors:
+            raise WorkOrderError(unbound_errors[0])
     launch_session_identity = request_record.get("launch_session_identity")
     launch_session_digest = request_record.get("launch_session_digest")
     if launch_session_identity is not None or launch_session_digest:
@@ -693,6 +728,8 @@ def validate_work_order(
                 errors.append("projection_binding_mismatch")
     elif projection_binding is not None:
         errors.append("projection_binding_requires_frontend_request_binding")
+    else:
+        errors.extend(_unbound_work_order_errors(work_order))
 
     worker_plan = work_order.get("worker_execution_plan")
     if worker_plan is not None and (

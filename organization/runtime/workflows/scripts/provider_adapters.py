@@ -133,12 +133,13 @@ def bounded_prompt(request: dict[str, Any]) -> str:
             raise AdapterConfigurationError("step_contract_missing")
         schema = contract.get("report_schema")
         schema_digest = contract.get("report_schema_sha256")
-        if (not isinstance(schema, str) or len(schema.encode("utf-8")) > 8192
+        schema_limit = 16384 if contract.get("output_contract") == "code_change_report" else 8192
+        if (not isinstance(schema, str) or len(schema.encode("utf-8")) > schema_limit
                 or schema_digest != "sha256:" + hashlib.sha256(schema.encode("utf-8")).hexdigest()):
             raise AdapterConfigurationError("report_schema_digest_mismatch")
         role = contract.get("role")
         if (not isinstance(role, str) or not role or len(role) > 128
-                or contract.get("output_contract") not in {"research_report", "external_review_report"}):
+                or contract.get("output_contract") not in {"research_report", "external_review_report", "code_change_report"}):
             raise AdapterConfigurationError("unsupported_step_contract")
         contract_lines = [f"Return only one {contract['output_contract']} JSON object.",
                           f"Schema: {contract['report_schema_path']}",

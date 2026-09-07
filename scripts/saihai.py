@@ -314,6 +314,67 @@ def build_workflow_parser(sub: argparse._SubParsersAction[argparse.ArgumentParse
     return parser
 
 
+def handle_usage_run(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        authority = trusted_local_executor.load_host_authorization(Path(args.authorization))
+    except trusted_local_executor.TrustedLocalError as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
+    request = read_request_json(frontdoor, args.request)
+    return frontdoor.run_trusted_local(request=request, authorization=authority,
+                                      state_root=Path(args.state_root))
+
+
+def handle_usage_advance(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        authority = trusted_local_executor.load_host_authorization(Path(args.authorization))
+    except trusted_local_executor.TrustedLocalError as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
+    return frontdoor.advance_trusted_local(authorization=authority, state_root=Path(args.state_root))
+
+
+def handle_usage_status(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        return trusted_local_executor.usage_status(args.execution_id, Path(args.state_root))
+    except trusted_local_executor.TrustedLocalError as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
+
+
+def handle_usage_repair_validation(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        authority = trusted_local_executor.load_host_authorization(Path(args.authorization))
+    except trusted_local_executor.TrustedLocalError as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
+    return frontdoor.repair_trusted_local_validation(authorization=authority, state_root=Path(args.state_root),
+                                                   repair_instruction=args.repair_instruction)
+
+
+def build_usage_parser(sub: Any) -> None:
+    parser = sub.add_parser('usage', help='explicit trusted-local execution and host publication')
+    commands = parser.add_subparsers(dest='command', required=True)
+    run = commands.add_parser('run', help='run one authorized task and real validation')
+    run.add_argument('--request', required=True)
+    run.add_argument('--authorization', required=True, help='private host-owned authorization file')
+    run.add_argument('--state-root', required=True)
+    run.set_defaults(handler=handle_usage_run)
+    advance = commands.add_parser('advance', help='advance host PR, CI, merge and integrated validation')
+    advance.add_argument('--authorization', required=True)
+    advance.add_argument('--state-root', required=True)
+    advance.set_defaults(handler=handle_usage_advance)
+    status = commands.add_parser('status', help='read saved trusted-local execution status')
+    status.add_argument('--execution-id', required=True)
+    status.add_argument('--state-root', required=True)
+    status.set_defaults(handler=handle_usage_status)
+    repair = commands.add_parser('repair-validation', help='repair a failed validation tree with a fresh execution')
+    repair.add_argument('--authorization', required=True)
+    repair.add_argument('--state-root', required=True)
+    repair.add_argument('--repair-instruction', default='', help='bounded host guidance within original task scope')
+    repair.set_defaults(handler=handle_usage_repair_validation)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Sahai deterministic frontdoor/workflow CLI",
@@ -321,6 +382,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="group", required=True)
     build_frontdoor_parser(sub)
     build_workflow_parser(sub)
+    build_usage_parser(sub)
     return parser
 
 
