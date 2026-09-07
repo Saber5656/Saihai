@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import review_lifecycle
+import request_intake
 import run_store
 import safe_paths
 
@@ -534,6 +535,11 @@ def build_work_order(
             },
         },
     }
+    if 'work_brief_ref' in request_record or 'work_brief_ref' in run:
+        if request_record.get('work_brief_ref') != run.get('work_brief_ref'):
+            raise WorkOrderError('work_brief_run_binding_mismatch')
+        work_order['work_brief_ref'] = request_record['work_brief_ref']
+        work_order['instruction'] += '\nResolve the digest-pinned work_brief_ref; perform only its selected unit under this step contract.'
     owner_principal = request_record.get("owner_principal")
     checkout_identity_digest = request_record.get("checkout_identity_digest")
     if owner_principal is not None or checkout_identity_digest not in (None, ""):
@@ -779,6 +785,14 @@ def validate_work_order(
             if allowed_ops.get(op) is not False:
                 errors.append(f"activation_scope.allowed_ops.{op} must be false")
 
+    if 'work_brief_ref' in work_order or (run or {}).get('work_brief_ref') is not None:
+        if state_root is None:
+            errors.append('work_brief_state_root_required')
+        else:
+            try:
+                request_intake.for_order(state_root, work_order, expected_ref=(run or {}).get('work_brief_ref'))
+            except (request_intake.IntakeError, request_intake.scope.ScopeError, run_store.RunStoreError) as exc:
+                errors.append(str(exc))
     return errors
 
 

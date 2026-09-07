@@ -314,6 +314,29 @@ def build_workflow_parser(sub: argparse._SubParsersAction[argparse.ArgumentParse
     return parser
 
 
+def handle_usage_prepare(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import request_intake
+    import trusted_local_executor
+    try:
+        authority = trusted_local_executor.load_host_authorization(Path(args.authorization))
+        request = read_request_json(frontdoor, args.request)
+        ledger = read_request_json(frontdoor, args.requirement_ledger)
+        state_root = Path(args.state_root)
+        provider = request_intake.CodexIntakeProvider(authorization=authority, request=request, state_root=state_root)
+        reference = request_intake.prepare(state_root=state_root, task_id=request['task_id'],
+            request_id=request['request_id'], user_prompt=request['instruction'], ledger=ledger,
+            provider=provider, intended_model=authority.model)
+        artifact = request_intake.resolve(state_root, reference)
+        questions = artifact['brief']['open_questions']
+        return {'decision': 'waiting_human' if questions else 'ok', 'work_brief_ref': reference,
+                'prepared_request': dict(request, work_brief_ref=reference),
+                'host_binding': {'intake_digest': reference['digest'], 'authority_evidence_ref': authority.publication.authority_evidence_ref},
+                'questions': questions, 'next_action': 'resolve_material_requirement' if questions else 'host_bind_existing_scope_and_run',
+                'authority_created': False}
+    except (request_intake.IntakeError, request_intake.scope.ScopeError, trusted_local_executor.TrustedLocalError) as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
+
+
 def handle_usage_run(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
     import trusted_local_executor
     try:
@@ -355,6 +378,12 @@ def handle_usage_repair_validation(frontdoor: Any, args: argparse.Namespace) -> 
 def build_usage_parser(sub: Any) -> None:
     parser = sub.add_parser('usage', help='explicit trusted-local execution and host publication')
     commands = parser.add_subparsers(dest='command', required=True)
+    prepare = commands.add_parser('prepare', help='classify and shape one bounded request under existing host authority')
+    prepare.add_argument('--request', required=True)
+    prepare.add_argument('--requirement-ledger', required=True)
+    prepare.add_argument('--authorization', required=True)
+    prepare.add_argument('--state-root', required=True)
+    prepare.set_defaults(handler=handle_usage_prepare)
     run = commands.add_parser('run', help='run one authorized task and real validation')
     run.add_argument('--request', required=True)
     run.add_argument('--authorization', required=True, help='private host-owned authorization file')

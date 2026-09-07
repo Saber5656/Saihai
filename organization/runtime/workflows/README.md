@@ -985,3 +985,7 @@ provider transcript content.
 | tmux worker | The adapter schema can represent it, but there is no execution path in P0. |
 | Viewer-side mutation controls | The implemented workflow viewer is deliberately read-only. |
 | deploy/push/PR automation | Publication requires a separate gate. |
+
+## Requirement-aware intake
+
+The optional host `usage prepare` path binds bounded classification, a grounded work brief and the complete requirement ledger to actual execution. See [intake-contract.md](intake-contract.md) for invocation, hunk scope, recovery and evidence limits.

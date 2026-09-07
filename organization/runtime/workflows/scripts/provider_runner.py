@@ -23,6 +23,7 @@ import safe_paths
 import scoped_worker_executor
 import workflow_selector
 import work_order_builder
+import request_intake
 
 BRIDGE_PRINCIPAL_TYPE = "main_agent_bridge"
 EXECUTION_PRINCIPAL_TYPES = {
@@ -593,6 +594,12 @@ def _resolve_step_contract(work_order: dict[str, Any], *, state_root: Path | Non
 def verify_request_step_contract(request: dict[str, Any], work_order: dict[str, Any], *,
                                  state_root: Path, run: dict[str, Any]) -> None:
     current = resolve_step_contract(work_order, state_root=state_root, run=run)
+    try:
+        brief = request_intake.for_order(state_root, work_order, expected_ref=run.get('work_brief_ref'))
+    except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+        raise ProviderRunnerError(str(exc)) from exc
+    if request.get('approved_work_brief') != brief or request.get('work_brief_ref') != work_order.get('work_brief_ref'):
+        raise ProviderRunnerError('provider_work_brief_binding_mismatch')
     legacy_single_step = ("step_contract" not in request
                           and (work_order.get("workflow_id"), work_order.get("step_id"))
                           == ("single_step_external_review", "review"))
@@ -731,6 +738,10 @@ def adapter_request(
             raise ProviderRunnerError('review_context_work_order_mismatch')
     else:
         context_snapshot = load_verified_context_snapshot(work_order.get("context_refs"))
+    try:
+        brief_context = request_intake.for_order(state_root, work_order, expected_ref=run.get('work_brief_ref'))
+    except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+        raise ProviderRunnerError(str(exc)) from exc
     context_snapshot_digest = "sha256:" + stable_digest(context_snapshot)
     context_json = json.dumps(context_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     context_bytes = context_json.encode("utf-8")
@@ -757,6 +768,8 @@ def adapter_request(
         "step_contract": resolve_step_contract(work_order, state_root=state_root, run=run),
         "context_refs": work_order.get("context_refs", []),
         "approved_context": context_snapshot,
+        **({'work_brief_ref': work_order['work_brief_ref'], 'approved_work_brief': brief_context,
+             'approved_work_brief_digest': 'sha256:' + stable_digest(brief_context)} if brief_context is not None else {}),
         "context_snapshot": {
             "content": context_json,
             "byte_length": len(context_bytes),
