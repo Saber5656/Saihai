@@ -60,7 +60,6 @@ jobs:
           DEV_WORKTREES_ROOT: ${{ runner.temp }}/worktrees
           TASK_WORKTREE_ROOT: ${{ runner.temp }}/worktrees
         run: |
-          node --version
           mkdir -p "$AGENTS_VAULT_ROOT" "$USER_VAULT_ROOT" "$DEV_WORKTREES_ROOT"
           python3 scripts/verify_delivery_toolchain.py --run full --output "$RUNNER_TEMP/delivery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-${{ matrix.shard_index }}" __CONT__
             --shard-index "${{ matrix.shard_index }}" __CONT__
