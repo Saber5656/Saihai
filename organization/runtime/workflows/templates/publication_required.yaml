@@ -135,6 +135,9 @@
           "on": "review_complete",
           "to": "qa"
         }
+      ],
+      "requires_prior_steps": [
+        "implement"
       ]
     },
     {

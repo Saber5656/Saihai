@@ -230,12 +230,18 @@ class MultistepProviderRunnerTests(unittest.TestCase):
                 snapshot.update(work_order=order, work_order_digest=work_order_builder.sha256_digest(order),
                                 activation_scope=order["activation_scope"])
                 run_store.atomic_write_json(snapshot_path, snapshot)
-                scoped_worker_executor.verify_frozen_work_order(root, run_id="run-chain", step_id="research",
-                    expected_run_states={"step_queued"}, expected_iteration=run["iteration"])
+                if order["to_role"] == "other-role":
+                    with self.assertRaisesRegex(scoped_worker_executor.ScopedWorkerError, "role_definition_path_invalid"):
+                        scoped_worker_executor.verify_frozen_work_order(root, run_id="run-chain", step_id="research",
+                            expected_run_states={"step_queued"}, expected_iteration=run["iteration"])
+                else:
+                    scoped_worker_executor.verify_frozen_work_order(root, run_id="run-chain", step_id="research",
+                        expected_run_states={"step_queued"}, expected_iteration=run["iteration"])
                 with mock.patch.object(provider_runner, "execute_provider") as execute:
                     result = self.invoke(root)
                 execute.assert_not_called()
-                self.assertEqual("work_order_not_provider_safe", result["reason"], result)
+                expected_reason = "role_definition_path_invalid" if order["to_role"] == "other-role" else "work_order_not_provider_safe"
+                self.assertEqual(expected_reason, result["reason"], result)
                 self.assertEqual([], self.accepted(root))
                 self.assertFalse(report_gate.report_path(root, "run-chain", "research").exists())
 

@@ -93,6 +93,19 @@ class UsageIntakeTests(unittest.TestCase):
         self.assertEqual(result['decision'],'blocked')
         self.assertFalse(list((f.state/'unit-completions').glob('*.json')))
 
+    def test_canonical_sync_blocked_cannot_create_intake_completion(self):
+        ref,auth,request=self.prepare();f=self.fixture
+        local.execute(request,auth,f.state);merged='a'*40
+        checks=[[{'check_runs':[{'id':1,'name':'validate','head_sha':merged,'status':'completed','conclusion':'success'}]}],[[]]]
+        with patch.object(publication,'publish',return_value={'status':'merged','merge_commit':merged,'pr':'https://github.com/example/repo/pull/1'}), \
+             patch.object(publication,'required_inventory',return_value={'validate'}), \
+             patch.object(publication,'_json',side_effect=checks), \
+             patch.object(local.effective_installation,'sync_primary',side_effect=local.effective_installation.InstallationError('fixture_sync_blocked')):
+            result=local.advance_publication(auth,f.state)
+        self.assertEqual(result['status'],'canonical_sync_blocked')
+        self.assertEqual(result['decision'],'blocked')
+        self.assertFalse(list((f.state/'unit-completions').glob('*.json')))
+
     def test_legacy_authority_material_does_not_change_existing_digests(self):
         material=local._authorization_material(self.fixture.auth)
         self.assertNotIn('intake_digest',material)

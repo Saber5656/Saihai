@@ -871,6 +871,17 @@ def _validate_resolution_results(results: Any, ids: dict[str, str]) -> None:
         _require(isinstance(row['evidence_refs'], list) and 0 < len(row['evidence_refs']) <= 32 and all(_text(ref) for ref in row['evidence_refs']), 'resolution_result_evidence')
 
 
+def _matches_frozen_instruction(work_order: dict[str, Any], expected: str) -> bool:
+    import role_definition
+    if any(field in work_order for field in role_definition.FIELDS):
+        try:
+            role_definition.validate_role_binding(work_order)
+            expected = role_definition.instruction_for(expected, work_order)
+        except role_definition.RoleDefinitionError:
+            return False
+    return work_order.get('instruction') == expected
+
+
 def consume_gated_report(run: dict[str, Any], report: dict[str, Any], *, work_order: dict[str, Any],
                          report_ref: str, digest: str) -> None:
     """Called only by report_gate AFTER its existing provider-evidence checks.
@@ -886,7 +897,7 @@ def consume_gated_report(run: dict[str, Any], report: dict[str, Any], *, work_or
                    provider_evidence=copy.deepcopy(report['provider_evidence']))
     if flow['initial'] is None:
         _require('resolution' not in report and state['snapshot'] == state['original_snapshot']
-                 and (work_order.get('instruction') == initial_review_instruction(run)
+                 and (_matches_frozen_instruction(work_order, initial_review_instruction(run))
                       or state['original_snapshot'].get('kind') == 'work_order'
                       and state['original_snapshot'] == work_order_identity(work_order)), 'initial_review_identity')
         ids = [f['finding_id'] for f in report['findings']]
@@ -906,7 +917,7 @@ def consume_gated_report(run: dict[str, Any], report: dict[str, Any], *, work_or
             _require(old['binding'] == resolution['binding'] and old['results'] == resolution['results'], 'resolution_replay_conflict')
             return
     binding = resolution_binding(run)
-    _require(work_order.get('instruction') == resolution_instruction(run) and resolution['binding'] == binding, 'resolution_identity_mismatch')
+    _require(_matches_frozen_instruction(work_order, resolution_instruction(run)) and resolution['binding'] == binding, 'resolution_identity_mismatch')
     _validate_resolution_results(resolution['results'], flow['finding_ids'])
     _require(report['findings'] == [], 'resolution_new_findings_forbidden')
     _require(report['result'] == 'pass', 'resolution_report_failed')

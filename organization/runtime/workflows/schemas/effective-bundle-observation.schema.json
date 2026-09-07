@@ -1,0 +1,390 @@
+{
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "target_surface": {
+      "type": "string",
+      "pattern": "[A-Za-z0-9][A-Za-z0-9_.-]{0,95}"
+    },
+    "task_id": {
+      "type": "null"
+    },
+    "run_id": {
+      "type": "null"
+    },
+    "membership": {
+      "type": "string",
+      "enum": [
+        "asserted_unverified"
+      ]
+    },
+    "trusted_selection": {
+      "type": "string",
+      "enum": [
+        "unknown"
+      ]
+    },
+    "missing_categories": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "common",
+          "role",
+          "policy",
+          "workflow",
+          "skill",
+          "runtime_config"
+        ]
+      },
+      "maxItems": 128,
+      "uniqueItems": true
+    },
+    "source_identity": {
+      "type": "object",
+      "properties": {
+        "expected_commit": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "[a-f0-9]{40}"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_commit": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "[a-f0-9]{40}"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "[a-f0-9]{64}"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "match",
+            "source_changed"
+          ]
+        }
+      },
+      "required": [
+        "expected_commit",
+        "observed_commit",
+        "repository_digest",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "manifest_digest": {
+      "type": "string",
+      "pattern": "[a-f0-9]{64}"
+    },
+    "members": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/member"
+      },
+      "maxItems": 128,
+      "minItems": 1
+    },
+    "policy_snapshots": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/snapshot"
+      },
+      "maxItems": 128
+    },
+    "deployment": {
+      "type": "string",
+      "enum": [
+        "not_observed"
+      ]
+    },
+    "runtime_generation": {
+      "type": "string",
+      "enum": [
+        "unknown"
+      ]
+    },
+    "target_verification": {
+      "type": "string",
+      "enum": [
+        "unverified"
+      ]
+    },
+    "observed_at": {
+      "type": "string",
+      "maxLength": 40,
+      "pattern": "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?\\+00:00"
+    },
+    "content_digest": {
+      "type": "string",
+      "pattern": "[a-f0-9]{64}"
+    }
+  },
+  "required": [
+    "schema_version",
+    "target_surface",
+    "task_id",
+    "run_id",
+    "membership",
+    "trusted_selection",
+    "missing_categories",
+    "source_identity",
+    "manifest_digest",
+    "members",
+    "policy_snapshots",
+    "deployment",
+    "runtime_generation",
+    "target_verification",
+    "observed_at",
+    "content_digest"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:saihai:effective-bundle-observation:1",
+  "title": "Informational effective artifact observation, never runtime authority",
+  "$defs": {
+    "file": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "read",
+            "unapproved_symlink",
+            "path_escape",
+            "not_regular_file",
+            "file_too_large",
+            "changed_during_read",
+            "missing",
+            "unreadable",
+            "unsafe_or_unreadable"
+          ]
+        },
+        "location_digest": {
+          "type": "string",
+          "pattern": "[a-f0-9]{64}"
+        },
+        "resolved_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "[a-f0-9]{64}"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "link_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "[a-f0-9]{64}"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "[a-f0-9]{64}"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha1": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "[a-f0-9]{40}"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1048576
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4095
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "file_identity": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "[a-f0-9]{64}"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "location_digest",
+        "resolved_digest",
+        "link_digest",
+        "sha256",
+        "sha1",
+        "bytes",
+        "mode",
+        "file_identity"
+      ],
+      "additionalProperties": false
+    },
+    "member": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "[A-Za-z0-9][A-Za-z0-9_.-]{0,95}"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "common",
+            "role",
+            "policy",
+            "workflow",
+            "skill",
+            "runtime_config"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/file"
+        },
+        "installed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/file"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relation": {
+          "type": "string",
+          "enum": [
+            "not_observed",
+            "unknown",
+            "drift",
+            "same_file",
+            "matching_copy"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "category",
+        "source",
+        "installed",
+        "relation"
+      ],
+      "additionalProperties": false
+    },
+    "snapshot": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "pattern": "[A-Za-z0-9][A-Za-z0-9_.-]{0,95}"
+        },
+        "policy": {
+          "type": "string",
+          "pattern": "[A-Za-z0-9][A-Za-z0-9_.-]{0,95}"
+        },
+        "embedded_sha1": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "[a-f0-9]{40}"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current_sha1": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "[a-f0-9]{40}"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "match",
+            "stale_policy_snapshot",
+            "missing_or_ambiguous_snapshot"
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "policy",
+        "embedded_sha1",
+        "current_sha1",
+        "status"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
