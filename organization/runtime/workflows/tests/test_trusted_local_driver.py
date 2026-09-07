@@ -162,6 +162,15 @@ class TrustedLocalDriverTests(unittest.TestCase):
         self.assertEqual(receipt['continuation'], stopped['continuation'])
         self.assertTrue(stopped['resumable'])
 
+    def test_intake_and_installation_receipts_survive_driver_summary(self):
+        self.drive(request=self.f.request, max_iterations=1)
+        receipt={'status':'complete','intake_digest':'sha256:'+'2'*64,
+                 'effective_installation':{'status':'installed_bytes_verified','active_runtime':'not_proven'},
+                 'canonical_sync':{'status':'synced','dependent_base':'a'*40}}
+        with patch.object(local,'advance_publication',return_value=receipt):
+            result=self.drive()
+        for key in ('intake_digest','effective_installation','canonical_sync'):
+            self.assertEqual(result[key],receipt[key])
     def test_completion_failure_and_unknown_status_stop(self):
         self.drive(request=self.f.request, max_iterations=1)
         for status in ('failed', 'unknown'):

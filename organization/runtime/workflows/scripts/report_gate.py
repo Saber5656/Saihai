@@ -776,6 +776,10 @@ def validate_normalized_provider_evidence(
         "workflow_id": str(run.get("workflow_id") or ""),
         "step_id": str(work_order.get("step_id") or ""),
     }
+    for field in ("role_definition_path", "role_definition_digest"):
+        if field in work_order and value.get(field) != work_order[field]:
+            errors.append(f"normalized_evidence.{field} mismatch with work order")
+
     for field, expected in expected_identity.items():
         if str(value.get(field) or "") != expected:
             errors.append(f"normalized_evidence.{field} mismatch: expected {expected!r}")

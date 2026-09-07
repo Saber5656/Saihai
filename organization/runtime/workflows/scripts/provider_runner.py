@@ -799,6 +799,9 @@ def adapter_request(
             "work_order_signature": (work_order.get("work_order_authority") or {}).get("signature"),
         },
     }
+    for field in ("role_definition_path", "role_definition_digest"):
+        if field in work_order:
+            request[field] = work_order[field]
     request["adapter_request_digest"] = "sha256:" + stable_digest(request)
     return request
 
@@ -1224,7 +1227,7 @@ def fake_provider_report(
             final_evidence={'refs': [request['evidence_path']]})
         report.pop('findings')
         if 'original_findings_only' in request['instruction']:
-            binding = json.loads(request['instruction'].split('\n')[-1])['binding']
+            binding = json.loads(request['instruction'].split('\n\n<SAIHAI_FROZEN_ROLE_CONTRACT>', 1)[0].split('\n')[-1])['binding']
             report['review']['findings'] = []
             report['resolution'] = {'binding': binding, 'results': {fid: {
                 'status': 'unresolved' if mode == 'findings' else 'resolved', 'evidence_refs': paths[:1]}
@@ -1471,6 +1474,9 @@ def normalized_evidence(
         "timed_out": bool(details.get("timed_out", False)),
         "raw_transcript_policy": "signal_only_not_shared",
     }
+    for field in ("role_definition_path", "role_definition_digest"):
+        if field in request:
+            evidence[field] = request[field]
     return {key: value for key, value in evidence.items() if value is not None}
 
 
