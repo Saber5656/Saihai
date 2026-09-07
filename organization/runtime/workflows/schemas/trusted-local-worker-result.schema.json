@@ -1,0 +1,49 @@
+{
+  "type": "object",
+  "properties": {
+    "result_version": {
+      "type": "string",
+      "enum": [
+        "1"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "changed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "result_version",
+    "status",
+    "summary",
+    "changed_paths",
+    "tests",
+    "evidence"
+  ],
+  "additionalProperties": false
+}

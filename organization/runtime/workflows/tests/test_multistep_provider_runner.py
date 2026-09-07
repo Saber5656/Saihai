@@ -288,6 +288,57 @@ class MultistepProviderRunnerTests(unittest.TestCase):
                     self.assertFalse(report_gate.report_path(root, "run-chain", "research").exists())
                     self.assertEqual([], self.accepted(root))
 
+    def test_contract_drift_during_provider_execution_blocks_acceptance(self):
+        for kind in ("schema", "template"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw).resolve()
+                self.setup_chain(root)
+                execute = provider_runner.execute_provider
+                resolve = provider_runner.resolve_step_contract
+                finished = False
+                def run_provider(**kwargs):
+                    nonlocal finished
+                    result = execute(**kwargs)
+                    finished = True
+                    return result
+                def current_contract(*args, **kwargs):
+                    contract = resolve(*args, **kwargs)
+                    if finished:
+                        key = "report_schema_sha256" if kind == "schema" else "template_contract_sha256"
+                        contract[key] = "sha256:changed"
+                    return contract
+                with mock.patch.object(provider_runner, "execute_provider", side_effect=run_provider) as invoked, \
+                     mock.patch.object(provider_runner, "resolve_step_contract", side_effect=current_contract):
+                    result = self.invoke(root)
+                self.assertEqual(1, invoked.call_count)
+                self.assertEqual("blocked", result["decision"], result)
+                self.assertIn("provider_step_contract_mismatch", json.dumps(result))
+                self.assertEqual([], self.accepted(root))
+                self.assertFalse(report_gate.report_path(root, "run-chain", "research").exists())
+                self.assertEqual("waiting_human", run_store.load_run(root, "run-chain")["run_state"])
+
+    def test_retry_budget_is_independent_between_chain_steps(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            self.setup_chain(root)
+            original = provider_runner.execute_provider
+            calls = {"research": 0, "review": 0}
+            def execute(**kwargs):
+                step = kwargs["request"]["step_id"]
+                calls[step] += 1
+                if calls[step] <= (5 if step == "research" else 1):
+                    return "timeout", None, {"reason": "provider_timeout", "duration_ms": 0}
+                return original(**kwargs)
+            with mock.patch.object(provider_runner, "execute_provider", side_effect=execute):
+                self.assertEqual("ok", self.invoke(root)["decision"])
+                self.assertEqual(5, run_store.load_run(root, "run-chain")["provider_execution"]["retry"]["auto_retries_used"])
+                self.drain(root)
+                self.assertEqual("ok", self.invoke(root)["decision"])
+            self.assertEqual({"research": 6, "review": 2}, calls)
+            retry = run_store.load_run(root, "run-chain")["provider_execution"]["retry"]
+            self.assertEqual(1, retry["auto_retries_used"])
+            self.assertEqual(1, retry["consecutive_failures"])
+
     def test_in_flight_and_heartbeat_outside_global_lock(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw).resolve(); self.setup_chain(root)

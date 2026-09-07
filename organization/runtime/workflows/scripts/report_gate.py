@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
 import json
@@ -11,10 +12,12 @@ from pathlib import Path
 from typing import Any
 
 import provider_evidence_contract
+import review_lifecycle
 import run_lifecycle
 import run_lock
 import run_store
 import safe_paths
+import work_order_builder
 import task_state_bridge
 import workflow_selector
 import work_order_builder
@@ -543,6 +546,8 @@ def validate_external_review_report(
     work_order: dict[str, Any],
     state_root: Path,
 ) -> list[str]:
+    if run.get('workflow_id') == 'standard_code_change':
+        return validate_standard_review_report(report, run=run, work_order=work_order, state_root=state_root)
     errors: list[str] = []
     required = {
         "report_version",
@@ -557,7 +562,7 @@ def validate_external_review_report(
         "findings",
         "authority",
     }
-    allowed = required | {"recommendations"}
+    allowed = required | {"recommendations", "resolution"}
     missing = sorted(required - set(report))
     if missing:
         errors.append("missing_required_fields:" + ",".join(missing))
@@ -590,6 +595,23 @@ def validate_external_review_report(
     )
     errors.extend(validate_findings(report.get("findings"), report.get("result")))
     errors.extend(validate_authority(report.get("authority")))
+    flow = run.get('review_lifecycle', {}).get('resolution_flow')
+    if 'resolution' in report and not flow:
+        errors.append('resolution_without_flow')
+    if not errors and report.get('result') in {'pass', 'findings'}:
+        # Validate against a copy before the report gate persists any state.
+        candidate = copy.deepcopy(run)
+        try:
+            review_lifecycle.start_from_gated_findings(candidate, report, work_order=work_order,
+                principal=work_order['work_order_authority']['issuer_principal'])
+            if not candidate.get('review_lifecycle', {}).get('resolution_flow'):
+                return errors
+            review_lifecycle.consume_gated_report(candidate, report, work_order=work_order,
+                report_ref=str(report_path(state_root, str(run['run_id']), str(work_order['step_id']))),
+                digest='sha256:' + stable_digest(report))
+            errors.extend(review_lifecycle.validate_record(candidate['review_lifecycle'], run=candidate))
+        except (review_lifecycle.ReviewLifecycleError, KeyError, TypeError, ValueError) as exc:
+            errors.append('resolution_report_invalid:' + str(exc))
     return errors
 
 
@@ -1433,7 +1455,12 @@ def _gate_chain_report(state_root: Path, run: dict[str, Any], actor: dict[str, A
             raise ReportGateError("step_attempt_mismatch")
         step = steps[list(CHAIN_CONTRACTS).index(sid)]
         order, bindings = _chain_order_binding(state_root, run, template, step, run["iteration"])
-        if _chain_claim_is_live(run, order, prior):
+        execution = run.get("provider_execution")
+        if sid == "final_evidence":
+            claim_live = _chain_claim_is_live(run, order, prior)
+        else:
+            claim_live = (not isinstance(execution, dict) or execution.get("step_id") == sid) and run_lifecycle.provider_claim_is_live(run, order)
+        if claim_live:
             raise ReportGateError("provider_in_flight")
         report = read_json(path)
         if report.get("step_id") != sid or report.get("workflow_id") != CHAIN_ID:
@@ -1544,6 +1571,11 @@ def gate_report(
             run = run_store.load_run(state_root, run_id)
             if run.get("workflow_id") == CHAIN_ID:
                 result = _gate_chain_report(state_root, run, actor, report_path_arg)
+            elif run.get("workflow_id") not in {"single_step_external_review", "standard_code_change"}:
+                result = _chain_rejection(state_root, run, actor, "unsupported_step_contract")
+            else:
+                result = None
+            if result is not None:
                 link_status = record_run_link_status(state_root, result["workflow_run"])
                 append_audit_event(state_root=state_root, event_type="validate_report", principal=actor,
                     subject={"run_id": run_id, "request_id": run["request_id"]},
@@ -1551,8 +1583,6 @@ def gate_report(
                         "transition_artifact_path": result["transition_artifact_path"],
                         "rejection_artifact_path": result["rejection_artifact_path"]})
                 return result
-            if run.get("workflow_id") != "single_step_external_review":
-                return _chain_rejection(state_root, run, actor, "unsupported_step_contract")
             run_state = str(run.get("run_state") or "")
             subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
             signature = run_lifecycle.sign_transition(
@@ -1586,6 +1616,8 @@ def gate_report(
                     "transition_artifact_path": None,
                     "rejection_artifact_path": None,
                 }
+            if run.get('workflow_id') == 'standard_code_change' and run.get('current_step') == 'final_evidence':
+                return finalize_standard_review(state_root, run, principal=actor)
             step_id = run_store.validate_artifact_id(str(run["current_step"]), "step_id")
             work_order_file = work_order_path(state_root, run_id, step_id)
             work_order = read_json(work_order_file)
@@ -1686,6 +1718,32 @@ def gate_report(
                 outcome, errors = report_read_outcome, [str(report_read_error)]
             else:
                 outcome, errors = classify_report_outcome(report, run=run, work_order=work_order, state_root=state_root)
+            if outcome == 'report_valid' and run.get('workflow_id') == 'standard_code_change':
+                return consume_standard_report(state_root, run, report, work_order=work_order, principal=actor)
+            if outcome == 'report_valid':
+                review_lifecycle.start_from_gated_findings(run, report, work_order=work_order, principal=actor)
+            if outcome == "report_valid" and run.get('review_lifecycle', {}).get('resolution_flow'):
+                review_lifecycle._live(run, review_lifecycle._owner(actor), run['review_lifecycle'])
+                # Preserve the accepted source before the canonical report file is
+                # reused by the bounded verification. No terminal or human-wait transition.
+                report_digest = 'sha256:' + stable_digest(report)
+                sealed_path = path.parent / ('review-record-' + report_digest.removeprefix('sha256:') + '.json')
+                if sealed_path.exists():
+                    if read_json(sealed_path) != report:
+                        raise ReportGateError('sealed_review_conflict')
+                else:
+                    run_store.atomic_write_json(sealed_path, report)
+                review_lifecycle.consume_gated_report(run, report, work_order=work_order,
+                    report_ref=str(sealed_path), digest=report_digest)
+                run_store.store_run(state_root, run, expected_current_state=run['run_state'])
+                action = review_lifecycle.next_review_action(run)
+                append_audit_event(state_root=state_root, event_type='validate_report', principal=actor,
+                    subject=subject, outcome='ok', details={'report_digest': report_digest,
+                    'report_ref': str(sealed_path), 'next_action': action, 'signature': signature})
+                return {'schema_version': 1, 'decision': 'blocked' if action == 'stopped' else 'ok',
+                        'validated': True, 'outcome': 'report_valid', 'report_status': 'review_flow',
+                        'next_action': action, 'workflow_run': run, 'report': report,
+                        'report_ref': str(sealed_path), 'run_path': str(run_file)}
             if outcome == "report_valid":
                 to_state = "complete"
                 report_status = "complete"
@@ -1933,3 +1991,154 @@ def gate_report(
     if decision == "ok" and outcome == "report_valid":
         response.pop("errors")
     return response
+
+
+
+def standard_review_view(report: dict[str, Any]) -> dict[str, Any]:
+    """Normalize structured findings, never normalize a provider failure to success."""
+    return dict(report_id=report['report_id'], provider_evidence=report['provider_evidence'],
+        result=('blocked' if report['result'] == 'blocked' else 'pass' if 'resolution' in report
+                or report['review']['status'] == 'approved' and not report['review'].get('findings') else 'findings'),
+        findings=report['review'].get('findings', []),
+        **({'resolution': report['resolution']} if 'resolution' in report else {}))
+
+
+def validate_standard_review_report(report: dict[str, Any], *, run: dict[str, Any],
+                                    work_order: dict[str, Any], state_root: Path) -> list[str]:
+    import scoped_worker_executor
+    schema = json.loads((Path(__file__).resolve().parents[1] / 'schemas/code-change-report.schema.json').read_text())
+    errors = work_order_builder._validate_schema_fragment(report, schema, '$')
+    for key in ('report_id', 'request_id', 'run_id', 'step_id', 'provider_evidence', 'authority'):
+        if key not in report:
+            errors.append('missing_required_field:' + key)
+    for key in ('request_id', 'run_id', 'workflow_id'):
+        if report.get(key) != run.get(key):
+            errors.append(key + '_mismatch')
+    if report.get('step_id') != run['current_step'] or run['current_step'] not in {'review', 'qa'}:
+        errors.append('standard_report_step_mismatch')
+    try:
+        frozen, _, _ = scoped_worker_executor.verify_frozen_work_order(state_root,
+            run_id=run['run_id'], step_id=run['current_step'], expected_run_states={'validating', 'waiting_provider'},
+            expected_iteration=run['iteration'])
+        if frozen != work_order:
+            errors.append('standard_frozen_order_mismatch')
+        refs = scoped_worker_executor.completed_review_context_refs(state_root, run)
+        expected = [dict(type='repo_file', value=row['path'], size_bytes=row['size_bytes'], digest=row['digest']) for row in refs]
+        if work_order['context_refs'] != expected:
+            errors.append('standard_context_stale')
+    except (scoped_worker_executor.ScopedWorkerError, KeyError, TypeError) as exc:
+        errors.append('standard_authority_invalid:' + str(exc))
+    errors.extend(validate_provider_evidence(report.get('provider_evidence'), run, work_order, state_root))
+    errors.extend(validate_normalized_provider_evidence_file(report, run=run, work_order=work_order, state_root=state_root))
+    errors.extend(validate_authority(report.get('authority')))
+    if errors or report.get('result') == 'blocked':
+        return errors
+    candidate = copy.deepcopy(run)
+    try:
+        if run['current_step'] == 'review':
+            if report['review']['status'] not in {'approved', 'changes_requested'}:
+                raise review_lifecycle.ReviewLifecycleError('review_blocked')
+            view = standard_review_view(report)
+            errors.extend(validate_findings(view['findings'], view['result']))
+            review_lifecycle.start_from_gated_findings(candidate, view, work_order=work_order,
+                principal=work_order['work_order_authority']['issuer_principal'])
+            review_lifecycle.consume_gated_report(candidate, view, work_order=work_order,
+                report_ref='reports/validated-standard.json', digest='sha256:' + stable_digest(report))
+            errors.extend(review_lifecycle.validate_record(candidate['review_lifecycle'], run=candidate))
+        elif report['validation']['status'] != 'passed' or review_lifecycle.next_review_action(run) != 'merge_preflight':
+            errors.append('required_validation_not_passed')
+        if run['current_step'] == 'qa' and (report['review']['status'] != 'approved' or report['review'].get('findings')):
+            errors.append('qa_blocking_findings')
+        if run['current_step'] == 'qa' and 'resolution' in report:
+            errors.append('qa_cannot_replace_review')
+    except (review_lifecycle.ReviewLifecycleError, KeyError, TypeError) as exc:
+        errors.append('standard_review_invalid:' + str(exc))
+    return errors
+
+
+def consume_standard_report(state_root: Path, run: dict[str, Any], report: dict[str, Any], *,
+                            work_order: dict[str, Any], principal: dict[str, Any]) -> dict[str, Any]:
+    digest = 'sha256:' + stable_digest(report)
+    archive = report_path(state_root, run['run_id'], run['current_step']).parent / ('review-record-' + digest[7:] + '.json')
+    if archive.exists() and read_json(archive) != report:
+        raise ReportGateError('sealed_review_conflict')
+    if not archive.exists():
+        run_store.atomic_write_json(archive, report)
+    if run['current_step'] == 'review':
+        view = standard_review_view(report)
+        receipt_ref, receipt_digest = seal_provider_receipt(state_root, run, work_order, digest)
+        view['provider_evidence'] = dict(view['provider_evidence'], host_receipt_ref=receipt_ref, host_receipt_digest=receipt_digest)
+        review_lifecycle.start_from_gated_findings(run, view, work_order=work_order, principal=principal)
+        review_lifecycle._live(run, review_lifecycle._owner(principal), run['review_lifecycle'])
+        review_lifecycle.consume_gated_report(run, view, work_order=work_order, report_ref=str(archive), digest=digest)
+        action = review_lifecycle.next_review_action(run)
+        if action == 'repair_original_findings':
+            review_lifecycle.reserve_followup_repair(run)
+            step = 'implement'
+        elif action == 'merge_preflight':
+            step = 'qa'
+        else:
+            run_store.store_run(state_root, run, expected_current_state=run['run_state'])
+            return {'schema_version':1, 'decision':'blocked', 'reason':action, 'workflow_run':run}
+    else:
+        seal_provider_receipt(state_root, run, work_order, digest)
+        run['review_lifecycle']['resolution_flow']['qa'] = dict(report_ref=str(archive), digest=digest,
+            snapshot=copy.deepcopy(run['review_lifecycle']['snapshot']))
+        step = 'final_evidence'
+    run['step_history'].append(dict(step_id=run['current_step'], status='complete', report_path=str(archive), report_digest=digest))
+    transition = run_lifecycle.queue_standard_step(state_root, run, step=step, principal=principal, artifact_refs=[str(archive)])
+    blocked = run['run_state'] == 'waiting_human'
+    return {'schema_version':1, 'decision':'blocked' if blocked else 'ok', 'validated':True,
+            'outcome':'report_valid', 'next_action':'blocked' if blocked else 'drain',
+            'review_action':review_lifecycle.next_review_action(run), 'transition':transition, 'workflow_run':run}
+
+
+def finalize_standard_review(state_root: Path, run: dict[str, Any], *, principal: dict[str, Any]) -> dict[str, Any]:
+    import scoped_worker_executor
+    scoped_worker_executor.verify_frozen_work_order(state_root, run_id=run['run_id'], step_id='final_evidence',
+        expected_run_states={'step_queued'}, expected_iteration=run['iteration'])
+    scoped_worker_executor.load_completed_review_context(state_root, run)
+    state = run.get('review_lifecycle', {})
+    review_lifecycle._live(run, review_lifecycle._owner(principal), state)
+    qa = state.get('resolution_flow', {}).get('qa')
+    if not qa or qa['snapshot'] != state['snapshot'] or review_lifecycle.next_review_action(run) != 'merge_preflight':
+        raise ReportGateError('final_validation_evidence_missing')
+    path = confined_state_artifact(state_root, qa['report_ref'], namespace='reports', label='qa report')
+    report = read_json(path)
+    if 'sha256:' + stable_digest(report) != qa['digest'] or report['validation']['status'] != 'passed':
+        raise ReportGateError('final_validation_evidence_invalid')
+    # The final step is a harness gate, not another model review.
+    run_lifecycle.transition_run(state_root, run['run_id'], to_state='validating',
+        reason_class='final_evidence_ready', transition='finalize_standard_review', principal=principal, run=run, persist=False)
+    transition = run_lifecycle.transition_run(state_root, run['run_id'], to_state='complete',
+        reason_class='standard_review_flow_complete', transition='finalize_standard_review', principal=principal,
+        artifact_refs=[str(path)], run=run, persist=False)
+    run_store.store_run(state_root, run, expected_current_state='step_queued')
+    return {'schema_version':1, 'decision':'ok', 'validated':True, 'outcome':'report_valid',
+            'next_action':'complete', 'transition':transition, 'workflow_run':run}
+
+
+
+def seal_provider_receipt(state_root: Path, run: dict[str, Any], work_order: dict[str, Any],
+                          report_digest: str) -> tuple[str, str]:
+    """Retain provider provenance before step files are reused by verification."""
+    run_id, step = run['run_id'], work_order['step_id']
+    evidence = read_json(provider_evidence_path(state_root, run_id, step))
+    request_file = state_paths(state_root)['adapter_requests'] / run_id / (step + '-' + work_order['provider_adapter_id'] + '.json')
+    request = read_json(confined_state_artifact(state_root, request_file, namespace='adapter-requests', label='provider request'))
+    transcript_source = confined_state_artifact(state_root, evidence['transcript_path'], namespace='provider-evidence', label='transcript')
+    transcript = read_json(transcript_source)
+    saved_transcript = provider_evidence_path(state_root, run_id, step).parent / (step + '-' + report_digest[7:] + '-transcript.json')
+    if saved_transcript.exists() and read_json(saved_transcript) != transcript:
+        raise ReportGateError('sealed_transcript_conflict')
+    if not saved_transcript.exists():
+        run_store.atomic_write_json(saved_transcript, transcript)
+    receipt = dict(report_digest=report_digest, work_order=work_order, adapter_request=request,
+                   normalized_evidence=evidence, transcript_ref=str(saved_transcript),
+                   transcript_digest='sha256:' + stable_digest(transcript))
+    path = report_path(state_root, run_id, step).parent / ('review-record-' + report_digest[7:] + '-receipt.json')
+    if path.exists() and read_json(path) != receipt:
+        raise ReportGateError('sealed_provider_receipt_conflict')
+    if not path.exists():
+        run_store.atomic_write_json(path, receipt)
+    return str(path), 'sha256:' + stable_digest(receipt)

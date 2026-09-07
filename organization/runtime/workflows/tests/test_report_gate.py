@@ -737,8 +737,68 @@ def test_terminal_replay_does_not_write_new_transition_artifact() -> None:
         assert_equal(after, before, "terminal replay transition artifacts")
 
 
+def test_conditional_editable_gate_starts_tracking_and_bounded_resume() -> None:
+    import review_lifecycle as review
+    import work_order_builder
+    from test_work_order_builder import build
+    owner = {'principal_type': 'manual_operator', 'principal_id': 'manual-cli', 'authn_method': 'local_cli'}
+    snapshot = {'repository': 'Saber5656/Saihai', 'base': 'a'*40, 'head': 'b'*40}
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        run_id, request_id = 'run-resolution', 'req-resolution'
+        adapter = prepare_review_handoff(root, request_id=request_id, run_id=run_id)
+        run = run_store.load_run(root, run_id)
+        # Conditional API fixture only. The current readonly template cannot reach
+        # this editable state through normal approval; this is NOT live-route evidence.
+        run['activation']['activation_scope']['allowed_ops']['edit'] = True
+        run['activation']['activation_scope']['allowed_paths'] = ['organization/runtime/workflows']
+        run_store.store_run(root, run)
+        # Neither initialization nor an enable helper is called: gate_report starts tracking.
+        order = build(root, run=run, report_path=adapter['report_path'])
+        run_store.atomic_write_json(report_gate.work_order_path(root, run_id, 'review'), order)
+        original = write_report(adapter, request_id=request_id, run_id=run_id, result='findings', findings=[{
+            'finding_id':'F-1','severity':'high','status':'open','summary':'Fix original defect',
+            'evidence_refs':['organization/runtime/workflows/README.md']}])
+        first = report_gate.gate_report(root, run_id, principal=owner)
+        assert 'next_action' in first, first
+        assert_equal(first['next_action'], 'repair_original_findings', 'repair action')
+        assert_equal(first['workflow_run']['run_state'], 'validating', 'no artificial human wait')
+        original_record = first['workflow_run']['review_lifecycle']['resolution_flow']['initial']
+        review.apply_event(root, run_id, principal=owner, event={'kind':'reserve_repair','batch_id':'fix-1'})
+        review.apply_event(root, run_id, principal=owner, event={'kind':'repair_produced','batch_id':'fix-1',
+            'snapshot':review.work_order_identity(dict(order, instruction='Approved repair result',
+                context_refs=[dict(order['context_refs'][0], digest='sha256:'+'c'*64)]))})
+        resumed = run_lifecycle.resume_run(root, run_id, principal=owner)
+        assert_equal(resumed['next_action'], 'verify_original_findings', 'bounded next action')
+        run = resumed['workflow_run']
+        order = build(root, run=run, report_path=adapter['report_path'])
+        assert 'Fix original defect' in order['instruction']
+        assert 'Do not perform a new general review' in order['instruction']
+        run_store.atomic_write_json(report_gate.work_order_path(root, run_id, 'review'), order)
+        report = write_report(adapter, request_id=request_id, run_id=run_id,
+            report_id='resolution-1', resolution={'binding':review.resolution_binding(run),
+            'results':{'F-1':{'status':'resolved','evidence_refs':['fixed README']}}})
+        # The same real evidence checks remain active for the bounded report.
+        invalid = dict(report, resolution=dict(report['resolution'], results={}))
+        errors = report_gate.validate_external_review_report(invalid, run=run, work_order=order, state_root=root)
+        assert any('resolution_result_ids' in e for e in errors), errors
+        done = report_gate.gate_report(root, run_id, principal=owner)
+        assert_equal(done['next_action'], 'merge_preflight', 'preflight entry only')
+        assert_equal(done['workflow_run']['run_state'], 'validating', 'not complete or merge authorized')
+        assert_equal(run_lifecycle.resume_run(root, run_id, principal=owner)['next_action'], 'merge_preflight', 'restart action')
+        assert_equal(done['workflow_run']['review_lifecycle']['resolution_flow']['initial'], original_record, 'immutable original')
+        assert_equal(json.loads(Path(original_record['report_ref']).read_text()), original, 'archived original report')
+        try:
+            build(root, run=done['workflow_run'], report_path=adapter['report_path'])
+        except report_gate.work_order_builder.WorkOrderError as exc:
+            assert 'review_work_order_not_requested' in str(exc)
+        else:
+            raise AssertionError('completed resolution must not build another general review')
+
+
 def main() -> None:
     tests = [
+        test_conditional_editable_gate_starts_tracking_and_bounded_resume,
         test_pass_report_completes,
         test_findings_report_completes_and_requires_findings,
         test_missing_provider_evidence_blocks_and_preserves_report,

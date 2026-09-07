@@ -113,7 +113,7 @@
       "path": "organization/runtime/workflows/templates/standard_code_change.yaml",
       "status": "active",
       "initial_step": "implement",
-      "max_steps": 4
+      "max_steps": 6
     },
     {
       "workflow_id": "publication_required",

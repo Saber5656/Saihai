@@ -492,6 +492,30 @@ to 128 pending requests / 8 MiB per principal and 10,000 regular durable
 artifacts / 128 MiB for the state root. Projection reads are limited to
 240/minute and acknowledgements to 120/minute. Audit JSONL rotates at 8 MiB.
 
+Private artifact I/O on macOS and Linux anchors directory traversal at an open
+filesystem-root descriptor. Each subsequent component is opened with `dir_fd`,
+`O_DIRECTORY`, and `O_NOFOLLOW`, and ownership/mode checks use `fstat` on that
+opened directory. Missing components are created relative to the same parent
+and reopened without following symlinks. Read, create, delete, and same-directory
+rename use the resulting parent descriptor, never an absolute-path reopen after
+validation. macOS's system `/var` alias is translated to `/private/var` before
+traversal; arbitrary aliases and `..` components are rejected. Platforms without
+the required flags or descriptor-relative operations fail with `io_error`;
+there is no pathname-based fallback.
+
+This closes intermediate symlink redirection during traversal, including a swap
+between directory creation and open. Once opened, a directory descriptor stays
+bound to that directory even if its name is moved or replaced; it does not prove
+that the directory remains reachable at its original pathname. This is not
+process isolation against another process with the same UID: such a process can
+still modify file contents, move already-open directories, or race leaf-name
+mutations after an identity check. Existing leaf owner, mode, regular-file,
+link-count and identity checks remain defense in depth, not a guarantee against
+all non-cooperating writers. The same-UID host-compromise trust boundary is
+unchanged. Deterministic temporary-tree regressions inject intermediate swaps
+for read/create/delete/rename and assert rejection and an unchanged outside tree;
+Linux CI and local macOS results must be recorded separately.
+
 Child-thread and worker summaries are visible to the frontend only when their
 request id, task id, owner-principal digest, and checkout digest exactly match
 the current request. Missing, legacy-unbound, or mismatched records are hidden.

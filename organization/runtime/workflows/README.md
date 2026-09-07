@@ -754,14 +754,16 @@ The provider runner also executes the chain's research and review steps through
 the same signed-order, claim, attempt journal, promotion, and report-gate path.
 It resolves the current template's readonly route, role and output schema into a
 runner-owned `step_contract` inside the digest-bound adapter request. The bounded
-prompt includes the selected role and complete output schema (at most 8 KiB),
+prompt includes the selected role and complete output schema (at most 8 KiB for the readonly chain, 16 KiB for the existing standard code-change report),
 without granting file or tool access. Research results keep their closed schema;
 parsed provider/model evidence remains in execution details and the normalized
 sidecar. Both report types retain the existing effective-model policy checks.
 No provider/model override or additional research-to-review context promotion is
 introduced: each step uses the original approved bounded context.
 
-For an approved `readonly_review_chain` run, use the existing commands in order:
+Production admission remains blocked until the complete chain runtime is validated.
+Offline integration fixtures substitute only the host readiness result.
+For an approved fixture `readonly_review_chain` run, use the existing commands in order:
 `workflow drain`, `workflow run-provider --fake-provider-mode success`, then
 repeat that pair for review, passing the same `--state-root` and `--run-id` as in
 the examples above. Drain creates each order; run-provider executes only that
@@ -788,8 +790,8 @@ whose existing frozen-order, model and request bindings still validate. That
 legacy format cannot attest a historical schema digest. Newly issued runner
 requests always carry the contract; a missing contract on a multi-step request
 fails closed with `provider_step_contract_mismatch`. Current template/schema
-drift on contract-bound requests is rejected before dispatch or completed-journal
-promotion; old requests are never silently upgraded or reissued.
+drift on contract-bound requests is rejected before dispatch, successful result
+finalization, or completed-journal promotion; old requests are never silently upgraded or reissued.
 
 Workflow-run execution uses an invocation-drain scheduler with a per-state-root
 global advisory lock:
