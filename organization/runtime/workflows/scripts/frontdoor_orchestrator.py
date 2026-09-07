@@ -3813,9 +3813,11 @@ def build_bridge_projection(
         )
     except work_order_builder.WorkOrderError:
         projection_binding = None
+    import output_monitor
     return {
         "schema_version": 1,
         "decision": "ok",
+        "run_output": output_monitor.run_output(run_store, state_root, record),
         "projection_version": "1",
         "safe_for_principal": redacted_principal(principal),
         "request_id": record.get("request_id"),
@@ -3985,6 +3987,20 @@ def bridge_read_projection(
     return projection
 
 
+def _clear_stale_output_for_ack(state_root: Path, request_id: str, digest: str, principal: dict) -> None:
+    path = state_root / 'output-observations' / (validate_artifact_id(request_id, 'request_id') + '.json')
+    if not state_file_exists(path):
+        return
+    observed = read_json(path)
+    if observed.get('request_id') != request_id:
+        raise FrontdoorError('output_observation_binding_mismatch')
+    if observed.get('projection_digest') == digest and observed.get('stale_output') is True:
+        append_audit_event(state_root=state_root, event_type='stale_output_cleared', principal=principal,
+            subject={'request_id': request_id, 'run_id': observed.get('run_id')}, outcome='ok',
+            details={'projection_digest':digest,'reason':'acknowledged','transition_effect':'none'})
+        write_json(path, dict(observed, stale_output=False, acknowledged=True))
+
+
 def bridge_ack_output(
     *,
     state_root: Path,
@@ -4116,6 +4132,7 @@ def bridge_ack_output(
             or existing_ack.get("ack_verified") is not True
         ):
             raise FrontdoorError("ack idempotency artifact conflict")
+        _clear_stale_output_for_ack(state_root, request_id, projection_digest, principal)
         return {
             "schema_version": 1,
             "decision": "ok",
@@ -4137,6 +4154,7 @@ def bridge_ack_output(
         "transition_effect": "none",
     }
     write_json(ack_path, ack)
+    _clear_stale_output_for_ack(state_root, request_id, projection_digest, principal)
     after = read_json(request_path(state_root, request_id))
     append_audit_event(
         state_root=state_root,
@@ -5604,6 +5622,16 @@ def validate_report(
     return payload
 
 
+def recover_review_context(*, state_root: Path, run_id: str, principal: dict[str, Any] | None = None) -> dict[str, Any]:
+    import legacy_review_recovery
+    try:
+        return legacy_review_recovery.recover(state_root=state_root, run_id=run_id,
+            principal=principal or default_manual_principal())
+    except scoped_worker_executor.ScopedWorkerError as exc:
+        raise FrontdoorError(exc.reason_class) from exc
+    except (run_store.RunStoreError, KeyError, TypeError, ValueError, OSError) as exc:
+        raise FrontdoorError("review_recovery_state_invalid") from exc
+
 def drive_run(**kwargs: Any) -> dict[str, Any]:
     from bounded_driver import drive_run as drive
     return drive(**kwargs)
@@ -6231,6 +6259,12 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--principal-id", default="manual-cli")
     create.add_argument("--authn-method", default="local_cli")
 
+    recovery = sub.add_parser("recover-review-context")
+    recovery.add_argument("--run-id", required=True)
+    recovery.add_argument("--principal-type", default="manual_operator")
+    recovery.add_argument("--principal-id", default="manual-cli")
+    recovery.add_argument("--authn-method", default="local_cli")
+
     drive = sub.add_parser("drive-run")
     selector = drive.add_mutually_exclusive_group(required=True)
     selector.add_argument("--run-id", default="")
@@ -6491,6 +6525,10 @@ def main() -> None:
                 resume_policy=args.resume_policy,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
+        elif args.command == "recover-review-context":
+            payload = recover_review_context(state_root=state_root, run_id=args.run_id,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method))
+
         elif args.command == "drive-run":
             payload = drive_run(state_root=state_root, run_id=args.run_id, request_id=args.request_id,
                 max_iterations=args.max_iterations, duration_seconds=args.duration_seconds,

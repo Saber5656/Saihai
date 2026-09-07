@@ -233,7 +233,7 @@ def canonical_root() -> Path:
         if result['status'] != 'loaded':
             raise VaultTaskError('vault_catalog_unavailable')
         return Path(env['AGENTS_VAULT_ROOT'])
-    except (ValueError, OSError, KeyError) as exc:
+    except (directory_paths.EnvError, ValueError, OSError, KeyError) as exc:
         raise VaultTaskError('vault_catalog_unavailable') from exc
 
 
