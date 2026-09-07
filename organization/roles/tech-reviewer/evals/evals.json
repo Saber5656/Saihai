@@ -12,7 +12,7 @@
     {
       "id": 2,
       "prompt": "差分には認可ロジック変更、性能劣化の疑い、受け入れ条件の未検証が含まれる。tech-reviewer としてレビューしてください。",
-      "expected_output": "TR は専門レビューを代替せず、認可と深いWeb/API脅威はtech-security、性能はtech-performance、受け入れ条件や検証不足はtech-qa / tech-testerへSpecialist Handoffする。専門レビュー待ちがblockingならVerdictはblockedにする。",
+      "expected_output": "最初に認可変更の範囲を専門担当へ限定して引き継ぐ。性能などの改善提案は記録し、通常変更に別のQA/統合レビューを重ねない。指定範囲の実際の必要証跡が不足する場合だけblockedにする。",
       "files": [
         "skills/tech-reviewer/SKILL.md"
       ]
@@ -36,9 +36,25 @@
     {
       "id": 5,
       "prompt": "レビュー対象は backend 実装、型定義、CI 設定、shell script の code-like diff を含む。実装担当のテスト結果と tech-reviewer 用の差分説明はあるが、tech-qa の QA Verdict はない。tech-reviewer としてレビューしてください。",
-      "expected_output": "QA Review Evidence を missing とし、tech-qa への blocking Specialist Handoff を出す。tech-reviewer の approve は必須 QA review evidence を代替しないため、Verdict は blocked にする。",
+      "expected_output": "通常変更ではreview not_requiredを明示する。必要なhost validationを保持し、別tech-qa reviewの不存在だけでblockしない。",
       "files": [
         "skills/tech-reviewer/SKILL.md"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "初回指摘F1を修正した。修正後の確認をしてください。",
+      "expected_output": "F1の解消のみ確認し、全面レビューと追加委譲を行わず次フェーズへ進む。",
+      "files": [
+        "organization/roles/tech-reviewer/skill.md"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "PR作成前の限定レビュー。base/tree digestと成功した検証結果がある。",
+      "expected_output": "precommit identityを使い、未来のPR番号やQA verdictを要求しない。",
+      "files": [
+        "organization/roles/tech-reviewer/skill.md"
       ]
     }
   ]

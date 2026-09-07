@@ -5535,6 +5535,9 @@ def _prepare_claude_adapter_locked(
         evidence_path=evidence_path,
         transcript_path=transcript_path,
     )
+    for field in ("role_definition_path", "role_definition_digest"):
+        if field in work_order:
+            evidence_contract["fixed_fields"][field] = work_order[field]
     prompt = bounded_claude_prompt(work_order, evidence_contract=evidence_contract)
     adapter_request = {
         "adapter_request_version": "1",
@@ -5562,6 +5565,9 @@ def _prepare_claude_adapter_locked(
             "work_order_signature": work_order.get("work_order_authority", {}).get("signature"),
         },
     }
+    for field in ("role_definition_path", "role_definition_digest"):
+        if field in work_order:
+            adapter_request[field] = work_order[field]
     provider_runner.secure_artifact_tree(state_root, request_path, "adapter-requests")
     provider_runner.private_atomic_write_json(state_root, request_path, adapter_request)
     provider_runner.write_signal_transcript(

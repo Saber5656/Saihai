@@ -289,6 +289,7 @@ def queue_evidence_view(state_root: Path, run: dict[str, Any]) -> list[dict[str,
             {
                 "from_role": "frontdoor",
                 "to_role": str(work_order.get("to_role") or ""),
+                "role_definition_digest": str(work_order.get("role_definition_digest") or ""),
                 "message_id": f"wo-{run_id}-{step_id}",
                 "inbox_path": "",
                 "payload_path": existing_path_text(order_path),
