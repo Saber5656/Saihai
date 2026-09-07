@@ -96,7 +96,7 @@ def fixture_registry(
 
 def bridge_payload(request_id: str, frontend_kind: str) -> dict[str, Any]:
     return {
-        "task_id": "TSK-surface-fixture",
+        "task_id": "TSK-PENDING-surface-fixture",
         "request_id": request_id,
         "request_kind": "external_review_request",
         "prompt": "Route the same deterministic review workflow.",
@@ -193,7 +193,7 @@ def test_fake_surface_registers_and_routes_through_deterministic_pipeline() -> N
 
         classified = frontdoor.proposed_request(
             state_root=state_root,
-            task_id="TSK-surface-fixture",
+            task_id="TSK-PENDING-surface-fixture",
             request_id="req-surface-fixture",
             user_prompt="Route the same deterministic review workflow.",
             refs=["organization/runtime/workflows/README.md"],
@@ -226,6 +226,8 @@ def test_fake_surface_registers_and_routes_through_deterministic_pipeline() -> N
                 "human_operator", "fixture-human", authn_method="local_ui"
             ),
         )
+        import vault_test_support
+        vault_test_support.prepare(state_root)
         run = frontdoor.create_run(
             state_root=state_root,
             request_id="req-surface-fixture",

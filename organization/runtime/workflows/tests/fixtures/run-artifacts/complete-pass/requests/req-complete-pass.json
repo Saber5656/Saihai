@@ -87,7 +87,7 @@
       "human_action_id": "approve-fixture",
       "provider_binding_digest": "sha256:591fe718a9cd85669e12381b58dfc56a2c1d5e547a3cb414884d2deaa8bb1da8",
       "request_id": "req-complete-pass",
-      "task_id": "TSK-complete-pass"
+      "task_id": "TSK-PENDING-complete-pass"
     }
   },
   "approved_activation": {
@@ -134,7 +134,7 @@
       "publication": "not_required"
     },
     "request_id": "req-complete-pass",
-    "task_id": "TSK-complete-pass",
+    "task_id": "TSK-PENDING-complete-pass",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],
@@ -219,7 +219,7 @@
       "publication": "not_required"
     },
     "request_id": "req-complete-pass",
-    "task_id": "TSK-complete-pass",
+    "task_id": "TSK-PENDING-complete-pass",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],
@@ -271,7 +271,7 @@
     ],
     "target_assurance_state": "action_enforced"
   },
-  "task_id": "TSK-complete-pass",
+  "task_id": "TSK-PENDING-complete-pass",
   "updated_at": "2026-01-01T00:00:00+0000",
   "user_prompt": "Run bounded offline external review."
 }

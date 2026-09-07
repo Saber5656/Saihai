@@ -44,7 +44,7 @@ def prepare_run(
             state_root,
             "propose",
             "--task-id",
-            f"TSK-{request_id}",
+            f"TSK-PENDING-{request_id}",
             "--request-id",
             request_id,
             "--prompt",

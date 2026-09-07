@@ -133,7 +133,7 @@ def call_tool(request_id: int, name: str, arguments: dict[str, Any]) -> dict[str
 def submit_arguments(**overrides: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "workspace": mcp.WORKSPACE_ID,
-        "task_id": "TSK-mcp-bridge",
+        "task_id": "TSK-PENDING-mcp-bridge",
         "request_id": "req-mcp-bridge",
         "prompt": "Prepare a bounded documentation proposal. PRIVATE_PROMPT_MARKER",
         "refs": ["README.md"],

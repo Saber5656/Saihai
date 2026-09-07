@@ -117,7 +117,7 @@
       "step_id": "review"
     }
   ],
-  "task_id": "TSK-failed-invalid-report",
+  "task_id": "TSK-PENDING-failed-invalid-report",
   "terminal": {
     "reason": "invalid_report",
     "status": "blocked"
@@ -261,5 +261,11 @@
       "transition_version": "1"
     }
   ],
+  "vault_task_binding": {
+    "content_digest": "sha256:c824bc26d6469e541e65644954bb0ada188443abd92d3a1184ce4560e4ae08ab",
+    "convention": "03-Contexts/Policies/Task-File-Conventions.md",
+    "path": "__STATE_ROOT__/fixture-vault/01-Projects/Fixtures/TSK-PENDING-failed-invalid-report/task.md",
+    "task_id": "TSK-PENDING-failed-invalid-report"
+  },
   "workflow_id": "single_step_external_review"
 }

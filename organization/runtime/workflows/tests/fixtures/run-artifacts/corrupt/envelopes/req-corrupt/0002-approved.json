@@ -43,7 +43,7 @@
       "publication": "not_required"
     },
     "request_id": "req-corrupt",
-    "task_id": "TSK-corrupt",
+    "task_id": "TSK-PENDING-corrupt",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],

@@ -947,3 +947,10 @@ provider transcript content.
 | tmux worker | The adapter schema can represent it, but there is no execution path in P0. |
 | Viewer-side mutation controls | The implemented workflow viewer is deliberately read-only. |
 | deploy/push/PR automation | Publication requires a separate gate. |
+
+### Host Vault task lifecycle
+
+New runs bind an existing canonical task record; verified completion is appended
+by the host before success is returned. See [Vault task lifecycle](../../../docs/runbooks/vault-task-lifecycle.md)
+for typed scaffolding, bounded evidence references, write failure recovery, and
+the distinction between persistence and Git publication.

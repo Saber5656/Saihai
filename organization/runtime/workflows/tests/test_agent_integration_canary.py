@@ -1423,7 +1423,7 @@ def _submit_routing_request(fx: Fixture, state_root: Path) -> tuple[dict, str]:
         state_root=state_root,
         frontend_kind="codex",
         payload={
-            "task_id": "TSK-routing",
+            "task_id": "TSK-PENDING-routing",
             "request_id": "req-routing",
             "request_kind": "agent_task_request",
             "prompt": canary.ROUTING_ACCEPTANCE_PROMPT,
@@ -1749,7 +1749,7 @@ def test_routing_acceptance_requires_fresh_prompt_and_append_only_audit() -> Non
             state_root=state_root,
             event_type="baseline_probe",
             principal=frontdoor.default_manual_principal(),
-            subject={"request_id": "req-baseline", "task_id": "TSK-baseline"},
+            subject={"request_id": "req-baseline", "task_id": "TSK-PENDING-baseline"},
             outcome="ok",
         )
         begin = canary.begin_routing_acceptance(
@@ -1790,7 +1790,7 @@ def test_routing_acceptance_requires_fresh_prompt_and_append_only_audit() -> Non
             state_root=fx.temp_root / "routing-state",
             event_type="request_approved",
             principal=frontdoor.default_manual_principal(),
-            subject={"request_id": "req-routing", "task_id": "TSK-routing"},
+            subject={"request_id": "req-routing", "task_id": "TSK-PENDING-routing"},
             outcome="ok",
         )
         _expect(

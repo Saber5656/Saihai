@@ -40,7 +40,7 @@
   },
   "run_id": "run-traversal",
   "step_id": "review",
-  "task_id": "TSK-traversal",
+  "task_id": "TSK-PENDING-traversal",
   "to_role": "tech-reviewer",
   "work_order_authority": {
     "issuer_principal": {

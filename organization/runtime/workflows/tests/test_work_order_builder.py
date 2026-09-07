@@ -45,7 +45,7 @@ def activation_scope(**overrides) -> dict:
 
 def run_record(**overrides) -> dict:
     candidate = {
-        "task_id": "TSK-work-order",
+        "task_id": "TSK-PENDING-work-order",
         "request_id": "req-work-order",
         "run_id": "run-work-order",
         "workflow_id": "single_step_external_review",
@@ -66,7 +66,7 @@ def run_record(**overrides) -> dict:
 
 def request_record(**overrides) -> dict:
     candidate = {
-        "task_id": "TSK-work-order",
+        "task_id": "TSK-PENDING-work-order",
         "request_id": "req-work-order",
         "owner_principal": {
             "principal_type": "main_agent_bridge",
@@ -179,7 +179,7 @@ def test_build_valid_p0_order() -> None:
             order["projection_binding"],
             work_order_builder.build_projection_binding(
                 request_id="req-work-order",
-                task_id="TSK-work-order",
+                task_id="TSK-PENDING-work-order",
                 owner_principal=order["frontend_request_binding"]["owner_principal"],
                 checkout_identity_digest="sha256:" + "4" * 64,
             ),
@@ -192,7 +192,7 @@ def test_projection_binding_is_exact_and_fail_closed() -> None:
         state_root = Path(raw_tmp)
         for field, replacement in (
             ("request_id", "req-other"),
-            ("task_id", "TSK-other"),
+            ("task_id", "TSK-PENDING-other"),
             ("owner_principal_digest", "sha256:" + "a" * 64),
             ("checkout_identity_digest", "sha256:" + "b" * 64),
         ):
@@ -396,7 +396,7 @@ def test_validate_rejects_foreign_current_run() -> None:
         state_root = Path(raw_tmp)
         order = build(state_root)
         current_run = run_record(
-            task_id="TSK-current",
+            task_id="TSK-PENDING-current",
             request_id="req-current",
             run_id="run-current",
         )
@@ -621,7 +621,7 @@ def test_real_readonly_chain_blocks_admission_before_work_order() -> None:
             task_kind='research', expected_artifacts=['research_report', 'typed_report', 'final_evidence'],
         )
         proposed = load_payload(run_frontdoor(
-            root, 'propose', '--task-id', 'TSK-chain', '--request-id', 'req-chain',
+            root, 'propose', '--task-id', 'TSK-PENDING-chain', '--request-id', 'req-chain',
             '--prompt', 'Research and independently review bounded evidence',
             '--classification', json.dumps(classification),
             '--ref', 'organization/runtime/workflows/README.md',

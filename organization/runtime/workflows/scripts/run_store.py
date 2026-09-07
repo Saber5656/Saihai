@@ -659,6 +659,13 @@ def validate_run_record(run: Any) -> list[str]:
         errors.append("workflow_id must be a non-empty string")
     if not _non_empty_string(run.get("current_step")):
         errors.append("current_step must be a non-empty string")
+    if 'vault_task_binding' in run:
+        binding = run['vault_task_binding']
+        keys = {'task_id', 'path', 'content_digest', 'convention'}
+        if (not isinstance(binding, dict) or set(binding) != keys
+                or any(not _non_empty_string(binding.get(key)) for key in keys)
+                or binding.get('task_id') != run.get('task_id')):
+            errors.append('vault_task_binding must match the run task and contain its canonical record identity')
     approved_provider_binding = run.get("approved_provider_binding")
     if not isinstance(approved_provider_binding, dict):
         errors.append("approved_provider_binding must be a json object")

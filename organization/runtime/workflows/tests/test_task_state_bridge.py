@@ -18,6 +18,10 @@ SERVER_SCRIPT = ROOT / "server.py"
 FRONTDOOR_TEST_WRAPPER = """
 import sys
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, str(__import__("pathlib").Path(sys.argv[1]).parent / "tests"))
+import vault_test_support
+if 'create-run' in sys.argv or 'verify-completion' in sys.argv:
+    vault_test_support.prepare(__import__("pathlib").Path(sys.argv[2]))
 import frontdoor_orchestrator as frontdoor
 frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
 sys.argv = [sys.argv[0], *sys.argv[3:]]
@@ -55,7 +59,7 @@ def load_json(path: Path) -> dict:
 def run_record(
     *,
     run_id: str,
-    task_id: str = "TSK-bridge",
+    task_id: str = "TSK-PENDING-bridge",
     request_id: str | None = None,
     run_state: str = "created",
     goal_state: str = "approved",
@@ -197,12 +201,12 @@ def test_run_task_view_is_thin() -> None:
 def test_runs_for_task_filters_and_sorts() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
-        write_json(state_root / "runs" / "run-b.json", run_record(run_id="run-b", task_id="TSK-sort"))
-        write_json(state_root / "runs" / "run-a.json", run_record(run_id="run-a", task_id="TSK-sort"))
-        write_json(state_root / "runs" / "run-c.json", run_record(run_id="run-c", task_id="TSK-other"))
+        write_json(state_root / "runs" / "run-b.json", run_record(run_id="run-b", task_id="TSK-PENDING-sort"))
+        write_json(state_root / "runs" / "run-a.json", run_record(run_id="run-a", task_id="TSK-PENDING-sort"))
+        write_json(state_root / "runs" / "run-c.json", run_record(run_id="run-c", task_id="TSK-PENDING-other"))
         write_private_text(state_root / "runs" / "run-corrupt.json", '{"run_id": tru')
 
-        rows = task_state_bridge.runs_for_task(state_root, "TSK-sort")
+        rows = task_state_bridge.runs_for_task(state_root, "TSK-PENDING-sort")
         assert_equal(
             [row["run_id"] for row in rows if not row.get("view_error")],
             ["run-a", "run-b"],
@@ -275,7 +279,7 @@ def test_queue_evidence_view_status_mapping() -> None:
 def test_task_view_cli_shape() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp).resolve()
-        write_json(state_root / "runs" / "run-cli.json", run_record(run_id="run-cli", task_id="TSK-cli"))
+        write_json(state_root / "runs" / "run-cli.json", run_record(run_id="run-cli", task_id="TSK-PENDING-cli"))
         completed = subprocess.run(
             [
                 sys.executable,
@@ -287,7 +291,7 @@ def test_task_view_cli_shape() -> None:
                 str(state_root),
                 "task-view",
                 "--task-id",
-                "TSK-cli",
+                "TSK-PENDING-cli",
             ],
             cwd=ROOT,
             capture_output=True,
@@ -310,7 +314,7 @@ def test_task_view_cli_shape() -> None:
                 str(state_root),
                 "task-view",
                 "--task-id",
-                "TSK-unknown",
+                "TSK-PENDING-unknown",
             ],
             cwd=ROOT,
             capture_output=True,
@@ -343,7 +347,7 @@ def test_no_writes_into_queue_dirs() -> None:
         itb_root = root / "itb"
         session_dir = itb_root / "thread-full"
         write_json(session_dir / "active-execution-context.json", {"session_id": "thread-full"})
-        write_json(session_dir / "active-task.json", {"task_id": "TSK-full"})
+        write_json(session_dir / "active-task.json", {"task_id": "TSK-PENDING-full"})
         (session_dir / "queue" / "inbox").mkdir(parents=True)
         (session_dir / "queue" / "inbox" / "role.yaml").write_text("messages: []\n", encoding="utf-8")
         (session_dir / "queue" / "tasks").mkdir()
@@ -355,7 +359,7 @@ def test_no_writes_into_queue_dirs() -> None:
         try:
             proposed = frontdoor.proposed_request(
                 state_root=state_root,
-                task_id="TSK-full",
+                task_id="TSK-PENDING-full",
                 request_id="req-full",
                 user_prompt="Run bounded external review",
                 refs=["organization/runtime/workflows/README.md"],
@@ -370,6 +374,8 @@ def test_no_writes_into_queue_dirs() -> None:
                 request_id="req-full",
                 human_action_id=proposed["approval"]["human_action_id"],
             )
+            import vault_test_support
+            vault_test_support.prepare(state_root)
             frontdoor.create_run(
                 state_root=state_root,
                 request_id="req-full",

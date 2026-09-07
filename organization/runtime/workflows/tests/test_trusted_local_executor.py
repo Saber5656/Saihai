@@ -40,15 +40,22 @@ out.write_text(json.dumps(dict(result_version='1',status='completed',summary='fi
 '''); self.cli.chmod(0o755)
         self.home = self.root / 'existing-home'; self.home.mkdir(mode=0o700)
         head = git('rev-parse', 'HEAD')
-        host = publication.HostAuthorization('task-usage', 'req-usage', 'run-usage', 'exec-usage', 'example/repo',
+        host = publication.HostAuthorization('TSK-20260907-usage', 'req-usage', 'run-usage', 'exec-usage', 'example/repo',
             str(self.repo), 'codex/task', head, head, ('app.txt',), ('validate','Analyze (actions)','Analyze (python)'),
             'sha256:'+'1'*64, 'parent-task-explicit-authority')
         self.auth = local.TrustedLocalAuthorization(host, str(self.cli), publication.digest(self.cli.read_bytes()),
             str(self.home), 'approved-model', ((sys.executable, '-c', "from pathlib import Path; assert Path('app.txt').read_text()=='after\\n'"),))
         self.request = dict(task_id=host.task_id,request_id=host.request_id,run_id=host.run_id,execution_id=host.execution_id,instruction='Make the approved fixture change.')
         self.state = self.root / 'state'
+        import vault_task_records as vault
+        self.vault = self.root / 'vault'; self.vault.mkdir()
+        vault.scaffold(self.vault, host.task_id, project='Fixtures', brief=dict(objective='Fixture',scope='Fixture',acceptance_criteria='Fixture'))
+        self.vault_patch = patch.object(vault, 'canonical_root', return_value=self.vault)
+        self.vault_patch.start(); self.addCleanup(self.vault_patch.stop)
 
-    def tearDown(self): self.tmp.cleanup()
+    def tearDown(self):
+        self.vault_patch.stop()
+        self.tmp.cleanup()
 
     def test_real_process_validation_report_and_not_required(self):
         result=local.execute(self.request,self.auth,self.state)
@@ -98,7 +105,10 @@ out.write_text(json.dumps(dict(result_version='1',status='completed',summary='fi
         cli=Path(__file__).resolve().parents[4]/'scripts'/'saihai.py'
         authority=self.root/'authority.json'
         authority.write_text(json.dumps(dataclasses.asdict(self.auth))); authority.chmod(0o600)
-        args=[sys.executable,str(cli),'usage','run','--request',json.dumps(self.request),
+        wrapper = 'import sys,runpy; sys.path.insert(0,sys.argv.pop(1)); import vault_task_records as v; from pathlib import Path; v.canonical_root=lambda:Path(sys.argv.pop(1)); sys.argv=sys.argv[1:]; script=sys.argv[0]; runpy.run_path(script,run_name="__main__")'
+        # Bind the temporary fixture in this subprocess, never the user's Vault.
+        wrapper = wrapper.replace('lambda:Path(sys.argv.pop(1))', 'lambda root=Path(sys.argv.pop(1)):root')
+        args=[sys.executable,'-c',wrapper,str(cli.parents[1]/'organization/runtime/workflows/scripts'),str(self.vault),str(cli),'usage','run','--request',json.dumps(self.request),
               '--authorization',str(authority),'--state-root',str(self.state)]
         result=subprocess.run(args,capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr+result.stdout)
@@ -107,6 +117,14 @@ out.write_text(json.dumps(dict(result_version='1',status='completed',summary='fi
                                 '--state-root',str(self.state)],capture_output=True,text=True)
         self.assertEqual(missing.returncode,2,missing.stderr)
         self.assertEqual(json.loads(missing.stdout)['reason'],'host_authorization_unavailable_or_invalid')
+
+    def test_missing_canonical_task_blocks_before_worker_claim(self):
+        import vault_task_records as vault
+        path=Path(vault.resolve_task(self.vault, self.auth.publication.task_id)['path'])
+        path.unlink()
+        with self.assertRaisesRegex(local.TrustedLocalError, 'vault_task_record_missing'):
+            local.execute(self.request,self.auth,self.state)
+        self.assertFalse((self.state/'trusted-local'/'exec-usage'/'claim.json').exists())
 
     def test_fixed_permissions_do_not_grant_other_task_or_publication(self):
         argv=local._argv(self.auth,self.repo,self.root/'output.json')
