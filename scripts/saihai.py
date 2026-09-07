@@ -368,8 +368,16 @@ def handle_usage_drive(frontdoor: Any, args: argparse.Namespace) -> dict[str, An
     except trusted_local_executor.TrustedLocalError as exc:
         raise frontdoor.FrontdoorError(str(exc)) from exc
     request = read_request_json(frontdoor, args.request) if args.request else None
+    plan = None
+    if args.worker_recovery_plan:
+        import run_store
+        path = Path(args.worker_recovery_plan)
+        worker = Path(authority.publication.worktree).resolve()
+        if not path.is_absolute() or path.resolve() != path or worker == path or worker in path.parents:
+            raise frontdoor.FrontdoorError('host_recovery_plan_path_invalid')
+        plan = run_store.read_json(path)
     return frontdoor.drive_trusted_local(authorization=authority, state_root=Path(args.state_root),
-        request=request, max_iterations=args.max_iterations, duration_seconds=args.duration_seconds,
+        request=request, worker_recovery_plan=plan, max_iterations=args.max_iterations, duration_seconds=args.duration_seconds,
         poll_interval_seconds=args.poll_interval_seconds)
 
 
@@ -441,6 +449,7 @@ def build_usage_parser(sub: Any) -> None:
     drive.add_argument('--authorization', required=True)
     drive.add_argument('--state-root', required=True)
     drive.add_argument('--request', default='', help='initial request; omit to resume the existing execution')
+    drive.add_argument('--worker-recovery-plan', default='', help='private host plan for a finished failed worker child only')
     drive.add_argument('--max-iterations', type=int, default=32)
     drive.add_argument('--duration-seconds', type=float, default=300)
     drive.add_argument('--poll-interval-seconds', type=float, default=5)

@@ -43,7 +43,7 @@ class UsageIntakeTests(unittest.TestCase):
         self.assertEqual(self.fixture.git('status','--porcelain'),'')
     def test_prepared_worker_gets_grounded_brief_not_private_prompt_and_real_diff(self):
         ref,auth,request=self.prepare();prompts=[];original=local._run_process
-        def capture(argv,prompt,*args):prompts.append(prompt);return original(argv,prompt,*args)
+        def capture(argv,prompt,*args,**kwargs):prompts.append(prompt);return original(argv,prompt,*args,**kwargs)
         with patch.object(local,'_run_process',side_effect=capture):
             result=local.execute(request,auth,self.fixture.state)
         self.assertEqual(result['status'],'validated')

@@ -20,7 +20,7 @@ UNCERTAIN = {'commit_uncertain', 'push_uncertain', 'pr_uncertain', 'merge_uncert
 
 
 def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
-          request: dict | None = None, max_iterations: int = 32,
+          request: dict | None = None, worker_recovery_plan: dict | None = None, max_iterations: int = 32,
           duration_seconds: float = 300, poll_interval_seconds: float = 5,
           commands: local.publication.Commands | None = None) -> dict:
     """Run once, then advance saved state; never replay an existing worker claim.
@@ -95,6 +95,8 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
                 if not claimed:
                     if request is None:
                         return finish('blocked', 'request_required_for_initial_execution')
+                    if worker_recovery_plan is not None:
+                        raise local.TrustedLocalError('worker_recovery_requires_existing_failure')
                     action = 'run'
                 else:
                     claim = run_store.read_json(directory / 'claim.json')
@@ -108,31 +110,36 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
                         return finish('waiting_human', integration)
                     if integration in UNCERTAIN:
                         return finish('uncertain', integration)
-                    if saved['validation']['status'] == 'failed':
+                    if saved['execution']['status'] == 'failed' and saved['execution']['reason'] == 'worker_process_failed':
+                        action = 'repair_worker'
+                    elif saved['validation']['status'] == 'failed':
                         action = 'repair_validation'
                     elif (saved['validation']['status'] == 'passed'
                           or integration in {'running', 'retryable_worker', 'retryable_validation'}):
                         action = 'advance'
                     else:
                         # Saved running is not a liveness proof. No fresh execute
-                        # and no repair without a real failed validation receipt.
+                        # and no repair without a proven terminal failure receipt.
                         return finish('blocked', 'execution_incomplete_inspection_required')
                 iterations += 1
                 record(action, 'started')
                 try:
                     if action == 'run':
                         result = local.execute(request, authorization, root)
+                    elif action == 'repair_worker':
+                        repairs += 1
+                        result = local.repair_worker_process(authorization, root, installation_plan=worker_recovery_plan)
                     elif action == 'repair_validation':
                         repairs += 1
                         result = local.repair_validation(authorization, root)
                     else:
                         result = local.advance_publication(authorization, root, commands=commands)
                 except local.TrustedLocalError as exc:
-                    if str(exc) != 'host_validation_failed':
+                    if str(exc) not in {'host_validation_failed', 'worker_process_failed'}:
                         raise
                     # The failed receipt, not the exception alone, determines
                     # whether the next iteration may reserve a repair.
-                    result = {'status': 'validation_failed'}
+                    result = {'status': 'validation_failed' if str(exc) == 'host_validation_failed' else 'worker_failed'}
                 status = result.get('status', 'unknown')
                 record(action, status)
                 persistence = result.get('completion_persistence')
@@ -150,7 +157,7 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
                     return finish('uncertain', status)
                 if result.get('decision') == 'blocked':
                     return finish('blocked', status)
-                if status not in WAITING | CONTINUE | {'validation_failed'}:
+                if status not in WAITING | CONTINUE | {'validation_failed', 'worker_failed'}:
                     return finish('blocked', 'unsupported_status')
             if status in WAITING:
                 polls += 1

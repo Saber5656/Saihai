@@ -185,3 +185,43 @@ Legacy standard_code_change QA/final/completion consumes the host-owned
 execution and current worktree. Hosts must run actual scoped validation to produce
 it; the gate never manufactures one from a provider report. The normal usage route
 continues to use its own execution directory and independently supplied authority.
+
+
+## Finished worker process recovery
+
+Worker results use a private strict provider schema: every property is required,
+with nullable forms for canonical optional fields. Only optional null values are
+removed before the unchanged canonical validator. Raw results remain saved.
+Normal worker processes now retain private bounded stdout/stderr diagnostics and
+post-process source identity, including nonzero exits.
+
+`usage drive` can continue a proven finished nonzero worker process in a fresh
+child execution. It verifies the original and current claims, unchanged authority
+and saved request digests, dead process identity, and exact source tree. Missing,
+running, unknown or successful process evidence is not retry authority. Legacy
+failures without a saved source identity permit only an unchanged clean authorized
+HEAD. Old claims, requests, process receipts and outcomes remain intact; the host
+`validation-repair.json` continuation selects the current child for status and
+publication, including subsequent validation repair.
+
+Five consecutive observed failures of the same typed cause and measured worker
+strategy stop that sequence. The strategy fingerprints wire schema, decoder,
+provider command, prompt and approved executable/model/installation. Retry IDs,
+host restarts and unrelated commits do not reset it. An actual correction starts
+a new sequence while all earlier attempts remain saved. Driver iteration and
+duration bounds remain independent.
+
+If an approved harness correction changes installed bytes, the host may supply:
+
+```sh
+python3.11 scripts/saihai.py usage drive --authorization /absolute/authority.json --state-root /absolute/private-state --worker-recovery-plan /absolute/private-plan.json
+```
+
+This explicit host file is never selected from worker/request output and must be
+private and outside the worker checkout. Only after proving the failed execution
+may the child pin and read back the new plan. Existing catalog roots, member
+locations, surface, policies, symlinks, sync destination and authorization remain
+unchanged; only source commit and expected content digest may differ. The old
+plan is preserved, its successful readback is not asserted, and a parent/child
+continuation receipt records both plan digests. No automatic plan replacement,
+authority expansion, runtime rollback or credential handling is performed.
