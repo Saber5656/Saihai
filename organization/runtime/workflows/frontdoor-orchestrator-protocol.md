@@ -394,3 +394,65 @@ the capability. Codex CLI model transport is fixed by the host backend and does
 not grant network/provider tools to the worker. Main-agent projections expose
 only execution/result/evidence digests and status; canonical capability,
 instruction, worktree path, raw result, and evidence path stay redacted.
+
+
+## Bounded readonly driving (Issue #109 U1)
+
+After one existing human approval, `drive-run --request-id <approved-request>`
+creates or reuses the request's bound run through `create_run` and advances the
+readonly review chain in the same CLI invocation. Alternatively,
+`drive-run --run-id <existing-run>` resumes an existing run. These selectors are
+mutually exclusive. The driver never calls approval or overrides the activation.
+An offline example is `drive-run --request-id <approved-request>
+--fake-provider-mode success` (on one command line). The existing state-root and
+local principal boundary still apply; fake transport is not live-provider proof.
+
+The consumer reloads durable state between actions. Existing `drain`, provider
+claim/recovery, and report gates retain their locks and authority checks.
+The driver requests `return_on_retry=True` from the existing provider API: both
+fresh and journal-recovered retry reservations yield after durable `step_queued`
+so the driver checks its invocation ceilings before another claim. The API default
+remains false for single-operation callers. `run_provider` already validates its
+report; only an existing `validating` state
+uses standalone report recovery. The final step calls `run_harness_gate`, never
+a model. No outer global lock is taken. Concurrent calls reuse existing claims
+and journals; a live provider claim stops the competing invocation without
+spending retry budget. A different active run remains subject to concurrency=1.
+
+| Result field / stop | Meaning |
+| --- | --- |
+| `stop=terminal` | Durable complete, failed or aborted state; inspect `run_state` |
+| `stop=waiting_human` | Existing human/publication gate or provider retry exhaustion |
+| `stop=waiting_provider` | Live provider attempt; caller may invoke again later |
+| `stop=blocked` | Existing transition rejected or concurrency prevented progress |
+| `stop=bounded` | Invocation ceiling or no enabled progress; no automatic approval |
+| `stop=unsupported` | Workflow/step/state outside the readonly U1 driver |
+| `stop=integration_pending` | Unconnected review/fix route; no synthetic repair grant |
+| `reason_class` | Machine-readable stop reason, without raw provider output |
+| `iterations`, `progress_count`, `invocation_id` | This invocation's action/progress counts and audit correlation |
+
+`--max-iterations` defaults to 32 (1–256); `--duration-seconds` defaults to 300
+(positive, at most 3600). Duration bounds admission of the next operation and
+caps provider timeout by remaining whole seconds; existing lock acquisition and
+report/gate cleanup are not forcibly interrupted at the deadline. These ceilings
+are not retry counts and are not persistent repair budgets. Existing provider
+retry accounting (default cap five, preserving stricter recorded caps) remains
+in the run; restarting the driver does not reset it. Changing a failure
+fingerprint resets only the consecutive-failure counter, not the total per-step
+retry consumption. Claim construction preserves stricter caps; expired attempts
+consume the same total budget. A verified new work-order step starts its own
+retry bookkeeping; provider output cannot choose that step. A wait does not reserve a
+repair. Every action records safe start/result audit events and every normal
+stop records its typed reason. A process crash can leave a start without a result;
+existing durable provider journal recovery, not an audit replay, decides execution.
+The result omits report bodies, transcripts, private paths and provider metadata.
+
+Single-operation CLI commands remain available. U1 does not add a server watcher,
+new configuration, authority, credentials, provider or publication permission.
+The readonly command stops at an unsupported review/fix continuation. Standard
+code changes use `usage drive` and the existing trusted-local authority,
+validation repair and publication APIs described in `trusted-local-contract.md`.
+No legacy authority receipt or mandatory review is introduced by that scheduler.
+This serial readonly workflow does not establish parallel execution or live
+acceptance. `terminal` alone does not establish publication authority or release
+approval.

@@ -748,10 +748,48 @@ drain, report gate and lifecycle. The host registers the claim under the global
 lock, runs existing dispatch preflight, writes a deterministic attempt journal,
 and promotes it through the existing recovery API with the caller's lock/store.
 It never directly repairs current step, iteration, accepted history or work
-orders. Only the gate advances the steps. These tests cover the gate consumer; the real multistep
-provider runner (#108) and deterministic final-evidence producer (#111) remain
-separate implementation boundaries. They do not prove live provider dispatch,
-formal role-review provenance, or commissioned runtime enforcement.
+orders. Only the gate advances the steps. Those tests cover the gate consumer.
+
+The provider runner also executes the chain's research and review steps through
+the same signed-order, claim, attempt journal, promotion, and report-gate path.
+It resolves the current template's readonly route, role and output schema into a
+runner-owned `step_contract` inside the digest-bound adapter request. The bounded
+prompt includes the selected role and complete output schema (at most 8 KiB for the readonly chain, 16 KiB for the existing standard code-change report),
+without granting file or tool access. Research results keep their closed schema;
+parsed provider/model evidence remains in execution details and the normalized
+sidecar. Both report types retain the existing effective-model policy checks.
+No provider/model override or additional research-to-review context promotion is
+introduced: each step uses the original approved bounded context.
+
+For an approved `readonly_review_chain` run, use the existing commands in order:
+`workflow drain`, `workflow run-provider --fake-provider-mode success`, then
+repeat that pair for review, passing the same `--state-root` and `--run-id` as in
+the examples above. Drain creates each order; run-provider executes only that
+step and the gate advances it. A final drain creates the `final_evidence` work order; the provider
+runner rejects that harness-only step. Two provider successes do not complete
+the run. After that final drain, execute `workflow-frontdoor run-harness-gate --run-id <run-id>` through
+`configure_organization.py`
+with the same state root to generate and validate the deterministic final report.
+Canonical filenames retain the existing `<step>-external-review-report.json`
+suffix even for the research schema.
+
+`test_multistep_provider_runner.py` exercises actual frontdoor entry and both
+runner-produced claims/journals, plus crash recovery without reinvocation,
+contract tampering, unsafe signed orders and invalid producer payloads. The
+adapter tests use an offline fake subprocess, including research JSON in the
+normal CLI stream parser. These fixtures do not prove live provider dispatch,
+human approval custody, formal role-review provenance, or commissioned runtime
+enforcement. Frozen role-definition integration and its projected evidence
+(#110) remain pending on the common accepted ancestry.
+
+Requests without a step contract retain compatibility only for exact
+`single_step_external_review/review`, including old completed-attempt journals
+whose existing frozen-order, model and request bindings still validate. That
+legacy format cannot attest a historical schema digest. Newly issued runner
+requests always carry the contract; a missing contract on a multi-step request
+fails closed with `provider_step_contract_mismatch`. Current template/schema
+drift on contract-bound requests is rejected before dispatch, successful result
+finalization, or completed-journal promotion; old requests are never silently upgraded or reissued.
 
 Workflow-run execution uses an invocation-drain scheduler with a per-state-root
 global advisory lock:
@@ -954,3 +992,40 @@ New runs bind an existing canonical task record; verified completion is appended
 by the host before success is returned. See [Vault task lifecycle](../../../docs/runbooks/vault-task-lifecycle.md)
 for typed scaffolding, bounded evidence references, write failure recovery, and
 the distinction between persistence and Git publication.
+
+### Deterministic readonly final evidence
+
+`python3 scripts/configure_organization.py workflow-frontdoor --state-root <state-root> run-harness-gate --run-id <run-id>`
+executes the queued `readonly_review_chain.final_evidence` step after research
+and review have been accepted. It uses no provider or LLM. The existing approved
+activation, signed orders, snapshots, signed acceptances/transitions, provider
+requests, normalized evidence, transcripts and attempt journals are rechecked.
+Research must have `findings`, review must have `pass`, and both reports must
+still satisfy their schemas and bounded evidence contracts.
+
+The producer creates the canonical final report with deterministic JSON bytes,
+then releases its lock before the report gate independently rechecks the current
+chain and commits `final_evidence_valid`. The request's terminal status is then
+synchronized. A completed previous review lease is recognized only when it
+matches the verified accepted review attempt; live current claims remain blocked.
+
+The CLI accepts the existing principal arguments but no report body, report path,
+model, schema, force or skip overrides. It requires an existing private signing
+key and does not provision or repair credentials. Missing/unsafe keys, unsupported
+workflow/route/schema contracts (including publication gates and code/policy final
+contracts), drift, conflicting reports and lock contention return typed `blocked`
+results with exit status 2. Unsupported gates produce no completion report.
+
+If execution stops after the report is durably created but before gate acceptance,
+rerun the same command: all inputs are checked again and only identical report
+bytes are reused. Partial, different or unsafe files are never overwritten.
+After acceptance, replay returns `duplicate_step_report`; inspect the existing
+run through `workflow-frontdoor task-view` rather than treating replay as a new success.
+
+`test_harness_gate_executor.py` runs the actual #108 runner with offline provider
+results for research and review, followed by this final producer and gate. This
+proves the local readonly chain, not a live external-provider execution, Vault
+writer acknowledgement, PR/merge readiness or installed-runtime acceptance.
+`verify-completion` remains a terminal consumer with its own supported contracts;
+it is not called before producing the final report. Frozen-role integration is
+a separate acceptance surface, not an extra prerequisite for this readonly unit.

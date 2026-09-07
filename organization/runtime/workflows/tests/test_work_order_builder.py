@@ -613,7 +613,7 @@ def test_existing_bounded_routes_remain_unpermitted() -> None:
         assert checked == 21
 
 
-def test_real_readonly_chain_blocks_admission_before_work_order() -> None:
+def test_real_readonly_chain_propose_approve_create_drain() -> None:
     from test_frontdoor_orchestrator import external_review_classification, load_payload, run_frontdoor
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw).resolve()
@@ -625,28 +625,19 @@ def test_real_readonly_chain_blocks_admission_before_work_order() -> None:
             '--prompt', 'Research and independently review bounded evidence',
             '--classification', json.dumps(classification),
             '--ref', 'organization/runtime/workflows/README.md',
-            check=False,
         ))
-        assert proposed['decision'] == 'blocked', proposed
-        assert proposed['request_status'] == 'blocked', proposed
-        assert proposed['activation']['approval_required_reason'] == 'readonly_chain_runtime_unavailable'
-        assert proposed['activation']['next_action'] == 'abort'
-        assert proposed['approval'] is None
-        # No approval challenge is exposed; a direct approval attempt also fails closed.
-        approved = load_payload(run_frontdoor(
-            root, 'approve', '--request-id', 'req-chain',
-            '--human-action-id', 'unavailable-runtime-cannot-be-approved', check=False,
-        ))
-        assert approved['decision'] == 'blocked', approved
-        record = json.loads(Path(proposed['request_path']).read_text())
-        assert record['status'] == 'blocked'
-        assert record['proposal']['approval_required_reason'] == 'readonly_chain_runtime_unavailable'
-        created = load_payload(run_frontdoor(
-            root, 'create-run', '--request-id', 'req-chain', '--run-id', 'run-chain', check=False,
-        ))
-        assert created['decision'] == 'blocked', created
-        assert not list((root / 'runs').glob('*.json'))
-        assert not list((root / 'work-orders').rglob('*.json'))
+        load_payload(run_frontdoor(root, 'approve', '--request-id', 'req-chain',
+                                  '--human-action-id', proposed['approval']['human_action_id']))
+        created = load_payload(run_frontdoor(root, 'create-run', '--request-id', 'req-chain', '--run-id', 'run-chain'))
+        assert created['workflow_run']['current_step'] == 'research'
+        drained = load_payload(run_frontdoor(root, 'drain', '--run-id', 'run-chain', check=False))
+        assert drained['decision'] == 'ok', drained
+        assert drained['workflow_run']['run_state'] == 'step_queued', drained
+        order = json.loads((root / 'work-orders/run-chain/research.json').read_text())
+        assert order['external_provider_allowed'] is True
+        assert order['provider_adapter_id'] == created['workflow_run']['approved_provider_binding']['provider_adapter_id']
+        assert order['intended_model'] == created['workflow_run']['approved_provider_binding']['default_model']
+        assert work_order_builder.validate_against_work_order_schema(order) == []
 
 
 def test_bounded_resolution_instruction_preserves_original_ids() -> None:
@@ -682,7 +673,7 @@ def main() -> None:
         test_readonly_chain_provider_flags_match_existing_schema,
         test_readonly_chain_provider_flag_rejects_contract_drift,
         test_existing_bounded_routes_remain_unpermitted,
-        test_real_readonly_chain_blocks_admission_before_work_order,
+        test_real_readonly_chain_propose_approve_create_drain,
         test_bounded_resolution_instruction_preserves_original_ids,
         test_build_valid_p0_order,
         test_frontend_request_binding_is_all_or_nothing,

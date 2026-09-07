@@ -326,6 +326,18 @@ def handle_usage_run(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]
                                       state_root=Path(args.state_root))
 
 
+def handle_usage_drive(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        authority = trusted_local_executor.load_host_authorization(Path(args.authorization))
+    except trusted_local_executor.TrustedLocalError as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
+    request = read_request_json(frontdoor, args.request) if args.request else None
+    return frontdoor.drive_trusted_local(authorization=authority, state_root=Path(args.state_root),
+        request=request, max_iterations=args.max_iterations, duration_seconds=args.duration_seconds,
+        poll_interval_seconds=args.poll_interval_seconds)
+
+
 def handle_usage_advance(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
     import trusted_local_executor
     try:
@@ -377,6 +389,14 @@ def build_usage_parser(sub: Any) -> None:
     run.add_argument('--authorization', required=True, help='private host-owned authorization file')
     run.add_argument('--state-root', required=True)
     run.set_defaults(handler=handle_usage_run)
+    drive = commands.add_parser('drive', help='run or resume a bounded authorized task through CI and completion')
+    drive.add_argument('--authorization', required=True)
+    drive.add_argument('--state-root', required=True)
+    drive.add_argument('--request', default='', help='initial request; omit to resume the existing execution')
+    drive.add_argument('--max-iterations', type=int, default=32)
+    drive.add_argument('--duration-seconds', type=float, default=300)
+    drive.add_argument('--poll-interval-seconds', type=float, default=5)
+    drive.set_defaults(handler=handle_usage_drive)
     advance = commands.add_parser('advance', help='advance host PR, CI, merge and integrated validation')
     advance.add_argument('--authorization', required=True)
     advance.add_argument('--state-root', required=True)

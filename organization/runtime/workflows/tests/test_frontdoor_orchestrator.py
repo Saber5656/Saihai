@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 sys.path.insert(0, str(__import__("pathlib").Path(sys.argv[1]).parent / "tests"))
 import vault_test_support
-if 'create-run' in sys.argv or 'verify-completion' in sys.argv:
+if any(command in sys.argv for command in ('create-run', 'verify-completion', 'drive-run')):
     vault_test_support.prepare(__import__("pathlib").Path(sys.argv[2]))
 import frontdoor_orchestrator as frontdoor
 frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
@@ -1327,6 +1327,7 @@ def test_concurrent_manual_prepare_writes_canonical_artifacts_once() -> None:
 
 
 def test_drain_allows_edit_capable_code_change_gate() -> None:
+    """Route an edit-capable code-change work order through Luna."""
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         classification = external_review_classification(
@@ -1441,7 +1442,7 @@ def test_drain_allows_edit_capable_code_change_gate() -> None:
         )
         assert_equal(
             work_order["intended_model"],
-            "operator-selected-openai",
+            "gpt-5.6-luna",
             "code change intended model",
         )
         assert work_order["intended_model"] != "claude-sonnet-4-6"
