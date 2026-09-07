@@ -131,6 +131,16 @@ def role_resolution_error(
     }
 
 
+def validate_phase_prerequisites(template: dict[str, Any]) -> list[str]:
+    # Support standalone file loading without depending on caller sys.path.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("saihai_phase_selector", Path(__file__).with_name("workflow_selector.py"))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.validate_phase_prerequisites(template)
+
+
 def validate_template_roles(
     *,
     repo_root: Path = REPO_ROOT,
@@ -222,6 +232,8 @@ def validate_template_roles(
         if not isinstance(steps, list):
             errors.append(source_error(template_path, repo_root, "template_steps_invalid", "steps must be an array"))
             continue
+        for reason in validate_phase_prerequisites(template):
+            errors.append(source_error(template_path, repo_root, reason, "required producer must precede every consumer path"))
         for step_index, step in enumerate(steps):
             if not isinstance(step, dict):
                 errors.append(

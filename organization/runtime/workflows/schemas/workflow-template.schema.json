@@ -273,6 +273,14 @@
               }
             },
             "additionalProperties": false
+          },
+          "requires_prior_steps": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
           }
         },
         "additionalProperties": false

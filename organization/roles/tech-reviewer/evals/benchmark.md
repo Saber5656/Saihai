@@ -35,3 +35,7 @@ Pass.
 | `git diff --check -- skills/tech-reviewer/SKILL.md skills/tech-reviewer/evals/evals.json skills/tech-reviewer/evals/benchmark.md` | pass |
 
 Residual risk: this is a static benchmark. Live reviewer behavior should be checked on the next real Engineering task.
+
+## 2026-09-07 usage-first instruction contract
+
+Deterministic contract assertions compare the previous role text with the revised text: ordinary changes do not wait for a separate QA review, repairs check original finding IDs only, and precommit uses its available tree identity. Old text: 0/3; revised text: 3/3. These are static instruction checks, not live model behavior or model performance measurements. Runtime phase tests separately cover current code template, later/missing producers, bypass paths, malformed and self dependencies. The existing review lifecycle suite confirms original-finding-only progression.
