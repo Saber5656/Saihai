@@ -126,13 +126,13 @@ Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(
         self.assertTrue(json.loads(result.stdout)['original_claim_preserved'])
         self.assertEqual(path.read_bytes(),before)
 
-    def test_three_failed_processes_exhaust_same_stage_budget(self):
-        for _ in range(3):
+    def test_five_same_cause_failures_stop_across_restarts(self):
+        for _ in range(5):
             invocation,path=self.failure();self.reconcile(invocation)
         with self.assertRaisesRegex(intake.IntakeError,'recovery_exhausted:classify'):self.prepare()
-        self.assertEqual(self.count.read_text(),'3')
+        self.assertEqual(self.count.read_text(),'5')
         with self.assertRaisesRegex(intake.IntakeError,'recovery_exhausted:classify'):self.prepare()
-        self.assertEqual(self.count.read_text(),'3')
+        self.assertEqual(self.count.read_text(),'5')
 
 
 if __name__=='__main__':unittest.main()

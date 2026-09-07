@@ -19,10 +19,11 @@ selector remains the only workflow selector. Existing `human_supplied` and
    --requirement-ledger /absolute/ledger.json --authorization /absolute/authority.json
    --state-root /absolute/private-state` (one shell invocation).
 3. The host stores the source, invokes classification and shaping under readonly
-   filesystem policy, and records actual process receipts. Each stage allows at
-   most three invalid-output attempts; recovery exhaustion is an internal block,
-   never an automatic product question. Replaying a persisted stage reuses its
-   output; an uncertain process claim needs reconciliation instead of another
+   filesystem policy, and records actual process receipts. Each call performs at most three new attempts. Five consecutive failures
+   with the same typed cause and measured corrective strategy exhaust that
+   sequence; distinct causes and actual schema/client corrections are separate.
+   A per-call yield is resumable internal work, never a product question.
+   Replaying a valid persisted stage reuses its output; an uncertain process claim needs reconciliation instead of another
    invocation. The configured model is taken from host authority and Max effort
    follows the currently approved active-role policy. There is no model fallback.
 4. The result contains a `work_brief_ref`, prepared request and `host_binding`.
@@ -193,11 +194,36 @@ python3.11 scripts/saihai.py usage reconcile-intake --request /absolute/request.
 
 Then repeat the same `usage prepare` command. Reconciliation preserves the original
 claim and process bytes, records the observed nonzero exit, consumes that original
-stage attempt and continues at the next attempt. The three-attempt budget never
-resets. Successful, still-running, missing/uncertain or differently authorized
+stage attempt and continues in its original strategy epoch. Historical failures
+are retained; the same-cause counter does not reset on restart or a new attempt ID. Successful, still-running, missing/uncertain or differently authorized
 processes cannot use this path. Old claims without an authorization digest require
 matching existing host execution/evidence identity and an unambiguous saved source;
 the reconciliation explicitly records that legacy binding. If multiple source
 revisions match, `--source-digest sha256:...` selects the exact existing source.
 The CLI neither creates authority nor changes model/credentials. Real API success
 still needs an actual provider retry; local fixture validation is not that evidence.
+
+
+## Context-bound scalars and corrective strategy epochs
+
+Shape wire schemas bind host-owned digest, version, selected-unit, safety and
+objective scalars with context-derived singleton enums. The provider emits those
+exact values; the host does not rewrite a wrong response afterward. Canonical
+validation still checks the result. Its field-level diagnostics contain only known
+host field names and fixed error categories, never arbitrary model instructions.
+
+An epoch is derived from the canonical wire schema, provider/decoder behavior,
+prompt expression, and authorized executable/model configuration. File formatting,
+attempt IDs, PIDs, restarting the host and unrelated repository commits do not
+create a new epoch. Genuine schema/client corrections yield a new fingerprint and
+new consecutive sequence; old claims, processes and failed outputs remain intact.
+Unaffected valid classification/shaping outputs are reused after revalidation.
+
+Three new calls bound one prepare invocation. `intake_recovery_yielded` allows the
+same prepare to continue. Five consecutive instances of the same typed cause in
+the same measured strategy return `intake_recovery_exhausted`. Different causes
+are not added together as a lifetime failure count. Provider causes use stable
+error/exit categories rather than volatile request IDs or whole diagnostic bytes.
+Claim uncertainty still requires reconciliation and cannot be bypassed merely by
+changing the schema. Legacy journal rows remain referenced, including failed shape
+copies from before the context-bound schema correction.

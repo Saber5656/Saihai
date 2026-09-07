@@ -22,7 +22,8 @@ import ledger_lifecycle
 
 SCHEMAS = Path(__file__).resolve().parents[1] / 'schemas'
 MAX_BYTES = 256 * 1024
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 3  # Per-call work budget, not lifetime failures.
+MAX_SAME_CAUSE = 5
 REF_FIELDS = {'request_id', 'digest', 'requirements_version', 'selected_unit_id'}
 
 
@@ -67,8 +68,13 @@ def _validate_schema(value: Any, name: str) -> None:
     # Import lazily: the work-order builder also consumes this module.
     import work_order_builder
     schema = json.loads((SCHEMAS / name).read_bytes())
-    if work_order_builder._validate_schema_fragment(value, schema, '$'):
-        raise IntakeError('intake_schema_invalid:' + name)
+    errors = work_order_builder._validate_schema_fragment(value, schema, '$')
+    if errors:
+        import re
+        first = errors[0]
+        match = re.match(r'schema:\$\.([A-Za-z0-9_]+)', first)
+        field = match.group(1) if match and match.group(1) in schema.get('properties', {}) else 'root_or_unknown_field'
+        raise IntakeError('intake_schema_invalid:' + name + ':' + field + ':' + first.rsplit(':', 1)[-1])
     canonical(value)
     def lengths(item: Any) -> None:
         if isinstance(item, str) and (not item.strip() or len(item) > 4096):
@@ -106,8 +112,9 @@ def validate_brief(brief: dict, ledger: dict, classification: dict, source_diges
         'source_prompt_digest': source_digest, 'requirements_digest': scope.digest(ledger),
         'requirements_version': ledger['requirements_version'], 'selected_unit_id': unit['unit_id'],
         'safety_class': workflow_selector.required_safety_class(classification)}
-    if any(brief.get(key) != value for key, value in expected.items()):
-        raise IntakeError('brief_requirement_or_safety_conflict')
+    mismatches = sorted(key for key, value in expected.items() if brief.get(key) != value)
+    if mismatches:
+        raise IntakeError('brief_requirement_or_safety_conflict:' + ','.join(mismatches))
     requirements = {r['requirement_id']: r for r in ledger['requirements']}
     decision_kinds = {'product_requirement', 'material_scope', 'security_authority'}
     if any('requires_decision' in row and row['requires_decision'] not in decision_kinds for row in requirements.values()):
@@ -157,25 +164,90 @@ def _prepare(*, state_root: Path, request_id: str, task_id: str, user_prompt: st
     evidence = []
 
     def call(stage: str, context: dict, validator: Callable[[Any], None]) -> Any:
+        import re
+        schema_path = SCHEMAS / ('typed-classification.schema.json' if stage == 'classify' else 'work-brief.schema.json')
+        strategy = intake_strategy(stage, context, provider, intended_model)
+        epoch = scope.digest(strategy)[7:]
+        prefix = epoch_prefix(source_key, stage, epoch)
+        _save_immutable(_path(state_root, request_id, prefix + '-epoch'),
+            {'source_key': source_key, 'stage': stage, 'epoch': epoch, 'strategy': strategy})
+        directory = Path(state_root) / 'intakes' / request_id
+        namespaces = {source_key + '-' + stage: None}
+        for epoch_path in directory.glob('*-epoch.json'):
+            descriptor = run_store.read_json(epoch_path)
+            if descriptor.get('source_key') != source_key or descriptor.get('stage') != stage:
+                continue
+            prior_epoch = scope.digest(descriptor['strategy'])[7:]
+            expected_prefix = epoch_prefix(source_key, stage, prior_epoch)
+            if descriptor.get('epoch') != prior_epoch or epoch_path.stem != expected_prefix + '-epoch':
+                raise IntakeError('intake_epoch_descriptor_changed')
+            namespaces[expected_prefix] = prior_epoch
+        def match_name(stem):
+            for namespace, prior_epoch in namespaces.items():
+                match = re.fullmatch(re.escape(namespace) + r'-(?P<attempt>[1-9][0-9]*)', stem)
+                if match:
+                    return {'epoch': prior_epoch, 'attempt': int(match['attempt'])}
+            return None
+
+        # Finish only host-reconciled journal links, preserving all old claims.
+        for link_path in sorted(directory.glob('*-reconciled.json')):
+            stem = link_path.stem.removesuffix('-reconciled')
+            match = match_name(stem)
+            if not match or run_store.private_artifact_exists(_path(state_root, request_id, stem)):
+                continue
+            linked = run_store.read_json(link_path)
+            marker, process = _reconciled_failure(state_root, request_id, linked['invocation_id'])
+            if marker['source_key'] != source_key or marker['stage'] != stage:
+                raise IntakeError('intake_reconciliation_source_changed')
+            receipt = failed_provider_receipt(state_root, request_id, linked['invocation_id'], marker, process)
+            row = {'stage': stage, 'attempt': int(match['attempt']), 'receipt': receipt,
+                   'output_digest': scope.digest(None), 'output': None, 'status': 'provider_failed',
+                   'reason': process_failure_cause(process), 'retry_epoch': match['epoch'] or 'legacy'}
+            _save_immutable(_path(state_root, request_id, stem), row)
+
+        history = []
+        active = []
+        for path in sorted(directory.glob('*.json')):
+            match = match_name(path.stem)
+            if not match:
+                continue
+            row = run_store.read_json(path)
+            history.append(row)
+            if match['epoch'] == epoch:
+                active.append((int(match['attempt']), row))
+        accounted = {row.get('receipt', {}).get('invocation_id') for row in history}
+        for claim_path in directory.glob('*-claim.json'):
+            claim = run_store.read_json(claim_path)
+            if (claim.get('source_key') == source_key and claim.get('stage') == stage
+                    and claim.get('invocation_id') not in accounted):
+                raise IntakeError('intake_attempt_requires_reconciliation')
+        # Reuse unaffected successful classification/shaping, without another call.
+        for row in history:
+            if (row.get('status') == 'valid' and row.get('receipt', {}).get('exit') == 0
+                    and row['receipt'].get('intended_model') == intended_model
+                    and row['receipt'].get('effective_model') == intended_model):
+                try:
+                    validator(row['output'])
+                except (IntakeError, scope.ScopeError):
+                    continue
+                evidence.extend(history)
+                return row['output']
+        evidence.extend(history)
+        active.sort(key=lambda item: item[0])
+        if [n for n, _ in active] != list(range(1, len(active) + 1)):
+            raise IntakeError('intake_epoch_journal_gap')
         failure = ''
-        for attempt in range(1, attempts + 1):
-            evidence_path = _path(state_root, request_id, source_key + '-' + stage + '-' + str(attempt))
-            # Diagnostic is a host reason code, never echoed arbitrary model prose.
-            if run_store.private_artifact_exists(evidence_path):
-                previous = run_store.read_json(evidence_path)
-                value, receipt = previous['output'], previous['receipt']
-            elif run_store.private_artifact_exists(_path(state_root, request_id, source_key + '-' + stage + '-' + str(attempt) + '-reconciled')):
-                linked = run_store.read_json(_path(state_root, request_id, source_key + '-' + stage + '-' + str(attempt) + '-reconciled'))
-                marker, process = _reconciled_failure(state_root, request_id, linked['invocation_id'])
-                if marker.get('source_key') != source_key or marker.get('stage') != stage or marker.get('attempt') != attempt:
-                    raise IntakeError('intake_reconciliation_source_changed')
-                value = None
-                receipt = {'invocation_id': linked['invocation_id'], 'evidence_ref': str(_path(state_root, request_id, linked['invocation_id'] + '-process')),
-                    'evidence_digest': scope.digest(process), 'intended_model': marker['intended_model'], 'effective_model': marker['intended_model'],
-                    'reasoning_effort': 'max', 'model_evidence_kind': 'host_configured_exact_cli_model', 'exit': process['exit']}
-            else:
-                value, receipt = provider(stage=stage, context=copy.deepcopy(context), attempt=attempt,
-                    diagnostic=failure, schema_path=SCHEMAS / ('typed-classification.schema.json' if stage == 'classify' else 'work-brief.schema.json'))
+        consecutive = 0
+        for _, row in active:
+            cause = row.get('reason', '')
+            consecutive = consecutive + 1 if cause == failure else 1
+            failure = cause
+        if consecutive >= MAX_SAME_CAUSE:
+            raise IntakeError('intake_recovery_exhausted:' + stage + ':' + failure)
+        for attempt in range(len(active) + 1, len(active) + attempts + 1):
+            evidence_path = _path(state_root, request_id, prefix + '-' + str(attempt))
+            value, receipt = provider(stage=stage, context=copy.deepcopy(context), attempt=attempt,
+                diagnostic=failure, schema_path=schema_path)
             if (not isinstance(receipt, dict) or receipt.get('intended_model') != intended_model
                     or receipt.get('effective_model') != intended_model
                     or not isinstance(receipt.get('invocation_id'), str) or not receipt['invocation_id']
@@ -186,29 +258,34 @@ def _prepare(*, state_root: Path, request_id: str, task_id: str, user_prompt: st
                 if (marker['intended_model'] != intended_model or marker['task_id'] != task_id
                         or receipt.get('evidence_digest') != scope.digest(process) or receipt['exit'] != process['exit']):
                     raise IntakeError('intake_failed_receipt_mismatch')
-                failure = 'intake_provider_process_failed'
-                row = {'stage': stage, 'attempt': attempt, 'receipt': receipt, 'output_digest': scope.digest(None),
-                       'output': None, 'status': 'provider_failed', 'reason': failure}
-                evidence.append(row)
-                _save_immutable(evidence_path, row)
-                continue
-            try:
-                canonical(value)
-            except IntakeError:
+                cause = process_failure_cause(process)
                 value = None
-            row = {'stage': stage, 'attempt': attempt, 'receipt': receipt, 'output_digest': scope.digest(value), 'output': value}
-            try:
-                validator(value)
-            except (IntakeError, scope.ScopeError) as exc:
-                failure = str(exc).split(':', 1)[0]
-                row.update(status='invalid', reason=failure)
+                status = 'provider_failed'
             else:
-                row['status'] = 'valid'
+                try:
+                    canonical(value)
+                except IntakeError:
+                    value = None
+                try:
+                    validator(value)
+                except (IntakeError, scope.ScopeError) as exc:
+                    cause = str(exc)  # Fixed host field/category, never model prose.
+                    status = 'invalid'
+                else:
+                    cause, status = '', 'valid'
+            consecutive = consecutive + 1 if cause and cause == failure else 1 if cause else 0
+            failure = cause
+            row = {'stage': stage, 'attempt': attempt, 'receipt': receipt, 'output_digest': scope.digest(value),
+                   'output': value, 'status': status, 'retry_epoch': epoch, 'consecutive_same_cause': consecutive}
+            if cause:
+                row['reason'] = cause
             evidence.append(row)
             _save_immutable(evidence_path, row)
-            if row['status'] == 'valid':
+            if status == 'valid':
                 return value
-        raise IntakeError('intake_recovery_exhausted:' + stage)
+            if consecutive >= MAX_SAME_CAUSE:
+                raise IntakeError('intake_recovery_exhausted:' + stage + ':' + cause)
+        raise IntakeError('intake_recovery_yielded:' + stage)
 
     def classified(value: Any) -> None:
         _validate_schema(value, 'typed-classification.schema.json')
@@ -231,6 +308,8 @@ def _prepare(*, state_root: Path, request_id: str, task_id: str, user_prompt: st
         'requirements_digest': scope.digest(ledger), 'source_prompt_digest': source_digest,
         'selected_unit': unit, 'safety_class': workflow_selector.required_safety_class(classification)},
         lambda value: validate_brief(value, ledger, classification, source_digest))
+    evidence.sort(key=lambda row: (0 if row['stage'] == 'classify' else 1,
+        '' if row.get('retry_epoch', 'legacy') == 'legacy' else row['retry_epoch'], row['attempt']))
     artifact = {'version': '1', 'task_id': task_id, 'request_id': request_id,
         'source_kind': source_kind, 'source_prompt_digest': source_digest,
         'classification': classification, 'brief': brief, 'requirement_ledger': copy.deepcopy(ledger),
@@ -320,10 +399,68 @@ def provider_schema(schema: dict) -> dict:
                 if 'enum' in child and None not in child['enum']:
                     child['enum'].append(None)
             result['properties'][key] = child
-        result['required'] = list(result['properties'])
+        result['required'] = sorted(result['properties'])
     elif result['type'] == 'array':
         result['items'] = provider_schema(result['items'])
     return result
+
+
+def bound_provider_schema(stage: str, context: dict, schema: dict) -> dict:
+    wire = provider_schema(schema)
+    bindings = {'classification_version': '1', 'classification_source': 'bounded_classifier_step'} if stage == 'classify' else {
+        'brief_version': '1', 'objective': context['selected_unit']['title'],
+        'source_prompt_digest': context['source_prompt_digest'], 'requirements_digest': context['requirements_digest'],
+        'requirements_version': context['source']['ledger']['requirements_version'],
+        'selected_unit_id': context['selected_unit']['unit_id'], 'safety_class': context['safety_class']}
+    for key, value in bindings.items():
+        wire['properties'][key]['enum'] = [value]
+    return wire
+
+
+def epoch_prefix(source_key: str, stage: str, epoch: str) -> str:
+    return scope.digest({'source': source_key, 'stage': stage, 'epoch': epoch})[7:] + '-' + stage
+
+
+def intake_strategy(stage: str, context: dict, provider: Any, model: str) -> dict:
+    import ast
+    import inspect
+    import textwrap
+    name = 'typed-classification.schema.json' if stage == 'classify' else 'work-brief.schema.json'
+    wire = bound_provider_schema(stage, context, json.loads((SCHEMAS / name).read_bytes()))
+    # Scope this fingerprint to actual provider/decoder behavior. Retry IDs,
+    # journaling code, process IDs and unrelated repository HEADs are excluded.
+    behavior = [ast.dump(ast.parse(textwrap.dedent(inspect.getsource(fn))), include_attributes=False)
+                for fn in (provider_schema, bound_provider_schema, decode_provider_value)]
+    method = ast.parse(textwrap.dedent(inspect.getsource(CodexIntakeProvider.__call__)))
+    prompt = next(n for n in ast.walk(method) if isinstance(n, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == 'prompt' for t in n.targets))
+    authority = getattr(provider, 'authorization', None)
+    return {'wire_schema_digest': scope.digest(wire), 'behavior_digest': scope.digest(behavior),
+            'prompt_digest': scope.digest(ast.dump(prompt, include_attributes=False)),
+            'model': model, 'executable_digest': getattr(authority, 'executable_digest', 'host_callback'),
+            'reasoning_effort': 'max'}
+
+
+def process_failure_cause(process: dict) -> str:
+    import re
+    import hashlib
+    diagnostic = ''
+    if process.get('diagnostic_path'):
+        raw = run_store.read_bytes(Path(process['diagnostic_path']))
+        if 'sha256:' + hashlib.sha256(raw).hexdigest() != process.get('diagnostic_digest'):
+            raise IntakeError('intake_diagnostic_digest_mismatch')
+        value = json.loads(raw)
+        diagnostic = value.get('stdout_tail', '') + value.get('stderr_tail', '')
+    codes = r'invalid_json_schema|invalid_request_error|rate_limit_exceeded|insufficient_quota|model_not_found|authentication_error|server_error'
+    found = re.search(codes, diagnostic)
+    return 'intake_provider_process_failed:' + (found.group() if found else 'timeout' if process.get('timed_out') else 'exit_' + str(process['exit']))
+
+
+def failed_provider_receipt(state_root: Path, request_id: str, invocation: str, marker: dict, process: dict) -> dict:
+    return {'invocation_id': invocation, 'evidence_ref': str(_path(state_root, request_id, invocation + '-process')),
+            'evidence_digest': scope.digest(process), 'intended_model': marker['intended_model'],
+            'effective_model': marker['intended_model'], 'reasoning_effort': 'max',
+            'model_evidence_kind': 'host_configured_exact_cli_model', 'exit': process['exit']}
 
 
 def decode_provider_value(value: Any, schema: dict) -> Any:
@@ -357,7 +494,7 @@ def reconcile_failed_attempt(*, state_root: Path, request: dict, authorization: 
     """Host-only acknowledgement of one observed failed readonly invocation.
 
     Never delete a claim, turn failure into success, retry an uncertain/successful
-    process, change model/authority or reset the existing three-attempt budget.
+    process, change model/authority or reset the same-cause sequence merely by restarting.
     """
     import re
     import trusted_local_executor as trusted
@@ -373,7 +510,7 @@ def reconcile_failed_attempt(*, state_root: Path, request: dict, authorization: 
         process = run_store.read_json(_path(root, request_id, invocation_id + '-process'))
         material = scope.digest(trusted._authorization_material(authorization))
         if (claim.get('invocation_id') != invocation_id or claim.get('stage') not in {'classify', 'shape'}
-                or type(claim.get('attempt')) is not int or not 1 <= claim['attempt'] <= MAX_ATTEMPTS
+                or type(claim.get('attempt')) is not int or claim['attempt'] < 1
                 or type(process.get('exit')) is not int or process['exit'] == 0
                 or not process.get('ended_at_epoch') or not process.get('process_start_token')
                 or process.get('execution_id') != authorization.publication.execution_id
@@ -402,7 +539,8 @@ def reconcile_failed_attempt(*, state_root: Path, request: dict, authorization: 
             'legacy_claim': 'authorization_digest' not in claim, 'budget_reset': False}
         _save_immutable(_path(root, request_id, invocation_id + '-reconcile'), marker)
         _reconciled_failure(root, request_id, invocation_id)
-        linked_name = source_key + '-' + claim['stage'] + '-' + str(claim['attempt']) + '-reconciled'
+        namespace = epoch_prefix(source_key, claim['stage'], claim['retry_epoch']) if claim.get('retry_epoch') else source_key + '-' + claim['stage']
+        linked_name = namespace + '-' + str(claim['attempt']) + '-reconciled'
         _save_immutable(_path(root, request_id, linked_name), {'invocation_id': invocation_id})
         return dict(marker, next_action='retry_same_prepare_request', original_claim_preserved=True)
 
@@ -439,7 +577,9 @@ class CodexIntakeProvider:
         # Recheck executable/model/scope identity immediately before each call.
         request = {key: getattr(auth.publication, key) for key in ('task_id', 'request_id', 'run_id', 'execution_id')}
         trusted._authorize(dict(request, instruction=self.expected_prompt), auth)
-        invocation = scope.digest({'stage': stage, 'context': context, 'attempt': attempt})[7:]
+        strategy = intake_strategy(stage, context, self, auth.model)
+        epoch = scope.digest(strategy)[7:]
+        invocation = scope.digest({'stage': stage, 'context': context, 'attempt': attempt, 'retry_epoch': epoch})[7:]
         claim_path = _path(self.state_root, self.request_id, invocation + '-claim')
         if run_store.private_artifact_exists(claim_path):
             reconcile_path = _path(self.state_root, self.request_id, invocation + '-reconcile')
@@ -452,11 +592,12 @@ class CodexIntakeProvider:
                 'evidence_digest': scope.digest(process), 'intended_model': auth.model, 'effective_model': auth.model,
                 'reasoning_effort': 'max', 'model_evidence_kind': 'host_configured_exact_cli_model', 'exit': process['exit']}
         canonical_schema = json.loads(schema_path.read_bytes())
-        wire_schema = provider_schema(canonical_schema)
+        wire_schema = bound_provider_schema(stage, context, canonical_schema)
         wire_path = _path(self.state_root, self.request_id, invocation + '-schema')
         _save_immutable(claim_path, {'invocation_id': invocation, 'stage': stage, 'attempt': attempt,
             'authorization_digest': scope.digest(trusted._authorization_material(auth)),
-            'schema_digest': scope.digest(wire_schema), 'source_key': scope.digest(context['source'])[7:]})
+            'schema_digest': scope.digest(wire_schema), 'source_key': scope.digest(context['source'])[7:],
+            'retry_epoch': epoch, 'strategy': strategy})
         _save_immutable(wire_path, wire_schema)
         with tempfile.TemporaryDirectory(prefix='intake-', dir=self.state_root) as scratch_name:
             scratch = Path(scratch_name)
