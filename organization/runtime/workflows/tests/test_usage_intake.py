@@ -109,7 +109,9 @@ class UsageIntakeTests(unittest.TestCase):
     def test_legacy_authority_material_does_not_change_existing_digests(self):
         material=local._authorization_material(self.fixture.auth)
         self.assertNotIn('intake_digest',material)
-        self.assertEqual(publication.digest(material),publication.digest({k:v for k,v in dataclasses.asdict(self.fixture.auth).items() if k not in {'intake_digest','validation_profile'}}))
+        legacy = {k:v for k,v in dataclasses.asdict(self.fixture.auth).items() if k not in {'intake_digest','validation_profile'}}
+        legacy['publication'].pop('expected_assignees')
+        self.assertEqual(publication.digest(material),publication.digest(legacy))
         for profile in (None, {'path':'/host/plan','sha256':'a'*64}):
             for intake in ('', 'sha256:'+'b'*64):
                 auth=dataclasses.replace(self.fixture.auth,validation_profile=profile,intake_digest=intake)

@@ -21,6 +21,8 @@ class FakeGitHub(adapter.Commands):
         self.stale = False
         self.merge_head = None
         self.failure = False
+        self.assignees = []
+        self.assignment_failure = False
 
     def run(self, args, *, cwd, env=None):
         self.calls.append(args)
@@ -32,6 +34,9 @@ class FakeGitHub(adapter.Commands):
         if args[1:3] == ['pr', 'list']:
             value = [{'number': 9, 'headRefOid': head}] if self.pr_exists else []
         elif args[1:3] == ['pr', 'create']:
+            if self.assignment_failure:
+                raise adapter.PublicationError('command_failed:gh')
+            self.assignees = [args[i+1] for i, arg in enumerate(args) if arg == '--assignee']
             self.pr_exists = True
             return b'https://github.com/example/repo/pull/9'
         elif args[1:3] == ['pr', 'checks']:
@@ -50,6 +55,7 @@ class FakeGitHub(adapter.Commands):
             value = [[]]
         else:
             value = {'state': 'open', 'merged': False, 'mergeable': True,
+                     'assignees': [{'login': name} for name in self.assignees],
                      'head': {'sha': '0' * 40 if self.stale else head, 'repo': {'full_name': 'example/repo'}},
                      'base': {'sha': 'b' * 40, 'ref': 'main', 'repo': {'full_name': 'example/repo'}}}
         return json.dumps(value).encode()
@@ -123,6 +129,50 @@ class HostPublicationTests(unittest.TestCase):
 
     def publish(self):
         return adapter.publish(self.report, self.auth, self.root / 'state', commands=self.commands)
+
+    def assigned(self):
+        self.auth = dataclasses.replace(self.auth, expected_assignees=('Saber5656',))
+        self.report['approved_scope_digest'] = self.auth.scope_digest
+
+    def test_exact_assignee_create_resume_and_completed_readback(self):
+        self.assigned(); self.publish()
+        self.assertEqual(self.commands.assignees, ['Saber5656'])
+        self.commands.success = True
+        self.assertEqual(self.publish()['status'], 'merged')
+        self.assertEqual(self.publish()['status'], 'merged')
+        self.assertEqual(sum(c[:3] == ['gh','pr','create'] for c in self.commands.calls), 1)
+        self.commands.assignees = []
+        with self.assertRaisesRegex(adapter.PublicationError, 'assignee_set_mismatch'): self.publish()
+
+    def test_reused_pr_extra_or_wrong_assignee_cannot_merge(self):
+        self.assigned(); self.commands.pr_exists = True; self.commands.success = True
+        for names in [('other',), ('Saber5656','other')]:
+            self.commands.assignees = list(names)
+            with self.assertRaisesRegex(adapter.PublicationError, 'assignee_set_mismatch'): self.publish()
+        self.assertIsNone(self.commands.merge_head)
+        self.assertFalse(any(c[:3] == ['gh','pr','create'] for c in self.commands.calls))
+        self.commands.assignees = ['saber5656']
+        self.assertEqual(self.publish()['status'], 'merged')
+
+    def test_assignment_failure_preserves_uncertain_without_duplicate_create(self):
+        self.assigned(); self.commands.assignment_failure = True
+        with self.assertRaisesRegex(adapter.PublicationError, 'command_failed'): self.publish()
+        self.assertEqual(self.publish()['status'], 'pr_uncertain')
+        self.assertIsNone(self.commands.merge_head)
+        self.assertEqual(sum(c[:3] == ['gh','pr','create'] for c in self.commands.calls), 1)
+
+    def test_optional_assignee_digest_compatibility_and_invalid_host_input(self):
+        old = dataclasses.asdict(self.auth); old.pop('expected_assignees')
+        self.assertEqual(adapter.digest(old), self.auth.scope_digest)
+        import trusted_local_executor as local
+        auth = local.TrustedLocalAuthorization(self.auth, '/unused', 'unused', '/unused', 'model', (('true',),))
+        expected = dataclasses.asdict(auth); expected['publication'].pop('expected_assignees')
+        expected.pop('validation_profile'); expected.pop('intake_digest')
+        self.assertEqual(local.authorization_payload(auth), expected)
+        for names in [('@me',), ('Saber5656','saber5656'), 'Saber5656', ('bad,other',)]:
+            with self.assertRaisesRegex(adapter.PublicationError, 'expected_assignees_invalid'):
+                adapter.validate_report(self.report, dataclasses.replace(self.auth, expected_assignees=names))
+        self.assertEqual(self.commands.calls, [])
 
     def test_commit_pr_pending_resume_head_pinned_merge(self):
         first = self.publish()

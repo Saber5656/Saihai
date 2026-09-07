@@ -45,10 +45,41 @@ class HostAuthorization:
     destination: str = 'main'
     risk_kind: str = 'ordinary'
     scope_review_receipt: str | None = None
+    expected_assignees: tuple[str, ...] | None = None
 
     @property
     def scope_digest(self) -> str:
-        return digest(dataclasses.asdict(self))
+        return digest(authorization_payload(self))
+
+
+def authorization_payload(authorization: HostAuthorization) -> dict:
+    value = dataclasses.asdict(authorization)
+    if authorization.expected_assignees is None:
+        value.pop('expected_assignees')  # Preserve historical authority/report/state digests.
+    return value
+
+
+def _assignee_contract(authorization: HostAuthorization) -> None:
+    names = authorization.expected_assignees
+    if names is None:
+        return  # Explicit compatibility: old authority makes no exact-assignee claim.
+    if (not isinstance(names, (tuple, list)) or len(names) > 10
+            or any(not isinstance(n, str) or not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?', n) for n in names)
+            or len({n.lower() for n in names}) != len(names)):
+        raise PublicationError('expected_assignees_invalid')
+
+
+def _verify_assignees(pr: dict, authorization: HostAuthorization) -> None:
+    if authorization.expected_assignees is None:
+        return
+    rows = pr.get('assignees')
+    if (not isinstance(rows, list) or any(not isinstance(row, dict)
+            or not isinstance(row.get('login'), str) for row in rows)):
+        raise PublicationError('assignee_readback_unavailable')
+    actual = [row['login'].lower() for row in rows]
+    if (len(actual) != len(set(actual))
+            or set(actual) != {n.lower() for n in authorization.expected_assignees}):
+        raise PublicationError('assignee_set_mismatch')
 
 
 class Commands:
@@ -128,6 +159,7 @@ def committed_snapshot(root: Path, base: str, *, commands: Commands | None = Non
 def validate_report(report: dict, authorization: HostAuthorization) -> Path:
     if not isinstance(authorization, HostAuthorization):
         raise PublicationError('trusted_host_authorization_required')
+    _assignee_contract(authorization)
     if report.get('version') != '1' or report.get('profile') != 'trusted_local_v1' or report.get('publication_allowed') is not False:
         raise PublicationError('worker_publication_forbidden')
     if authorization.destination != 'main' or not re.fullmatch(r'[^/\s]+/[^/\s]+', authorization.repository):
@@ -241,7 +273,7 @@ def publish(report: dict, authorization: HostAuthorization, state_root: Path,
     """
     cmd = commands or Commands()
     root = validate_report(report, authorization)
-    key = digest({'report': report, 'authorization': dataclasses.asdict(authorization)})[7:]
+    key = digest({'report': report, 'authorization': authorization_payload(authorization)})[7:]
     state_root = Path(state_root)
     state_root.mkdir(parents=True, exist_ok=True)
     # Lock only this execution. The host serializes distinct publications to a repo.
@@ -253,6 +285,8 @@ def publish(report: dict, authorization: HostAuthorization, state_root: Path,
         if state.get('binding') != key:
             raise PublicationError('publication_state_binding_mismatch')
         if state['status'] == 'merged':
+            if authorization.expected_assignees is not None:
+                _verify_assignees(_json(cmd, root, 'api', f'repos/{authorization.repository}/pulls/{state["pr"]}'), authorization)
             return state
         if _git(cmd, root, 'branch', '--show-current').decode().strip() != authorization.branch:
             raise PublicationError('branch_changed')
@@ -281,6 +315,7 @@ def publish(report: dict, authorization: HostAuthorization, state_root: Path,
                 return state
         if state['status'] == 'merge_uncertain':
             observed = _json(cmd, root, 'api', f'repos/{authorization.repository}/pulls/{state["pr"]}')
+            _verify_assignees(observed, authorization)
             if (observed.get('merged') and observed['head']['sha'] == state['head']
                     and observed['base']['ref'] == authorization.destination
                     and re.fullmatch(r'[a-f0-9]{40}', observed.get('merge_commit_sha', ''))):
@@ -327,7 +362,8 @@ def publish(report: dict, authorization: HostAuthorization, state_root: Path,
                 state['status'] = 'pr_uncertain'; _save(path, state)
                 cmd.run(['gh', 'pr', 'create', '--repo', authorization.repository, '--base', authorization.destination,
                          '--head', authorization.branch, '--title', f'[{authorization.task_id}] Validated task changes',
-                         '--body', f'Host publication for task {authorization.task_id}. Validation tree: {report["tree"]}.'], cwd=root)
+                         '--body', f'Host publication for task {authorization.task_id}. Validation tree: {report["tree"]}.']
+                        + [arg for name in (authorization.expected_assignees or ()) for arg in ('--assignee', name)], cwd=root)
                 prs = _json(cmd, root, 'pr', 'list', '--repo', authorization.repository, '--head', authorization.branch,
                             '--base', authorization.destination, '--state', 'open', '--json', 'number,headRefOid')
             if len(prs) != 1 or prs[0]['headRefOid'] != head:
@@ -337,6 +373,7 @@ def publish(report: dict, authorization: HostAuthorization, state_root: Path,
         if (pr['head']['sha'] != head or pr['head']['repo']['full_name'].lower() != authorization.repository.lower()
                 or pr['base']['ref'] != authorization.destination or pr['base']['repo']['full_name'].lower() != authorization.repository.lower()):
             raise PublicationError('pull_request_identity_changed')
+        _verify_assignees(pr, authorization)
         if pr.get('merged'):
             state.update(status='merged', merge_commit=pr['merge_commit_sha']); _save(path, state); return state
         if pr.get('mergeable') is False:
@@ -374,6 +411,7 @@ def publish(report: dict, authorization: HostAuthorization, state_root: Path,
         if any(latest.get(name, (-1, 'missing'))[1] != 'success' for name in required) or any(row['state'] != 'SUCCESS' for row in native):
             state.update(status='ci_pending'); _save(path, state); return state
         fresh = _json(cmd, root, 'api', f'repos/{authorization.repository}/pulls/{state["pr"]}')
+        _verify_assignees(fresh, authorization)
         if fresh['head']['sha'] != head or fresh['base']['sha'] != pr['base']['sha']:
             raise PublicationError('merge_identity_changed')
         state.update(status='merge_uncertain', required_checks=sorted(required), base=pr['base']['sha']); _save(path, state)
