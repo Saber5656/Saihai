@@ -703,9 +703,44 @@ def activation_envelope(
     return envelope
 
 
+def validate_phase_prerequisites(template: dict[str, Any]) -> list[str]:
+    """A prior producer must dominate its consumer, including branches/retries."""
+    steps = template.get("steps")
+    if not isinstance(steps, list) or not all(isinstance(s, dict) for s in steps):
+        return ["phase_steps_invalid"]
+    if not any("requires_prior_steps" in s for s in steps):
+        return []
+    nodes = {s.get("id"): s for s in steps if isinstance(s.get("id"), str)}
+    initial = template.get("initial_step")
+    if initial not in nodes or len(nodes) != len(steps):
+        return ["phase_step_identity_invalid"]
+    edges = {k: {t.get("to") for t in s.get("transitions", []) if isinstance(t, dict) and isinstance(t.get("to"), str) and t.get("to") in nodes}
+             for k, s in nodes.items()}
+    def reachable_without(excluded: str | None) -> set[str]:
+        seen = set()
+        pending = [initial]
+        while pending:
+            current = pending.pop()
+            if current == excluded or current in seen:
+                continue
+            seen.add(current)
+            pending.extend(edges[current] - seen)
+        return seen
+    reachable = reachable_without(None)
+    errors = []
+    for consumer, step in nodes.items():
+        requirements = step.get("requires_prior_steps", [])
+        if not isinstance(requirements, list) or any(not isinstance(v, str) for v in requirements) or len(set(requirements)) != len(requirements):
+            errors.append(f"phase_prerequisites_invalid:{consumer}")
+            continue
+        for producer in requirements:
+            if producer not in nodes or producer == consumer or consumer not in reachable or consumer in reachable_without(producer):
+                errors.append(f"phase_prerequisite_unreachable:{consumer}:{producer}")
+    return errors
+
+
 def validate_template(template: dict[str, Any], path: Path, registry: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    from template_role_validator import validate_phase_prerequisites
     errors.extend(validate_phase_prerequisites(template))
     required = [
         "workflow_template_version",
