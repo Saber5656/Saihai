@@ -47,6 +47,7 @@ def _load_frontdoor() -> Any:
     _load_module(SCRIPT_DIR / "run_store.py", "saihai_harness_run_store", public_name="run_store")
     if (SCRIPT_DIR / "run_lock.py").exists():
         _load_module(SCRIPT_DIR / "run_lock.py", "saihai_harness_run_lock", public_name="run_lock")
+    _load_module(SCRIPT_DIR / "review_lifecycle.py", "saihai_harness_review_lifecycle", public_name="review_lifecycle")
     if (SCRIPT_DIR / "run_lifecycle.py").exists():
         _load_module(SCRIPT_DIR / "run_lifecycle.py", "saihai_harness_run_lifecycle", public_name="run_lifecycle")
     _load_module(SCRIPT_DIR / "workflow_selector.py", "saihai_harness_workflow_selector", public_name="workflow_selector")
@@ -77,7 +78,7 @@ class OrchestratorHarness:
     """Drives a full orchestrator flow against a throwaway state root."""
 
     def __init__(self, state_root: Path, repo_root: Path | None = None):
-        self.state_root = Path(state_root)
+        self.state_root = Path(state_root).resolve()
         self.repo_root = Path(repo_root or REPO_ROOT)
         self.frontdoor = _load_frontdoor()
         self.optional_modules = {
@@ -124,7 +125,7 @@ class OrchestratorHarness:
 
     def propose(
         self,
-        task_id: str = "TSK-e2e",
+        task_id: str = "TSK-PENDING-e2e",
         request_id: str = "req-e2e",
         *,
         prompt: str = "Run bounded offline external review.",
@@ -173,6 +174,8 @@ class OrchestratorHarness:
         return response
 
     def create_run(self, request_id: str, run_id: str = "") -> dict[str, Any]:
+        import vault_test_support
+        vault_test_support.prepare(self.state_root)
         response = self.frontdoor.create_run(
             state_root=self.state_root,
             request_id=request_id,
@@ -269,6 +272,11 @@ class OrchestratorHarness:
         }
         report.update(overrides)
         report_path.write_text(json.dumps(report, ensure_ascii=False) + "\n", encoding="utf-8")
+        for artifact in (report_path, evidence_path, transcript_path):
+            artifact.chmod(0o600)
+            for parent in artifact.parents:
+                if parent == self.state_root: break
+                parent.chmod(0o700)
         return report_path
 
     def validate_report(self, run_id: str) -> dict[str, Any]:

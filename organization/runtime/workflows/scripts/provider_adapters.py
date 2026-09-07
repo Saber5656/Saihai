@@ -19,6 +19,8 @@ from typing import Any, Callable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_CODEX_MODEL = "gpt-5.6-luna"
+DEFAULT_CODEX_REASONING_EFFORT = "max"
 DEFAULT_TIMEOUT_SECONDS = 1_800
 MAX_TIMEOUT_SECONDS = 86_400
 MAX_CONTEXT_BYTES = 1_048_576
@@ -119,20 +121,46 @@ def bounded_prompt(request: dict[str, Any]) -> str:
     instruction = request.get("instruction") or ""
     if not isinstance(instruction, str) or len(instruction.encode("utf-8")) > MAX_INSTRUCTION_BYTES:
         raise AdapterConfigurationError("instruction_too_large")
+    contract = request.get("step_contract")
+    if contract is None and (request.get("workflow_id"), request.get("step_id")) == (
+            "single_step_external_review", "review"):
+        # Compatibility for legacy direct adapter callers, never multi-step requests.
+        contract_lines = ["Return only one External Review Report JSON object matching",
+                          "organization/runtime/workflows/schemas/external-review-report.schema.json."]
+        role = "reviewer"
+        evidence_lines = ["provider_evidence.evidence_path: runner-bound",
+                          "provider_evidence.transcript_path: runner-bound"]
+    else:
+        if not isinstance(contract, dict):
+            raise AdapterConfigurationError("step_contract_missing")
+        schema = contract.get("report_schema")
+        schema_digest = contract.get("report_schema_sha256")
+        schema_limit = 16384 if contract.get("output_contract") == "code_change_report" else 8192
+        if (not isinstance(schema, str) or len(schema.encode("utf-8")) > schema_limit
+                or schema_digest != "sha256:" + hashlib.sha256(schema.encode("utf-8")).hexdigest()):
+            raise AdapterConfigurationError("report_schema_digest_mismatch")
+        role = contract.get("role")
+        if (not isinstance(role, str) or not role or len(role) > 128
+                or contract.get("output_contract") not in {"research_report", "external_review_report", "code_change_report"}):
+            raise AdapterConfigurationError("unsupported_step_contract")
+        contract_lines = [f"Return only one {contract['output_contract']} JSON object.",
+                          f"Schema: {contract['report_schema_path']}",
+                          "The complete output schema is embedded below; do not read files.", schema]
+        evidence_lines = ([] if contract["output_contract"] == "research_report" else
+                          ["provider_evidence.evidence_path: runner-bound",
+                           "provider_evidence.transcript_path: runner-bound"])
     prompt = "\n".join(
         [
-            "You are a tool-disabled reviewer for one approved readonly work order.",
+            f"You are a tool-disabled {role} for one approved readonly work order.",
             "Do not call tools, read additional files, edit files, execute commands, or request broader context.",
             "Use only the digest-verified context snapshot embedded below.",
-            "Return only one External Review Report JSON object matching",
-            "organization/runtime/workflows/schemas/external-review-report.schema.json.",
+            *contract_lines,
             "Do not wrap the JSON in prose or markdown fences.",
             f"request_id: {request['request_id']}",
             f"run_id: {request['run_id']}",
             f"workflow_id: {request['workflow_id']}",
             f"step_id: {request['step_id']}",
-            "provider_evidence.evidence_path: runner-bound",
-            "provider_evidence.transcript_path: runner-bound",
+            *evidence_lines,
             "Instruction:",
             instruction,
             "BEGIN APPROVED CONTEXT SNAPSHOT",
@@ -694,6 +722,7 @@ def invoke_codex_exec(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     heartbeat: Callable[[], bool | None] | None = None,
 ) -> dict[str, Any]:
+    """Invoke the confined Codex adapter with the Luna model and max effort pinned."""
     if not _valid_timeout(timeout_seconds):
         return _configuration_failure("invalid_timeout")
     try:
@@ -712,6 +741,8 @@ def invoke_codex_exec(
         "exec",
         "--ephemeral",
         "--json",
+        "--model",
+        DEFAULT_CODEX_MODEL,
         "--sandbox",
         "read-only",
         "--ignore-user-config",
@@ -720,6 +751,8 @@ def invoke_codex_exec(
         'approval_policy="never"',
         "--config",
         'shell_environment_policy.inherit="none"',
+        "--config",
+        f'model_reasoning_effort="{DEFAULT_CODEX_REASONING_EFFORT}"',
         "--skip-git-repo-check",
         "-C",
         ".",

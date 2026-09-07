@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -74,99 +75,12 @@ def validate_artifact_id(value: str, label: str) -> str:
     return safe_value
 
 
-def _validated_private_directory(
-    path: Path,
-    *,
-    create_missing: bool,
-) -> Path | None:
-    """Validate a private directory chain, optionally creating missing components."""
-
-    absolute = path.expanduser()
-    if not absolute.is_absolute():
-        absolute = absolute.absolute()
-    resolved = absolute.resolve(strict=False)
-    if resolved != absolute:
-        macos_var_alias = (
-            str(absolute).startswith("/var/")
-            and str(resolved) == "/private" + str(absolute)
-        )
-        if not macos_var_alias:
-            raise RunStoreError("io_error", ["private directory symlink redirection forbidden"])
-        absolute = resolved
-    components: list[Path] = []
-    current = Path(absolute.anchor)
-    components.append(current)
-    for part in absolute.parts[1:]:
-        current = current / part
-        components.append(current)
-
-    private_subtree = False
-    old_umask = os.umask(0o077)
-    try:
-        for component in components:
-            created = False
-            try:
-                metadata = component.lstat()
-            except FileNotFoundError:
-                if not create_missing:
-                    return None
-                try:
-                    component.mkdir(mode=0o700)
-                    created = True
-                    metadata = component.lstat()
-                except OSError as exc:
-                    raise RunStoreError("io_error", [str(exc)]) from exc
-            except OSError as exc:
-                raise RunStoreError("io_error", [str(exc)]) from exc
-            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-                raise RunStoreError("io_error", ["private directory chain contains non-directory"])
-            mode = stat.S_IMODE(metadata.st_mode)
-            if created or (metadata.st_uid == os.getuid() and mode == 0o700):
-                private_subtree = True
-            if private_subtree:
-                if metadata.st_uid != os.getuid() or mode != 0o700:
-                    raise RunStoreError(
-                        "io_error",
-                        [f"owned state directory chain must be exact mode 0700:{component.name}"],
-                    )
-            elif metadata.st_mode & 0o022 and not (
-                metadata.st_uid == 0 and mode & stat.S_ISVTX
-            ):
-                raise RunStoreError(
-                    "io_error",
-                    ["private directory ancestor is writable by another principal"],
-                )
-    finally:
-        os.umask(old_umask)
-
-    try:
-        metadata = absolute.lstat()
-    except OSError as exc:
-        raise RunStoreError("io_error", [str(exc)]) from exc
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_ISLNK(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-    ):
-        raise RunStoreError("io_error", ["artifact parent must be owned mode 0700"])
-    return absolute
-
-
-def _ensure_private_directory(path: Path) -> None:
-    """Create a no-symlink directory chain with private new components."""
-
-    validated = _validated_private_directory(path, create_missing=True)
-    if validated is None:  # pragma: no cover - create_missing=True is exhaustive.
-        raise RunStoreError("io_error", ["private directory could not be created"])
-
-
 def ensure_private_directory(path: Path) -> None:
-    old_umask = os.umask(0o077)
-    try:
-        _ensure_private_directory(path)
-    finally:
-        os.umask(old_umask)
+    """Create and validate private directories through anchored descriptors."""
+
+    descriptor = _open_private_directory(path, create_missing=True)
+    assert descriptor is not None
+    os.close(descriptor)
 
 
 def _artifact_name(path: Path) -> str:
@@ -189,35 +103,74 @@ def _nofollow_flag() -> int:
 
 
 def _open_private_directory(path: Path, *, create_missing: bool) -> int | None:
-    validated = _validated_private_directory(path, create_missing=create_missing)
-    if validated is None:
-        return None
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    flags |= _nofollow_flag()
+    """Walk from the filesystem root without reopening validated pathnames.
+
+    Only the macOS system /var alias is translated lexically. No other symlink
+    is resolved, including one introduced between component opens.
+    """
+
+    absolute = path.expanduser().absolute()
+    if ".." in absolute.parts:
+        raise RunStoreError("io_error", ["private directory traversal forbidden"])
+    if sys.platform == "darwin" and absolute.parts[1:2] == ("var",):
+        absolute = Path("/private") / absolute.relative_to("/")
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        raise RunStoreError("io_error", ["O_DIRECTORY is required for private artifacts"])
+    flags = os.O_RDONLY | directory_flag | _nofollow_flag()
     descriptor = -1
+    private_subtree = False
+    old_umask = os.umask(0o077)
     try:
-        descriptor = os.open(validated, flags)
-        metadata = os.fstat(descriptor)
-    except FileNotFoundError as exc:
+        descriptor = os.open(absolute.anchor, flags)
+        # The root is the sole absolute open. Each remaining name is opened or
+        # created through its already-open parent, then validated via fstat.
+        for part in (None, *absolute.parts[1:]):
+            created = False
+            if part is not None:
+                try:
+                    child = os.open(part, flags, dir_fd=descriptor)
+                except FileNotFoundError:
+                    if not create_missing:
+                        return None
+                    created = True
+                    try:
+                        os.mkdir(part, mode=0o700, dir_fd=descriptor)
+                    except FileExistsError:
+                        # A concurrent creator is still subject to no-follow
+                        # open and the same ownership/mode validation below.
+                        pass
+                    child = os.open(part, flags, dir_fd=descriptor)
+                os.close(descriptor)
+                descriptor = child
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RunStoreError("io_error", ["private directory chain contains non-directory"])
+            mode = stat.S_IMODE(metadata.st_mode)
+            if created or (metadata.st_uid == os.getuid() and mode == 0o700):
+                private_subtree = True
+            if private_subtree:
+                if metadata.st_uid != os.getuid() or mode != 0o700:
+                    raise RunStoreError(
+                        "io_error", ["owned state directory chain must be exact mode 0700"],
+                    )
+            elif metadata.st_mode & 0o022 and not (
+                metadata.st_uid == 0 and mode & stat.S_ISVTX
+            ):
+                raise RunStoreError(
+                    "io_error", ["private directory ancestor is writable by another principal"],
+                )
+        if metadata.st_uid != os.getuid() or mode != 0o700:
+            raise RunStoreError("io_error", ["artifact parent descriptor is unsafe"])
+        result = descriptor
+        descriptor = -1
+        return result
+    except (OSError, NotImplementedError, TypeError) as exc:
+        raise RunStoreError("io_error", [str(exc)]) from exc
+    finally:
         if descriptor >= 0:
             os.close(descriptor)
-        if not create_missing:
-            return None
-        raise RunStoreError("io_error", [str(exc)]) from exc
-    except OSError as exc:
-        if descriptor >= 0:
-            os.close(descriptor)
-        raise RunStoreError("io_error", [str(exc)]) from exc
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-    ):
-        os.close(descriptor)
-        raise RunStoreError("io_error", ["artifact parent descriptor is unsafe"])
-    return descriptor
+        os.umask(old_umask)
 
 
 def _open_parent(
@@ -706,6 +659,13 @@ def validate_run_record(run: Any) -> list[str]:
         errors.append("workflow_id must be a non-empty string")
     if not _non_empty_string(run.get("current_step")):
         errors.append("current_step must be a non-empty string")
+    if 'vault_task_binding' in run:
+        binding = run['vault_task_binding']
+        keys = {'task_id', 'path', 'content_digest', 'convention'}
+        if (not isinstance(binding, dict) or set(binding) != keys
+                or any(not _non_empty_string(binding.get(key)) for key in keys)
+                or binding.get('task_id') != run.get('task_id')):
+            errors.append('vault_task_binding must match the run task and contain its canonical record identity')
     approved_provider_binding = run.get("approved_provider_binding")
     if not isinstance(approved_provider_binding, dict):
         errors.append("approved_provider_binding must be a json object")
@@ -907,6 +867,10 @@ def validate_run_record(run: Any) -> list[str]:
                 errors.append(f"terminal.{field} is required")
         if run.get("run_state") in TERMINAL_RUN_STATES and not _non_empty_string(terminal.get("status")):
             errors.append("terminal_status_required_for_terminal_state")
+
+    if "review_lifecycle" in run:
+        import review_lifecycle
+        errors.extend(review_lifecycle.validate_record(run["review_lifecycle"], run=run))
 
     return errors
 

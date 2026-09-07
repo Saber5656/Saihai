@@ -113,7 +113,7 @@
       "path": "organization/runtime/workflows/templates/standard_code_change.yaml",
       "status": "active",
       "initial_step": "implement",
-      "max_steps": 4
+      "max_steps": 6
     },
     {
       "workflow_id": "publication_required",
@@ -135,6 +135,13 @@
       "status": "active",
       "initial_step": "security_review",
       "max_steps": 7
+    },
+    {
+      "workflow_id": "readonly_review_chain",
+      "path": "organization/runtime/workflows/templates/readonly_review_chain.yaml",
+      "status": "active",
+      "initial_step": "research",
+      "max_steps": 3
     }
   ],
   "planned_templates": [],
@@ -189,6 +196,19 @@
         "publication_required": false
       },
       "workflow_id": "standard_code_change",
+      "status": "selected"
+    },
+    {
+      "rule_id": "readonly_review_chain",
+      "precedence": 55,
+      "when": {
+        "task_kind": "research",
+        "permission_required": "readonly"
+      },
+      "expected_artifacts_contains": [
+        "final_evidence"
+      ],
+      "workflow_id": "readonly_review_chain",
       "status": "selected"
     },
     {
@@ -275,8 +295,8 @@
       "adapter_contract_version": "1",
       "provider_adapter_id": "codex_cli_openai_p0",
       "provider_target": "codex_cli_openai",
-      "default_model": "operator-selected-openai",
-      "effective_model_policy": "record_without_equality",
+      "default_model": "gpt-5.6-luna",
+      "effective_model_policy": "required_exact_match",
       "transport": "headless_cli",
       "sync_mode": "sync",
       "context_freshness": "fresh_process",

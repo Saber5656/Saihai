@@ -155,7 +155,7 @@
       "step_id": "review"
     }
   ],
-  "task_id": "TSK-corrupt",
+  "task_id": "TSK-PENDING-corrupt",
   "terminal": {
     "reason": "report_valid",
     "status": "complete"
@@ -300,5 +300,11 @@
       "transition_version": "1"
     }
   ],
+  "vault_task_binding": {
+    "content_digest": "sha256:7d6e0672e443d84bce70f82431142f4917ce696ae91f5e0ad68a7369b9364547",
+    "convention": "03-Contexts/Policies/Task-File-Conventions.md",
+    "path": "__STATE_ROOT__/fixture-vault/01-Projects/Fixtures/TSK-PENDING-corrupt/task.md",
+    "task_id": "TSK-PENDING-corrupt"
+  },
   "workflow_id": "single_step_external_review"
 }

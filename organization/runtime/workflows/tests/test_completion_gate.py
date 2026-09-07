@@ -21,6 +21,10 @@ SERVER_SCRIPT = SCRIPT_DIR / "frontdoor_server.py"
 FRONTDOOR_TEST_WRAPPER = """
 import sys
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, str(__import__("pathlib").Path(sys.argv[1]).parent / "tests"))
+import vault_test_support
+if 'create-run' in sys.argv or 'verify-completion' in sys.argv:
+    vault_test_support.prepare(__import__("pathlib").Path(sys.argv[2]))
 import frontdoor_orchestrator as frontdoor
 frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
 sys.argv = [sys.argv[0], *sys.argv[3:]]
@@ -99,7 +103,7 @@ def prepare_terminal_run(
             state_root,
             "propose",
             "--task-id",
-            f"TSK-{request_id}",
+            f"TSK-PENDING-{request_id}",
             "--request-id",
             request_id,
             "--prompt",
@@ -242,6 +246,16 @@ def test_complete_run_verifies_and_annotates() -> None:
         assert_equal(block["evidence_sha256"], file_sha256(artifacts["evidence_path"]), "evidence digest")
         assert "completion_verification" in payload["workflow_run"], "run annotation missing"
         assert_equal(payload["workflow_run"]["run_state"], "complete", "run state unchanged")
+        task_path = Path(block['vault_persistence']['path'])
+        assert_equal(task_path.read_text().count('## Saihai completion'), 1, 'one persisted completion')
+        repeated = verify(state_root)
+        assert repeated['evidence']['vault_persistence']['replayed']
+        assert_equal(task_path.read_text().count('## Saihai completion'), 1, 'idempotent replay')
+        task_path.chmod(0o444)
+        denied = verify(state_root, check=False)
+        assert_equal(denied['decision'], 'blocked', 'unwritable Vault blocks success')
+        assert_equal(denied['reason'], 'vault_task_record_not_writable', 'write denial typed')
+
 
 
 def test_non_terminal_blocks_without_annotation() -> None:
@@ -252,7 +266,7 @@ def test_non_terminal_blocks_without_annotation() -> None:
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-nonterminal",
+                "TSK-PENDING-nonterminal",
                 "--request-id",
                 "req-nonterminal",
                 "--prompt",
@@ -499,6 +513,8 @@ def test_http_verify_completion_route() -> None:
         state_root = Path(raw_tmp)
         prepare_terminal_run(state_root)
         server_module = load_server_module()
+        import vault_test_support
+        vault_test_support.prepare(state_root)
         try:
             server = server_module.FrontdoorServer(
                 ("127.0.0.1", 0),
@@ -531,8 +547,63 @@ def test_http_verify_completion_route() -> None:
         assert_equal(bad_payload["decision"], "blocked", "invalid id decision")
 
 
+def test_readonly_chain_completion_verifies_accepted_evidence() -> None:
+    from test_multistep_report_gate import MultistepReportGateTests
+    import report_gate
+    import run_store
+
+    fixture = MultistepReportGateTests()
+    for variant in ("valid", "research_drift", "review_missing", "acceptance_signature", "transition_missing", "transition_signature", "final_reference"):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            fixture.advance_to(root, "final_evidence")
+            final_path = fixture.fake_produce(root)
+            accepted = fixture.submit(root, final_path)
+            assert_equal(accepted["decision"], "ok", "chain gate acceptance")
+            run = run_store.load_run(root, "run-chain")
+            if variant == "research_drift":
+                path = report_gate.report_path(root, "run-chain", "research")
+                value = report_gate.read_json(path)
+                value["findings"][0]["summary"] = "changed after acceptance"
+                run_store.atomic_write_json(path, value)
+            elif variant == "review_missing":
+                path = report_gate.report_path(root, "run-chain", "review")
+                path.rename(path.with_suffix(".held"))
+            elif variant == "acceptance_signature":
+                run["step_history"][-1]["acceptance"]["signature"]["signature"] = "sha256:" + "0" * 64
+                run_store.store_run(root, run, expected_current_state="complete")
+            elif variant in {"transition_missing", "transition_signature"}:
+                path = Path(accepted["transition_artifact_path"])
+                if variant == "transition_missing":
+                    path.rename(path.with_suffix(".held"))
+                else:
+                    value = report_gate.read_json(path)
+                    value["signature"]["signature"] = "sha256:" + "0" * 64
+                    run_store.atomic_write_json(path, value)
+            elif variant == "final_reference":
+                value = report_gate.read_json(final_path)
+                value["research_report_ref"] = "another-run"
+                run_store.atomic_write_json(final_path, value)
+            before = run_store.load_run(root, "run-chain")
+            result = verify(root, "run-chain", check=False)
+            if variant == "valid":
+                assert_equal(result["decision"], "complete", "chain completion")
+                assert_equal(result["skipped"], [], "chain checks must not be skipped")
+                assert_equal(result["evidence"]["provider_evidence_step_id"], "review", "provider evidence attribution")
+                assert_equal(result["evidence"]["report_path"], str(final_path), "verified final report")
+                review_evidence = report_gate.provider_evidence_path(root, "run-chain", "review")
+                assert_equal(result["evidence"]["evidence_path"], str(review_evidence), "actual prior evidence")
+                assert_equal(result["workflow_run"]["completion_verification"]["decision"], "complete", "annotation")
+                assert "provider_evidence" not in report_gate.read_json(final_path), "do not forge final provider fields"
+            else:
+                assert_equal(result["decision"], "blocked", variant)
+                assert_equal(result["reason"], "completion_verification_failed", variant)
+                assert_equal(run_store.load_run(root, "run-chain"), before, "failed verification must not annotate")
+
+
 def run_all() -> None:
     tests = [
+        test_readonly_chain_completion_verifies_accepted_evidence,
         test_complete_run_verifies_and_annotates,
         test_non_terminal_blocks_without_annotation,
         test_missing_report_and_evidence_are_all_reported,

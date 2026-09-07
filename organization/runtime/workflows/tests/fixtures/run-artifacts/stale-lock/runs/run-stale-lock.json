@@ -155,7 +155,7 @@
       "step_id": "review"
     }
   ],
-  "task_id": "TSK-stale-lock",
+  "task_id": "TSK-PENDING-stale-lock",
   "terminal": {
     "reason": "report_valid",
     "status": "complete"
@@ -300,5 +300,11 @@
       "transition_version": "1"
     }
   ],
+  "vault_task_binding": {
+    "content_digest": "sha256:31036761f56cc958dbfd0febbd213e2f1c65d6a95a1ec36211dfc8359770b493",
+    "convention": "03-Contexts/Policies/Task-File-Conventions.md",
+    "path": "__STATE_ROOT__/fixture-vault/01-Projects/Fixtures/TSK-PENDING-stale-lock/task.md",
+    "task_id": "TSK-PENDING-stale-lock"
+  },
   "workflow_id": "single_step_external_review"
 }

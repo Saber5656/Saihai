@@ -233,7 +233,7 @@ def create_repo(root: Path) -> Path:
 
 def direct_work_order(**overrides) -> dict:
     order = {
-        "task_id": "TSK-scoped",
+        "task_id": "TSK-PENDING-scoped",
         "request_id": "req-scoped",
         "run_id": "run-scoped",
         "step_id": "implement",
@@ -441,7 +441,7 @@ def create_approved_code_change(state_root: Path, *, user_prompt: str, worker_re
         state_root=state_root,
         frontend_kind="codex",
         payload={
-            "task_id": "TSK-scoped-e2e",
+            "task_id": "TSK-PENDING-scoped-e2e",
             "request_id": "req-scoped-e2e",
             "request_kind": "agent_task_request",
             "prompt": user_prompt,
@@ -459,7 +459,7 @@ def create_approved_code_change(state_root: Path, *, user_prompt: str, worker_re
     )
     proposed = frontdoor.proposed_request(
         state_root=state_root,
-        task_id="TSK-scoped-e2e",
+        task_id="TSK-PENDING-scoped-e2e",
         request_id="req-scoped-e2e",
         user_prompt=user_prompt,
         refs=["README.md"],
@@ -475,6 +475,8 @@ def create_approved_code_change(state_root: Path, *, user_prompt: str, worker_re
         request_id="req-scoped-e2e",
         human_action_id=proposed["approval"]["human_action_id"],
     )
+    import vault_test_support
+    vault_test_support.prepare(state_root)
     frontdoor.create_run(
         state_root=state_root,
         request_id="req-scoped-e2e",
@@ -562,11 +564,11 @@ def test_typed_request_to_redacted_result_e2e() -> None:
         )
         assert_equal(executed["worker_execution"]["status"], "completed", "worker status")
         run = frontdoor.run_store.load_run(state_root, "run-scoped-e2e")
-        assert_equal(run["run_state"], "waiting_human", "review gate run state")
+        assert_equal(run["run_state"], "step_queued", "review gate run state")
         assert_equal(run["current_step"], "review", "review gate next step")
         assert_equal(
             run["transitions"][-1]["reason_class"],
-            "scoped_worker_completed_review_required",
+            "standard_step_ready",
             "review gate reason",
         )
         stored_request = json.loads(
@@ -619,7 +621,7 @@ def test_main_agent_and_arbitrary_inputs_are_rejected() -> None:
             ),
         )
     base = {
-        "task_id": "TSK-main",
+        "task_id": "TSK-PENDING-main",
         "request_id": "req-main",
         "request_kind": "external_review_request",
         "prompt": "typed user intent",
@@ -649,7 +651,7 @@ def test_tamper_expiry_replay_and_binding_checks() -> None:
             ),
         )
         for reason, kwargs in (
-            ("capability_task_id_mismatch", {"expected_task_id": "TSK-other"}),
+            ("capability_task_id_mismatch", {"expected_task_id": "TSK-PENDING-other"}),
             ("capability_run_id_mismatch", {"expected_run_id": "run-other"}),
             ("capability_work_order_digest_mismatch", {"expected_work_order_digest": "sha256:" + "0" * 64}),
             ("capability_branch_mismatch", {"expected_branch": "codex/other"}),
@@ -710,7 +712,7 @@ def test_tamper_expiry_replay_and_binding_checks() -> None:
         os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = "/usr/bin/true"
         try:
             order["worker_execution_plan"] = executor.build_execution_plan(
-                task_id="TSK-scoped",
+                task_id="TSK-PENDING-scoped",
                 request_id="req-scoped",
                 run_id="run-scoped",
                 step_id="implement",
@@ -1012,7 +1014,7 @@ def test_codex_backend_requires_fixed_secure_absolute_executable() -> None:
             assert_reason(
                 "codex_backend_executable_not_configured",
                 lambda: executor.build_execution_plan(
-                    task_id="TSK-binary",
+                    task_id="TSK-PENDING-binary",
                     request_id="req-binary",
                     run_id="run-binary",
                     step_id="implement",
@@ -1029,7 +1031,7 @@ def test_codex_backend_requires_fixed_secure_absolute_executable() -> None:
             assert_reason(
                 "codex_backend_executable_insecure",
                 lambda: executor.build_execution_plan(
-                    task_id="TSK-binary",
+                    task_id="TSK-PENDING-binary",
                     request_id="req-binary",
                     run_id="run-binary",
                     step_id="implement",
@@ -1043,7 +1045,7 @@ def test_codex_backend_requires_fixed_secure_absolute_executable() -> None:
             assert_reason(
                 "codex_backend_executable_not_configured",
                 lambda: executor.build_execution_plan(
-                    task_id="TSK-binary",
+                    task_id="TSK-PENDING-binary",
                     request_id="req-binary",
                     run_id="run-binary",
                     step_id="implement",
@@ -1179,7 +1181,7 @@ def test_review_fix_expired_reissue_paths_git_and_gateway_compatibility() -> Non
         os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = "/usr/bin/true"
         try:
             order["worker_execution_plan"] = executor.build_execution_plan(
-                task_id="TSK-scoped",
+                task_id="TSK-PENDING-scoped",
                 request_id="req-scoped",
                 run_id="run-scoped",
                 step_id="implement",
@@ -1242,7 +1244,7 @@ def test_review_fix_expired_reissue_paths_git_and_gateway_compatibility() -> Non
         os.environ["SAIHAI_SCOPED_CODEX_EXECUTABLE"] = "/usr/bin/true"
         try:
             order["worker_execution_plan"] = executor.build_execution_plan(
-                task_id="TSK-scoped",
+                task_id="TSK-PENDING-scoped",
                 request_id="req-scoped",
                 run_id="run-scoped",
                 step_id="implement",
@@ -1961,8 +1963,232 @@ def test_execution_authority_schemas_match_exact_runtime_normalizers() -> None:
             )
 
 
+def _standard_review_flow_case(*, legacy_budget=False, unresolved=False, drift=False, final_failure=False) -> None:
+    import provider_runner
+    import report_gate
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        root = Path(raw_tmp)
+        state_root, repo = root / 'state', create_repo(root)
+        from unittest.mock import patch
+        original_loader = frontdoor.workflow_selector.load_template
+        def versioned_template(*args, **kwargs):
+            template = original_loader(*args, **kwargs)
+            if legacy_budget and template and template['workflow_id'] == 'standard_code_change':
+                return dict(template, max_steps=4)
+            return template
+        # Produce a genuinely signed old-version approval before restoring today's template.
+        with patch.object(frontdoor.workflow_selector, 'load_template', versioned_template):
+            _, drained = create_approved_code_change(state_root, user_prompt='Fix the bounded example', worker_repo=repo)
+        run_id = 'run-scoped-e2e'
+        initial_run = frontdoor.run_store.load_run(state_root, run_id)
+        assert_equal(initial_run['activation']['activation_scope']['step_budget'], 4 if legacy_budget else 6, 'approved budget')
+        owner = frontdoor.default_manual_principal()
+        class RepairRunner:
+            backend_id = executor.BACKEND_ID
+            def __init__(self, content): self.content = content
+            def run(self, *, worktree_path, instruction_path, result_schema_path, execution_id):
+                (worktree_path / 'README.md').write_text(self.content)
+                return dict(result_version='1', status='completed', summary='bounded fixture',
+                            changed_paths=['README.md'], tests=[], evidence=[])
+        task_trees = []
+        def execute(order, number):
+            assurance = assurance_for_work_order(order)
+            capability = derive_capability_from_state(state_root=state_root, run_id=run_id, step_id='implement',
+                repo_root=repo, repo_full_name='Saber5656/Saihai', worktree_root=root/'worktrees',
+                principal=EXECUTOR, gateway_principal=GATEWAY, signing_key=SIGNING_KEY,
+                assurance_binding=assurance, issued_at_epoch=1_800_000_000+number,
+                nonce='bounded_resolution_execution_' + str(number))
+            task_trees.append(Path(capability['worktree']['worktree_path']))
+            return execute_capability(state_root=state_root, capability_id=capability['capability_id'],
+                principal=EXECUTOR, gateway_principal=GATEWAY, signing_key=SIGNING_KEY,
+                current_assurance_binding=assurance, runner=RepairRunner('broken\n' if number == 1 else 'fixed\n'),
+                now_epoch=1_800_000_010+number)
+        def drain():
+            previous = {key:os.environ.get(key) for key in ('SAIHAI_SCOPED_CODEX_EXECUTABLE','SAIHAI_SCOPED_REPO_ROOT')}
+            os.environ['SAIHAI_SCOPED_CODEX_EXECUTABLE']='/usr/bin/true'
+            os.environ['SAIHAI_SCOPED_REPO_ROOT']=str(repo)
+            try: return frontdoor.drain_run(state_root=state_root, run_id=run_id)
+            finally:
+                for key,value in previous.items():
+                    if value is None: os.environ.pop(key,None)
+                    else: os.environ[key]=value
+        execute(drained['work_order'], 1)
+        review_order = drain()['work_order']
+        original_order_digest = executor.sha256_digest(review_order)
+        first = provider_runner.run_provider(state_root=state_root, run_id=run_id,
+            adapter_id='codex_cli_openai_p0', fake_provider_mode='findings', principal=owner)
+        assert first['decision'] == 'ok', {k:first.get(k) for k in ('reason','errors','report_gate')}
+        run = frontdoor.run_store.load_run(state_root, run_id)
+        assert_equal(run['current_step'], 'implement', 'original finding repair')
+        assert run['review_lifecycle']['resolution_flow']['initial'] is not None
+        fix_order = drain()['work_order']
+        assert 'Repair only these unresolved original findings' in fix_order['instruction']
+        execute(fix_order, 2)
+        verification_order = drain()['work_order']
+        assert 'original_findings_only' in verification_order['instruction']
+        assert executor.sha256_digest(verification_order) != original_order_digest
+        frozen_initial = json.loads((state_root/'work-orders'/run_id/'review-snapshot-2.json').read_text())
+        assert frozen_initial['work_order'] == review_order
+        if drift:
+            (task_trees[-1]/'README.md').write_text('unrecorded change\n')
+        verified = provider_runner.run_provider(state_root=state_root, run_id=run_id,
+            adapter_id='codex_cli_openai_p0', fake_provider_mode='findings' if unresolved else 'success', principal=owner)
+        if drift:
+            assert_equal(verified['decision'],'blocked','unrecorded tree drift blocks provider dispatch')
+            assert_equal(verified['reason'],'review_worktree_drift','current snapshot check')
+            return
+        if legacy_budget:
+            run = frontdoor.run_store.load_run(state_root, run_id)
+            assert_equal(verified['decision'],'blocked','old budget is not expanded')
+            assert_equal(run['activation']['activation_scope']['step_budget'],4,'preserved old approval')
+            assert_equal(run['review_lifecycle']['stop_reason'],'activation_step_budget_exhausted','budget blocker')
+            return
+        if unresolved:
+            run = frontdoor.run_store.load_run(state_root, run_id)
+            assert_equal(run['current_step'],'implement','unresolved returns to original fix only')
+            assert_equal(run['review_lifecycle']['repair_rounds'],2,'same bounded budget')
+            assert 'Repair only' in drain()['work_order']['instruction']
+            return
+        assert_equal(verified['decision'], 'ok', 'resolution gate')
+        run = frontdoor.run_store.load_run(state_root, run_id)
+        assert_equal(run['current_step'], 'qa', 'next QA without broad review')
+        flow = run['review_lifecycle']['resolution_flow']
+        assert_equal(len(flow['verifications']),1,'one bounded verification')
+        assert_equal(len([r for r in run['step_history'] if r.get('step_id')=='review' and r.get('status')=='complete']),2,'one review plus one verification')
+        drain()
+        qa = provider_runner.run_provider(state_root=state_root, run_id=run_id,
+            adapter_id='codex_cli_openai_p0', fake_provider_mode='success', principal=owner)
+        assert_equal(qa['decision'],'ok','QA gate')
+        final_order = drain()['work_order']
+        assert_equal(final_order['step_id'],'final_evidence','final harness gate')
+        if final_failure:
+            before = frontdoor.run_store.load_run(state_root, run_id)
+            transition_fn = report_gate.run_lifecycle.transition_run
+            store_fn = report_gate.run_store.store_run
+            def fail_second_transition(*args, **kwargs):
+                if kwargs.get('transition') == 'finalize_standard_review' and kwargs.get('to_state') == 'complete':
+                    raise RuntimeError('QA136-001 injected after first transition')
+                return transition_fn(*args, **kwargs)
+            def fail_final_store(*args, **kwargs):
+                if args[1].get('run_state') == 'complete':
+                    raise RuntimeError('QA136-001 injected before atomic store')
+                return store_fn(*args, **kwargs)
+            for target, name, fault in [(report_gate.run_lifecycle, 'transition_run', fail_second_transition),
+                                         (report_gate.run_store, 'store_run', fail_final_store)]:
+                with patch.object(target, name, fault):
+                    try:
+                        report_gate.gate_report(state_root, run_id, principal=owner)
+                    except RuntimeError as exc:
+                        assert 'QA136-001 injected' in str(exc)
+                    else:
+                        raise AssertionError('injected finalization failure did not occur')
+                assert_equal(frontdoor.run_store.load_run(state_root, run_id), before, 'no partial finalization persisted')
+        done = report_gate.gate_report(state_root,run_id,principal=owner)
+        assert_equal(done['workflow_run']['run_state'],'complete','six authorized steps complete')
+        assert_equal(done['workflow_run']['iteration'],6,'unchanged activation budget')
+
+
+def test_standard_review_fix_resolution_and_qa_end_to_end() -> None:
+    _standard_review_flow_case()
+
+
+def test_standard_review_flow_blocks_unrecorded_tree_drift() -> None:
+    _standard_review_flow_case(drift=True)
+
+
+def test_standard_review_flow_preserves_old_approval_budget() -> None:
+    _standard_review_flow_case(legacy_budget=True)
+
+
+def test_standard_review_flow_unresolved_never_advances_to_qa() -> None:
+    _standard_review_flow_case(unresolved=True)
+
+
+def test_qa136_001_finalization_is_atomic_and_retryable() -> None:
+    _standard_review_flow_case(final_failure=True)
+
+
+def test_sec_s136_initial_001_parent_swap_never_reads_outside() -> None:
+    from unittest.mock import patch
+    for timing in ('before', 'after'):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            tree, outside = root/'tree', root/'outside'
+            (tree/'nested').mkdir(parents=True)
+            outside.mkdir()
+            (tree/'nested'/'data.txt').write_text('inside')
+            (outside/'data.txt').write_text('outside must never be read')
+            instructions = root/'instruction.json'
+            instructions.write_text(json.dumps({'context_refs':[{'type':'repo_file','value':'nested/data.txt'}]}))
+            instructions.chmod(0o600)
+            capability = {'allowed_paths':['nested'], 'prompt_artifact':{'path':str(instructions)}}
+            real_open, real_read = os.open, os.read
+            outside_inode = (outside/'data.txt').stat()
+            swapped = []
+            def swap():
+                (tree/'nested').rename(tree/'original-directory')
+                (tree/'nested').symlink_to(outside, target_is_directory=True)
+                swapped.append(True)
+            def racing_open(path, flags, *args, **kwargs):
+                name = os.fspath(path)
+                descriptor_step = name == 'nested' and kwargs.get('dir_fd') is not None
+                old_path_step = name == str(tree/'nested'/'data.txt') and kwargs.get('dir_fd') is None
+                if not swapped and (descriptor_step or old_path_step):
+                    if descriptor_step:
+                        assert flags & os.O_NOFOLLOW and flags & os.O_DIRECTORY
+                    if timing == 'before':
+                        swap()
+                        return real_open(path, flags, *args, **kwargs)
+                    fd = real_open(path, flags, *args, **kwargs)
+                    swap()
+                    return fd
+                return real_open(path, flags, *args, **kwargs)
+            def guarded_read(fd, size):
+                info = os.fstat(fd)
+                assert (info.st_dev, info.st_ino) != (outside_inode.st_dev, outside_inode.st_ino), 'out-of-scope bytes read'
+                return real_read(fd, size)
+            with patch.object(os, 'open', racing_open), patch.object(os, 'read', guarded_read):
+                if timing == 'before':
+                    try:
+                        executor.capture_review_context(capability, tree, [])
+                    except executor.ScopedWorkerError as exc:
+                        assert_equal(exc.reason_class,'review_context_unavailable','symlink swap blocked')
+                    else:
+                        raise AssertionError('swapped parent was followed')
+                else:
+                    captured = executor.capture_review_context(capability, tree, [])
+                    assert_equal(captured[0]['content'],'inside','opened directory remains pinned')
+            assert swapped, 'race injection did not execute'
+
+
+def test_review_helpers_exist_at_cli_entry() -> None:
+    import inspect
+    import runpy
+    from unittest.mock import patch
+    seen = []
+    def inspect_entry(_parser, *_args, **_kwargs):
+        scope = inspect.currentframe().f_back.f_globals
+        for name in ('capture_review_context', 'load_completed_review_context', 'completed_review_context_refs'):
+            assert callable(scope.get(name)), name + ' missing at CLI entry'
+        seen.append(True)
+        raise SystemExit(0)
+    with patch.object(executor.argparse.ArgumentParser, 'parse_args', inspect_entry):
+        try:
+            runpy.run_path(str(Path(executor.__file__)), run_name='__main__')
+        except SystemExit as exc:
+            assert_equal(exc.code,0,'dry CLI entry')
+    assert seen
+
+
 def main() -> None:
     tests = [
+        test_qa136_001_finalization_is_atomic_and_retryable,
+        test_sec_s136_initial_001_parent_swap_never_reads_outside,
+        test_review_helpers_exist_at_cli_entry,
+        test_standard_review_fix_resolution_and_qa_end_to_end,
+        test_standard_review_flow_blocks_unrecorded_tree_drift,
+        test_standard_review_flow_preserves_old_approval_budget,
+        test_standard_review_flow_unresolved_never_advances_to_qa,
         test_typed_request_to_redacted_result_e2e,
         test_main_agent_and_arbitrary_inputs_are_rejected,
         test_tamper_expiry_replay_and_binding_checks,
