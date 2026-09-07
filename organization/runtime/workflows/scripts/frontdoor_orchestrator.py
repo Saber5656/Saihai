@@ -28,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import host_state_root
 import safe_paths
+import vault_task_records
 import run_store
 import run_lock
 import run_lifecycle
@@ -4817,6 +4818,10 @@ def create_run(
                     "workflow_run": existing,
                 }
 
+            try:
+                task_binding = vault_task_records.bind_task(record['task_id'])
+            except vault_task_records.VaultTaskError as exc:
+                raise FrontdoorError(exc.reason_class) from exc
             run = {
                 "run_version": "1",
                 "run_id": effective_run_id,
@@ -4845,6 +4850,7 @@ def create_run(
                     "step_local_snapshot": "immutable_step_attempt_snapshot",
                     "provider_transcript": "confined_evidence_path_only",
                 },
+                "vault_task_binding": task_binding,
                 "approved_provider_binding": approved_provider_binding,
                 "transitions": [],
                 "transition_provenance": [
@@ -4880,7 +4886,7 @@ def create_run(
         principal=actor,
         subject=subject,
         outcome="ok",
-        details={"created": True, "run_link": link_status},
+        details={"created": True, "run_link": link_status, "vault_task_binding": task_binding},
     )
     return {
         "schema_version": 1,

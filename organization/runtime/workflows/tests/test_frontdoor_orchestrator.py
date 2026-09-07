@@ -24,6 +24,10 @@ FRONTDOOR_TEST_WRAPPER = """
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, str(__import__("pathlib").Path(sys.argv[1]).parent / "tests"))
+import vault_test_support
+if any(command in sys.argv for command in ('create-run', 'verify-completion', 'drive-run')):
+    vault_test_support.prepare(__import__("pathlib").Path(sys.argv[2]))
 import frontdoor_orchestrator as frontdoor
 frontdoor.DIRECTORY_CATALOG["SAIHAI_ORCH_STATE_ROOT"] = sys.argv[2]
 sys.argv = [sys.argv[0], *sys.argv[3:]]
@@ -177,7 +181,7 @@ def sha256_text(value: str) -> str:
 def child_thread_plan(state_root: Path, **overrides) -> dict:
     instruction_ref = ROOT / "organization/runtime/workflows/README.md"
     plan = {
-        "task_id": "TSK-child-thread",
+        "task_id": "TSK-PENDING-child-thread",
         "request_id": "req-child-summary",
         "issue_id": "67",
         "issue_url": "https://github.com/Saber5656/Saihai/issues/67",
@@ -284,7 +288,7 @@ def prepare_review_handoff(state_root: Path, *, request_id: str, run_id: str) ->
             state_root,
             "propose",
             "--task-id",
-            f"TSK-{request_id}",
+            f"TSK-PENDING-{request_id}",
             "--request-id",
             request_id,
             "--prompt",
@@ -800,7 +804,7 @@ def test_frontdoor_propose_approve_create_run_and_drain() -> None:
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-frontdoor",
+                "TSK-PENDING-frontdoor",
                 "--request-id",
                 "req-frontdoor",
                 "--prompt",
@@ -1110,7 +1114,7 @@ def test_approved_provider_binding_blocks_request_adapter_and_model_mutation() -
                 state_root,
                 "propose",
                 "--task-id",
-                f"TSK-{request_id}",
+                f"TSK-PENDING-{request_id}",
                 "--request-id",
                 request_id,
                 "--prompt",
@@ -1338,7 +1342,7 @@ def test_drain_allows_edit_capable_code_change_gate() -> None:
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-code-change",
+                "TSK-PENDING-code-change",
                 "--request-id",
                 "req-code-change",
                 "--prompt",
@@ -1404,7 +1408,7 @@ def test_drain_allows_edit_capable_code_change_gate() -> None:
         # for the bound positive path.
         state_root = Path(raw_tmp) / "bound"
         proposed = load_payload(run_frontdoor(
-            state_root, "propose", "--task-id", "TSK-code-change", "--request-id", "req-code-change",
+            state_root, "propose", "--task-id", "TSK-PENDING-code-change", "--request-id", "req-code-change",
             "--prompt", "Implement bounded code change", "--classification", json.dumps(classification),
             "--ref", "organization/runtime/workflows/README.md", "--allowed-path", "organization/runtime/workflows",
         ))
@@ -1448,7 +1452,7 @@ def test_drain_allows_edit_capable_code_change_gate() -> None:
             state_root,
             "propose",
             "--task-id",
-            "TSK-code-change-wrong-adapter",
+            "TSK-PENDING-code-change-wrong-adapter",
             "--request-id",
             "req-code-change-wrong-adapter",
             "--prompt",
@@ -1479,7 +1483,7 @@ def test_drain_blocks_invalid_existing_work_order() -> None:
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-invalid-work-order",
+                "TSK-PENDING-invalid-work-order",
                 "--request-id",
                 "req-invalid-work-order",
                 "--prompt",
@@ -1517,7 +1521,7 @@ def test_drain_blocks_invalid_existing_work_order() -> None:
         order_dir.mkdir(parents=True, mode=0o700)
         invalid_order = {
             "work_order_version": "1",
-            "task_id": "TSK-invalid-work-order",
+            "task_id": "TSK-PENDING-invalid-work-order",
             "request_id": "req-invalid-work-order",
             "run_id": "run-invalid-work-order",
             "workflow_id": "single_step_external_review",
@@ -1586,7 +1590,7 @@ def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
         )
         (session_dir / "active-execution-context.json").chmod(0o600)
         (session_dir / "active-task.json").write_text(
-            json.dumps({"task_id": "TSK-linked"}) + "\n",
+            json.dumps({"task_id": "TSK-PENDING-linked"}) + "\n",
             encoding="utf-8",
         )
         (session_dir / "active-task.json").chmod(0o600)
@@ -1598,7 +1602,7 @@ def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-linked",
+                "TSK-PENDING-linked",
                 "--request-id",
                 "req-linked",
                 "--prompt",
@@ -1680,7 +1684,7 @@ def test_frontdoor_full_flow_updates_session_task_state_index() -> None:
         assert_equal(index["runs"][0]["report_path"], str(report_path), "index report path")
         assert_equal(index["runs"][0]["evidence_path"], str(evidence_path), "index evidence path")
 
-        task_view = load_payload(run_frontdoor(state_root, "task-view", "--task-id", "TSK-linked", env=env))
+        task_view = load_payload(run_frontdoor(state_root, "task-view", "--task-id", "TSK-PENDING-linked", env=env))
         assert_equal(task_view["runs"][0]["run_id"], "run-linked", "task-view run")
         assert_equal(task_view["queue_evidence"][0]["message_status"], "done", "task-view queue status")
 
@@ -1693,7 +1697,7 @@ def test_drain_blocks_and_quarantines_corrupt_run_json() -> None:
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-corrupt-run",
+                "TSK-PENDING-corrupt-run",
                 "--request-id",
                 "req-corrupt-run",
                 "--prompt",
@@ -1736,7 +1740,7 @@ def create_approved_run(state_root: Path, *, request_id: str, run_id: str) -> No
             state_root,
             "propose",
             "--task-id",
-            f"TSK-{request_id}",
+            f"TSK-PENDING-{request_id}",
             "--request-id",
             request_id,
             "--prompt",
@@ -1874,7 +1878,7 @@ def test_propose_updates_waiting_request_and_blocks_duplicate_overwrite() -> Non
                 state_root,
                 "bridge-submit-request",
                 "--task-id",
-                "TSK-duplicate",
+                "TSK-PENDING-duplicate",
                 "--request-id",
                 "req-duplicate",
                 "--request-kind",
@@ -1896,7 +1900,7 @@ def test_propose_updates_waiting_request_and_blocks_duplicate_overwrite() -> Non
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-duplicate",
+                "TSK-PENDING-duplicate",
                 "--request-id",
                 "req-duplicate",
                 "--prompt",
@@ -1927,7 +1931,7 @@ def test_propose_updates_waiting_request_and_blocks_duplicate_overwrite() -> Non
             state_root,
             "propose",
             "--task-id",
-            "TSK-duplicate",
+            "TSK-PENDING-duplicate",
             "--request-id",
             "req-duplicate",
             "--prompt",
@@ -1945,7 +1949,7 @@ def test_propose_updates_waiting_request_and_blocks_duplicate_overwrite() -> Non
             state_root,
             "propose",
             "--task-id",
-            "TSK-blocked-propose",
+            "TSK-PENDING-blocked-propose",
             "--request-id",
             "req-blocked-propose",
             "--prompt",
@@ -1970,7 +1974,7 @@ def test_create_run_validates_resume_policy_and_binds_request() -> None:
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-run-binding",
+                "TSK-PENDING-run-binding",
                 "--request-id",
                 "req-run-binding",
                 "--prompt",
@@ -2004,6 +2008,18 @@ def test_create_run_validates_resume_policy_and_binds_request() -> None:
         else:
             raise AssertionError("invalid resume policy should be blocked")
 
+        from unittest.mock import patch
+        import vault_task_records
+        empty_vault = state_root / 'empty-vault'
+        empty_vault.mkdir(mode=0o700)
+        with patch.object(vault_task_records, 'canonical_root', return_value=empty_vault):
+            try:
+                frontdoor_module.create_run(state_root=state_root, request_id='req-run-binding', run_id='run-one', resume_policy='manual')
+            except frontdoor_module.FrontdoorError as exc:
+                assert 'vault_task_record_missing' in str(exc)
+            else:
+                raise AssertionError('missing task must not create a run')
+        assert not (state_root / 'runs' / 'run-one.json').exists()
         load_payload(run_frontdoor(state_root, "create-run", "--request-id", "req-run-binding", "--run-id", "run-one"))
         replayed = load_payload(
             run_frontdoor(state_root, "create-run", "--request-id", "req-run-binding", "--run-id", "run-one")
@@ -2144,7 +2160,7 @@ def test_approval_uses_requested_ref_forms_without_leaking_original_paths() -> N
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-absolute-ref",
+                "TSK-PENDING-absolute-ref",
                 "--request-id",
                 "req-absolute-ref",
                 "--prompt",
@@ -2192,7 +2208,7 @@ def test_frontdoor_blocks_unapproved_and_unbounded_requests() -> None:
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-missing",
+                "TSK-PENDING-missing",
                 "--request-id",
                 "req-missing",
                 "--prompt",
@@ -2210,7 +2226,7 @@ def test_frontdoor_blocks_unapproved_and_unbounded_requests() -> None:
             state_root,
             "propose",
             "--task-id",
-            "TSK-norefs",
+            "TSK-PENDING-norefs",
             "--request-id",
             "req-norefs",
             "--classification",
@@ -2320,7 +2336,7 @@ def test_http_frontdoor_api_flow() -> None:
                 "POST",
                 f"{base}/frontdoor/propose",
                 {
-                    "task_id": "TSK-http-missing-channel",
+                    "task_id": "TSK-PENDING-http-missing-channel",
                     "request_id": "req-http-missing-channel",
                     "prompt": "Run HTTP readonly review",
                     "refs": ["organization/runtime/workflows/README.md"],
@@ -2334,7 +2350,7 @@ def test_http_frontdoor_api_flow() -> None:
                 "POST",
                 f"{base}/frontdoor/propose",
                 {
-                    "task_id": "TSK-http-spoof",
+                    "task_id": "TSK-PENDING-http-spoof",
                     "request_id": "req-http-spoof",
                     "prompt": "Run HTTP readonly review",
                     "refs": ["organization/runtime/workflows/README.md"],
@@ -2351,7 +2367,7 @@ def test_http_frontdoor_api_flow() -> None:
                 "POST",
                 f"{base}/frontdoor/propose",
                 {
-                    "task_id": "TSK-http-blocked-propose",
+                    "task_id": "TSK-PENDING-http-blocked-propose",
                     "request_id": "req-http-blocked-propose",
                     "prompt": "Run HTTP readonly review",
                     "refs": ["organization/runtime/workflows/README.md"],
@@ -2366,7 +2382,7 @@ def test_http_frontdoor_api_flow() -> None:
                 "POST",
                 f"{base}/frontdoor/propose",
                 {
-                    "task_id": "TSK-http",
+                    "task_id": "TSK-PENDING-http",
                     "request_id": "req-http",
                     "prompt": "Run HTTP readonly review",
                     "refs": ["organization/runtime/workflows/README.md"],
@@ -2386,6 +2402,8 @@ def test_http_frontdoor_api_flow() -> None:
                 human_headers,
             )
             assert_equal(approved["request_status"], "approved", "http approved")
+            import vault_test_support
+            vault_test_support.prepare(state_root)
 
             created = http_json(
                 "POST",
@@ -2439,7 +2457,7 @@ def test_http_frontdoor_api_flow() -> None:
 
             task_runs = http_json(
                 "GET",
-                f"{base}/orchestrator/tasks/TSK-http/runs",
+                f"{base}/orchestrator/tasks/TSK-PENDING-http/runs",
                 None,
                 operator_headers,
             )
@@ -2507,7 +2525,7 @@ def test_main_agent_bridge_is_output_confirmation_only() -> None:
                 state_root,
                 "bridge-submit-request",
                 "--task-id",
-                "TSK-bridge",
+                "TSK-PENDING-bridge",
                 "--request-id",
                 "req-bridge",
                 "--request-kind",
@@ -2542,7 +2560,7 @@ def test_main_agent_bridge_is_output_confirmation_only() -> None:
                 state_root,
                 "bridge-submit-request",
                 "--task-id",
-                "TSK-bridge",
+                "TSK-PENDING-bridge",
                 "--request-id",
                 "req-bridge",
                 "--request-kind",
@@ -2567,7 +2585,7 @@ def test_main_agent_bridge_is_output_confirmation_only() -> None:
             state_root,
             "bridge-submit-request",
             "--task-id",
-            "TSK-bridge",
+            "TSK-PENDING-bridge",
             "--request-id",
             "req-bridge",
             "--request-kind",
@@ -2627,7 +2645,7 @@ def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         payload = {
-            "task_id": "TSK-replay",
+            "task_id": "TSK-PENDING-replay",
             "request_id": "req-replay",
             "request_kind": "external_review_request",
             "prompt": "Replay existing request",
@@ -2647,7 +2665,7 @@ def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
             frontdoor_module.request_path(state_root, "req-replay"),
             {
                 "request_version": "1",
-                "task_id": "TSK-replay",
+                "task_id": "TSK-PENDING-replay",
                 "request_id": "req-replay",
                 "request_kind": "external_review_request",
                 "created_at": now,
@@ -2668,7 +2686,7 @@ def test_bridge_idempotent_replay_does_not_reresolve_refs() -> None:
                     "decision": "waiting_human",
                     "request_status": "waiting_human",
                     "reason": "typed_classification_required_from_non_bridge_principal",
-                    "task_id": "TSK-replay",
+                    "task_id": "TSK-PENDING-replay",
                     "request_id": "req-replay",
                     "next_action": "ask_human",
                 },
@@ -2711,7 +2729,7 @@ def test_bridge_replays_pre_surface_idempotency_record() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         payload = {
-            "task_id": "TSK-legacy-replay",
+            "task_id": "TSK-PENDING-legacy-replay",
             "request_id": "req-legacy-replay",
             "request_kind": "external_review_request",
             "prompt": "Replay a pre-surface request",
@@ -2985,7 +3003,7 @@ def test_bridge_rejects_smuggled_authority_fields_over_http() -> None:
                 "POST",
                 f"{base}/main-agent/submit-request",
                 {
-                    "task_id": "TSK-smuggle-missing",
+                    "task_id": "TSK-PENDING-smuggle-missing",
                     "request_id": "req-smuggle-missing",
                     "request_kind": "external_review_request",
                     "prompt": "run it",
@@ -3000,7 +3018,7 @@ def test_bridge_rejects_smuggled_authority_fields_over_http() -> None:
                 "POST",
                 f"{base}/main-agent/submit-request",
                 {
-                    "task_id": "TSK-smuggle-principal",
+                    "task_id": "TSK-PENDING-smuggle-principal",
                     "request_id": "req-smuggle-principal",
                     "request_kind": "external_review_request",
                     "prompt": "run it",
@@ -3034,7 +3052,7 @@ def test_bridge_rejects_smuggled_authority_fields_over_http() -> None:
                 "POST",
                 f"{base}/main-agent/submit-request",
                 {
-                    "task_id": "TSK-smuggle",
+                    "task_id": "TSK-PENDING-smuggle",
                     "request_id": "req-smuggle",
                     "request_kind": "external_review_request",
                     "prompt": "run it",
@@ -3070,7 +3088,7 @@ def test_http_bridge_uses_authenticated_principal_and_verified_ack() -> None:
                 "POST",
                 f"{base}/main-agent/submit-request",
                 {
-                    "task_id": "TSK-http-bridge",
+                    "task_id": "TSK-PENDING-http-bridge",
                     "request_id": "req-http-bridge",
                     "request_kind": "external_review_request",
                     "prompt": "Run HTTP bridge review",
@@ -3286,7 +3304,7 @@ def test_work_order_revalidates_refs_before_provider_handoff() -> None:
         }
         run = {
             "run_id": "run-refcheck",
-            "task_id": "TSK-refcheck",
+            "task_id": "TSK-PENDING-refcheck",
             "request_id": "req-refcheck",
             "workflow_id": "single_step_external_review",
             "activation": {
@@ -3295,7 +3313,7 @@ def test_work_order_revalidates_refs_before_provider_handoff() -> None:
             },
         }
         request_record = {
-            "task_id": "TSK-refcheck",
+            "task_id": "TSK-PENDING-refcheck",
             "request_id": "req-refcheck",
             "classification": external_review_classification(),
             "requested_context_refs": [ref_path],
@@ -3448,7 +3466,7 @@ def test_bridge_rejects_path_unsafe_ids_and_missing_refs() -> None:
             state_root,
             "bridge-submit-request",
             "--task-id",
-            "TSK-unsafe",
+            "TSK-PENDING-unsafe",
             "--request-id",
             "../outside",
             "--request-kind",
@@ -3469,7 +3487,7 @@ def test_bridge_rejects_path_unsafe_ids_and_missing_refs() -> None:
             state_root,
             "bridge-submit-request",
             "--task-id",
-            "TSK-norefs",
+            "TSK-PENDING-norefs",
             "--request-id",
             "req-norefs-bridge",
             "--request-kind",
@@ -3489,7 +3507,7 @@ def test_bridge_rejects_path_unsafe_ids_and_missing_refs() -> None:
             state_root,
             "bridge-submit-request",
             "--task-id",
-            "TSK-outside-ref",
+            "TSK-PENDING-outside-ref",
             "--request-id",
             "req-outside-ref",
             "--request-kind",
@@ -3525,7 +3543,7 @@ def test_bridge_principal_cannot_execute_or_change_workflow_definitions() -> Non
                 state_root,
                 "propose",
                 "--task-id",
-                "TSK-exec",
+                "TSK-PENDING-exec",
                 "--request-id",
                 "req-exec",
                 "--prompt",
@@ -3883,7 +3901,7 @@ def test_projection_binding_hides_mismatch_legacy_and_cross_owner_records() -> N
         for index, (field, replacement) in enumerate(
             (
                 ("request_id", "req-mismatch"),
-                ("task_id", "TSK-mismatch"),
+                ("task_id", "TSK-PENDING-mismatch"),
                 ("owner_principal_digest", "sha256:" + "e" * 64),
                 ("checkout_identity_digest", "sha256:" + "f" * 64),
             )
@@ -4782,7 +4800,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         first_payload = {
-            "task_id": "TSK-quota-one",
+            "task_id": "TSK-PENDING-quota-one",
             "request_id": "req-quota-one",
             "request_kind": "orchestrator_status_request",
             "prompt": "first bounded request",
@@ -4799,7 +4817,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
         assert_equal(first["request_status"], "waiting_human", "quota first request")
         second_payload = {
             **first_payload,
-            "task_id": "TSK-quota-two",
+            "task_id": "TSK-PENDING-quota-two",
             "request_id": "req-quota-two",
             "idempotency_key": "quota-two",
         }
@@ -4864,7 +4882,7 @@ def test_bridge_retention_cli_preserves_active_authority_and_quota_boundaries() 
                 state_root=state_root,
                 frontend_kind="codex",
                 payload={
-                    "task_id": "TSK-durable-quota",
+                    "task_id": "TSK-PENDING-durable-quota",
                     "request_id": "req-durable-quota",
                     "request_kind": "orchestrator_status_request",
                     "prompt": "must fail before durable request creation",
@@ -5046,7 +5064,7 @@ def test_bridge_rejects_child_thread_and_raw_tool_smuggling() -> None:
         state_root = Path(raw_tmp)
         frontdoor_module = load_server_module().frontdoor
         payload = {
-            "task_id": "TSK-smuggle-child",
+            "task_id": "TSK-PENDING-smuggle-child",
             "request_id": "req-smuggle-child",
             "request_kind": "orchestrator_status_request",
             "prompt": "Spawn a child thread",

@@ -43,7 +43,7 @@
       "publication": "not_required"
     },
     "request_id": "req-complete-findings",
-    "task_id": "TSK-complete-findings",
+    "task_id": "TSK-PENDING-complete-findings",
     "workflow_selection": {
       "initial_step": "review",
       "optional_expansions": [],

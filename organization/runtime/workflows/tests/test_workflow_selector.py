@@ -424,7 +424,7 @@ def test_activation_prompt_is_only_proposed() -> None:
     proposed = selector.activation_envelope(
         external_review_classification(),
         activation_source="frontdoor_prompt",
-        task_id="TSK-test",
+        task_id="TSK-PENDING-test",
         request_id="req-test",
         refs=["organization/runtime/workflows/README.md"],
     )
@@ -442,7 +442,7 @@ def test_activation_scope_follows_selected_template() -> None:
     approved_readonly = selector.activation_envelope(
         external_review_classification(),
         activation_source="orchestrator-start",
-        task_id="TSK-test",
+        task_id="TSK-PENDING-test",
         request_id="req-test",
         refs=["organization/runtime/workflows/README.md"],
     )
@@ -456,7 +456,7 @@ def test_activation_scope_follows_selected_template() -> None:
     approved_code = selector.activation_envelope(
         typed_classification("code_change"),
         activation_source="orchestrator-start",
-        task_id="TSK-test",
+        task_id="TSK-PENDING-test",
         request_id="req-test",
         refs=["organization/runtime/workflows/README.md"],
         allowed_paths=["organization/runtime/workflows"],
@@ -471,7 +471,7 @@ def test_activation_scope_follows_selected_template() -> None:
     approved_publication = selector.activation_envelope(
         typed_classification("publication"),
         activation_source="orchestrator-start",
-        task_id="TSK-test",
+        task_id="TSK-PENDING-test",
         request_id="req-test",
         refs=["organization/runtime/workflows/README.md"],
         allowed_paths=["organization/runtime/workflows"],
@@ -512,7 +512,7 @@ def test_activation_requires_bounded_refs_for_approval() -> None:
     missing_refs = selector.activation_envelope(
         external_review_classification(),
         activation_source="orchestrator-start",
-        task_id="TSK-test",
+        task_id="TSK-PENDING-test",
         request_id="req-test",
         refs=[],
     )
@@ -528,7 +528,7 @@ def test_human_ui_and_manual_cli_approval_attribution() -> None:
     human_ui = selector.activation_envelope(
         external_review_classification(),
         activation_source="human_ui",
-        task_id="TSK-test",
+        task_id="TSK-PENDING-test",
         request_id="req-test",
         refs=["organization/runtime/workflows/README.md"],
     )
@@ -538,7 +538,7 @@ def test_human_ui_and_manual_cli_approval_attribution() -> None:
     manual_cli = selector.activation_envelope(
         external_review_classification(),
         activation_source="manual_cli",
-        task_id="TSK-test",
+        task_id="TSK-PENDING-test",
         request_id="req-test",
         refs=["organization/runtime/workflows/README.md"],
     )
@@ -862,7 +862,7 @@ def test_blocked_activation_cli_exits_nonzero() -> None:
         "--activation-source",
         "orchestrator-start",
         "--task-id",
-        "TSK-test",
+        "TSK-PENDING-test",
         "--request-id",
         "req-test",
         "--classification",
@@ -880,7 +880,7 @@ def test_readonly_chain_available_preserves_activation_scope() -> None:
     )
     for source in ("frontdoor_prompt", "orchestrator-start", "human_ui", "manual_cli"):
         envelope = selector.activation_envelope(
-            classification, activation_source=source, task_id="TSK-chain",
+            classification, activation_source=source, task_id="TSK-PENDING-chain",
             request_id="req-chain", refs=["organization/runtime/workflows/README.md"],
         )
         proposed = source == "frontdoor_prompt"

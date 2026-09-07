@@ -70,7 +70,7 @@ def test_research_mutation_and_diff_attempts_are_rejected() -> None:
     envelope = workflow_selector.activation_envelope(
         classification,
         activation_source="orchestrator-start",
-        task_id="TSK-issue-28",
+        task_id="TSK-PENDING-issue-28",
         request_id="req-issue-28",
         refs=["docs/research-source.md"],
     )

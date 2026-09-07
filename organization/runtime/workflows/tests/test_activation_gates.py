@@ -81,7 +81,7 @@ def propose(
 ) -> dict:
     return frontdoor.proposed_request(
         state_root=state_root,
-        task_id=task_id or f"TSK-{request_id}",
+        task_id=task_id or f"TSK-PENDING-{request_id}",
         request_id=request_id,
         user_prompt="Run a bounded workflow.",
         refs=refs if refs is not None else ["organization/runtime/workflows/README.md"],
@@ -331,7 +331,7 @@ def test_destructive_publication_policy_fail_closed() -> None:
     unsupported = frontdoor.workflow_selector.activation_envelope(
         external_review_classification(),
         activation_source="chat_text",
-        task_id="TSK-unsupported",
+        task_id="TSK-PENDING-unsupported",
         request_id="req-unsupported",
         refs=["organization/runtime/workflows/README.md"],
     )
@@ -390,6 +390,8 @@ def test_create_run_links_request_record() -> None:
             request_id="req-linked-run",
             human_action_id=proposed["approval"]["human_action_id"],
         )
+        import vault_test_support
+        vault_test_support.prepare(state_root)
         created = frontdoor.create_run(
             state_root=state_root,
             request_id="req-linked-run",
@@ -406,6 +408,8 @@ def test_create_run_links_request_record() -> None:
         record = read_request(state_root, "req-linked-run")
         assert_equal(record["linked_runs"], ["run-linked-run"], "request linked runs")
 
+        import vault_test_support
+        vault_test_support.prepare(state_root)
         replayed = frontdoor.create_run(
             state_root=state_root,
             request_id="req-linked-run",

@@ -34,7 +34,7 @@ def valid_run(**overrides) -> dict:
     candidate = {
         "run_version": "1",
         "run_id": "run-store",
-        "task_id": "TSK-run-store",
+        "task_id": "TSK-PENDING-run-store",
         "request_id": "req-run-store",
         "workflow_id": "single_step_external_review",
         "approved_provider_binding": {
@@ -127,6 +127,8 @@ def test_store_and_reload_roundtrip() -> None:
 
 
 def test_store_rejects_schema_invalid() -> None:
+    for binding in ([], {}, {'task_id':'another'}):
+        assert any('vault_task_binding' in error for error in run_store.validate_run_record(valid_run(vault_task_binding=binding)))
     with tempfile.TemporaryDirectory() as raw_tmp:
         state_root = Path(raw_tmp)
         run = valid_run()

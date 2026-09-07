@@ -155,7 +155,7 @@
       "step_id": "review"
     }
   ],
-  "task_id": "TSK-traversal",
+  "task_id": "TSK-PENDING-traversal",
   "terminal": {
     "reason": "report_valid",
     "status": "complete"
@@ -300,5 +300,11 @@
       "transition_version": "1"
     }
   ],
+  "vault_task_binding": {
+    "content_digest": "sha256:85946b782b9c04a018e345527999c91024290ec5a56bf29f529249fc4948f3e9",
+    "convention": "03-Contexts/Policies/Task-File-Conventions.md",
+    "path": "__STATE_ROOT__/fixture-vault/01-Projects/Fixtures/TSK-PENDING-traversal/task.md",
+    "task_id": "TSK-PENDING-traversal"
+  },
   "workflow_id": "single_step_external_review"
 }

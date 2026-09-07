@@ -53,6 +53,7 @@
       },
       "additionalProperties": false
     },
+    "vault_task_binding": {"type": "object", "required": ["task_id", "path", "content_digest", "convention"], "properties": {"task_id": {"type": "string"}, "path": {"type": "string"}, "content_digest": {"type": "string"}, "convention": {"type": "string"}}, "additionalProperties": false},
     "review_lifecycle": {
       "$ref": "review-lifecycle.schema.json"
     },

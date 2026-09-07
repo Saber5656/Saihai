@@ -23,6 +23,7 @@ import host_publication_adapter as publication
 import run_lock
 import run_store
 import request_intake
+import vault_task_records
 import scoped_worker_executor as scoped
 
 PROFILE = 'trusted_local_v1'
@@ -234,6 +235,10 @@ def _execute(request: dict, authorization: TrustedLocalAuthorization, state_root
         if publication.snapshot(root, paths) != starting_identity:
             raise TrustedLocalError('failed_validation_tree_changed')
     host = authorization.publication
+    try:
+        task_binding = vault_task_records.bind_task(host.task_id, authority_ref=host.authority_evidence_ref)
+    except vault_task_records.VaultTaskError as exc:
+        raise TrustedLocalError(exc.reason_class) from exc
     directory = Path(state_root).resolve() / 'trusted-local' / host.execution_id
     intake = None
     brief_context = None
@@ -265,6 +270,7 @@ def _execute(request: dict, authorization: TrustedLocalAuthorization, state_root
         raise TrustedLocalError('execution_already_claimed') from exc
     with os.fdopen(fd, 'w') as stream:
         json.dump(claim, stream, sort_keys=True)
+    _save(directory / 'vault-task-binding.json', task_binding)
     _save(directory / 'request.json', request)
     _save(directory / 'activation.json', dict(claim, status='authorized_by_user_task', publication_allowed=False))
     if repair_context is not None:
@@ -705,7 +711,19 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
         result = dict(result, merge_status='merged', integrated_checks=states,
                       status='complete' if all(s == 'success' for s in states.values()) else
                       'integrated_ci_failed' if any(s in {'failure','error','cancelled','timed_out','action_required','skipped','neutral','stale'} for s in states.values()) else 'integrated_ci_pending')
-    result['decision'] = 'blocked' if result['status'] in {'ci_failed','integrated_ci_failed','requires_user_decision','same_conflict_retry_limit','integration_reconciliation_required'} else 'ok'
+    if result['status'] == 'complete':
+        try:
+            binding_path = directory / 'vault-task-binding.json'
+            binding = run_store.read_json(binding_path) if binding_path.exists() else vault_task_records.bind_task(host.task_id, authority_ref=host.authority_evidence_ref)
+            if binding.get('task_id') != host.task_id:
+                raise vault_task_records.VaultTaskError('vault_task_identity_mismatch')
+            validation = report['validation']
+            result['vault_persistence'] = vault_task_records.persist_completion(binding, run_id=host.run_id,
+                evidence={'result':'complete', 'merge_commit':result['merge_commit'], 'pr':result['pr'], 'validation':'passed'},
+                attachments=[{'path':validation['evidence_path'], 'digest':validation['evidence_digest']}])
+        except vault_task_records.VaultTaskError as exc:
+            result.update(status='vault_persistence_failed', reason=exc.reason_class)
+    result['decision'] = 'blocked' if result['status'] in {'vault_persistence_failed','ci_failed','integrated_ci_failed','requires_user_decision','same_conflict_retry_limit','integration_reconciliation_required'} else 'ok'
     _save(directory / 'publication.json', result)
     return result
 

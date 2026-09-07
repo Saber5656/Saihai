@@ -155,7 +155,7 @@
       "step_id": "review"
     }
   ],
-  "task_id": "TSK-complete-pass",
+  "task_id": "TSK-PENDING-complete-pass",
   "terminal": {
     "reason": "report_valid",
     "status": "complete"
@@ -300,5 +300,11 @@
       "transition_version": "1"
     }
   ],
+  "vault_task_binding": {
+    "content_digest": "sha256:91595266b67915fa939145266fbcee50c29b2a0604ca3225eee6cfa98df76754",
+    "convention": "03-Contexts/Policies/Task-File-Conventions.md",
+    "path": "__STATE_ROOT__/fixture-vault/01-Projects/Fixtures/TSK-PENDING-complete-pass/task.md",
+    "task_id": "TSK-PENDING-complete-pass"
+  },
   "workflow_id": "single_step_external_review"
 }
