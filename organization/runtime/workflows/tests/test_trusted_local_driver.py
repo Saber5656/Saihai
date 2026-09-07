@@ -64,7 +64,7 @@ class TrustedLocalDriverTests(unittest.TestCase):
         local.execute(self.f.request, self.f.auth, self.f.state)
         directory = self.f.state/'trusted-local'/self.f.auth.publication.execution_id
         claim = json.loads((directory/'claim.json').read_text())
-        legacy = dataclasses.asdict(self.f.auth); legacy.pop('intake_digest'); legacy.pop('validation_profile')
+        legacy = dataclasses.asdict(self.f.auth); legacy.pop('intake_digest'); legacy.pop('validation_profile'); legacy['publication'].pop('expected_assignees')
         self.assertEqual(local.publication.digest(legacy), claim['authorization_digest'])
         with patch.object(local, '_run_process', side_effect=AssertionError('existing worker replayed')):
             result = self.drive(max_iterations=1)
@@ -73,15 +73,16 @@ class TrustedLocalDriverTests(unittest.TestCase):
 
     def test_intake_scope_refresh_preserves_host_action_without_human_question(self):
         local.execute(self.f.request, self.f.auth, self.f.state)
-        response = {'status': 'intake_scope_refresh_required', 'next_action': 'host_refresh_base_and_hunk_contracts',
-                    'intake_digest': 'sha256:' + 'a'*64}
-        with patch.object(local, 'advance_publication', return_value=response), \
-             patch.object(local, '_run_process', side_effect=AssertionError('worker replayed')):
-            result = self.drive()
-        self.assertEqual(response['status'], result['status'])
-        self.assertEqual(response['next_action'], result['next_action'])
-        self.assertEqual('blocked', result['stop']); self.assertTrue(result['resumable'])
-        self.assertEqual(0, result['polls'])
+        for status,action in [('intake_scope_refresh_required','host_refresh_base_and_hunk_contracts'),
+                              ('intake_findings_pending','host_triage_or_resolve_recorded_findings')]:
+            response = {'status': status, 'next_action': action, 'intake_digest': 'sha256:' + 'a'*64}
+            with patch.object(local, 'advance_publication', return_value=response), \
+                 patch.object(local, '_run_process', side_effect=AssertionError('worker replayed')):
+                result = self.drive()
+            self.assertEqual(response['status'], result['status'])
+            self.assertEqual(response['next_action'], result['next_action'])
+            self.assertEqual('blocked', result['stop']); self.assertTrue(result['resumable'])
+            self.assertEqual(0, result['polls'])
 
     def test_pending_bound_and_resume_never_replays_worker(self):
         first = self.drive(request=self.f.request, max_iterations=2)

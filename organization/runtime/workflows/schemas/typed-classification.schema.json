@@ -20,7 +20,8 @@
   ],
   "properties": {
     "classification_version": {
-      "const": "1"
+      "const": "1",
+      "type": "string"
     },
     "task_kind": {
       "type": "string",

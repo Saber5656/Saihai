@@ -340,3 +340,7 @@ it excludes archive/manifest/runtime/raw logs/environment/full SARIF. This does 
 the pre-existing CodeQL SARIF/database service upload. always() cannot guarantee retention
 on hard runner failure; missing final receipts remain blockers. Linux init/analysis/service
 execution and full Issue acceptance remain pending until real authorized CI evidence exists.
+
+Application delivery uses the host integration API described in
+[application-delivery-contract.md](application-delivery-contract.md), including
+independent environment/release grants, immutable promotion and measured recovery.

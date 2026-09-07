@@ -65,10 +65,53 @@ class UsageIntakeTests(unittest.TestCase):
             local.advance_publication(auth,f.state)
         conflict=local._integrate_conflict(auth,auth,report_path.parent,f.state,{'head':auth.publication.head},None)
         self.assertEqual(conflict['status'],'intake_scope_refresh_required')
+    def test_complete_host_pipeline_records_canonical_unit_and_every_reached_stage(self):
+        ref,auth,request=self.prepare();f=self.fixture
+        local.execute(request,auth,f.state)
+        merged='a'*40
+        checks=[[{'check_runs':[{'id':1,'name':'validate','head_sha':merged,'status':'completed','conclusion':'success'}]}],[[]]]
+        with patch.object(publication,'publish',return_value={'status':'merged','merge_commit':merged,'pr':'https://github.com/example/repo/pull/1'}), \
+             patch.object(publication,'required_inventory',return_value={'validate'}), \
+             patch.object(publication,'_json',side_effect=checks):
+            result=local.advance_publication(auth,f.state)
+        self.assertEqual(result['status'],'complete')
+        artifact=intake.resolve(f.state,ref)
+        life=intake.ledger_lifecycle
+        identity=life.unit_identity(artifact['requirement_ledger'],artifact['requirement_ledger']['task_units'][1])
+        receipt=local.run_store.read_json(life._completion_path(f.state,identity))
+        self.assertEqual(receipt['merge_commit'],merged)
+        stages={local.run_store.read_json(path)['stage'] for path in (f.state/'ledger-stages'/f.request['task_id']).glob('*.json')}
+        self.assertEqual(stages,life.STAGES)
+
+    def test_new_publication_finding_cannot_be_reported_complete(self):
+        ref,auth,request=self.prepare();f=self.fixture
+        local.execute(request,auth,f.state)
+        observation={'text':'A newly observed risk','requirement_ids':['RB'],'kind':'data_loss'}
+        with patch.object(publication,'publish',return_value={'status':'ci_pending','incidental_findings':[observation]}):
+            result=local.advance_publication(auth,f.state)
+        self.assertEqual(result['status'],'intake_findings_pending')
+        self.assertEqual(result['decision'],'blocked')
+        self.assertFalse(list((f.state/'unit-completions').glob('*.json')))
+
+    def test_canonical_sync_blocked_cannot_create_intake_completion(self):
+        ref,auth,request=self.prepare();f=self.fixture
+        local.execute(request,auth,f.state);merged='a'*40
+        checks=[[{'check_runs':[{'id':1,'name':'validate','head_sha':merged,'status':'completed','conclusion':'success'}]}],[[]]]
+        with patch.object(publication,'publish',return_value={'status':'merged','merge_commit':merged,'pr':'https://github.com/example/repo/pull/1'}), \
+             patch.object(publication,'required_inventory',return_value={'validate'}), \
+             patch.object(publication,'_json',side_effect=checks), \
+             patch.object(local.effective_installation,'sync_primary',side_effect=local.effective_installation.InstallationError('fixture_sync_blocked')):
+            result=local.advance_publication(auth,f.state)
+        self.assertEqual(result['status'],'canonical_sync_blocked')
+        self.assertEqual(result['decision'],'blocked')
+        self.assertFalse(list((f.state/'unit-completions').glob('*.json')))
+
     def test_legacy_authority_material_does_not_change_existing_digests(self):
         material=local._authorization_material(self.fixture.auth)
         self.assertNotIn('intake_digest',material)
-        self.assertEqual(publication.digest(material),publication.digest({k:v for k,v in dataclasses.asdict(self.fixture.auth).items() if k not in {'intake_digest','validation_profile'}}))
+        legacy = {k:v for k,v in dataclasses.asdict(self.fixture.auth).items() if k not in {'intake_digest','validation_profile'}}
+        legacy['publication'].pop('expected_assignees')
+        self.assertEqual(publication.digest(material),publication.digest(legacy))
         for profile in (None, {'path':'/host/plan','sha256':'a'*64}):
             for intake in ('', 'sha256:'+'b'*64):
                 auth=dataclasses.replace(self.fixture.auth,validation_profile=profile,intake_digest=intake)

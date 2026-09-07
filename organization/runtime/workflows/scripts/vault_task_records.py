@@ -51,7 +51,7 @@ def _relative(root: Path, path: Path) -> tuple[str, ...]:
 
 
 @contextmanager
-def _record(root: Path, path: Path, *, writable: bool = False):
+def _record(root: Path, path: Path, *, writable: bool = False, with_parent: bool = False):
     """Anchor every component to open directory descriptors; never follow links."""
     parts = _relative(root, path)
     handles = []
@@ -76,7 +76,7 @@ def _record(root: Path, path: Path, *, writable: bool = False):
         data = os.read(fd, MAX_RECORD_BYTES + 1)
         if len(data) > MAX_RECORD_BYTES:
             raise VaultTaskError('vault_task_record_too_large')
-        yield fd, data
+        yield (fd, data, directory) if with_parent else (fd, data)
         for parent, name, handle in edges:
             current = os.stat(name, dir_fd=parent, follow_symlinks=False)
             opened = os.fstat(handle)
@@ -281,3 +281,81 @@ def persist_completion(binding: dict, *, run_id: str, evidence: dict, attachment
     refs = checked_attachments(attachments)
     return append_completion(canonical_root(), binding, run_id=run_id,
                              evidence=dict(evidence, attachments=refs))
+
+
+def ledger_checkpoint(binding: dict, payload: dict, *, persist: bool = False) -> dict:
+    """Read-back a full immutable host ledger using the existing task writer lock.
+
+    Only an exact interrupted prefix may be completed. Different existing bytes,
+    symlinks and replaced directory entries are never adopted or overwritten.
+    The task marker is written last; neither a sidecar alone nor a caller's ACK
+    is proof that the canonical checkpoint is present.
+    """
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                             separators=(',', ':'), allow_nan=False).encode() + b'\n'
+    except (ValueError, TypeError) as exc:
+        raise VaultTaskError('vault_ledger_invalid') from exc
+    if len(encoded) > MAX_RECORD_BYTES:
+        raise VaultTaskError('vault_ledger_too_large')
+    root = canonical_root()
+    path = Path(binding.get('path', ''))
+    task_id = binding.get('task_id', '')
+    key = digest(encoded)
+    name = 'saihai-ledger-' + key[7:] + '.json'
+    marker = ('\n<!-- saihai-ledger:' + key[7:] + ' -->\n').encode()
+    block = marker + ('Ledger checkpoint: [' + name + '](' + name + ')\n').encode()
+
+    def finish(fd: int, existing: bytes, expected: bytes) -> None:
+        if existing == expected:
+            return
+        if not persist or not expected.startswith(existing):
+            raise VaultTaskError('vault_ledger_checkpoint_conflict')
+        os.lseek(fd, len(existing), os.SEEK_SET)
+        remaining = memoryview(expected)[len(existing):]
+        while remaining:
+            count = os.write(fd, remaining)
+            if count <= 0:
+                raise VaultTaskError('vault_ledger_write_failed')
+            remaining = remaining[count:]
+        os.fsync(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
+        if os.read(fd, MAX_RECORD_BYTES + 1) != expected:
+            raise VaultTaskError('vault_ledger_read_back_failed')
+
+    with _record(root, path, writable=persist, with_parent=True) as (task_fd, data, directory):
+        _identity(task_id, path, data)
+        if payload.get('task_id') != task_id:
+            raise VaultTaskError('vault_ledger_task_mismatch')
+        flags = (os.O_RDWR | os.O_CREAT if persist else os.O_RDONLY) | os.O_NOFOLLOW | os.O_NONBLOCK
+        fd = os.open(name, flags, 0o600, dir_fd=directory)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_RECORD_BYTES:
+                raise VaultTaskError('vault_ledger_file_unsafe')
+            finish(fd, os.read(fd, MAX_RECORD_BYTES + 1), encoded)
+            current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (st.st_dev, st.st_ino):
+                raise VaultTaskError('vault_ledger_file_changed')
+        finally:
+            os.close(fd)
+        if block not in data:
+            if not persist:
+                raise VaultTaskError('vault_ledger_ack_missing')
+            # Recover only this exact marker's interrupted suffix at EOF.
+            start = data.find(marker)
+            if start >= 0:
+                if not block.startswith(data[start:]):
+                    raise VaultTaskError('vault_ledger_ack_conflict')
+                expected = data[:start] + block
+            else:
+                overlap = next((n for n in range(min(len(data), len(marker) - 1), 0, -1)
+                                if data.endswith(marker[:n])), 0)
+                expected = (data[:-overlap] if overlap else data) + block
+            if len(expected) > MAX_RECORD_BYTES:
+                raise VaultTaskError('vault_task_record_too_large')
+            finish(task_fd, data, expected)
+        if persist:
+            os.fsync(directory)
+    return {'status': 'canonical_read_back', 'task_id': task_id,
+            'path': str(path.parent / name), 'digest': key, 'committed': False, 'published': False}

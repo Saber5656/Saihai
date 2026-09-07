@@ -87,7 +87,7 @@ def _observe(plan):
     env = catalog()
     if plan['surface'] not in {'codex-app', 'codex-cli', 'claude-cli'}:
         raise InstallationError('surface_unknown')
-    values = dict(env, CODEX_SURFACE=str(Path.home() / '.codex'), CLAUDE_SURFACE=str(Path.home() / '.claude'))
+    values = dict(env, CODEX_SURFACE=str(Path.home() / '.codex'), CLAUDE_SURFACE=str(Path.home() / '.claude'), AGENTS_SURFACE=str(Path.home() / '.agents'))
     if not isinstance(plan['roots'], dict) or any(k not in values for k in plan['roots'].values()):
         raise InstallationError('catalog_root_unknown')
     roots = {key: values[value] for key, value in plan['roots'].items()}
