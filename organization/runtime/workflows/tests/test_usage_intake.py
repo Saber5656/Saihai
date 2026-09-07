@@ -69,6 +69,16 @@ class UsageIntakeTests(unittest.TestCase):
         material=local._authorization_material(self.fixture.auth)
         self.assertNotIn('intake_digest',material)
         self.assertEqual(publication.digest(material),publication.digest({k:v for k,v in dataclasses.asdict(self.fixture.auth).items() if k!='intake_digest'}))
+    def test_driver_binds_intake_claim_and_rejects_digest_changes(self):
+        import trusted_local_driver as driver
+        ref,auth,request=self.prepare();f=self.fixture
+        result=driver.drive(authorization=auth,state_root=f.state,request=request,max_iterations=1)
+        self.assertEqual(result['last_status'],'validated')
+        directory=f.state/'trusted-local'/auth.publication.execution_id
+        self.assertEqual(json.loads((directory/'claim.json').read_text())['authorization_digest'],
+                         json.loads((directory/'drive.json').read_text())['authorization_digest'])
+        with self.assertRaisesRegex(local.TrustedLocalError,'drive_authority_changed'):
+            driver.drive(authorization=dataclasses.replace(auth,intake_digest='sha256:'+'a'*64),state_root=f.state)
     def test_actual_intake_process_receipts_and_no_repo_mutation(self):
         f=self.fixture
         f.cli.write_text('''#!/usr/bin/env python3

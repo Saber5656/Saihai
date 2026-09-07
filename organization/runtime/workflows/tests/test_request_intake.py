@@ -46,9 +46,14 @@ def provider(stage, context, attempt, diagnostic, schema_path):
 class IntakeTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.state=Path(self.tmp.name).resolve()/'state'
+        import vault_task_records as vault
+        self.vault=self.state.parent/'vault';self.vault.mkdir()
+        vault.scaffold(self.vault,'TSK-20260907-intake',project='Fixtures',brief=dict(objective='Intake fixture',scope='Fixture',acceptance_criteria='Fixture'))
+        self.vault_patch=patch.object(vault,'canonical_root',return_value=self.vault)
+        self.vault_patch.start();self.addCleanup(self.vault_patch.stop)
     def tearDown(self): self.tmp.cleanup()
     def prepare(self, **kw):
-        params=dict(state_root=self.state,request_id='req-intake',task_id='task-intake',user_prompt='Review API A and API B.',
+        params=dict(state_root=self.state,request_id='req-intake',task_id='TSK-20260907-intake',user_prompt='Review API A and API B.',
                     ledger=ledger(),provider=provider,intended_model='approved-model')
         params.update(kw);return intake.prepare(**params)
     def test_preserves_all_requirements_and_pending_and_raw_source_private(self):
@@ -104,7 +109,7 @@ class IntakeTests(unittest.TestCase):
             return value,receipt
         ref=self.prepare(ledger=doc,provider=ambiguous)
         with self.assertRaisesRegex(intake.IntakeError,'material_requirement_unresolved'):
-            intake.for_order(self.state,dict(task_id='task-intake',request_id='req-intake',workflow_id='single_step_external_review',work_brief_ref=ref))
+            intake.for_order(self.state,dict(task_id='TSK-20260907-intake',request_id='req-intake',workflow_id='single_step_external_review',work_brief_ref=ref))
     def test_private_source_denied_benign_short_exact_words_allowed(self):
         for kind in ('private_transcript','secret'):
             with self.assertRaisesRegex(intake.IntakeError,'private_source'):self.prepare(source_kind=kind)
@@ -131,7 +136,7 @@ class IntakeTests(unittest.TestCase):
         artifact['brief']['objective']='swapped';path.write_text(json.dumps(artifact))
         with self.assertRaisesRegex(intake.IntakeError,'digest_mismatch'):intake.resolve(self.state,ref)
     def test_approval_material_binds_brief_without_changing_legacy(self):
-        record=dict(task_id='task-intake',request_id='req-intake',proposal={})
+        record=dict(task_id='TSK-20260907-intake',request_id='req-intake',proposal={})
         with patch.object(frontdoor,'approval_provider_binding',return_value={}):
             old=frontdoor.approval_action_id(record)
             record['work_brief_ref']=self.prepare();new=frontdoor.approval_action_id(record)
@@ -140,14 +145,14 @@ class IntakeTests(unittest.TestCase):
             self.assertNotEqual(new,frontdoor.approval_action_id(record))
     def test_bound_classification_cannot_be_self_attested(self):
         with self.assertRaisesRegex(frontdoor.FrontdoorError,'host_intake'):
-            frontdoor.proposed_request(state_root=self.state,task_id='task-intake',request_id='req-intake',
+            frontdoor.proposed_request(state_root=self.state,task_id='TSK-20260907-intake',request_id='req-intake',
                 user_prompt='Review API B',refs=['README.md'],classification=external_review_classification(classification_source='bounded_classifier_step'),
                 allowed_paths=['README.md'],expires_at='run_terminal',frontdoor='manual',chat_session_id='test')
 
     def test_frontdoor_proposal_approval_drain_transport_and_tamper(self):
         doc=ledger()
         for unit in doc['task_units']:unit['allowed_paths']=['README.md']
-        proposed=frontdoor.proposed_request(state_root=self.state,task_id='task-intake',request_id='req-intake',
+        proposed=frontdoor.proposed_request(state_root=self.state,task_id='TSK-20260907-intake',request_id='req-intake',
             user_prompt='Review API A and API B.',refs=['README.md'],classification=None,allowed_paths=['README.md'],
             expires_at='run_terminal',frontdoor='manual',chat_session_id='fixture',intake_provider=provider,
             requirement_ledger=doc,intake_model='approved-model')
