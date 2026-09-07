@@ -310,7 +310,7 @@
         "module": "scoped_worker_executor",
         "function": "verify_worker_runtime_binding",
         "fields_constant": "WORKER_RUNTIME_BINDING_FIELDS",
-        "validator_digest": "sha256:864c5232712a40d165b5c1d4bedafb64920c056d0097a3b845581c287c56ca6e"
+        "validator_digest": "sha256:60377a61f55d78bdf50ffb6743ac42db8ecca760676fdce83aecc56fdb83652f"
       },
       "rationale": "The shipped Codex worker is a target for capability-bound launch and action boundaries. Its minimal-read, workspace-write permission profile configures root, temporary, Git metadata, dedicated auth, and network denies as defense in depth, but current host-domain evidence does not prove generic same-rootfs external-mutation denial and explicitly records that network denial alone does not deny a same-rootfs local Git push. A clean post-execution HEAD also does not prove commit denial, and configured dedicated auth-path denial does not prove generic credential denial. Live managed_worker therefore remains mechanically suppressed until a separately isolated worker domain supplies stronger evidence for every blocked operation and the launch binding."
     }

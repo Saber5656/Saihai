@@ -14,7 +14,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 from directory_paths import load_environment  # noqa: E402
 
-ENV_DIAGNOSTICS = load_environment(checkout_root=REPO_ROOT, require_catalog=True)
+ENV_DIAGNOSTICS = ({"status":"startup_diagnostic_deferred"} if sys.argv[1:2] == ["startup"]
+                   else load_environment(checkout_root=REPO_ROOT, require_catalog=True))
 FRONTDOOR_PATH = REPO_ROOT / "organization" / "runtime" / "workflows" / "scripts" / "frontdoor_orchestrator.py"
 
 FRONTDOOR_COMMANDS = {"propose", "approve", "status"}
@@ -387,6 +388,12 @@ def handle_usage_repair_validation(frontdoor: Any, args: argparse.Namespace) -> 
                                                    repair_instruction=args.repair_instruction)
 
 
+def handle_output_status(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import output_monitor
+    return output_monitor.status(frontdoor, state_root=state_root_from_args(frontdoor,args),
+        principal=frontdoor.default_manual_principal(), stale_seconds=args.stale_seconds)
+
+
 def handle_task_scaffold(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
     import vault_task_records
     try:
@@ -439,9 +446,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Sahai deterministic frontdoor/workflow CLI",
     )
     sub = parser.add_subparsers(dest="group", required=True)
+    sub.add_parser("startup", help="host startup/recovery diagnostics; use startup --help")
     build_frontdoor_parser(sub)
     build_workflow_parser(sub)
     build_usage_parser(sub)
+    output = sub.add_parser('output', help='host acknowledgement monitoring')
+    outputs = output.add_subparsers(dest='command', required=True)
+    status = outputs.add_parser('status')
+    status.add_argument('--state-root', default='')
+    status.add_argument('--stale-seconds', type=int, default=900)
+    status.set_defaults(handler=handle_output_status)
     task = sub.add_parser('task', help='canonical host task records')
     tasks = task.add_subparsers(dest='command', required=True)
     scaffold = tasks.add_parser('scaffold')
@@ -453,6 +467,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    supplied = list(sys.argv[1:] if argv is None else argv)
+    if supplied[:1] == ["startup"]:
+        sys.path.insert(0, str(FRONTDOOR_PATH.parent))
+        import startup_recovery
+        return startup_recovery.cli(supplied[1:])
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
