@@ -1029,6 +1029,9 @@ def build_provider_execution(
     previous = run.get("provider_execution") if isinstance(run.get("provider_execution"), dict) else {}
     retry = (previous.get("retry") if previous.get("step_id") == request["step_id"]
              and isinstance(previous.get("retry"), dict) else {})
+    max_auto_retries = retry.get("max_auto_retries", DEFAULT_MAX_AUTO_RETRIES)
+    if type(max_auto_retries) is not int or max_auto_retries < 0:
+        raise ProviderRunnerError("provider_retry_cap_invalid")
     attempt_number = int(previous.get("attempt_number") or 0) + 1
     claimed_at = now_iso()
     return {
@@ -1056,7 +1059,7 @@ def build_provider_execution(
             "last_failure_fingerprint": retry.get("last_failure_fingerprint"),
             "consecutive_failures": int(retry.get("consecutive_failures") or 0),
             "auto_retries_used": int(retry.get("auto_retries_used") or 0),
-            "max_auto_retries": DEFAULT_MAX_AUTO_RETRIES,
+            "max_auto_retries": min(max_auto_retries, DEFAULT_MAX_AUTO_RETRIES),
         },
         "last_outcome": previous.get("last_outcome"),
     }
@@ -1563,8 +1566,11 @@ def run_provider(
     timeout_seconds: int = DEFAULT_PROVIDER_TIMEOUT_SECONDS,
     fake_provider_mode: str = "",
     live: bool = False,
+    return_on_retry: bool = False,
     principal: dict[str, Any],
 ) -> dict[str, Any]:
+    if type(return_on_retry) is not bool:
+        raise ProviderRunnerError("provider_retry_yield_invalid")
     timeout_seconds = validate_provider_timeout(timeout_seconds)
     run_store.validate_artifact_id(run_id, "run_id")
     subject = {"run_id": run_id, "adapter_id": adapter_id}
@@ -1675,7 +1681,6 @@ def run_provider(
                         else:
                             retry_state["last_failure_fingerprint"] = fingerprint
                             retry_state["consecutive_failures"] = 1
-                            retry_state["auto_retries_used"] = 0
                         non_retryable = reason_code in {
                             "auth_required",
                             "auth_or_quota",
@@ -1711,6 +1716,9 @@ def run_provider(
                                 run=run,
                             )
                             recovered_result = None
+                            if return_on_retry:
+                                return {"schema_version": 1, "decision": "ok",
+                                        "reason": "provider_retry_scheduled", "workflow_run": run}
                             continue
                         execution["phase"] = "human_gate"
                         transition = run_lifecycle.transition_run(
@@ -2174,7 +2182,6 @@ def run_provider(
                 else:
                     retry_state["last_failure_fingerprint"] = fingerprint
                     retry_state["consecutive_failures"] = 1
-                    retry_state["auto_retries_used"] = 0
                 non_retryable = reason_code in {
                     "auth_required",
                     "auth_or_quota",
@@ -2213,6 +2220,9 @@ def run_provider(
                         run=current_run,
                     )
         if retry:
+            if return_on_retry:
+                return {"schema_version": 1, "decision": "ok",
+                        "reason": "provider_retry_scheduled", "workflow_run": current_run}
             continue
         if outcome != "ok" or report is None:
             return {
