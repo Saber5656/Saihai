@@ -325,6 +325,25 @@ print(json.dumps({'result':'fail' if flags.get(name)=='fail' else 'pass','cases'
         self.assertEqual(measurement['binding']['migrations'],failed['migration'][1]['binding']['migrations'])
 
 
+    def test_reconciliation_preserves_preflight_evidence_after_recovery_crash(self):
+        self.policy=dataclasses.replace(self.policy,migration_required=True,migration_paths=('app.txt',))
+        self.host=self.make_host();self.flags(migration=True)
+        candidate=self.build();self.grant(candidate);self.flags(migration=True,health='fail')
+        failed=self.promote(candidate);self.grant(candidate,action='recover');self.flags(migration=True)
+        def crash(*args):
+            self.perform(*args)
+            raise KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            self.host.recover(failed,candidate,grant_id='recover',perform=crash)
+        pending=self.host.recover(failed,candidate,grant_id='recover',perform=self.perform)
+        preflight=pending['evidence'][0]
+        terminal=self.host.reconcile(pending,candidate,grant_id='recover',recovery=True)
+        self.assertEqual(terminal['state'],'recovered_verified')
+        self.assertEqual(terminal['evidence'][0],preflight)
+        self.assertEqual(preflight['name'],'recovery_compatibility')
+        self.assertEqual(len(self.calls),2)
+
+
 class MetricsTests(unittest.TestCase):
     def test_traceable_pairs_deduplication_and_missing_data(self):
         events=[{'id':'a','subject':'one','kind':'commit','at':1,'evidence':'host:a'},

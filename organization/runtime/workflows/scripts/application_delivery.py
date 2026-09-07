@@ -467,8 +467,8 @@ class DeliveryHost:
             owner = self.policy.recovery_owner if recovery else self.profile['release']['owner']
             self._grant(grant_id, candidate, binding['environment'], action, owner)
             try:
-                row['evidence'] = [self._observe(check, binding, artifact=artifact)
-                                   for check in ('deployment_identity',) + self.policy.health_checks]
+                row['evidence'].extend(self._observe(check, binding, artifact=artifact)
+                                       for check in ('deployment_identity',) + self.policy.health_checks)
                 self._candidate(candidate, previous=recovery)
                 self._grant(grant_id, candidate, binding['environment'], action, owner)
                 row['state'] = 'recovered_verified' if recovery else 'verified'
