@@ -868,7 +868,7 @@ def test_blocked_activation_cli_exits_nonzero() -> None:
     assert_equal(payload["activation_status"], "blocked", "blocked activation payload")
 
 
-def test_readonly_chain_runtime_unavailable_cannot_be_approved() -> None:
+def test_readonly_chain_available_preserves_activation_scope() -> None:
     classification = typed_classification(
         "research", external_provider_required=True,
         expected_artifacts=["research_report", "typed_report", "final_evidence"],
@@ -878,18 +878,21 @@ def test_readonly_chain_runtime_unavailable_cannot_be_approved() -> None:
             classification, activation_source=source, task_id="TSK-chain",
             request_id="req-chain", refs=["organization/runtime/workflows/README.md"],
         )
-        assert_equal(envelope["activation_status"], "blocked", source)
-        assert_equal(envelope["workflow_selection"]["status"], "blocked", source)
-        assert_equal(envelope["approval_required_reason"], "readonly_chain_runtime_unavailable", source)
-        assert_equal(envelope["next_action"], "abort", source)
-        assert "approved_by" not in envelope
-        assert "approved_at" not in envelope
-        assert "goal_state_transition" not in envelope
-    # The unavailable runtime must not become an ordinary provider-approval request.
+        proposed = source == "frontdoor_prompt"
+        assert_equal(envelope["activation_status"], "proposed" if proposed else "approved", source)
+        assert_equal(envelope["workflow_selection"]["status"], "selected", source)
+        assert_equal(envelope["workflow_selection"]["workflow_id"], "readonly_review_chain", source)
+        assert_equal(envelope["next_action"], "keep_draft" if proposed else "create_workflow_run", source)
+        assert_equal(envelope["activation_scope"]["step_budget"], 1 if proposed else 3, source)
+        assert_equal(envelope["activation_scope"]["allowed_ops"],
+                     {op: False for op in ("edit", "commit", "push", "network")}, source)
+        if proposed:
+            assert "approved_by" not in envelope
+            assert "approved_at" not in envelope
     classification["external_provider_required"] = False
     result = selector.select_workflow(classification)
-    assert_equal(result["decision"], "blocked", "provider absence does not unblock runtime")
-    assert_equal(result["workflow_selection"]["reason"], "readonly_chain_runtime_unavailable", "runtime reason")
+    assert_equal(result["decision"], "waiting_human", "provider absence requires a decision")
+    assert_equal(result["workflow_selection"]["reason"], "readonly_chain_requires_provider", "provider reason")
 
 
 def main() -> None:
@@ -920,7 +923,7 @@ def main() -> None:
         test_workflow_run_schema_encodes_scheduler_and_activation_scope,
         test_configure_organization_facade,
         test_blocked_activation_cli_exits_nonzero,
-        test_readonly_chain_runtime_unavailable_cannot_be_approved,
+        test_readonly_chain_available_preserves_activation_scope,
     ]
     for test in tests:
         test()
