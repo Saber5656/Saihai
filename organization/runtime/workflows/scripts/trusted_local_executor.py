@@ -275,6 +275,9 @@ def _execute(request: dict, authorization: TrustedLocalAuthorization, state_root
     _save(directory / 'activation.json', dict(claim, status='authorized_by_user_task', publication_allowed=False))
     if repair_context is not None:
         _save(directory / 'repair-input.json', repair_context)
+    if intake is not None:
+        request_intake.ledger_lifecycle.record_stage(state_root, intake, request['work_brief_ref'],
+            stage='plan', observation={'scope': brief_context})
     output = directory / 'worker-result.json'
     descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     os.close(descriptor)
@@ -293,6 +296,9 @@ def _execute(request: dict, authorization: TrustedLocalAuthorization, state_root
     result = run_store.read_json(output)
     errors = scoped.work_order_builder._validate_schema_fragment(result,
         json.loads(RESULT_SCHEMA.read_text()), '$')
+    if intake is not None and not errors:
+        request_intake.ledger_lifecycle.record_stage(state_root, intake, request['work_brief_ref'],
+            stage='implementation', observation=result, findings=result.get('incidental_findings', []))
     if errors or result.get('status') != 'completed':
         raise TrustedLocalError('worker_result_invalid')
     if _git(root, 'rev-parse', 'HEAD') != host.head or _git(root, 'branch', '--show-current') != host.branch:
@@ -313,7 +319,14 @@ def _execute(request: dict, authorization: TrustedLocalAuthorization, state_root
             raise TrustedLocalError(str(exc)) from exc
     identity = publication.snapshot(root, paths)
     validation_path = directory / 'validation.json'
-    _validate(root, authorization, identity, validation_path)
+    try:
+        _validate(root, authorization, identity, validation_path)
+    finally:
+        if intake is not None and validation_path.exists():
+            observed_validation = run_store.read_json(validation_path)
+            request_intake.ledger_lifecycle.record_stage(state_root, intake, request['work_brief_ref'],
+                stage='validation', observation=observed_validation,
+                findings=observed_validation.get('incidental_findings', []))
     if _git(root, 'rev-parse', 'HEAD') != host.head or _git(root, 'branch', '--show-current') != host.branch:
         raise TrustedLocalError('validation_git_identity_changed')
     if publication.snapshot(root, paths) != identity:
@@ -328,6 +341,8 @@ def _execute(request: dict, authorization: TrustedLocalAuthorization, state_root
           'status': 'not_required' if authorization.review_policy == 'normal_optional' else 'completed',
           'evidence_ref': host.scope_review_receipt})
     if intake is not None:
+        request_intake.ledger_lifecycle.record_stage(state_root, intake, request['work_brief_ref'],
+            stage='review', observation=run_store.read_json(directory / 'review.json'))
         report['intake_digest'] = authorization.intake_digest
         report['requirement_scope'] = scope_evidence
     _save(directory / 'report.json', report)
@@ -656,17 +671,22 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
         report = continuation['report']
         integrated_parent = continuation['integrated_parent']
     if authorization.intake_digest:
-        reference = run_store.read_json(directory / 'request.json').get('work_brief_ref')
-        if (current.intake_digest != authorization.intake_digest
-                or report.get('intake_digest') != authorization.intake_digest
-                or not isinstance(reference, dict) or reference.get('digest') != authorization.intake_digest):
+        original_reference = run_store.read_json(directory / 'request.json').get('work_brief_ref')
+        reference = continuation.get('work_brief_ref', original_reference) if continuation_path.exists() else original_reference
+        if (report.get('intake_digest') != current.intake_digest
+                or not isinstance(reference, dict) or reference.get('digest') != current.intake_digest
+                or not isinstance(original_reference, dict) or original_reference.get('digest') != authorization.intake_digest):
             raise TrustedLocalError('publication_intake_binding_changed')
+        request_intake.verify_refresh_chain(state_root, reference, original_reference, root=Path(host.worktree))
         try:
             artifact = request_intake.resolve(state_root, reference)
         except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
             raise TrustedLocalError(str(exc)) from exc
+        request_intake.ledger_lifecycle.require_prerequisites(state_root, artifact)
         if report.get('requirement_scope', {}).get('ledger_digest') != request_intake.scope.digest(artifact['requirement_ledger']):
             raise TrustedLocalError('publication_requirement_scope_changed')
+    if current.intake_digest and request_intake.ledger_lifecycle.findings_status(state_root, artifact)['blocked']:
+        return {'status': 'intake_findings_pending', 'decision': 'blocked', 'next_action': 'host_triage_or_resolve_recorded_findings'}
     progress_path = directory / 'integration.json'
     progress = run_store.read_json(progress_path) if progress_path.exists() else {}
     if progress.get('status') in {'running', 'retryable_worker', 'retryable_validation', 'mutation_uncertain'}:
@@ -680,6 +700,9 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
     if result['status'] == 'conflict_pending':
         result = _integrate_conflict(authorization, current, directory, state_root, result,
                                     commands or publication.Commands())
+    if current.intake_digest:
+        request_intake.ledger_lifecycle.record_stage(state_root, artifact, reference,
+            stage='publication', observation=result, findings=result.get('incidental_findings', []))
     if result['status'] == 'merged':
         cmd = commands or publication.Commands()
         root = Path(host.worktree)
@@ -711,6 +734,11 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
         result = dict(result, merge_status='merged', integrated_checks=states,
                       status='complete' if all(s == 'success' for s in states.values()) else
                       'integrated_ci_failed' if any(s in {'failure','error','cancelled','timed_out','action_required','skipped','neutral','stale'} for s in states.values()) else 'integrated_ci_pending')
+    if current.intake_digest and result.get('merge_status') == 'merged':
+        request_intake.ledger_lifecycle.record_stage(state_root, artifact, reference,
+            stage='merge', observation=result, findings=result.get('incidental_findings', []))
+    if current.intake_digest and request_intake.ledger_lifecycle.findings_status(state_root, artifact)['blocked']:
+        result.update(status='intake_findings_pending', next_action='host_triage_or_resolve_recorded_findings')
     if result['status'] == 'complete':
         try:
             binding_path = directory / 'vault-task-binding.json'
@@ -721,9 +749,13 @@ def advance_publication(authorization: TrustedLocalAuthorization, state_root: Pa
             result['vault_persistence'] = vault_task_records.persist_completion(binding, run_id=host.run_id,
                 evidence={'result':'complete', 'merge_commit':result['merge_commit'], 'pr':result['pr'], 'validation':'passed'},
                 attachments=[{'path':validation['evidence_path'], 'digest':validation['evidence_digest']}])
-        except vault_task_records.VaultTaskError as exc:
-            result.update(status='vault_persistence_failed', reason=exc.reason_class)
-    result['decision'] = 'blocked' if result['status'] in {'vault_persistence_failed','ci_failed','integrated_ci_failed','requires_user_decision','same_conflict_retry_limit','integration_reconciliation_required'} else 'ok'
+            if current.intake_digest:
+                request_intake.ledger_lifecycle.record_completion(state_root, artifact, reference, report, result)
+                request_intake.ledger_lifecycle.record_stage(state_root, artifact, reference,
+                    stage='completion', observation=result)
+        except (vault_task_records.VaultTaskError, request_intake.ledger_lifecycle.LedgerError) as exc:
+            result.update(status='vault_persistence_failed', reason=getattr(exc, 'reason_class', str(exc)))
+    result['decision'] = 'blocked' if result['status'] in {'intake_findings_pending','vault_persistence_failed','ci_failed','integrated_ci_failed','requires_user_decision','same_conflict_retry_limit','integration_reconciliation_required'} else 'ok'
     _save(directory / 'publication.json', result)
     return result
 
@@ -738,11 +770,11 @@ def _authority_from_record(value: dict) -> TrustedLocalAuthorization:
 def _integrate_conflict(original: TrustedLocalAuthorization, current: TrustedLocalAuthorization,
                         directory: Path, state_root: Path, prior: dict, cmd: publication.Commands) -> dict:
     """Host merges fresh main, repairs only conflict paths, validates a new identity."""
-    if current.intake_digest:
-        # Old line ranges cannot authorize new-base conflict edits. The host must
-        # map/rebind existing accepted scope; this is not a fresh human approval.
+    if current.intake_digest and cmd is None:
         return {'status': 'intake_scope_refresh_required', 'next_action': 'host_refresh_base_and_hunk_contracts',
                 'intake_digest': current.intake_digest}
+    intake_plan = None
+    refreshed_ref = None
     host = current.publication; root = Path(host.worktree)
     progress_path = directory / 'integration.json'
     progress = run_store.read_json(progress_path) if progress_path.exists() else {'attempt': 0, 'same_cause_retries': 0}
@@ -759,6 +791,25 @@ def _integrate_conflict(original: TrustedLocalAuthorization, current: TrustedLoc
     else:
         cmd.run(['git','fetch','origin',host.destination], cwd=root)
         fresh = _git(root, 'rev-parse', 'origin/' + host.destination)
+        if current.intake_digest:
+            source_request = run_store.read_json(directory / 'request.json')
+            continuation_file = directory / 'continuation.json'
+            previous = run_store.read_json(continuation_file) if continuation_file.exists() else {}
+            source_ref = previous.get('work_brief_ref', source_request['work_brief_ref'])
+            if source_ref['digest'] != current.intake_digest:
+                raise TrustedLocalError('integration_intake_binding_changed')
+            _authorize(dict(source_request, work_brief_ref=source_ref, execution_id=host.execution_id),
+                dataclasses.replace(current, publication=dataclasses.replace(host, head=prior['head'])), clean=True)
+            try:
+                old_artifact = request_intake.resolve(state_root, source_ref)
+                old_base = request_intake.scope.selected_unit(old_artifact['requirement_ledger'])['change_contracts'][0]['base']
+                refreshed_ref, intake_plan = request_intake.refresh_hunks(state_root, source_ref,
+                    root=root, old_base=old_base, new_base=fresh, task_head=prior['head'])
+                request_intake.verify_refresh_chain(state_root, refreshed_ref, source_request['work_brief_ref'], root=root)
+            except (request_intake.scope.ScopeError, request_intake.IntakeError) as exc:
+                return {'status': 'intake_scope_refresh_required', 'next_action': 'host_refresh_base_and_hunk_contracts',
+                        'reason': str(exc), 'intake_digest': current.intake_digest}
+            progress.update(work_brief_ref=refreshed_ref)
         progress.update(status='running', prior_head=prior['head'], fresh_base=fresh, repair_paths=[])
         _save(progress_path, progress)
         try:
@@ -769,6 +820,15 @@ def _integrate_conflict(original: TrustedLocalAuthorization, current: TrustedLoc
         if _git(root, 'rev-parse', 'MERGE_HEAD') != fresh:
             raise TrustedLocalError('integration_base_changed')
         conflicts = [p for p in _git(root,'diff','--name-only','--diff-filter=U','-z').split('\0') if p]
+    if current.intake_digest and resuming:
+        refreshed_ref = progress.get('work_brief_ref')
+        source_ref = run_store.read_json(directory / 'request.json')['work_brief_ref']
+        request_intake.verify_refresh_chain(state_root, refreshed_ref, source_ref, root=root)
+        artifact = request_intake.resolve(state_root, refreshed_ref)
+        refresh = artifact['mechanical_refresh']; proof = refresh['proof']
+        parent = request_intake.resolve(state_root, refresh['parent_reference'])
+        intake_plan = request_intake.scope.mechanical_refresh(root, parent['requirement_ledger'],
+            old_base=proof['old_base'], new_base=fresh, task_head=prior['head'])
     progress['attempt'] += 1
     progress['repair_paths'] = conflicts
     _scope(conflicts, host.allowed_paths)
@@ -782,10 +842,35 @@ def _integrate_conflict(original: TrustedLocalAuthorization, current: TrustedLoc
     execution_id = original.publication.execution_id + '-integration-' + str(progress['attempt'])
     run_store.validate_artifact_id(execution_id,'execution_id')
     repaired_host = dataclasses.replace(host, execution_id=execution_id, head=prior['head'], base=fresh)
-    repaired = dataclasses.replace(current, publication=repaired_host)
+    repaired = dataclasses.replace(current, publication=repaired_host,
+        intake_digest=refreshed_ref['digest'] if refreshed_ref else current.intake_digest)
     request = dict(run_store.read_json(directory/'request.json'), execution_id=execution_id)
     evidence = directory / execution_id; run_store.ensure_private_directory(evidence)
-    if conflicts:
+    if intake_plan is not None:
+        request['work_brief_ref'] = refreshed_ref
+        _authorize(request, repaired, clean=False)
+        import base64
+        desired = {row['path']: row for row in intake_plan['outputs']}
+        if not set(conflicts) <= set(desired):
+            raise TrustedLocalError('integration_conflict_outside_mechanical_plan')
+        for path, row in desired.items():
+            target = root / path
+            if target.is_symlink() or any(parent.is_symlink() for parent in target.parents if parent != root and root in parent.parents):
+                raise TrustedLocalError('integration_path_changed')
+            if row['content_base64'] is None:
+                if target.exists():
+                    target.unlink()  # Only an explicit original delete contract reaches this branch.
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(base64.b64decode(row['content_base64'], validate=True))
+                target.chmod(0o755 if row['mode'] == '100755' else 0o644)
+        if desired:
+            cmd.run(['git', 'add', '--', *desired], cwd=root)
+        request['work_brief_ref'] = refreshed_ref
+        _save(evidence/'process.json', {'execution_id':execution_id, 'exit':0, 'actor_kind':ACTOR,
+            'operation':'host_mechanical_hunk_remap', 'proof':intake_plan['proof'],
+            'prior_head':prior['head'], 'fresh_base':fresh})
+    elif conflicts:
         request['instruction'] += ('\nResolve only the Git conflicts in '+json.dumps(conflicts)+
             '. Preserve both the original task intent and unrelated main changes. Do not stage or commit. '
             'If requirements are contradictory, return blocked and explain the decision needed.')
@@ -816,6 +901,9 @@ def _integrate_conflict(original: TrustedLocalAuthorization, current: TrustedLoc
     _scope(paths,host.allowed_paths)
     patch=cmd.run(['git','diff','--cached','--binary','--full-index','--no-ext-diff','--no-renames',fresh],cwd=root)
     identity={'tree':tree,'diff_digest':publication.digest(patch)}
+    refreshed_scope = None
+    if intake_plan is not None:
+        refreshed_scope = request_intake.scope.validate_diff(root, intake_plan['ledger'], base=fresh, actual_paths=paths)
     try:
         _validate(root,repaired,identity,evidence/'validation.json')
     except TrustedLocalError:
@@ -837,9 +925,13 @@ def _integrate_conflict(original: TrustedLocalAuthorization, current: TrustedLoc
         execution={'actor_kind':ACTOR,'authority_evidence_ref':host.authority_evidence_ref,
                    'process_evidence_path':str(evidence/'process.json'),'process_evidence_digest':publication.digest((evidence/'process.json').read_bytes())},
         validation={'status':'passed','evidence_path':str(evidence/'validation.json'),'evidence_digest':publication.digest((evidence/'validation.json').read_bytes())})
+    if refreshed_ref is not None:
+        report.update(intake_digest=refreshed_ref['digest'], requirement_scope=refreshed_scope)
     publication.validate_report(report,repaired_host)
     continuation={'authorization':_authorization_material(repaired),'report':report,'integrated_parent':prior['head'],
                   'original_authorization_digest':publication.digest(_authorization_material(original))}
+    if refreshed_ref is not None:
+        continuation['work_brief_ref'] = refreshed_ref
     _save(directory/'continuation.json',continuation)
     progress['status']='integrated';_save(progress_path,progress)
     return {'status':'integration_validated','head':head,'base':fresh,'execution_id':execution_id}

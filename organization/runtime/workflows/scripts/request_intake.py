@@ -18,6 +18,7 @@ import requirement_scope as scope
 import run_store
 import run_lock
 import workflow_selector
+import ledger_lifecycle
 
 SCHEMAS = Path(__file__).resolve().parents[1] / 'schemas'
 MAX_BYTES = 256 * 1024
@@ -218,8 +219,12 @@ def _prepare(*, state_root: Path, request_id: str, task_id: str, user_prompt: st
     canonical(artifact)
     key = scope.digest(artifact)
     _save_immutable(_path(state_root, request_id, key.removeprefix('sha256:')), artifact)
-    return {'request_id': request_id, 'digest': key, 'requirements_version': ledger['requirements_version'],
-            'selected_unit_id': unit['unit_id']}
+    reference = {'request_id': request_id, 'digest': key, 'requirements_version': ledger['requirements_version'],
+                 'selected_unit_id': unit['unit_id']}
+    ledger_lifecycle.acknowledge(artifact, reference, persist=True)
+    ledger_lifecycle.record_stage(state_root, artifact, reference, stage='intake',
+        observation={'source_digest': source_digest}, findings=ledger.get('incidental_findings', []))
+    return reference
 
 
 def prepare(**kwargs: Any) -> dict:
@@ -250,6 +255,7 @@ def resolve(state_root: Path, reference: dict) -> dict:
     check_source_boundary(ledger)
     if workflow_selector.select_workflow(artifact['classification']) != artifact['selector_result']:
         raise IntakeError('work_brief_selector_drift')
+    ledger_lifecycle.acknowledge(artifact, reference)
     return artifact
 
 
@@ -263,6 +269,7 @@ def for_order(state_root: Path, order: dict, *, expected_ref: dict | None = None
     if (artifact['request_id'] != order.get('request_id') or artifact['task_id'] != order.get('task_id')
             or artifact['workflow_selection'].get('workflow_id') != order.get('workflow_id')):
         raise IntakeError('work_brief_order_identity_mismatch')
+    ledger_lifecycle.require_prerequisites(state_root, artifact)
     if artifact['brief']['open_questions']:
         raise IntakeError('material_requirement_unresolved')
     # Transport selected shaped data. Original private intake remains host-only.
@@ -339,3 +346,49 @@ class CodexIntakeProvider:
             return value, {'invocation_id': invocation, 'evidence_ref': str(evidence_path),
                 'evidence_digest': scope.digest(process), 'intended_model': auth.model, 'effective_model': auth.model,
                 'reasoning_effort': 'max', 'model_evidence_kind': 'host_configured_exact_cli_model', 'exit': process['exit']}
+
+
+def refresh_hunks(state_root: Path, reference: dict, *, root: Path,
+                  old_base: str, new_base: str, task_head: str) -> tuple[dict, dict]:
+    """An existing host may derive only a reproducible mechanical binding refresh."""
+    parent = resolve(state_root, reference)
+    plan = scope.mechanical_refresh(root, parent['requirement_ledger'],
+                                    old_base=old_base, new_base=new_base, task_head=task_head)
+    artifact = copy.deepcopy(parent)
+    artifact['requirement_ledger'] = plan['ledger']
+    artifact['brief']['requirements_digest'] = scope.digest(plan['ledger'])
+    artifact['mechanical_refresh'] = {'parent_reference': reference, 'proof': plan['proof']}
+    # All semantic fields, dispositions, original requirement rows and model
+    # provenance are retained. The host mapping is a separate typed operation.
+    key = scope.digest(artifact)
+    refreshed = dict(reference, digest=key)
+    _save_immutable(_path(state_root, reference['request_id'], key[7:]), artifact)
+    ledger_lifecycle.acknowledge(artifact, refreshed, persist=True)
+    verify_refresh_chain(state_root, refreshed, reference, root=root)
+    return refreshed, plan
+
+
+def verify_refresh_chain(state_root: Path, reference: dict, original: dict, *, root: Path) -> None:
+    current = reference
+    for _ in range(6):
+        if current == original:
+            return
+        artifact = resolve(state_root, current)
+        refresh = artifact.get('mechanical_refresh', {})
+        parent_ref, proof = refresh.get('parent_reference'), refresh.get('proof', {})
+        parent = resolve(state_root, parent_ref)
+        if current['request_id'] != original['request_id'] or parent['task_id'] != artifact['task_id']:
+            raise IntakeError('refresh_identity_mismatch')
+        try:
+            plan = scope.mechanical_refresh(root, parent['requirement_ledger'], old_base=proof['old_base'],
+                                           new_base=proof['new_base'], task_head=proof['task_head'])
+        except (KeyError, scope.ScopeError) as exc:
+            raise IntakeError('refresh_proof_invalid') from exc
+        expected = copy.deepcopy(parent)
+        expected['requirement_ledger'] = plan['ledger']
+        expected['brief']['requirements_digest'] = scope.digest(plan['ledger'])
+        expected['mechanical_refresh'] = {'parent_reference': parent_ref, 'proof': plan['proof']}
+        if expected != artifact:
+            raise IntakeError('refresh_semantic_or_contract_drift')
+        current = parent_ref
+    raise IntakeError('refresh_chain_limit')
