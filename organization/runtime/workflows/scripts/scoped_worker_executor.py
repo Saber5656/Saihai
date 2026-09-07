@@ -31,6 +31,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import review_lifecycle  # noqa: E402
+import request_intake  # noqa: E402
 import run_lock  # noqa: E402
 import run_lifecycle  # noqa: E402
 import run_store  # noqa: E402
@@ -1766,6 +1767,12 @@ def derive_capability(
         "allowed_paths": allowed_paths,
         "forbidden": ["commit", "push", "pull_request", "network", "provider", "worktree_change", "branch_change"],
     }
+    if 'work_brief_ref' in work_order:
+        try:
+            instruction['work_brief_ref'] = work_order['work_brief_ref']
+            instruction['approved_work_brief'] = request_intake.for_order(state_root, work_order)
+        except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+            raise ScopedWorkerError(str(exc)) from exc
     instruction_path = _state_artifact_path(
         state_root,
         "instructions",
@@ -2590,6 +2597,19 @@ def execute_capability(
             execution_path = _state_artifact_path(state_root, "executions", f"{execution_id}.json")
             run_store.atomic_write_json(execution_path, execution)
             instruction_path = Path(capability["prompt_artifact"]["path"])
+            instruction_data = _read_state_json(instruction_path, reason='instruction_artifact_invalid')
+            scope_artifact = None
+            if 'work_brief_ref' in instruction_data:
+                try:
+                    scope_artifact = request_intake.resolve(state_root, instruction_data['work_brief_ref'])
+                    live_run = run_store.load_run(state_root, capability['run_id'])
+                    if live_run.get('work_brief_ref') != instruction_data['work_brief_ref']:
+                        raise request_intake.IntakeError('worker_requirements_version_stale')
+                    # Validate declared ranges/base before the worker, including empty diffs.
+                    request_intake.scope.validate_diff(worktree_path, scope_artifact['requirement_ledger'],
+                        base=capability['repository']['base_revision'], actual_paths=[])
+                except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+                    raise ScopedWorkerError(str(exc)) from exc
             raw_result = active_runner.run(
                 worktree_path=worktree_path,
                 instruction_path=instruction_path,
@@ -2598,6 +2618,16 @@ def execute_capability(
             )
         verify_task_worktree_after_execution(capability, worktree_path)
         actual_changed_paths = _changed_paths(worktree_path)
+        scope_evidence = None
+        if scope_artifact is not None:
+            try:
+                live_run = run_store.load_run(state_root, capability['run_id'])
+                if live_run.get('work_brief_ref') != instruction_data['work_brief_ref']:
+                    raise request_intake.IntakeError('worker_requirements_version_stale')
+                scope_evidence = request_intake.scope.validate_diff(worktree_path, scope_artifact['requirement_ledger'],
+                    base=capability['repository']['base_revision'], actual_paths=actual_changed_paths)
+            except (request_intake.IntakeError, request_intake.scope.ScopeError) as exc:
+                raise ScopedWorkerError(str(exc)) from exc
         result = validate_worker_result(raw_result, actual_changed_paths=actual_changed_paths)
         evidence = {
             "evidence_version": "1",
@@ -2612,6 +2642,7 @@ def execute_capability(
             "base_revision": capability["repository"]["base_revision"],
             "changed_paths": actual_changed_paths,
             "result": result,
+            **({'requirement_scope': scope_evidence} if scope_evidence is not None else {}),
             "review_context": capture_review_context(capability, worktree_path, actual_changed_paths),
         }
         evidence_path = _state_artifact_path(

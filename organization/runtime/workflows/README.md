@@ -1029,3 +1029,7 @@ writer acknowledgement, PR/merge readiness or installed-runtime acceptance.
 `verify-completion` remains a terminal consumer with its own supported contracts;
 it is not called before producing the final report. Frozen-role integration is
 a separate acceptance surface, not an extra prerequisite for this readonly unit.
+
+## Requirement-aware intake
+
+The optional host `usage prepare` path binds bounded classification, a grounded work brief and the complete requirement ledger to actual execution. See [intake-contract.md](intake-contract.md) for invocation, hunk scope, recovery and evidence limits.

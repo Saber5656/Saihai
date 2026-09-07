@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import review_lifecycle
+import request_intake
 import run_store
 import safe_paths
 import role_definition
@@ -474,7 +475,7 @@ def _unbound_work_order_errors(work_order: dict[str, Any]) -> list[str]:
     return errors
 
 
-def _base_instruction(template: dict[str, Any], step: dict[str, Any], run: dict[str, Any] | None = None) -> str:
+def _unbound_instruction(template: dict[str, Any], step: dict[str, Any], run: dict[str, Any] | None = None) -> str:
     if run and run.get('review_lifecycle', {}).get('resolution_flow'):
         action = review_lifecycle.next_review_action(run)
         if step['id'] == 'review' and action == 'verify_original_findings':
@@ -485,6 +486,13 @@ def _base_instruction(template: dict[str, Any], step: dict[str, Any], run: dict[
             return review_lifecycle.repair_instruction(run)
     return (f"{template['purpose']} Step '{step['id']}' ({step['assignment_role']}): "
             f"follow the input work order contract and produce {step['output_contract']}.")
+
+
+def _base_instruction(template: dict[str, Any], step: dict[str, Any], run: dict[str, Any] | None = None) -> str:
+    instruction = _unbound_instruction(template, step, run)
+    if run and run.get('work_brief_ref'):
+        instruction += '\nResolve the digest-pinned work_brief_ref; perform only its selected unit under this step contract.'
+    return instruction
 
 
 def build_work_order(
@@ -554,6 +562,10 @@ def build_work_order(
             },
         },
     }
+    if 'work_brief_ref' in request_record or 'work_brief_ref' in run:
+        if request_record.get('work_brief_ref') != run.get('work_brief_ref'):
+            raise WorkOrderError('work_brief_run_binding_mismatch')
+        work_order['work_brief_ref'] = request_record['work_brief_ref']
     owner_principal = request_record.get("owner_principal")
     checkout_identity_digest = request_record.get("checkout_identity_digest")
     if owner_principal is not None or checkout_identity_digest not in (None, ""):
@@ -808,6 +820,14 @@ def validate_work_order(
             if allowed_ops.get(op) is not False:
                 errors.append(f"activation_scope.allowed_ops.{op} must be false")
 
+    if 'work_brief_ref' in work_order or (run or {}).get('work_brief_ref') is not None:
+        if state_root is None:
+            errors.append('work_brief_state_root_required')
+        else:
+            try:
+                request_intake.for_order(state_root, work_order, expected_ref=(run or {}).get('work_brief_ref'))
+            except (request_intake.IntakeError, request_intake.scope.ScopeError, run_store.RunStoreError) as exc:
+                errors.append(str(exc))
     return errors
 
 
