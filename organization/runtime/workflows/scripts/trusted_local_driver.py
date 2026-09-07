@@ -72,7 +72,7 @@ def drive(*, authorization: local.TrustedLocalAuthorization, state_root: Path,
                    'last_status': result.get('status')}
         # Keep host continuation receipts separate from completion. Never turn a
         # pending Vault write into complete, and never perform that write here.
-        for key in ('pr', 'head', 'merge_commit', 'integrated_checks', 'completion_persistence', 'continuation', 'next_action', 'intake_digest'):
+        for key in ('pr', 'head', 'merge_commit', 'integrated_checks', 'completion_persistence', 'continuation', 'next_action', 'intake_digest', 'effective_installation', 'canonical_sync'):
             if key in result:
                 payload[key] = result[key]
         record('stop', reason)
