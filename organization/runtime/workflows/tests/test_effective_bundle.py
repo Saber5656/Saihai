@@ -173,10 +173,10 @@ class ObservationTests(unittest.TestCase):
                     self.observe()
 
     def test_secrets_and_private_paths_absent(self):
-        secret = "fixture-secret-do-not-export"
-        (self.root / "source").write_text(secret)
+        content_marker = "synthetic-content-must-not-be-exported"
+        (self.root / "source").write_text(content_marker)
         report = json.dumps(self.observe())
-        self.assertNotIn(secret, report)
+        self.assertNotIn(content_marker, report)
         self.assertNotIn(str(self.root), report)
         self.assertNotIn('"path"', report)
 
