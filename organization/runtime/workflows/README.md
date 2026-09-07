@@ -1033,3 +1033,10 @@ a separate acceptance surface, not an extra prerequisite for this readonly unit.
 ## Requirement-aware intake
 
 The optional host `usage prepare` path binds bounded classification, a grounded work brief and the complete requirement ledger to actual execution. See [intake-contract.md](intake-contract.md) for invocation, hunk scope, recovery and evidence limits.
+
+## Visible App host mediation
+
+[App execution contract](app-execution-contract.md) defines the optional host-only
+App tool adapter and durable Issue/resource reservations. Existing child-action
+records and serial workflow concurrency remain unchanged. Fixture verification
+does not establish live App creation or filesystem isolation.
