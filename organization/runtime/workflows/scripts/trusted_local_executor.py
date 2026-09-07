@@ -53,6 +53,7 @@ class TrustedLocalAuthorization:
 
 def authorization_payload(auth):
     value = dataclasses.asdict(auth)
+    value['publication'] = publication.authorization_payload(auth.publication)
     if value.get('validation_profile') is None:
         value.pop('validation_profile', None)
     if not auth.intake_digest:

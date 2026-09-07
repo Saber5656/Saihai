@@ -53,7 +53,7 @@ class InstallationTests(unittest.TestCase):
         with self.assertRaisesRegex(install.InstallationError,'authority_changed'):
             install.verify(dataclasses.replace(self.auth,model='other'),self.state)
     def test_host_intake_serialization_preserves_legacy_and_binds_new(self):
-        legacy=dataclasses.asdict(self.auth);legacy.pop('intake_digest');legacy.pop('validation_profile')
+        legacy=dataclasses.asdict(self.auth);legacy.pop('intake_digest');legacy.pop('validation_profile'); legacy['publication'].pop('expected_assignees')
         self.assertEqual(install._authorization_digest(self.auth),pub.digest(legacy))
         with_intake=dataclasses.replace(self.auth,intake_digest='sha256:'+'2'*64)
         self.assertEqual(install._authorization_digest(with_intake),pub.digest(local._authorization_material(with_intake)))

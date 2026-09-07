@@ -85,3 +85,21 @@ worker output. It resumes the same feature branch and PR without force push.
 The [usage coordinator](trusted-local-contract.md) owns conflict repair and
 resumable required CI observation on the actual merge SHA; only its `complete`
 state completes integrated validation.
+
+### Host-owned exact Assignees
+
+`HostAuthorization.expected_assignees` optionally binds a concrete tuple/list of
+GitHub logins to the host authority. It is never inferred from worker output or
+task prose. Symbolic `@me`, duplicate case-insensitive logins, and malformed
+logins are rejected before mutation. A supplied empty set means exactly no
+Assignees. Creation passes the concrete logins to GitHub; reuse, resume, and the
+last pre-merge readback require exact case-insensitive set equality. Missing or
+mismatched readback blocks publication; the adapter does not silently edit an
+existing PR's metadata. An authorized host may correct it and resume the same PR.
+An uncertain create remains uncertain until its existing PR is reconciled.
+
+Omitted/`None` retains the historical authority, scope and private-state digests
+and makes no exact-Assignee guarantee. New host publication intents should set
+the required concrete set explicitly. Changing this set is a changed authority,
+not permission to replay an already claimed worker. Completed legacy receipts
+remain reusable under their original contract.
