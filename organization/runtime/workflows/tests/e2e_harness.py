@@ -47,6 +47,7 @@ def _load_frontdoor() -> Any:
     _load_module(SCRIPT_DIR / "run_store.py", "saihai_harness_run_store", public_name="run_store")
     if (SCRIPT_DIR / "run_lock.py").exists():
         _load_module(SCRIPT_DIR / "run_lock.py", "saihai_harness_run_lock", public_name="run_lock")
+    _load_module(SCRIPT_DIR / "review_lifecycle.py", "saihai_harness_review_lifecycle", public_name="review_lifecycle")
     if (SCRIPT_DIR / "run_lifecycle.py").exists():
         _load_module(SCRIPT_DIR / "run_lifecycle.py", "saihai_harness_run_lifecycle", public_name="run_lifecycle")
     _load_module(SCRIPT_DIR / "workflow_selector.py", "saihai_harness_workflow_selector", public_name="workflow_selector")

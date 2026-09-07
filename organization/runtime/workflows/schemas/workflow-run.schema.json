@@ -24,6 +24,9 @@
     "approved_provider_binding"
   ],
   "properties": {
+    "review_lifecycle": {
+      "$ref": "review-lifecycle.schema.json"
+    },
     "run_version": {
       "const": "1"
     },

@@ -248,10 +248,10 @@ def _verify_evidence_digest(
         reasons.append(reason("digest_mismatch", f"expected raw stdout {stdout_sha256}, found {actual_stdout}"))
 
 
-def vault_evidence(state_root: Path, run: dict[str, Any], report: dict[str, Any], evidence: dict[str, Any] | None) -> dict[str, Any]:
+def vault_evidence(state_root: Path, run: dict[str, Any], report: dict[str, Any], evidence: dict[str, Any] | None, *, verified_evidence_path: Path | None = None) -> dict[str, Any]:
     provider_evidence = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
     report_path = Path(str(run.get("_verified_report_path") or "")).expanduser()
-    evidence_path = Path(str(provider_evidence.get("evidence_path") or "")).expanduser()
+    evidence_path = verified_evidence_path or Path(str(provider_evidence.get("evidence_path") or "")).expanduser()
     return {
         "vault_evidence_version": "1",
         "task_id": str(run.get("task_id") or ""),
@@ -337,6 +337,46 @@ def annotate_completion(
     return run
 
 
+def _verify_readonly_chain_completion(state_root: Path, run: dict[str, Any]) -> tuple[Path, dict[str, Any], Path, dict[str, Any]]:
+    """Verify the committed chain without replaying or mutating the report gate."""
+    template = report_gate.workflow_selector.load_template(report_gate.CHAIN_ID)
+    steps = report_gate._chain_contract(template, run)
+    accepted = report_gate._chain_prior_acceptances(state_root, run, template, steps)
+    expected = [("research", "findings", "research_complete", "review"),
+                ("review", "pass", "review_complete", "final_evidence"),
+                ("final_evidence", "complete", "final_evidence_valid", "complete")]
+    if run.get("current_step") != "final_evidence" or len(accepted) != len(expected):
+        raise report_gate.ReportGateError("chain_acceptance_incomplete")
+    for value, (step, result, event, target) in zip(accepted, expected):
+        if (value.get("step_id"), value.get("result"), value.get("on"), value.get("to_step")) != (step, result, event, target):
+            raise report_gate.ReportGateError("chain_acceptance_mismatch")
+    final = accepted[-1]
+    report_file = report_gate.report_path(state_root, run["run_id"], "final_evidence")
+    report = report_gate.read_json(report_file)
+    refs = [value["report_path"] for value in accepted[:2]]
+    evidence_refs = report.get("evidence_refs")
+    if (report.get("research_report_ref") != refs[0] or report.get("review_report_ref") != refs[1]
+            or not isinstance(evidence_refs, list) or any(not isinstance(ref, str) for ref in evidence_refs)
+            or set(evidence_refs) != set(refs) or report.get("result") != "complete"
+            or report.get("review_status") != "pass" or report.get("validation_status") != "passed"
+            or report.get("no_diff_completion") is not True):
+        raise report_gate.ReportGateError("chain_final_report_mismatch")
+    # A run record alone cannot replace the final signed transition artifact.
+    record = next(t for t in run["transitions"] if t.get("report_binding") == final)
+    expected_artifact = {"transition_artifact_version": "1", "gate": "report_gate", **record}
+    directory = state_paths(state_root)["transitions"] / run["run_id"]
+    matches = []
+    for path in run_store.list_private_artifacts(directory, suffix="-report-gate.json"):
+        artifact = report_gate.read_json(path)
+        if report_gate.canonical_json(artifact) == report_gate.canonical_json(expected_artifact):
+            matches.append(path)
+    if len(matches) != 1:
+        raise report_gate.ReportGateError("chain_final_transition_missing_or_mismatched")
+    evidence_path = report_gate.provider_evidence_path(state_root, run["run_id"], "review")
+    # These fields describe the verified review provider, never a final provider.
+    return report_file, report, evidence_path, report_gate.read_json(evidence_path)
+
+
 def verify_completion(
     state_root: Path,
     run_id: str,
@@ -391,100 +431,107 @@ def verify_completion(
             ):
                 reasons.append(reason("activation_not_approved", "activation must be approved from a legal source"))
 
-            step_id = str(run.get("current_step") or "")
-            work_order_file = state_paths(state_root)["work_orders"] / run_id / f"{step_id}.json"
-            if work_order_file.exists():
-                work_order = _load_optional_json(work_order_file, reasons, "missing_work_order")
+            if run.get("workflow_id") == report_gate.CHAIN_ID:
+                try:
+                    report_file, report, evidence_path, evidence = _verify_readonly_chain_completion(state_root, run)
+                except (report_gate.ReportGateError, run_store.RunStoreError, work_order_builder.WorkOrderError,
+                        run_lifecycle.LifecycleError, OSError, ValueError, TypeError, KeyError, StopIteration) as exc:
+                    reasons.append(reason("invalid_chain_completion", str(exc)))
             else:
-                reasons.append(reason("missing_work_order", f"missing work order: {work_order_file}"))
-            _verify_snapshot(state_root=state_root, run=run, work_order=work_order, reasons=reasons, skipped=skipped)
-
-            if work_order is not None:
-                report_file = Path(str(work_order.get("report_path") or "")).expanduser()
-            else:
-                report_file = state_paths(state_root)["reports"] / run_id / f"{step_id}-external-review-report.json"
-            if not report_file.exists():
-                reasons.append(reason("missing_typed_report", f"missing typed report: {report_file}"))
-                if work_order is not None:
-                    canonical_evidence = report_gate.provider_evidence_path(
-                        state_root,
-                        run_id,
-                        str(work_order.get("step_id") or step_id),
-                    )
-                    if not canonical_evidence.exists():
-                        reasons.append(
-                            reason("missing_provider_evidence", f"missing provider evidence: {canonical_evidence}")
-                        )
-            else:
-                report = _load_optional_json(report_file, reasons, "invalid_typed_report")
-
-            if report is not None and work_order is not None:
-                outcome, errors = report_gate.classify_report_outcome(
-                    report,
-                    run=run,
-                    work_order=work_order,
-                    state_root=state_root,
-                )
-                if outcome != "report_valid":
-                    report_reason_class = (
-                        report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
-                        if outcome == report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
-                        else "invalid_typed_report"
-                    )
-                    reasons.append(
-                        reason(report_reason_class, f"{outcome}: {'; '.join(errors)}")
-                    )
-                for field in ("run_id", "request_id", "workflow_id"):
-                    if str(report.get(field) or "") != str(run.get(field) or ""):
-                        reasons.append(reason("report_identity_mismatch", f"{field} mismatch"))
-                if str(report.get("step_id") or "") != str(work_order.get("step_id") or ""):
-                    reasons.append(reason("report_identity_mismatch", "step_id mismatch"))
-
-                provider = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
-                evidence_raw = provider.get("evidence_path")
-                transcript_raw = provider.get("transcript_path")
-                for label, raw in (("evidence_path", evidence_raw), ("transcript_path", transcript_raw)):
-                    path = Path(str(raw or "")).expanduser()
-                    if raw and not path_is_within(path, state_root):
-                        reasons.append(reason("evidence_path_escape", f"{label} escapes state root: {path}"))
-                evidence_path = Path(str(evidence_raw or "")).expanduser()
-                if not evidence_raw or not evidence_path.exists():
-                    reasons.append(reason("missing_provider_evidence", f"missing provider evidence: {evidence_path}"))
+                step_id = str(run.get("current_step") or "")
+                work_order_file = state_paths(state_root)["work_orders"] / run_id / f"{step_id}.json"
+                if work_order_file.exists():
+                    work_order = _load_optional_json(work_order_file, reasons, "missing_work_order")
                 else:
-                    evidence = _load_optional_json(evidence_path, reasons, "missing_provider_evidence")
-                    if evidence is not None:
-                        evidence_errors = report_gate.validate_normalized_provider_evidence(
-                            evidence,
-                            run=run,
-                            work_order=work_order,
-                            state_root=state_root,
-                            evidence_path=evidence_path,
-                            report_provider_evidence=provider,
-                        )
-                        evidence_reason_class = (
-                            report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
-                            if report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
-                            in evidence_errors
-                            else "invalid_provider_evidence"
-                        )
-                        for item in evidence_errors:
-                            reasons.append(reason(evidence_reason_class, item))
-                    _verify_evidence_digest(
-                        state_root=state_root,
-                        evidence=evidence,
-                        report=report,
-                        reasons=reasons,
-                        skipped=skipped,
-                    )
+                    reasons.append(reason("missing_work_order", f"missing work order: {work_order_file}"))
+                _verify_snapshot(state_root=state_root, run=run, work_order=work_order, reasons=reasons, skipped=skipped)
 
-            transition_artifact = _approved_transition_artifact(state_root, run_id, skipped)
-            if report is not None:
-                _verify_approved_transition_binding(
-                    transition_artifact=transition_artifact,
-                    report_path=report_file,
-                    evidence_path=evidence_path,
-                    reasons=reasons,
-                )
+                if work_order is not None:
+                    report_file = Path(str(work_order.get("report_path") or "")).expanduser()
+                else:
+                    report_file = state_paths(state_root)["reports"] / run_id / f"{step_id}-external-review-report.json"
+                if not report_file.exists():
+                    reasons.append(reason("missing_typed_report", f"missing typed report: {report_file}"))
+                    if work_order is not None:
+                        canonical_evidence = report_gate.provider_evidence_path(
+                            state_root,
+                            run_id,
+                            str(work_order.get("step_id") or step_id),
+                        )
+                        if not canonical_evidence.exists():
+                            reasons.append(
+                                reason("missing_provider_evidence", f"missing provider evidence: {canonical_evidence}")
+                            )
+                else:
+                    report = _load_optional_json(report_file, reasons, "invalid_typed_report")
+
+                if report is not None and work_order is not None:
+                    outcome, errors = report_gate.classify_report_outcome(
+                        report,
+                        run=run,
+                        work_order=work_order,
+                        state_root=state_root,
+                    )
+                    if outcome != "report_valid":
+                        report_reason_class = (
+                            report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
+                            if outcome == report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
+                            else "invalid_typed_report"
+                        )
+                        reasons.append(
+                            reason(report_reason_class, f"{outcome}: {'; '.join(errors)}")
+                        )
+                    for field in ("run_id", "request_id", "workflow_id"):
+                        if str(report.get(field) or "") != str(run.get(field) or ""):
+                            reasons.append(reason("report_identity_mismatch", f"{field} mismatch"))
+                    if str(report.get("step_id") or "") != str(work_order.get("step_id") or ""):
+                        reasons.append(reason("report_identity_mismatch", "step_id mismatch"))
+
+                    provider = report.get("provider_evidence") if isinstance(report.get("provider_evidence"), dict) else {}
+                    evidence_raw = provider.get("evidence_path")
+                    transcript_raw = provider.get("transcript_path")
+                    for label, raw in (("evidence_path", evidence_raw), ("transcript_path", transcript_raw)):
+                        path = Path(str(raw or "")).expanduser()
+                        if raw and not path_is_within(path, state_root):
+                            reasons.append(reason("evidence_path_escape", f"{label} escapes state root: {path}"))
+                    evidence_path = Path(str(evidence_raw or "")).expanduser()
+                    if not evidence_raw or not evidence_path.exists():
+                        reasons.append(reason("missing_provider_evidence", f"missing provider evidence: {evidence_path}"))
+                    else:
+                        evidence = _load_optional_json(evidence_path, reasons, "missing_provider_evidence")
+                        if evidence is not None:
+                            evidence_errors = report_gate.validate_normalized_provider_evidence(
+                                evidence,
+                                run=run,
+                                work_order=work_order,
+                                state_root=state_root,
+                                evidence_path=evidence_path,
+                                report_provider_evidence=provider,
+                            )
+                            evidence_reason_class = (
+                                report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
+                                if report_gate.PROVIDER_MODEL_ASSURANCE_MISMATCH
+                                in evidence_errors
+                                else "invalid_provider_evidence"
+                            )
+                            for item in evidence_errors:
+                                reasons.append(reason(evidence_reason_class, item))
+                        _verify_evidence_digest(
+                            state_root=state_root,
+                            evidence=evidence,
+                            report=report,
+                            reasons=reasons,
+                            skipped=skipped,
+                        )
+
+                transition_artifact = _approved_transition_artifact(state_root, run_id, skipped)
+                if report is not None:
+                    _verify_approved_transition_binding(
+                        transition_artifact=transition_artifact,
+                        report_path=report_file,
+                        evidence_path=evidence_path,
+                        reasons=reasons,
+                    )
 
             if reasons:
                 reason_classes = {
@@ -509,7 +556,12 @@ def verify_completion(
                 }
 
             assert report is not None
-            block = vault_evidence(state_root, {**run, "_verified_report_path": str(report_file)}, report, evidence)
+            block = vault_evidence(state_root, {**run, "_verified_report_path": str(report_file)}, report, evidence,
+                                   verified_evidence_path=evidence_path)
+            if run.get("workflow_id") == report_gate.CHAIN_ID:
+                block["provider_evidence_step_id"] = "review"
+                block["accepted_report_refs"] = [str(report_gate.report_path(state_root, run_id, step))
+                                                  for step in ("research", "review", "final_evidence")]
             if annotate:
                 run = annotate_completion(state_root, run, block=block, principal=actor)
             return {
