@@ -163,7 +163,8 @@ def _argv(auth: TrustedLocalAuthorization, root: Path, output: Path) -> list[str
     return argv[:-1] + ['--model', auth.model, '--json', '-']
 
 
-def _run_process(argv: list[str], prompt: str, auth: TrustedLocalAuthorization, root: Path) -> tuple[dict, bytes]:
+def _run_process(argv: list[str], prompt: str, auth: TrustedLocalAuthorization, root: Path,
+                 *, diagnostic_path: Path | None = None) -> tuple[dict, bytes]:
     env = {'PATH': '/Applications/ChatGPT.app/Contents/Resources:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
            'HOME': str(Path.home()), 'CODEX_HOME': auth.codex_home, 'LANG': 'C.UTF-8', 'TMPDIR': tempfile.gettempdir()}
     started = time.time()
@@ -186,6 +187,14 @@ def _run_process(argv: list[str], prompt: str, auth: TrustedLocalAuthorization, 
                'environment_digest': publication.digest(env), 'stdout_digest': publication.digest(out),
                'stderr_digest': publication.digest(err), 'profile': PROFILE, 'actor_kind': ACTOR,
                'authority_evidence_ref': auth.publication.authority_evidence_ref}
+    if diagnostic_path is not None:
+        diagnostic = {'trust': 'untrusted_provider_output', 'bounded_bytes_per_stream': 16384,
+            'stdout_tail': out[-16384:].decode('utf-8', errors='replace'),
+            'stderr_tail': err[-16384:].decode('utf-8', errors='replace'),
+            'stdout_digest': receipt['stdout_digest'], 'stderr_digest': receipt['stderr_digest']}
+        _save(diagnostic_path, diagnostic)
+        receipt.update(diagnostic_path=str(diagnostic_path),
+                       diagnostic_digest=publication.digest(diagnostic_path.read_bytes()))
     return receipt, out
 
 

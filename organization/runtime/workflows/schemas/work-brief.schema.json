@@ -2,7 +2,8 @@
   "type": "object",
   "properties": {
     "brief_version": {
-      "const": "1"
+      "const": "1",
+      "type": "string"
     },
     "objective": {
       "type": "string",
@@ -80,7 +81,8 @@
               "material_scope",
               "product_requirement",
               "security_authority"
-            ]
+            ],
+            "type": "string"
           },
           "question": {
             "type": "string",
@@ -135,7 +137,8 @@
             "enum": [
               "selected",
               "pending"
-            ]
+            ],
+            "type": "string"
           }
         },
         "required": [

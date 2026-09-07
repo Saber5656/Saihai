@@ -164,14 +164,34 @@ def _prepare(*, state_root: Path, request_id: str, task_id: str, user_prompt: st
             if run_store.private_artifact_exists(evidence_path):
                 previous = run_store.read_json(evidence_path)
                 value, receipt = previous['output'], previous['receipt']
+            elif run_store.private_artifact_exists(_path(state_root, request_id, source_key + '-' + stage + '-' + str(attempt) + '-reconciled')):
+                linked = run_store.read_json(_path(state_root, request_id, source_key + '-' + stage + '-' + str(attempt) + '-reconciled'))
+                marker, process = _reconciled_failure(state_root, request_id, linked['invocation_id'])
+                if marker.get('source_key') != source_key or marker.get('stage') != stage or marker.get('attempt') != attempt:
+                    raise IntakeError('intake_reconciliation_source_changed')
+                value = None
+                receipt = {'invocation_id': linked['invocation_id'], 'evidence_ref': str(_path(state_root, request_id, linked['invocation_id'] + '-process')),
+                    'evidence_digest': scope.digest(process), 'intended_model': marker['intended_model'], 'effective_model': marker['intended_model'],
+                    'reasoning_effort': 'max', 'model_evidence_kind': 'host_configured_exact_cli_model', 'exit': process['exit']}
             else:
                 value, receipt = provider(stage=stage, context=copy.deepcopy(context), attempt=attempt,
                     diagnostic=failure, schema_path=SCHEMAS / ('typed-classification.schema.json' if stage == 'classify' else 'work-brief.schema.json'))
             if (not isinstance(receipt, dict) or receipt.get('intended_model') != intended_model
                     or receipt.get('effective_model') != intended_model
                     or not isinstance(receipt.get('invocation_id'), str) or not receipt['invocation_id']
-                    or not receipt.get('evidence_ref') or receipt.get('exit') != 0):
+                    or not receipt.get('evidence_ref') or type(receipt.get('exit')) is not int):
                 raise IntakeError('intake_provider_provenance_invalid')
+            if receipt['exit'] != 0:
+                marker, process = _reconciled_failure(state_root, request_id, receipt['invocation_id'])
+                if (marker['intended_model'] != intended_model or marker['task_id'] != task_id
+                        or receipt.get('evidence_digest') != scope.digest(process) or receipt['exit'] != process['exit']):
+                    raise IntakeError('intake_failed_receipt_mismatch')
+                failure = 'intake_provider_process_failed'
+                row = {'stage': stage, 'attempt': attempt, 'receipt': receipt, 'output_digest': scope.digest(None),
+                       'output': None, 'status': 'provider_failed', 'reason': failure}
+                evidence.append(row)
+                _save_immutable(evidence_path, row)
+                continue
             try:
                 canonical(value)
             except IntakeError:
@@ -277,6 +297,116 @@ def for_order(state_root: Path, order: dict, *, expected_ref: dict | None = None
             'reference': reference, 'authority': 'data_only'}
 
 
+def provider_schema(schema: dict) -> dict:
+    """Strict provider dialect; the canonical local validator remains unchanged.
+
+    All properties are required on the wire. Optional values become nullable and
+    only their null sentinel is removed when decoding back to the canonical type.
+    """
+    result = {k: copy.deepcopy(v) for k, v in schema.items() if k not in {'$schema', '$id', 'title'}}
+    if 'type' not in result:
+        raise IntakeError('provider_schema_explicit_type_required')
+    if 'const' in result:
+        result['enum'] = [result.pop('const')]
+    if result['type'] == 'object':
+        if result.get('additionalProperties') is not False or not isinstance(result.get('properties'), dict):
+            raise IntakeError('provider_schema_closed_object_required')
+        required = set(result.get('required', []))
+        for key, value in result['properties'].items():
+            child = provider_schema(value)
+            if key not in required:
+                types = child['type'] if isinstance(child['type'], list) else [child['type']]
+                child['type'] = list(dict.fromkeys(types + ['null']))
+                if 'enum' in child and None not in child['enum']:
+                    child['enum'].append(None)
+            result['properties'][key] = child
+        result['required'] = list(result['properties'])
+    elif result['type'] == 'array':
+        result['items'] = provider_schema(result['items'])
+    return result
+
+
+def decode_provider_value(value: Any, schema: dict) -> Any:
+    if isinstance(value, dict) and schema.get('type') == 'object':
+        required = set(schema.get('required', []))
+        properties = schema.get('properties', {})
+        return {key: decode_provider_value(child, properties.get(key, {}))
+                for key, child in value.items() if not (key in properties and key not in required and child is None)}
+    if isinstance(value, list) and schema.get('type') == 'array':
+        return [decode_provider_value(child, schema['items']) for child in value]
+    return value
+
+
+def _reconciled_failure(state_root: Path, request_id: str, invocation: str) -> tuple[dict, dict]:
+    marker = run_store.read_json(_path(state_root, request_id, invocation + '-reconcile'))
+    claim = run_store.read_json(_path(state_root, request_id, invocation + '-claim'))
+    process = run_store.read_json(_path(state_root, request_id, invocation + '-process'))
+    if (marker.get('decision') != 'consume_failed_attempt_and_continue' or marker.get('invocation_id') != invocation
+            or marker.get('claim_digest') != scope.digest(claim) or marker.get('process_digest') != scope.digest(process)
+            or type(process.get('exit')) is not int or process['exit'] == 0
+            or not process.get('ended_at_epoch') or not process.get('process_start_token')
+            or marker.get('request_id') != request_id):
+        raise IntakeError('intake_reconciliation_invalid')
+    token = run_lock.process_start_token(process['pid'])
+    if token == process['process_start_token']:
+        raise IntakeError('intake_process_still_running')
+    return marker, process
+
+
+def reconcile_failed_attempt(*, state_root: Path, request: dict, authorization: Any, invocation_id: str, source_digest: str = '') -> dict:
+    """Host-only acknowledgement of one observed failed readonly invocation.
+
+    Never delete a claim, turn failure into success, retry an uncertain/successful
+    process, change model/authority or reset the existing three-attempt budget.
+    """
+    import re
+    import trusted_local_executor as trusted
+    if not re.fullmatch(r'[a-f0-9]{64}', invocation_id):
+        raise IntakeError('intake_invocation_id_invalid')
+    trusted._authorize(request, authorization)
+    request_id = request['request_id']
+    root = Path(state_root).resolve()
+    if root == Path(authorization.publication.worktree).resolve() or Path(authorization.publication.worktree).resolve() in root.parents:
+        raise IntakeError('intake_state_inside_worker_scope')
+    with run_lock.hold_global_lock(root, operation='reconcile_intake_failure', run_id=request_id):
+        claim = run_store.read_json(_path(root, request_id, invocation_id + '-claim'))
+        process = run_store.read_json(_path(root, request_id, invocation_id + '-process'))
+        material = scope.digest(trusted._authorization_material(authorization))
+        if (claim.get('invocation_id') != invocation_id or claim.get('stage') not in {'classify', 'shape'}
+                or type(claim.get('attempt')) is not int or not 1 <= claim['attempt'] <= MAX_ATTEMPTS
+                or type(process.get('exit')) is not int or process['exit'] == 0
+                or not process.get('ended_at_epoch') or not process.get('process_start_token')
+                or process.get('execution_id') != authorization.publication.execution_id
+                or process.get('authority_evidence_ref') != authorization.publication.authority_evidence_ref
+                or claim.get('authorization_digest', material) != material):
+            raise IntakeError('intake_failed_process_not_reconcilable')
+        if run_lock.process_start_token(process['pid']) == process['process_start_token']:
+            raise IntakeError('intake_process_still_running')
+        matches = []
+        for source_path in (root / 'intakes' / request_id).glob('source-*.json'):
+            source = run_store.read_json(source_path)
+            key = scope.digest(source)[7:]
+            if (source_path.stem == 'source-' + key and source.get('task_id') == request['task_id']
+                    and source.get('request_id') == request_id and source.get('user_prompt') == request['instruction']
+                    and (not source_digest or source_digest == 'sha256:' + key)):
+                matches.append(key)
+        if len(matches) != 1:
+            raise IntakeError('intake_reconciliation_source_ambiguous')
+        source_key = matches[0]
+        if claim.get('source_key', source_key) != source_key:
+            raise IntakeError('intake_reconciliation_source_changed')
+        marker = {'version': 1, 'decision': 'consume_failed_attempt_and_continue', 'invocation_id': invocation_id,
+            'source_key': source_key, 'stage': claim['stage'], 'attempt': claim['attempt'],
+            'request_id': request_id, 'task_id': request['task_id'], 'intended_model': authorization.model,
+            'authorization_digest': material, 'claim_digest': scope.digest(claim), 'process_digest': scope.digest(process),
+            'legacy_claim': 'authorization_digest' not in claim, 'budget_reset': False}
+        _save_immutable(_path(root, request_id, invocation_id + '-reconcile'), marker)
+        _reconciled_failure(root, request_id, invocation_id)
+        linked_name = source_key + '-' + claim['stage'] + '-' + str(claim['attempt']) + '-reconciled'
+        _save_immutable(_path(root, request_id, linked_name), {'invocation_id': invocation_id})
+        return dict(marker, next_action='retry_same_prepare_request', original_claim_preserved=True)
+
+
 class CodexIntakeProvider:
     """Actual bounded CLI calls using an existing independent host authorization.
 
@@ -312,15 +442,29 @@ class CodexIntakeProvider:
         invocation = scope.digest({'stage': stage, 'context': context, 'attempt': attempt})[7:]
         claim_path = _path(self.state_root, self.request_id, invocation + '-claim')
         if run_store.private_artifact_exists(claim_path):
-            raise IntakeError('intake_attempt_requires_reconciliation')
-        _save_immutable(claim_path, {'invocation_id': invocation, 'stage': stage, 'attempt': attempt})
+            reconcile_path = _path(self.state_root, self.request_id, invocation + '-reconcile')
+            if not run_store.private_artifact_exists(reconcile_path):
+                raise IntakeError('intake_attempt_requires_reconciliation')
+            marker, process = _reconciled_failure(self.state_root, self.request_id, invocation)
+            if marker['authorization_digest'] != scope.digest(trusted._authorization_material(auth)):
+                raise IntakeError('intake_reconciliation_authority_changed')
+            return None, {'invocation_id': invocation, 'evidence_ref': str(_path(self.state_root, self.request_id, invocation + '-process')),
+                'evidence_digest': scope.digest(process), 'intended_model': auth.model, 'effective_model': auth.model,
+                'reasoning_effort': 'max', 'model_evidence_kind': 'host_configured_exact_cli_model', 'exit': process['exit']}
+        canonical_schema = json.loads(schema_path.read_bytes())
+        wire_schema = provider_schema(canonical_schema)
+        wire_path = _path(self.state_root, self.request_id, invocation + '-schema')
+        _save_immutable(claim_path, {'invocation_id': invocation, 'stage': stage, 'attempt': attempt,
+            'authorization_digest': scope.digest(trusted._authorization_material(auth)),
+            'schema_digest': scope.digest(wire_schema), 'source_key': scope.digest(context['source'])[7:]})
+        _save_immutable(wire_path, wire_schema)
         with tempfile.TemporaryDirectory(prefix='intake-', dir=self.state_root) as scratch_name:
             scratch = Path(scratch_name)
             output = scratch / 'output.json'
             argv = trusted._argv(auth, self.root, output)
             readonly = ('permissions.saihai_trusted_local={filesystem={":root"="deny",":minimal"="read",'
                         '":tmpdir"="deny",":slash_tmp"="deny",' + json.dumps(str(scratch)) + '="write"},network={enabled=false}}')
-            argv = [readonly if item.startswith('permissions.saihai_trusted_local=') else str(schema_path)
+            argv = [readonly if item.startswith('permissions.saihai_trusted_local=') else str(wire_path)
                     if item == str(trusted.RESULT_SCHEMA) else item for item in argv]
             # Current approved active-role policy: Max effort. No model fallback.
             argv = argv[:-1] + ['-c', 'model_reasoning_effort="max"', '-']
@@ -329,9 +473,11 @@ class CodexIntakeProvider:
                       'For shape copy the selected unit title, scope, done_criteria and ledger constraints exactly. '
                       'Account for every requirement as selected or pending. Only ask a question for a requirement '
                       'whose host ledger explicitly sets requires_decision to that material question kind. '
+                      'Use null for absent optional fields such as classification notes. '
                       'Never invent missing features, permissions, approval or workflow IDs.\n' +
                       json.dumps({'stage': stage, 'context': context, 'repair_reason': diagnostic}, ensure_ascii=False))
-            process, _ = trusted._run_process(argv, prompt, dataclasses.replace(auth, timeout_seconds=min(auth.timeout_seconds, 180)), self.root)
+            process, _ = trusted._run_process(argv, prompt, dataclasses.replace(auth, timeout_seconds=min(auth.timeout_seconds, 180)), self.root,
+                diagnostic_path=_path(self.state_root, self.request_id, invocation + '-diagnostic'))
             evidence_path = _path(self.state_root, self.request_id, invocation + '-process')
             _save_immutable(evidence_path, process)
             if process['exit'] != 0 or not process['process_start_token']:
@@ -343,7 +489,10 @@ class CodexIntakeProvider:
                     value = json.loads(output.read_bytes())
                 except (ValueError, UnicodeError):
                     value = None
+            original_value = value
+            value = decode_provider_value(value, canonical_schema)
             return value, {'invocation_id': invocation, 'evidence_ref': str(evidence_path),
+                'provider_output_digest': scope.digest(original_value), 'normalized_output_digest': scope.digest(value),
                 'evidence_digest': scope.digest(process), 'intended_model': auth.model, 'effective_model': auth.model,
                 'reasoning_effort': 'max', 'model_evidence_kind': 'host_configured_exact_cli_model', 'exit': process['exit']}
 

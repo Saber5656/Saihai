@@ -168,3 +168,36 @@ Vaults. They distinguish actual local validation from simulated GitHub responses
 they do not attest a live approved-model invocation, real publication, managed-domain
 isolation or cross-project deployment. The publication owner verifies those outcomes
 separately and must not close an Issue on schema coverage alone.
+
+## Provider schema compatibility and failed-attempt recovery
+
+The two canonical intake schemas explicitly type their const/enum properties. The
+provider adapter emits a closed structured-output schema with every property
+required; canonical optional fields use a nullable wire type. Decoding removes only
+null optional sentinels, then applies the unchanged canonical validator and grounding
+checks. Unknown fields and null required values are still rejected. The generated
+schema and its digest are saved with the host invocation claim. This follows the
+[Structured Outputs schema contract](https://developers.openai.com/api/docs/guides/structured-outputs).
+
+New intake process receipts link private stdout/stderr diagnostics, each capped at
+16 KiB, retaining the full stream digests. Diagnostic text is untrusted and is never
+inserted into a recovery prompt or canonical ledger. Historical digest-only receipts
+cannot reconstruct discarded bytes; an independently captured diagnostic remains
+separate evidence.
+
+After the host has corrected the cause of a known failed readonly invocation:
+
+```text
+python3.11 scripts/saihai.py usage reconcile-intake --request /absolute/request.json --invocation-id <64-hex-invocation> --authorization /absolute/authority.json --state-root /absolute/private-state
+```
+
+Then repeat the same `usage prepare` command. Reconciliation preserves the original
+claim and process bytes, records the observed nonzero exit, consumes that original
+stage attempt and continues at the next attempt. The three-attempt budget never
+resets. Successful, still-running, missing/uncertain or differently authorized
+processes cannot use this path. Old claims without an authorization digest require
+matching existing host execution/evidence identity and an unambiguous saved source;
+the reconciliation explicitly records that legacy binding. If multiple source
+revisions match, `--source-digest sha256:...` selects the exact existing source.
+The CLI neither creates authority nor changes model/credentials. Real API success
+still needs an actual provider retry; local fixture validation is not that evidence.

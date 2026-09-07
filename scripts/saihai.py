@@ -338,6 +338,18 @@ def handle_usage_prepare(frontdoor: Any, args: argparse.Namespace) -> dict[str, 
         raise frontdoor.FrontdoorError(str(exc)) from exc
 
 
+def handle_usage_reconcile_intake(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
+    import request_intake
+    import trusted_local_executor
+    try:
+        authority = trusted_local_executor.load_host_authorization(Path(args.authorization))
+        request = read_request_json(frontdoor, args.request)
+        return request_intake.reconcile_failed_attempt(state_root=Path(args.state_root), request=request,
+            authorization=authority, invocation_id=args.invocation_id, source_digest=args.source_digest)
+    except (request_intake.IntakeError, trusted_local_executor.TrustedLocalError) as exc:
+        raise frontdoor.FrontdoorError(str(exc)) from exc
+
+
 def handle_usage_run(frontdoor: Any, args: argparse.Namespace) -> dict[str, Any]:
     import trusted_local_executor
     try:
@@ -413,6 +425,13 @@ def build_usage_parser(sub: Any) -> None:
     prepare.add_argument('--authorization', required=True)
     prepare.add_argument('--state-root', required=True)
     prepare.set_defaults(handler=handle_usage_prepare)
+    reconcile = commands.add_parser('reconcile-intake', help='acknowledge one observed failed intake attempt without resetting its budget')
+    reconcile.add_argument('--request', required=True)
+    reconcile.add_argument('--invocation-id', required=True)
+    reconcile.add_argument('--source-digest', default='', help='select an exact saved source when multiple revisions exist')
+    reconcile.add_argument('--authorization', required=True)
+    reconcile.add_argument('--state-root', required=True)
+    reconcile.set_defaults(handler=handle_usage_reconcile_intake)
     run = commands.add_parser('run', help='run one authorized task and real validation')
     run.add_argument('--request', required=True)
     run.add_argument('--authorization', required=True, help='private host-owned authorization file')
