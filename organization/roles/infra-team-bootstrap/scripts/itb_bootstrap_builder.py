@@ -14646,6 +14646,12 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
 
     if provider_runtime == ("codex_exec", "codex"):
         cwd = str(hook_input.get("cwd") or state.get("cwd") or os.getcwd())
+        activation_request_id = normalize_cell(
+            hook_input.get("request_id") or hook_input.get("requestId")
+        ) or f"req-{uuid.uuid4().hex}"
+        transcript_dir = session_dir / "provider-exec" / safe_id(agent_id)
+        transcript_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = transcript_dir / f"activation-{uuid.uuid4().hex}.jsonl"
         started = time.monotonic()
         try:
             launch = launch_provider_with_canonical_policy(
@@ -14758,6 +14764,12 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             )
         completed = launch["completed"]
         elapsed_ms = int((time.monotonic() - started) * 1000)
+        transcript_path.write_text(completed.stdout, encoding="utf-8")
+        activation_evidence = {
+            "request_id": activation_request_id,
+            "transcript_path": str(transcript_path),
+            "transcript_sha256": hashlib.sha256(completed.stdout.encode("utf-8")).hexdigest(),
+        }
         output_rejection_type, output_rejection_reason = codex_bounded_output_rejection(completed)
         if output_rejection_type:
             reset_response_evidence(
@@ -14792,7 +14804,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     },
                 ),
             )
-            return {"decision": "block", "reason": output_rejection_reason}
+            return {"decision": "block", "reason": output_rejection_reason, "evidence": activation_evidence}
         if completed.returncode != 0:
             process_note = "codex provider process failed"
             reset_response_evidence(
@@ -14827,7 +14839,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                     },
                 ),
             )
-            return {"decision": "block", "reason": process_note}
+            return {"decision": "block", "reason": process_note, "evidence": activation_evidence}
 
         codex_parse_error = ""
         codex_parse_error_type_value = ""
@@ -15017,6 +15029,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
             return {
                 "decision": "block",
                 "reason": codex_parse_error or "codex provider activation produced no inference evidence",
+                "evidence": activation_evidence,
             }
 
         row["activation_status"] = "response_active"
@@ -15063,6 +15076,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                         else {}
                     ),
                     "stdout_result_present": bool(result_text),
+                    **activation_evidence,
                 },
             ),
         )
@@ -15071,6 +15085,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 "hookEventName": "ProviderActivation",
                 "additionalContext": f"Codex provider activation complete for `{agent_id}` with `{effective_model}`.",
             },
+            "evidence": activation_evidence,
             "activation": {
                 "agent_id": agent_id,
                 "provider": "openai",
@@ -15081,6 +15096,7 @@ def provider_activate(*, runtime: str, state_root: Path, hook_input: dict[str, A
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "usage_source": "codex_exec_json",
+                "response": result_text,
             },
         }
     if provider_runtime != ("claude_cli", "claude"):
