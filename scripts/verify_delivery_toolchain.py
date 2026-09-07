@@ -400,6 +400,12 @@ def publish_validation(full_log, output, receipt, python):
     if stage.get('name') != 'full' or stage.get('status') != 'success' or type(stage.get('exit')) is not int or stage['exit'] != 0 or type(stage.get('log_sha256')) is not str or not re.fullmatch('[a-f0-9]{64}', stage['log_sha256']):
         raise ContractError('missing successful full stage evidence')
     public = sanitize_validation(validation_document(full_log, stage['log_sha256']), python)
+    if 'selection' in receipt:
+        selection = validation_document(full_log, stage['log_sha256']).get('selection')
+        if selection != receipt['selection']: raise ContractError('shard selection mismatch')
+        public['selection'] = selection
+    elif 'selection' in validation_document(full_log, stage['log_sha256']):
+        raise ContractError('unexpected shard selection')
     data = (json.dumps(public, indent=2, allow_nan=False) + '\n').encode('utf-8')
     if len(data) > VALIDATION_JSON_LIMIT: raise ContractError('public validation byte budget')
     with (output / 'validation.json').open('xb') as stream: stream.write(data)
@@ -415,7 +421,12 @@ def verify_validation_result(output, receipt):
         raise ContractError('sanitized validation result changed')
 
 
-def execute(output, run):
+def execute(output, run, shard_index=None, shard_count=None):
+    selection = None
+    if shard_index is not None or shard_count is not None:
+        if run != 'full' or type(shard_index) is not int or type(shard_count) is not int or not 0 <= shard_index < shard_count <= 64:
+            raise ContractError('invalid shard selection')
+        selection = {'kind':'shard','index':shard_index,'count':shard_count}
     output.mkdir(mode=0o700)  # Attempt directory must not already exist.
     receipt = {'schema_version': 1, 'attempt': output.name, 'start': now(), 'status': 'running',
                'bootstrap': {'executable': sys.executable, 'version': platform.python_version()},
@@ -423,6 +434,7 @@ def execute(output, run):
                         'ci_image': {k: os.environ.get(k) for k in ('ImageOS', 'ImageVersion', 'RUNNER_OS', 'RUNNER_ARCH')}},
                'stages': [], 'authorizes_execution': False,
                'other_platforms': 'not_run', 'codeql': 'local_unavailable/remote_pending', 'policy': 'not_adopted'}
+    if selection is not None: receipt['selection'] = selection
     private = Path(tempfile.mkdtemp(prefix='saihai-delivery-runtime-'))
     # Only receipt.json and sanitized validation.json are publication artifacts.
     save_receipt(output, receipt)
@@ -459,7 +471,9 @@ def execute(output, run):
         run_stage('focused-toolchain', [str(python), '-B', 'tests/test_delivery_ci_contract.py'], output, receipt, env, 180)
         run_stage('focused-inventory', [str(python), '-B', 'organization/runtime/workflows/tests/test_delivery_workflow_inventory.py'], output, receipt, env, 180)
         if run == 'full':
-            full_log = run_stage('full', [str(python), '-B', 'scripts/validate_all.py'], output, receipt, env, 900)
+            full_command = [str(python), '-B', 'scripts/validate_all.py']
+            if selection is not None: full_command.extend(['--shard-index',str(shard_index),'--shard-count',str(shard_count)])
+            full_log = run_stage('full', full_command, output, receipt, env, 900)
             publish_validation(full_log, output, receipt, python)
         receipt['target_after'] = target_identity(ROOT); require_identity(receipt['target_before'], receipt['target_after'])
         if receipt['dependency_lock_digest'] != digest((ROOT / lock['dependency_lock']['path']).read_bytes()): raise ContractError('dependency lock changed during run')
@@ -914,6 +928,8 @@ def codeql_phase(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--shard-index', type=int)
+    parser.add_argument('--shard-count', type=int)
     parser.add_argument('--output', type=Path, help='new private attempt directory; never reused')
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--run', choices=['focused', 'full'])
@@ -940,7 +956,7 @@ def main():
         if not args.bundle or not args.language: parser.error('fixed bundle and language required')
         raise SystemExit(codeql_phase(args))
     if args.bundle or args.language or args.fetch_only: parser.error('CodeQL arguments in Python mode')
-    raise SystemExit(execute(args.output.absolute(), args.run))
+    raise SystemExit(execute(args.output.absolute(), args.run, args.shard_index, args.shard_count))
 
 
 if __name__ == '__main__': main()

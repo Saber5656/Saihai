@@ -50,6 +50,15 @@ def discover_suites() -> list[Path]:
     return discovered
 
 
+def select_shard(suites: list[Path], *, index: int, count: int) -> list[Path]:
+    """Return one deterministic, disjoint shard from an ordered suite list."""
+    if count < 1:
+        raise ValueError("shard count must be at least 1")
+    if index < 0 or index >= count:
+        raise ValueError(f"shard index must be between 0 and {count - 1}")
+    return [path for position, path in enumerate(suites) if position % count == index]
+
+
 def rel(path: Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix()
 
@@ -99,6 +108,12 @@ def tail(value: Any, limit: int = 500) -> str:
     if len(compact) <= limit:
         return compact
     return compact[-limit:]
+
+
+def emit_progress(event: str, **fields: Any) -> None:
+    """Emit a flushed machine-readable liveness event without polluting stdout."""
+    payload = {"schema_version": 1, "event": event, **fields}
+    print(json.dumps(payload, ensure_ascii=False), file=sys.stderr, flush=True)
 
 
 def child_env() -> dict[str, str]:
@@ -197,6 +212,69 @@ def unittest_counts(*outputs: str) -> tuple[dict[str, Any], bool] | None:
     if not summaries:
         return None
     return summaries[0] if len(summaries) == 1 else (unknown_counts(), False)
+def run_captured(
+    command: list[str],
+    *,
+    timeout: float,
+    heartbeat_event: str,
+    heartbeat_target: str,
+    heartbeat_interval: float = 30,
+) -> dict[str, Any]:
+    """Capture a child process while emitting metadata-only liveness events."""
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
+    if heartbeat_interval <= 0:
+        raise ValueError("heartbeat interval must be positive")
+
+    started = time.perf_counter()
+    process = subprocess.Popen(
+        command,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=child_env(),
+    )
+    deadline = started + timeout
+    try:
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                process.kill()
+                stdout, stderr = process.communicate()
+                return {
+                    "returncode": process.returncode,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "timed_out": True,
+                }
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=min(heartbeat_interval, remaining)
+                )
+            except subprocess.TimeoutExpired:
+                emit_progress(
+                    heartbeat_event,
+                    target=heartbeat_target,
+                    elapsed_seconds=round(time.perf_counter() - started, 3),
+                )
+                continue
+            return {
+                "returncode": process.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "timed_out": False,
+            }
+    except BaseException:
+        try:
+            process.kill()
+        except BaseException:
+            pass
+        try:
+            process.communicate()
+        except BaseException:
+            pass
+        raise
 
 
 def run_suite(path: Path, *, timeout: float = 300) -> dict[str, Any]:
@@ -205,16 +283,14 @@ def run_suite(path: Path, *, timeout: float = 300) -> dict[str, Any]:
         "path": rel(path), "command": [sys.executable, str(path)], "cwd": str(REPO_ROOT),
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
-    try:
-        completed = subprocess.run(
-            result["command"], cwd=REPO_ROOT, capture_output=True, text=True,
-            timeout=timeout, env=child_env(), check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
+    captured = run_captured(result["command"], timeout=timeout,
+                            heartbeat_event="suite_heartbeat", heartbeat_target=rel(path))
+    if captured["timed_out"]:
         return {**result, **unknown_counts(), "result": "fail", "status": "timed_out",
                 "exit_code": None, "finished_at": datetime.now(timezone.utc).isoformat(),
                 "duration_seconds": round(time.perf_counter() - started, 3), "detail": "timeout",
-                "stdout_tail": tail(exc.stdout), "stderr_tail": tail(exc.stderr)}
+                "stdout_tail": tail(captured["stdout"]), "stderr_tail": tail(captured["stderr"])}
+    completed = subprocess.CompletedProcess(result["command"], captured["returncode"], captured["stdout"], captured["stderr"])
     result.update(exit_code=completed.returncode, finished_at=datetime.now(timezone.utc).isoformat(),
                   duration_seconds=round(time.perf_counter() - started, 3))
     lines = completed.stdout.strip().splitlines()
@@ -253,35 +329,42 @@ def run_suite(path: Path, *, timeout: float = 300) -> dict[str, Any]:
 
 def run_contract(command: list[str], *, timeout: float = 300) -> dict[str, Any]:
     started = time.perf_counter()
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=child_env(),
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
+    target = " ".join(command)
+    completed = run_captured(
+        command,
+        timeout=timeout,
+        heartbeat_event="contract_heartbeat",
+        heartbeat_target=target,
+    )
+    if completed["timed_out"]:
         return {
             "command": command,
             "result": "fail",
             "duration_seconds": round(time.perf_counter() - started, 3),
             "detail": "timeout",
-            "stdout_tail": tail(exc.stdout),
-            "stderr_tail": tail(exc.stderr),
+            "stdout_tail": tail(completed["stdout"]),
+            "stderr_tail": tail(completed["stderr"]),
         }
     duration = round(time.perf_counter() - started, 3)
-    payload = parse_json_stdout(completed.stdout)
-    passed = completed.returncode == 0 and payload is not None and payload.get("decision") == "ok"
+    payload = parse_json_stdout(completed["stdout"])
+    passed = (
+        completed["returncode"] == 0
+        and payload is not None
+        and payload.get("decision") == "ok"
+    )
     return {
         "command": command,
         "result": "pass" if passed else "fail",
         "duration_seconds": duration,
-        "detail": "" if passed else (f"exit:{completed.returncode}" if completed.returncode else "decision_not_ok"),
-        "stdout_tail": "" if passed else tail(completed.stdout),
-        "stderr_tail": "" if passed else tail(completed.stderr),
+        "detail": ""
+        if passed
+        else (
+            f"exit:{completed['returncode']}"
+            if completed["returncode"]
+            else "decision_not_ok"
+        ),
+        "stdout_tail": "" if passed else tail(completed["stdout"]),
+        "stderr_tail": "" if passed else tail(completed["stderr"]),
     }
 
 
@@ -306,21 +389,64 @@ def compile_targets() -> tuple[bool, list[dict[str, str]]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run offline Saihai validation")
     parser.add_argument("--only", default="", help="only run suites whose path contains this substring")
+    parser.add_argument("--shard-index", type=int, default=None, help="zero-based suite shard index")
+    parser.add_argument("--shard-count", type=int, default=None, help="total number of suite shards")
     parser.add_argument("--list", action="store_true", help="list discovered suites and exit")
     args = parser.parse_args()
 
     suites = discover_suites()
     if args.only:
         suites = [path for path in suites if args.only in rel(path)]
+    shard_requested = args.shard_index is not None or args.shard_count is not None
+    if shard_requested and (args.shard_index is None or args.shard_count is None):
+        parser.error("--shard-index and --shard-count must be provided together")
+    if shard_requested:
+        try:
+            suites = select_shard(suites, index=args.shard_index, count=args.shard_count)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.list:
         for path in suites:
             print(rel(path))
         return
 
     started = time.perf_counter()
-    suite_results = [run_suite(path) for path in suites]
-    contract_results = [run_contract(command) for command in CONTRACT_CMDS]
+    emit_progress(
+        "validation_start",
+        suite_count=len(suites),
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
+    )
+    suite_results: list[dict[str, Any]] = []
+    for path in suites:
+        target = rel(path)
+        emit_progress("suite_start", target=target)
+        result = run_suite(path)
+        suite_results.append(result)
+        emit_progress(
+            "suite_complete",
+            target=target,
+            result=result["result"],
+            cases=result["cases"],
+            duration_seconds=result["duration_seconds"],
+            detail=result["detail"],
+        )
+    contract_results: list[dict[str, Any]] = []
+    for command in CONTRACT_CMDS:
+        target = " ".join(command)
+        emit_progress("contract_start", target=target)
+        result = run_contract(command)
+        contract_results.append(result)
+        emit_progress(
+            "contract_complete",
+            target=target,
+            result=result["result"],
+            duration_seconds=result["duration_seconds"],
+            detail=result["detail"],
+        )
+    emit_progress("compile_start")
     compiled, compile_errors = compile_targets()
+    emit_progress("compile_complete", result="pass" if compiled else "fail")
     no_suites = not suites
     failed = (
         no_suites
@@ -336,10 +462,17 @@ def main() -> None:
         "compiled": compiled,
         "total_duration_seconds": round(time.perf_counter() - started, 3),
     }
+    if shard_requested:
+        summary['selection'] = {'kind':'shard','index':args.shard_index,'count':args.shard_count}
     if no_suites:
         summary["detail"] = "no_suites_matched"
     if compile_errors:
         summary["compile_errors"] = compile_errors
+    emit_progress(
+        "validation_complete",
+        result=summary["result"],
+        total_duration_seconds=summary["total_duration_seconds"],
+    )
     print(json.dumps(summary, ensure_ascii=False))
     raise SystemExit(1 if failed else 0)
 

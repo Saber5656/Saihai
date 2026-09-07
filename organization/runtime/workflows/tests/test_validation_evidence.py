@@ -79,8 +79,8 @@ class NativeAndApplicabilityTests(unittest.TestCase):
         self.value={'schema_version':1,'suite_evidence_version':1,'result':'pass','compiled':True,
                     'suites':[{k:v for k,v in suite.items() if k in fields}],
                     'contracts':[{'command':[sys.executable,p,*args],'result':'pass'} for p,args in [
-                        ('organization/runtime/workflows/scripts/workflow_contract_inventory.py',['--check']),
-                        ('organization/integrations/github/scripts/main.py',['validate-contract'])]]}
+                        ('organization/runtime/workflows/scripts/workflow_selector.py',['validate-contracts']),
+                        ('organization/runtime/workflows/scripts/template_role_validator.py',[])]]}
         probe={'executable':sys.executable,'prefix':str(Path(sys.executable).parent.parent),'version':'3.11.16','machine':'arm64'}
         self.receipt={'schema_version':1,'attempt':'synthetic-local-fixture','start':'2020-01-01T00:00:00Z','end':'2030-01-01T00:00:00Z',
                      'status':'success','exit':0,'bootstrap':{'executable':sys.executable,'version':'3.11.16'},

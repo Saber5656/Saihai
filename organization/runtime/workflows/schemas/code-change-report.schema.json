@@ -67,6 +67,53 @@
           "items": {
             "type": "string"
           }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "finding_id",
+              "severity",
+              "status",
+              "summary",
+              "evidence_refs"
+            ],
+            "properties": {
+              "finding_id": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low",
+                  "info"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "closed",
+                  "waived",
+                  "informational"
+                ]
+              },
+              "summary": {
+                "type": "string"
+              },
+              "evidence_refs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -108,6 +155,238 @@
         }
       },
       "additionalProperties": false
+    },
+    "report_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "provider_evidence": {
+      "type": "object",
+      "required": [
+        "provider",
+        "provider_adapter_id",
+        "intended_model",
+        "effective_model",
+        "effective_model_policy",
+        "model_assurance",
+        "request_id",
+        "provider_session_id",
+        "transcript_path",
+        "evidence_path"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "provider_adapter_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "intended_model": {
+          "type": "string"
+        },
+        "effective_model": {
+          "type": "string"
+        },
+        "effective_model_policy": {
+          "enum": [
+            "required_exact_match",
+            "record_without_equality"
+          ]
+        },
+        "model_assurance": {
+          "enum": [
+            "exact_match_enforced",
+            "provider_reported_only"
+          ]
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "provider_session_id": {
+          "type": "string"
+        },
+        "transcript_path": {
+          "type": "string"
+        },
+        "evidence_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "authority": {
+      "type": "object",
+      "required": [
+        "canonical_result",
+        "stdout_is_signal_only",
+        "raw_transcript_shared"
+      ],
+      "properties": {
+        "canonical_result": {
+          "const": "typed_report_file"
+        },
+        "stdout_is_signal_only": {
+          "const": true
+        },
+        "raw_transcript_shared": {
+          "const": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "summary": {
+      "type": "string"
+    },
+    "resolution": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "original_findings_only"
+            },
+            "original_review": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "snapshot": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "repository": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048
+                    },
+                    "base": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "head": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    }
+                  },
+                  "required": [
+                    "repository",
+                    "base",
+                    "head"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "required": [
+                    "kind",
+                    "work_order_digest",
+                    "context_digest"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "work_order"
+                    },
+                    "work_order_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "context_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "batch_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "finding_ids": {
+              "type": "array",
+              "maxItems": 256,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              }
+            },
+            "pr": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "policy": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          },
+          "required": [
+            "mode",
+            "original_review",
+            "snapshot",
+            "batch_id",
+            "finding_ids",
+            "pr",
+            "policy"
+          ],
+          "additionalProperties": false
+        },
+        "results": {
+          "type": "object",
+          "maxProperties": 256,
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "enum": [
+                  "resolved",
+                  "unresolved"
+                ]
+              },
+              "evidence_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              }
+            },
+            "required": [
+              "status",
+              "evidence_refs"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "binding",
+        "results"
+      ],
+      "additionalProperties": false
+    },
+    "step_id": {
+      "enum": [
+        "review",
+        "qa"
+      ]
     }
   },
   "additionalProperties": false,

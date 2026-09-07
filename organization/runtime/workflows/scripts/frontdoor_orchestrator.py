@@ -33,6 +33,7 @@ import run_lock
 import run_lifecycle
 import completion_gate
 import report_gate
+import harness_gate_executor
 import task_state_bridge
 import work_order_builder
 import workflow_selector
@@ -4841,7 +4842,18 @@ def drain_run(
             run_id=run_id,
             principal=actor,
         ):
-            run = run_store.load_run(state_root, run_id)
+            try:
+                run = run_store.load_run(state_root, run_id)
+                if any(not isinstance(row, dict) for row in run['step_history']):
+                    raise run_store.RunStoreError('schema_invalid', ['step_history entries must be objects'])
+            except run_store.RunStoreError as exc:
+                if exc.reason_class != 'schema_invalid':
+                    raise
+                append_audit_event(state_root=state_root, event_type='drain_run', principal=actor,
+                    subject=subject, outcome='blocked',
+                    details={'reason': 'work_order_invalid', 'errors': exc.errors})
+                return {'schema_version': 1, 'decision': 'blocked', 'reason': 'work_order_invalid',
+                        'errors': exc.errors, 'run_path': str(path)}
             subject = {"run_id": run_id, "request_id": str(run.get("request_id") or "")}
             signature = assert_execution_principal(
                 state_root=state_root,
@@ -4907,7 +4919,9 @@ def drain_run(
             drained = False
             if not errors:
                 order_exists = state_file_exists(order_path)
-                if order_exists:
+                refresh_standard_order = (workflow_id == 'standard_code_change' and order_exists
+                    and not work_order_builder.snapshot_path(state_root, run_id, order_step_id, int(run['iteration'])).exists())
+                if order_exists and not refresh_standard_order:
                     work_order = read_json(order_path)
                 else:
                     try:
@@ -4919,7 +4933,7 @@ def drain_run(
                             step=step,
                             issuer_principal=actor,
                         )
-                    except FrontdoorError as exc:
+                    except (FrontdoorError, work_order_builder.WorkOrderError) as exc:
                         errors.append(str(exc))
                 if not errors:
                     errors.extend(
@@ -4931,7 +4945,7 @@ def drain_run(
                             run=run,
                         )
                     )
-                if not errors and not order_exists:
+                if not errors and (not order_exists or refresh_standard_order):
                     write_json(order_path, work_order)
                     drained = True
                 if not errors:
@@ -5584,6 +5598,17 @@ def validate_report(
     return payload
 
 
+def run_harness_gate(*, state_root: Path, run_id: str,
+                     principal: dict[str, Any] | None = None) -> dict[str, Any]:
+    actor = principal or make_principal("harness_runner", "local-harness", authn_method="local_cli")
+    payload = harness_gate_executor.execute_harness_gate(
+        state_root=state_root, run_id=run_id, principal=actor)
+    if payload.get("validated") is True or payload.get("reason") == "duplicate_step_report":
+        synchronize_terminal_request(state_root=state_root, run_id=run_id, principal=actor,
+                                     operation="run_harness_gate_terminal_request_sync")
+    return payload
+
+
 def run_provider(
     *,
     state_root: Path,
@@ -6058,6 +6083,12 @@ def build_work_order(
     issuer_principal: dict[str, Any],
 ) -> dict[str, Any]:
     resolved_refs = verified_context_refs_for_work_order(request_record)
+    if run.get('workflow_id') == 'standard_code_change' and any(
+            row.get('step_id') == 'implement' and row.get('status') == 'completed' for row in run.get('step_history', [])):
+        try:
+            resolved_refs = scoped_worker_executor.completed_review_context_refs(state_root, run)
+        except scoped_worker_executor.ScopedWorkerError as exc:
+            raise FrontdoorError(exc.reason_class) from exc
     if not isinstance(resolved_refs, list) or not resolved_refs:
         refs = run["activation"]["context_scope"]["refs"]
         resolved_refs = [{"type": "repo_file", "value": ref, "path": ref} for ref in refs]
@@ -6222,6 +6253,12 @@ def parser() -> argparse.ArgumentParser:
     report.add_argument("--principal-id", default="local-harness")
     report.add_argument("--authn-method", default="local_cli")
 
+    harness_gate_parser = sub.add_parser("run-harness-gate")
+    harness_gate_parser.add_argument("--run-id", required=True)
+    harness_gate_parser.add_argument("--principal-type", default="harness_runner")
+    harness_gate_parser.add_argument("--principal-id", default="local-harness")
+    harness_gate_parser.add_argument("--authn-method", default="local_cli")
+
     run_provider_parser = sub.add_parser("run-provider")
     run_provider_parser.add_argument("--run-id", required=True)
     run_provider_parser.add_argument("--adapter-id", default=provider_runner.DEFAULT_ADAPTER_ID)
@@ -6337,6 +6374,32 @@ def parser() -> argparse.ArgumentParser:
     return parser
 
 
+def run_trusted_local(*, request: dict[str, Any], authorization: Any, state_root: Path) -> dict[str, Any]:
+    """Explicit usage-first host entry; no managed-worker attestation is implied."""
+    import trusted_local_executor
+    try:
+        return trusted_local_executor.execute(request, authorization, state_root)
+    except trusted_local_executor.TrustedLocalError as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
+
+def repair_trusted_local_validation(*, authorization: Any, state_root: Path, repair_instruction: str = "") -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        return trusted_local_executor.repair_validation(authorization, state_root, repair_instruction=repair_instruction)
+    except (trusted_local_executor.TrustedLocalError, trusted_local_executor.publication.PublicationError) as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
+def advance_trusted_local(*, authorization: Any, state_root: Path) -> dict[str, Any]:
+    import trusted_local_executor
+    try:
+        return trusted_local_executor.advance_publication(authorization, state_root)
+    except (trusted_local_executor.TrustedLocalError, trusted_local_executor.publication.PublicationError) as exc:
+        raise FrontdoorError(str(exc)) from exc
+
+
 def main() -> None:
     os.umask(0o077)
     args = parser().parse_args()
@@ -6429,6 +6492,11 @@ def main() -> None:
                 state_root=state_root,
                 run_id=args.run_id,
                 report_path_arg=args.report_path,
+                principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
+            )
+        elif args.command == "run-harness-gate":
+            payload = run_harness_gate(
+                state_root=state_root, run_id=args.run_id,
                 principal=principal_from_cli(args.principal_type, args.principal_id, args.authn_method),
             )
         elif args.command == "run-provider":

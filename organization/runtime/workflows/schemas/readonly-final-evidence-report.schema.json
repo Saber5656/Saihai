@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sahai.local/schemas/workflows/readonly-final-evidence-report.schema.json",
+  "title": "Readonly Chain Final Evidence",
+  "description": "Harness-owned declaration of research/review evidence acceptance. The harness must validate referenced artifacts and run/step identity; schema validity alone does not prove execution.",
+  "type": "object",
+  "required": [
+    "report_version",
+    "workflow_id",
+    "step_id",
+    "result",
+    "research_report_ref",
+    "review_report_ref",
+    "review_status",
+    "validation_status",
+    "evidence_refs",
+    "no_diff_completion"
+  ],
+  "properties": {
+    "report_version": {
+      "const": "1"
+    },
+    "workflow_id": {
+      "const": "readonly_review_chain"
+    },
+    "step_id": {
+      "const": "final_evidence"
+    },
+    "result": {
+      "enum": [
+        "complete",
+        "blocked"
+      ]
+    },
+    "research_report_ref": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "review_report_ref": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "review_status": {
+      "enum": [
+        "pass",
+        "findings",
+        "blocked",
+        "invalid"
+      ]
+    },
+    "validation_status": {
+      "enum": [
+        "passed",
+        "failed",
+        "blocked",
+        "not_run"
+      ]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "\\S"
+      }
+    },
+    "no_diff_completion": {
+      "type": "boolean",
+      "const": true
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "result"
+        ],
+        "properties": {
+          "result": {
+            "const": "complete"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "review_status": {
+            "const": "pass"
+          },
+          "validation_status": {
+            "const": "passed"
+          }
+        }
+      }
+    }
+  ]
+}

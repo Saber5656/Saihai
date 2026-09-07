@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import review_lifecycle
 import run_lock
 import run_store
 import safe_paths
@@ -23,9 +24,9 @@ TERMINAL_RUN_STATES = run_store.TERMINAL_RUN_STATES
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "created": {"step_queued", "waiting_human", "aborted"},
-    "step_queued": {"waiting_provider", "waiting_human", "aborted"},
+    "step_queued": {"step_queued", "validating", "waiting_provider", "waiting_human", "aborted"},
     "waiting_provider": {"step_queued", "validating", "waiting_human", "failed", "aborted"},
-    "validating": {"complete", "failed", "waiting_human", "aborted"},
+    "validating": {"step_queued", "complete", "failed", "waiting_human", "aborted"},
     "waiting_human": {"step_queued", "failed", "aborted"},
     "remediating": {"step_queued", "failed", "aborted"},
     "complete": set(),
@@ -181,8 +182,15 @@ def transition_run(
     terminal_reason: str | None = None,
     expected_current_state: str | None = None,
     run: dict[str, Any] | None = None,
+    persist: bool = True,
+    report_binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Advance a run through the canonical lifecycle table and persist it."""
+    """Advance a run; locked callers may batch in-memory transitions into one store.
+
+    With persist=False the caller must retain the same run object and global
+    lock, then persist once with the original expected_current_state. Report
+    binding is included in the signed transition, never read from provider input.
+    """
 
     assert_execution_principal(principal)
     run = run if run is not None else run_store.load_run(state_root, run_id)
@@ -193,6 +201,11 @@ def transition_run(
         raise LifecycleError("terminal_state_immutable", [f"run is terminal: {from_state}"])
     if from_state not in ALLOWED_TRANSITIONS:
         raise LifecycleError("illegal_transition", [f"unknown run state: {from_state}"])
+    if from_state == 'step_queued' and to_state == 'validating' and (run.get('workflow_id') != 'standard_code_change' or run.get('current_step') != 'final_evidence' or transition != 'finalize_standard_review'):
+        raise LifecycleError('illegal_transition', ['final harness gate only'])
+    if (from_state, to_state) == ('step_queued', 'step_queued') and (
+            run.get('workflow_id') != 'standard_code_change' or transition != 'queue_standard_step'):
+        raise LifecycleError('illegal_transition', ['standard flow queue only'])
     if to_state not in ALLOWED_TRANSITIONS[from_state]:
         raise LifecycleError("illegal_transition", [f"{from_state} -> {to_state} is not allowed"])
     if to_state not in GOAL_STATE_FOR_RUN_STATE:
@@ -214,6 +227,8 @@ def transition_run(
         "run_id": effective_run_id,
         "artifact_refs": _normalized_artifact_refs(artifact_refs),
     }
+    if report_binding is not None:
+        record["report_binding"] = report_binding
     record["signature"] = sign_transition(
         state_root=state_root,
         principal=principal,
@@ -229,11 +244,12 @@ def transition_run(
             "reason": terminal_reason or reason_class,
         }
 
-    run_store.store_run(
-        state_root,
-        run,
-        expected_current_state=expected_current_state or from_state,
-    )
+    if persist:
+        run_store.store_run(
+            state_root,
+            run,
+            expected_current_state=expected_current_state or from_state,
+        )
     return record
 
 
@@ -443,6 +459,30 @@ def resume_run(
                 "next_action": "drain",
                 "workflow_run": run,
             }
+        if run_state == 'step_queued' and run.get('workflow_id') == 'standard_code_change':
+            review_action = review_lifecycle.next_review_action(run)
+            if review_action == 'stopped':
+                return {'schema_version': 1, 'decision': 'blocked', 'resumed': False,
+                        'next_action': 'stopped', 'review_action': review_action, 'workflow_run': run}
+            step_actions = {'implement': 'derive_scoped_worker_capability', 'review': 'run_provider',
+                            'qa': 'run_provider', 'final_evidence': 'validate_report'}
+            current_step = run['current_step']
+            if current_step not in step_actions:
+                raise LifecycleError('standard_step_invalid', ['unsupported standard step'])
+            import work_order_builder
+            snapshot = work_order_builder.snapshot_path(state_root, run_id, current_step, run['iteration'])
+            action = 'drain' if not snapshot.exists() else step_actions[current_step]
+            return {'schema_version':1, 'decision':'ok', 'resumed':False, 'next_action':action,
+                    'review_action':review_lifecycle.next_review_action(run), 'workflow_run':run}
+        if run_state in {"step_queued", "validating"} and run.get("review_lifecycle", {}).get("resolution_flow"):
+            review_lifecycle._live(run, review_lifecycle._owner(principal), run["review_lifecycle"])
+            action = review_lifecycle.next_review_action(run)
+            if run_state == 'validating' and action == 'initial_review':
+                action = 'validate_report'
+            if run.get('workflow_id') == 'standard_code_change' and action != 'stopped':
+                action = 'drain' if run_state == 'step_queued' else 'validate_report'
+            return {"schema_version": 1, "decision": "blocked" if action == "stopped" else "ok",
+                    "resumed": False, "next_action": action, "review_action": review_lifecycle.next_review_action(run), "workflow_run": run}
         if run_state == "step_queued":
             return {
                 "schema_version": 1,
@@ -625,3 +665,23 @@ def abort_run(
             "transition": transition,
             "workflow_run": run,
         }
+
+
+
+def queue_standard_step(state_root: Path, run: dict[str, Any], *, step: str,
+                        principal: dict[str, Any], artifact_refs: list[str]) -> dict[str, Any]:
+    """Advance an already-authorized standard run without increasing its budget."""
+    if run.get('workflow_id') != 'standard_code_change' or step not in {'implement', 'review', 'qa', 'final_evidence'}:
+        raise LifecycleError('standard_step_invalid')
+    limit = min(int(run['max_steps']), int(run['activation']['activation_scope']['step_budget']))
+    if int(run['iteration']) >= limit:
+        if run.get('review_lifecycle'):
+            review_lifecycle._stop(run['review_lifecycle'], 'activation_step_budget_exhausted')
+        return transition_run(state_root, run['run_id'], to_state='waiting_human',
+            reason_class='activation_step_budget_exhausted', transition='queue_standard_step',
+            principal=principal, artifact_refs=artifact_refs, run=run)
+    run['current_step'] = step
+    run['iteration'] += 1
+    return transition_run(state_root, run['run_id'], to_state='step_queued',
+        reason_class='standard_step_ready', transition='queue_standard_step',
+        principal=principal, artifact_refs=artifact_refs, run=run)

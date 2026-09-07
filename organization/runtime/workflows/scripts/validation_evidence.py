@@ -289,8 +289,8 @@ def inspect_native_bundle(bundle: ExecutionBundle) -> dict:
             if (type(suite['cwd']) is not str or not suite['cwd'].startswith('/')
                     or suite['command'] != [python, suite['cwd']+'/'+path]):
                 raise EvidenceError('suite_command_mismatch')
-        expected_contracts = [[python,'organization/runtime/workflows/scripts/workflow_contract_inventory.py','--check'],
-                              [python,'organization/integrations/github/scripts/main.py','validate-contract']]
+        expected_contracts = [[python,'organization/runtime/workflows/scripts/workflow_selector.py','validate-contracts'],
+                              [python,'organization/runtime/workflows/scripts/template_role_validator.py']]
         if value['contracts'] != [{'command':c,'result':'pass'} for c in expected_contracts]:
             raise EvidenceError('contracts_missing_or_not_passed')
         out.update(integrity='consistent', receipt=receipt, validation=value)

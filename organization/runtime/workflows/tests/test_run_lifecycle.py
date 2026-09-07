@@ -615,8 +615,62 @@ def test_resume_does_not_duplicate_runs() -> None:
         assert_equal([path.name for path in run_files], ["run-no-duplicate.json"], "single run file")
 
 
+def test_report_transitions_commit_together() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        state_root = Path(raw_tmp)
+        store_run(state_root)
+        transition(state_root, "run-lifecycle", "step_queued", "step_queued")
+        before = run_store.load_run(state_root, "run-lifecycle")
+        run = run_store.load_run(state_root, "run-lifecycle")
+        for state in ("waiting_provider", "validating"):
+            run_lifecycle.transition_run(
+                state_root, "run-lifecycle", to_state=state, reason_class="report_received",
+                transition="validate_report", principal=manual_principal(), run=run,
+                persist=False,
+            )
+        assert_equal(run_store.load_run(state_root, "run-lifecycle"), before, "uncommitted transitions")
+        binding = {"on": "research_complete", "from_step": "research", "to_step": "review"}
+        record = run_lifecycle.transition_run(
+            state_root, "run-lifecycle", to_state="step_queued", reason_class="research_complete",
+            transition="validate_report", principal=manual_principal(), run=run,
+            expected_current_state="step_queued", report_binding=binding,
+        )
+        assert_equal(record["report_binding"], binding, "signed report binding")
+        expected = run_lifecycle.sign_transition(
+            state_root=state_root, principal=manual_principal(), transition="validate_report",
+            subject={k: v for k, v in record.items() if k != "signature"},
+        )
+        assert_equal(record["signature"]["signature"], expected["signature"], "binding signature")
+        stored = run_store.load_run(state_root, "run-lifecycle")
+        assert_equal(len(stored["transitions"]), 4, "atomic transition sequence")
+        assert_equal(stored["terminal"]["status"], None, "intermediate terminal unset")
+
+
+def test_resume_review_flow_never_reopens_initial_review_after_repair() -> None:
+    from test_review_lifecycle import ReviewLifecycleTests
+    import review_lifecycle as review
+    fixture = ReviewLifecycleTests()
+    fixture.setUp()
+    try:
+        ids = fixture.enable_flow()
+        fixture.seal(ids)
+        run = fixture.produced()
+        run['run_state'] = 'validating'
+        run['goal_state'] = 'active'
+        run_store.store_run(fixture.root, run)
+        owner = run['review_lifecycle']['owner']
+        result = run_lifecycle.resume_run(fixture.root, run['run_id'], principal=owner)
+        assert result['review_action'] == 'verify_original_findings', result
+        assert result['next_action'] == 'validate_report', result
+        assert result['workflow_run']['run_state'] == 'validating'
+    finally:
+        fixture.tearDown()
+
+
 def main() -> None:
     tests = [
+        test_report_transitions_commit_together,
+        test_resume_review_flow_never_reopens_initial_review_after_repair,
         test_work_order_path_uses_confined_safe_constructor,
         test_work_order_path_rejects_traversal_and_unsafe_components,
         test_work_order_path_rejects_symlinked_namespace,

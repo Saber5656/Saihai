@@ -15,15 +15,20 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  validation_shards:
+    name: validate / shard-${{ matrix.shard_index }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.11"
-      - name: Run validation with verified native toolchain
+      - name: Run validation suite
         env:
           SAIHAI_ROOT: ${{ github.workspace }}
           AGENTS_VAULT_ROOT: ${{ runner.temp }}/agents-vault
@@ -36,14 +41,28 @@ jobs:
           TASK_WORKTREE_ROOT: ${{ runner.temp }}/worktrees
         run: |
           mkdir -p "$AGENTS_VAULT_ROOT" "$USER_VAULT_ROOT" "$DEV_WORKTREES_ROOT"
-          python3 scripts/verify_delivery_toolchain.py --run full --output "$RUNNER_TEMP/delivery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          python3 scripts/verify_delivery_toolchain.py --run full --output "$RUNNER_TEMP/delivery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-${{ matrix.shard_index }}" \
+            --shard-index "${{ matrix.shard_index }}" \
+            --shard-count 8
       - name: Retain bounded validation evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: delivery-${{ github.run_id }}-${{ github.run_attempt }}
+          name: delivery-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard_index }}
           path: |
-            ${{ runner.temp }}/delivery-${{ github.run_id }}-${{ github.run_attempt }}/receipt.json
-            ${{ runner.temp }}/delivery-${{ github.run_id }}-${{ github.run_attempt }}/validation.json
+            ${{ runner.temp }}/delivery-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard_index }}/receipt.json
+            ${{ runner.temp }}/delivery-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard_index }}/validation.json
           retention-days: 14
           if-no-files-found: error
+
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: validation_shards
+    if: ${{ always() }}
+    steps:
+      - name: Confirm every validation shard passed
+        env:
+          SHARD_RESULT: ${{ needs.validation_shards.result }}
+        run: test "$SHARD_RESULT" = "success"
