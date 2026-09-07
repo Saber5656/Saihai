@@ -24,7 +24,7 @@ def digest(value: Any) -> str:
 def selected_unit(ledger: dict) -> dict:
     if not isinstance(ledger, dict):
         raise ScopeError('requirement_ledger_invalid:object_required')
-    errors = gtc_unit_ledger_errors(ledger)
+    errors = gtc_unit_ledger_errors(ledger, require_ready=False)
     if errors:
         raise ScopeError('requirement_ledger_invalid:' + ','.join(errors))
     return next(unit for unit in ledger['task_units'] if unit['unit_id'] == ledger['selected_unit_id'])
@@ -78,7 +78,7 @@ def revise(ledger: dict, *, expected_digest: str, version: str,
     return result
 
 
-def validate_diff(root: Path, ledger: dict, *, base: str, actual_paths: list[str]) -> dict:
+def validate_diff(root: Path, ledger: dict, *, base: str, actual_paths: list[str], target: str | None = None) -> dict:
     """Check actual Git hunks against explicit selected-unit host contracts.
 
     Ranges use the base's one-based line coordinates; insertions name an exact
@@ -86,7 +86,7 @@ def validate_diff(root: Path, ledger: dict, *, base: str, actual_paths: list[str
     Binary/mode/rename/deletion edits require explicit operation contracts.
     """
     unit = selected_unit(ledger)
-    if not re.fullmatch(r'[a-f0-9]{40}', base):
+    if not re.fullmatch(r'[a-f0-9]{40}', base) or (target is not None and not re.fullmatch(r'[a-f0-9]{40}', target)):
         raise ScopeError('scope_base_invalid')
     contracts = unit.get('change_contracts')
     if not isinstance(contracts, list) or not contracts:
@@ -118,13 +118,18 @@ def validate_diff(root: Path, ledger: dict, *, base: str, actual_paths: list[str
         if path not in by_path:
             raise ScopeError('actual_diff_outside_selected_unit')
         contract = by_path[path]
-        if (root / path).is_symlink():
+        if target is None and (root / path).is_symlink():
             raise ScopeError('actual_diff_symlink_forbidden')
         done = subprocess.run(['git', 'diff', '--no-ext-diff', '--no-textconv', '--no-renames',
-            '--unified=0', base, '--', path], cwd=root, capture_output=True, check=True, timeout=30)
+            '--unified=0', base, *([target] if target else []), '--', path], cwd=root, capture_output=True, check=True, timeout=30)
         patch = done.stdout.decode('utf-8', errors='strict')
         tracked = subprocess.run(['git', 'ls-files', '--error-unmatch', '--', path], cwd=root,
             capture_output=True, timeout=30).returncode == 0
+        if target is not None:
+            entry = subprocess.run(['git', 'ls-tree', target, '--', path], cwd=root, capture_output=True, check=True, timeout=30).stdout
+            tracked = bool(entry)
+            if entry.startswith(b'120000 '):
+                raise ScopeError('actual_diff_symlink_forbidden')
         operation = 'delete' if 'deleted file mode ' in patch else 'create' if not tracked or 'new file mode ' in patch else 'edit'
         if operation not in contract['operations']:
             raise ScopeError('actual_diff_operation_outside_scope')
@@ -147,7 +152,7 @@ def validate_diff(root: Path, ledger: dict, *, base: str, actual_paths: list[str
     return {'requirements_version': ledger['requirements_version'], 'ledger_digest': digest(ledger),
             'selected_unit_id': unit['unit_id'], 'base': base, 'changes': evidence}
 
-def gtc_unit_ledger_errors(envelope: dict[str, Any]) -> list[str]:
+def gtc_unit_ledger_errors(envelope: dict[str, Any], *, require_ready: bool = True) -> list[str]:
     """Validate local accounting only; envelope declarations confer no authority."""
     errors: list[str] = []
     try:
@@ -244,7 +249,106 @@ def gtc_unit_ledger_errors(envelope: dict[str, Any]) -> list[str]:
     selected = envelope.get("selected_unit_id")
     if not text(selected) or selected not in unit_ids:
         errors.append("selected_unit_id")
-    elif dependencies.get(selected):
-        # No trusted prerequisite-completion producer is connected in U1.
+    elif require_ready and dependencies.get(selected):
+        # Legacy envelopes have no independent host completion evidence.
         errors.append("selected_unit_id.prerequisite_integration_pending")
     return list(dict.fromkeys(errors))
+
+
+def mechanical_refresh(root: Path, ledger: dict, *, old_base: str, new_base: str, task_head: str) -> dict:
+    """Remap only disjoint immutable Git preimages; no inference or scope expansion.
+
+    Returns a typed plan and exact resulting bytes without writing the checkout.
+    Overlapping edits, ambiguous anchors, binary/upstream mode changes and new
+    path collisions remain internal scope-refresh work, not permission questions.
+    """
+    import difflib
+    import base64
+    for revision in (old_base, new_base, task_head):
+        if not re.fullmatch(r'[a-f0-9]{40}', revision):
+            raise ScopeError('refresh_revision_invalid')
+
+    def git(*args: str) -> bytes:
+        return subprocess.run(['git', *args], cwd=root, capture_output=True, check=True, timeout=30).stdout
+
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', old_base, task_head], cwd=root,
+                      capture_output=True, timeout=30).returncode != 0:
+        raise ScopeError('refresh_original_base_not_ancestor')
+    paths = [p.decode() for p in git('diff', '--name-only', '--no-renames', '-z', old_base, task_head).split(b'\0') if p]
+    if len(paths) > 256:
+        raise ScopeError('refresh_path_limit')
+    validate_diff(root, ledger, base=old_base, actual_paths=paths, target=task_head)
+    original = selected_unit(ledger)
+    result = copy.deepcopy(ledger)
+    selected = selected_unit(result)
+    outputs = []
+    preimages = []
+    comparison_budget = 2_000_000
+
+    def blob(revision: str, path: str) -> tuple[str, bytes] | None:
+        entry = git('ls-tree', '-z', revision, '--', path)
+        if not entry:
+            return None
+        if entry.count(b'\0') != 1:
+            raise ScopeError('refresh_tree_entry_invalid')
+        metadata, name = entry[:-1].split(b'\t', 1)
+        mode, kind, oid = metadata.split()
+        if name.decode() != path or kind != b'blob' or mode not in {b'100644', b'100755'}:
+            raise ScopeError('refresh_file_type_unsupported')
+        if int(git('cat-file', '-s', oid.decode())) > 1024 * 1024:
+            raise ScopeError('refresh_blob_limit')
+        return mode.decode(), git('cat-file', 'blob', oid.decode())
+
+    for old_contract, contract in zip(original['change_contracts'], selected['change_contracts']):
+        path = contract['path']
+        before, fresh, task = blob(old_base, path), blob(new_base, path), blob(task_head, path)
+        contract['base'] = new_base
+        preimages.append({'path': path, 'old': digest(before[1].hex()) if before else None,
+                          'fresh': digest(fresh[1].hex()) if fresh else None})
+        if before == fresh:
+            merged = task
+        elif before is None or fresh is None or task is None:
+            raise ScopeError('refresh_path_collision_or_delete_overlap')
+        elif before[0] != fresh[0] or before[0] != task[0] or any(b'\0' in b[1] for b in (before, fresh, task)):
+            raise ScopeError('refresh_binary_or_mode_overlap')
+        else:
+            old_lines, new_lines, task_lines = (value[1].splitlines(keepends=True) for value in (before, fresh, task))
+            comparison_budget -= len(old_lines) * (len(new_lines) + len(task_lines))
+            if comparison_budget < 0:
+                raise ScopeError('refresh_comparison_budget_exceeded')
+            upstream = [(a, b, c, d) for tag, a, b, c, d in
+                        difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False).get_opcodes() if tag != 'equal']
+
+            def mapped(start: int, end: int, *, anchor: bool = False) -> tuple[int, int]:
+                if not 0 <= start <= end <= len(old_lines):
+                    raise ScopeError('refresh_range_outside_preimage')
+                for a, b, c, d in upstream:
+                    overlap = a <= start <= b if anchor else (max(a, start) < min(b, end) if a != b else start <= a <= end)
+                    if overlap:
+                        raise ScopeError('refresh_upstream_overlaps_contract')
+                shift = sum((d-c)-(b-a) for a, b, c, d in upstream if b <= start)
+                lo, hi = start + shift, end + shift
+                if old_lines[start:end] != new_lines[lo:hi]:
+                    raise ScopeError('refresh_preimage_mismatch')
+                return lo, hi
+
+            contract['ranges'] = [[mapped(lo-1, hi)[0]+1, mapped(lo-1, hi)[1]] for lo, hi in old_contract['ranges']]
+            contract['insertions'] = [mapped(n, n, anchor=True)[0] for n in old_contract['insertions']]
+            changes = []
+            for tag, a, b, c, d in difflib.SequenceMatcher(None, old_lines, task_lines, autojunk=False).get_opcodes():
+                if tag != 'equal':
+                    lo, hi = mapped(a, b, anchor=a == b)
+                    changes.append((lo, hi, task_lines[c:d]))
+            merged_lines = list(new_lines)
+            for lo, hi, replacement in reversed(changes):
+                merged_lines[lo:hi] = replacement
+            merged = (task[0], b''.join(merged_lines))
+        if path in paths:
+            outputs.append({'path': path, 'mode': merged[0] if merged else None,
+                            'content_base64': base64.b64encode(merged[1]).decode() if merged else None})
+    proof = {'version': 1, 'operation': 'host_mechanical_hunk_remap', 'parent_ledger_digest': digest(ledger),
+             'old_base': old_base, 'new_base': new_base, 'task_head': task_head, 'preimages': preimages,
+             'requirements_digest': digest(ledger['requirements']),
+             'before_contracts': original['change_contracts'], 'after_contracts': selected['change_contracts']}
+    # Preserve every other input field byte-for-byte at the JSON value level.
+    return {'ledger': result, 'proof': proof, 'outputs': outputs}
