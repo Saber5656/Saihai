@@ -298,3 +298,16 @@ def assess_profile(profile: Any) -> dict[str, Any]:
         "errors": errors,
         "pending": ["trusted_repository_policy_adoption", "actual_workflow_parity", "actual_run_evidence"],
     }
+
+
+def application_delivery_host(profile, *, root, state, policy, commands, grants):
+    """Connect this profile to host-observed application delivery, not PR grants.
+
+    The trusted host supplies existing release grants and measuring adapters.
+    Profile validation alone still grants no execution or release authority.
+    """
+    from application_delivery import DeliveryHost, load_release_policy
+    if type(policy) is dict:
+        policy = load_release_policy(root, policy)
+    return DeliveryHost(root=root, state=state, profile=profile, policy=policy,
+                        commands=commands, grants=grants)
