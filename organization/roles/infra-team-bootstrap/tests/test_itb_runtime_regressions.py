@@ -2963,7 +2963,8 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                     {**canonical_unknown_metric, "provider": "anthropic"}
                 )
             )
-            self.assertFalse(
+            # Historical intended routing may differ from today's registry.
+            self.assertTrue(
                 builder.metric_provider_identity_is_valid(
                     {**canonical_unknown_metric, "intended_model": "gpt-5.6-sol"}
                 )
@@ -3012,7 +3013,7 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                     "usage_source": "claude_print_json",
                 }
             ),
-            "",
+            "claude-opus-4-6",
         )
 
         conflicting_metric = {
@@ -3118,7 +3119,6 @@ class ItbRuntimeRegressionTest(unittest.TestCase):
                 {"provider": "anthropic"},
                 {"provider": 123},
                 {"provider": ""},
-                {"intended_model": "gpt-5.6-sol"},
                 {"intended_model": None},
                 {"intended_model": ""},
                 {"intendedModel": "gpt-5.6-sol"},

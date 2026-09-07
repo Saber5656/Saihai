@@ -3919,13 +3919,7 @@ def gate_latency_enrich_provider_evidence_from_report(
     organization_instance_id = normalize_cell(
         evidence.get("organization_instance_id") or metric.get("organization_instance_id")
     )
-    try:
-        role_row = role_agent_row_for(
-            role_id,
-            organization_instance_id=organization_instance_id,
-        )
-    except (OSError, ValueError):
-        role_row = {}
+    role_row = historical_metric_role(evidence)
     if not role_row:
         return {
             "provider_identity_status": "invalid",
@@ -4189,8 +4183,23 @@ def percentile(values: list[float], ratio: float) -> float:
     return round(ordered[min(max(index, 0), len(ordered) - 1)], 3)
 
 
+def historical_metric_role(metric: dict[str, Any]) -> dict[str, Any]:
+    """Validate recorded identity for display only; never grant current execution."""
+    provider, valid_provider, has_provider = exact_model_alias_from_sources(metric, keys=("provider",))
+    intended, valid_intended, has_intended = exact_model_alias_from_sources(
+        metric, keys=("intended_model", "intendedModel", "primary_model")
+    )
+    if not (valid_provider and has_provider and valid_intended and has_intended):
+        return {}
+    if not ((provider == "anthropic" and intended.startswith("claude-")) or
+            (provider == "openai" and intended.startswith("gpt-"))):
+        return {}
+    return {"agent_id": normalize_cell(metric.get("role_id") or metric.get("agent_id")),
+            "provider": provider, "primary_model": intended}
+
+
 def metric_effective_model(metric: dict[str, Any]) -> str:
-    """Return only exact, canonically bound provider-observed model identity."""
+    """Return exact historically recorded identity, independent of current routing."""
     effective_model, aliases_valid, model_present = exact_model_alias_from_sources(metric)
     if not aliases_valid or not model_present or not effective_model:
         return ""
@@ -4200,13 +4209,7 @@ def metric_effective_model(metric: dict[str, Any]) -> str:
     role_id = normalize_cell(metric.get("role_id") or metric.get("agent_id"))
     if not role_id:
         return ""
-    try:
-        canonical_role_row = role_agent_row_for(
-            role_id,
-            organization_instance_id=normalize_cell(metric.get("organization_instance_id")),
-        )
-    except (OSError, ValueError):
-        canonical_role_row = {}
+    canonical_role_row = historical_metric_role(metric)
     if not canonical_role_row:
         return ""
     bound, errors = bind_canonical_provider_evidence(
@@ -4248,13 +4251,7 @@ def metric_provider_identity_is_valid(metric: dict[str, Any]) -> bool:
     role_id = normalize_cell(metric.get("role_id") or metric.get("agent_id"))
     if not role_id:
         return False
-    try:
-        canonical_role_row = role_agent_row_for(
-            role_id,
-            organization_instance_id=normalize_cell(metric.get("organization_instance_id")),
-        )
-    except (OSError, ValueError):
-        canonical_role_row = {}
+    canonical_role_row = historical_metric_role(metric)
     if not canonical_role_row:
         return False
     _bound, errors = bind_canonical_provider_evidence(
