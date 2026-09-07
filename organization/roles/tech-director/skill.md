@@ -247,12 +247,12 @@ Narration policy: act on routine flow checks silently; surface only anomaly or a
 | Field | Value |
 |---|---|
 | policy_digest_status | `ready` |
-| policy_digest_sha1 | `3208f43814e1e595e6baf885b6bc3e5641653fc4` |
+| policy_digest_sha1 | `2df457f4b391ddc124d00955030f8db4970fa61e` |
 
 | Policy | Status | SHA1 | Bytes | Source |
 |---|---|---:|---:|---|
-| AI-Organization | `ready` | `380b4a2cab2325b88f68993485ae997428265913` | 31825 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/AI-Organization.md` |
-| Gate-IO-Contract | `ready` | `7af1c38f0b140feb45a11009ca94f70da542344d` | 34482 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Gate-IO-Contract.md` |
-| Dispatcher-IO-Contract | `ready` | `75cd888d160d7ae0a87640cefd1268ea84b4209e` | 6188 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Dispatcher-IO-Contract.md` |
-| Task-File-Conventions | `ready` | `ac5b009a443216dd7b00ebaa5541eaecfe341176` | 18748 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Task-File-Conventions.md` |
+| AI-Organization | `ready` | `614e48cb86aed7f8dd729f85cf9b2473b4cfd863` | 32950 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/AI-Organization.md` |
+| Gate-IO-Contract | `ready` | `cd4c18067152d42aec89e704c2d49947ced35a4d` | 35437 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Gate-IO-Contract.md` |
+| Dispatcher-IO-Contract | `ready` | `9098f00dd615a4b8e9c6638397244d705ad0d0db` | 6340 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Dispatcher-IO-Contract.md` |
+| Task-File-Conventions | `ready` | `09c72ca8166b65d9c1a1a2a5fb0b7dde061d9bf9` | 18813 | `${AGENTS_VAULT_ROOT}/03-Contexts/Policies/Task-File-Conventions.md` |
 <!-- ITB_POLICY_DIGEST_SNAPSHOT_END -->
